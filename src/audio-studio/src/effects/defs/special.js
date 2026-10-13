@@ -184,7 +184,7 @@ registerEffect({
     pct('exciter', 'Exciter', 0, { section: 'Exciter' }),
     num('width', 'Widener', -100, 100, 0, '%', { step: 1, section: 'Widener' }),
     pct('loudness', 'Loudness Maximizer', 0, { section: 'Loudness Maximizer' }),
-    db('output', 'Output Gain', -18, 18, 0),
+    db('output', 'Output Gain', -30, 18, 0),
     num('lowShelfQ', 'Low Shelf Q', 0.1, 10, 0.71, '', { step: 0.01, scale: 'log', section: 'Equalizer' }),
     num('highShelfQ', 'High Shelf Q', 0.1, 10, 0.71, '', { step: 0.01, scale: 'log', section: 'Equalizer' }),
   ],

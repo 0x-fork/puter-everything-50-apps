@@ -46,7 +46,7 @@ registerEffect({
     db('ampDisc', 'Amplitude Discrimination', 0, 20, 3, { section: 'Discrimination' }),
     pct('decay', 'Spectral Decay Rate', 70, { max: 99, section: 'Discrimination' }),
     choice('fftSize', 'FFT Size', sizes([1024, 2048, 4096, 8192, 16384]), 4096, { section: 'Advanced' }),
-    num('phaseAngle', 'Phase Angle', -180, 180, 0, 'deg', { step: 1, section: 'Custom Position' }),
+    num('phaseAngle', 'Phase Angle', -360, 360, 0, 'deg', { step: 1, section: 'Custom Position' }),
     num('pan', 'Pan', -100, 100, 0, '%', { step: 1, section: 'Custom Position' }),
     num('delay', 'Delay', -5, 5, 0, 'ms', { step: 0.01, section: 'Custom Position' }),
   ],

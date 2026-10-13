@@ -164,7 +164,7 @@ registerEffect({
     choice('scale', 'Scale', ['Major', 'Minor', 'Chromatic'], 2),
     choice('key', 'Key', KEYS, 0),
     num('attack', 'Attack', 1, 10, 7, '', { step: 0.1, description: 'How quickly notes are pulled into tune (1 slow, 10 fast)' }),
-    num('sensitivity', 'Sensitivity', 1, 100, 50, '', { step: 1, description: 'How noisy a note may be and still be corrected' }),
+    num('sensitivity', 'Sensitivity', 1, 200, 50, '', { step: 1, description: 'How noisy a note may be and still be corrected' }),
     choice('reference', 'Reference Channel', ['Left', 'Right'], 0),
     choice('fftSize', 'FFT Size', ['1024', '2048', '4096'], 1),
     hz('calibration', 'A4 Calibration', 410, 470, 440, { scale: 'linear', step: 0.1 }),
@@ -189,7 +189,7 @@ registerEffect({
   params: [
     choice('algorithm', 'Algorithm', ['Spectral (music)', 'Waveform (speech)', 'Varispeed (tape)'], 0),
     num('stretch', 'Stretch', 10, 1000, 100, '%', { step: 0.1, scale: 'log', description: 'New duration as a percentage of the original' }),
-    num('semitones', 'Pitch Shift', -24, 24, 0, 'st', { step: 1 }),
+    num('semitones', 'Pitch Shift', -36, 36, 0, 'st', { step: 1 }),
     num('cents', 'Cents', -100, 100, 0, 'ct', { step: 1 }),
     choice('precision', 'Precision', PRECISION, 1),
     bool('lockChannels', 'Lock Stereo Channels', true),

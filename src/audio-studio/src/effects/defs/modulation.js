@@ -90,7 +90,7 @@ registerEffect({
     pct('depth', 'Depth', 70),
     hzRate('rate', 'Modulation Rate', 0.01, 10, 0.4),
     num('phaseDiff', 'Phase Difference', -180, 180, 0, '°', { step: 1 }),
-    num('upperFreq', 'Upper Frequency', 100, 18000, 3000, 'Hz', { step: 1, scale: 'log' }),
+    num('upperFreq', 'Upper Frequency', 20, 20000, 3000, 'Hz', { step: 1, scale: 'log' }),
     pct('feedback', 'Feedback', 30, { min: -90, max: 90 }),
     pct('mix', 'Mix', 50, { ends: ['Dry', 'Wet'] }),
     db('gain', 'Output Gain', -20, 12, 0),

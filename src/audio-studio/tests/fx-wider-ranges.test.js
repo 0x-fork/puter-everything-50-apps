@@ -117,3 +117,71 @@ describe('wider effect ranges', () => {
     expect(wet(300, { lfCut: 3000 })).toBeLessThan(wet(300, { lfCut: 20 }) * 0.3);
   });
 });
+
+describe('more reference ranges', () => {
+  it('declares them', () => {
+    expect(range('phaser', 'upperFreq')).toEqual([20, 20000]);
+    expect(range('reverb', 'decay')[0]).toBe(20);
+    expect(range('fullReverb', 'decay')[0]).toBe(20);
+    expect(range('deesser', 'threshold')).toEqual([-80, 0]);
+    expect(range('echo', 'eq0')).toEqual([-24, 15]);
+    expect(range('adaptiveNoiseReduction', 'threshold')).toEqual([-20, 30]);
+    expect(range('hissReduction', 'reduceBy')).toEqual([0, 100]);
+    expect(range('fftFilter', 'curve')).toEqual([-100, 24]);
+    expect(range('parametricEq', 'gain')).toEqual([-80, 40]);
+    expect(range('scientificFilter', 'gain')).toEqual([-50, 50]);
+    expect(range('graphicEq10', 'gain')).toEqual([-50, 50]);
+    expect(range('stretchPitch', 'semitones')).toEqual([-36, 36]);
+    expect(range('automaticPitchCorrection', 'sensitivity')).toEqual([1, 200]);
+    expect(range('centerChannelExtractor', 'phaseAngle')).toEqual([-360, 360]);
+    expect(range('mastering', 'output')).toEqual([-30, 18]);
+    expect(range('convolutionReverb', 'roomSize')[0]).toBe(10);
+    expect(range('surroundReverb', 'roomSize')[0]).toBe(10);
+    expect(getEffect('denoise').params.find((p) => p.id === 'focus').options).toHaveLength(5);
+  });
+
+  it('Reverb decays within tens of milliseconds at its shortest', () => {
+    // When the output falls 40 dB below its loudest 5 ms window, and stays there.
+    const tailEnd = (decay) => {
+      const [l] = render('reverb', { decay, dry: 0, wet: 100, preDelay: 0, diffusion: 100 }, impulse(RATE / 2));
+      const win = 240;
+      const env = [];
+      for (let k = 0; k + win <= l.length; k += win) env.push(rms(l.subarray(k, k + win)));
+      const top = Math.max(...env);
+      let last = 0;
+      env.forEach((e, i) => e > top / 100 && (last = i));
+      return last * 5;
+    };
+    expect(tailEnd(20)).toBeLessThan(tailEnd(100));
+  });
+
+  it('Hiss Reduction reduces by up to 100 dB', () => {
+    let seed = 7;
+    const noise = Float32Array.from({ length: 2 * RATE }, () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5) * 0.02);
+    const level = 10 * Math.log10((0.02 * 0.02) / 12);
+    const floor = [{ f: 1, g: level }, { f: 24000, g: level }];
+    const out = (reduceBy) => rms(render('hissReduction', { reduceBy, floorLeft: floor, floorRight: floor }, noise)[0].subarray(RATE));
+    expect(out(100)).toBeLessThan(out(80));
+  });
+
+  it('DeNoise focuses on lows and highs together', () => {
+    let seed = 3;
+    const noise = Float32Array.from({ length: 2 * RATE }, () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5) * 0.1);
+    const out = (focus) => render('denoise', { amount: 100, focus }, noise)[0];
+    // Against mids-only, lows-and-highs reduces more at 100 Hz and less at 1.5 kHz.
+    const band = (x, f) => {
+      let re = 0;
+      let im = 0;
+      const w = (2 * Math.PI * f) / RATE;
+      for (let i = RATE; i < 2 * RATE; i++) {
+        re += x[i] * Math.cos(w * i);
+        im += x[i] * Math.sin(w * i);
+      }
+      return Math.hypot(re, im);
+    };
+    const [both, mids] = [out(4), out(2)];
+    const avg = (x, f) => [0.97, 0.99, 1, 1.01, 1.03].reduce((s, k) => s + band(x, f * k), 0);
+    expect(avg(both, 100)).toBeLessThan(avg(mids, 100));
+    expect(avg(both, 1500)).toBeGreaterThan(avg(mids, 1500));
+  });
+});

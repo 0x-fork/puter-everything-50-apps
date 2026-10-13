@@ -116,8 +116,12 @@ describe('drawn distortion curves', () => {
     // Linear axes show the whole curve, down to -120 dB.
     expect(count()).toBeGreaterThan(at60);
     expect(dlg.querySelector('.dist-graph .fx-point').getAttribute('aria-valuetext')).toMatch(/^In 0, out/);
+    // Reset draws the negative half straight again (and unlinks it).
+    dlg.querySelector('[aria-label="Reset the negative curve"]').click();
     dlg.querySelector('.btn.primary').click();
-    expect((await p).linearScale).toBe(true);
+    const v = await p;
+    expect(v.linearScale).toBe(true);
+    expect(v).toMatchObject({ symmetric: false, negative: DRAWN, negCurve: [{ x: -120, y: -120 }, { x: 0, y: 0 }] });
   });
 });
 

@@ -28,12 +28,13 @@ const dehummer = responseEditor({
 
 // ------------------------------------------------------- DeNoise, DeReverb
 
-/** Glyphs for the processing focus choices: all, lows, mids, highs. */
+/** Glyphs for the processing focus choices: all, lows, mids, highs, lows and highs. */
 const focusIcons = () => ({
   0: glyph('M3 12h18'),
   1: glyph('M3 9h6l4 6h8'),
   2: glyph('M3 15h4l3-6h4l3 6h4'),
   3: glyph('M3 15h8l4-6h6'),
+  4: glyph('M3 9h4l3 6h4l3-6h4'),
 });
 
 /**

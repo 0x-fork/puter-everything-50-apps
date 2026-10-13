@@ -49,7 +49,7 @@ registerEffect({
   group: GROUP,
   kind: 81,
   params: [
-    ms('decay', 'Decay Time', 100, 15000, 2000),
+    ms('decay', 'Decay Time', 20, 15000, 2000),
     ms('preDelay', 'Pre-Delay', 0, 500, 20, { scale: 'linear' }),
     ms('attack', 'Attack Time', 0, 1000, 0, { scale: 'linear' }),
     hz('highCut', 'High Frequency Cut', 500, 20000, 7000),
@@ -104,7 +104,7 @@ registerEffect({
   group: GROUP,
   kind: 82,
   params: [
-    ms('decay', 'Decay Time', 100, 15000, 1800, { section: 'Reverb' }),
+    ms('decay', 'Decay Time', 20, 15000, 1800, { section: 'Reverb' }),
     ms('preDelay', 'Pre-Delay Time', 0, 500, 12, { scale: 'linear', section: 'Reverb' }),
     pct('diffusion', 'Diffusion', 85, { section: 'Reverb' }),
     pct('perception', 'Perception', 40, { section: 'Reverb' }),
@@ -179,7 +179,7 @@ registerEffect({
   params: [
     choice('impulse', 'Impulse', [...IMPULSES.map((t) => t.label), 'Loaded Impulse'], 2),
     pct('mix', 'Mix', 35),
-    pct('roomSize', 'Room Size', 100, { min: 25, max: 200 }),
+    pct('roomSize', 'Room Size', 100, { min: 10, max: 200 }),
     pct('dampLF', 'Damping LF', 0),
     pct('dampHF', 'Damping HF', 30),
     ms('preDelay', 'Pre-Delay', 0, 500, 0, { scale: 'linear' }),
@@ -225,7 +225,7 @@ registerEffect({
   params: [
     choice('impulse', 'Impulse', [...IMPULSES.map((t) => t.label), 'Loaded Impulse'], 4, { section: 'Reverb Settings' }),
     pct('mix', 'Mix', 100, { section: 'Output' }),
-    pct('roomSize', 'Room Size', 100, { min: 25, max: 200, section: 'Reverb Settings' }),
+    pct('roomSize', 'Room Size', 100, { min: 10, max: 200, section: 'Reverb Settings' }),
     pct('dampLF', 'Damping LF', 70, { section: 'Reverb Settings' }),
     pct('dampHF', 'Damping HF', 73, { section: 'Reverb Settings' }),
     ms('preDelay', 'Pre-Delay', 0, 100, 0, { scale: 'linear', section: 'Reverb Settings' }),

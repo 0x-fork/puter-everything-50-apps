@@ -73,6 +73,34 @@ stretchView.hides = true;
 
 // ------------------------------------------------------------ Pitch Shifter
 
+/**
+ * The frequency ratio as an editable value: typing or dragging it sets the
+ * nearest semitones and cents (a ratio of 1.5 is +7 st +2 ct).
+ */
+export function ratioField(ctx) {
+  const set = (r) => {
+    const cents = Math.round(1200 * Math.log2(Math.min(4, Math.max(0.25, r)) || 1));
+    const st = Math.min(24, Math.max(-24, Math.round(cents / 100)));
+    ctx.set('semitones', st);
+    ctx.set('cents', Math.min(100, Math.max(-100, cents - st * 100)));
+  };
+  const hot = hotNumber({
+    value: pitchRatio(ctx.values.semitones, ctx.values.cents),
+    min: 0.25,
+    max: 4,
+    step: 0.0001,
+    label: 'Ratio',
+    pixelsPerStep: 0.02,
+    format: (r) => r.toFixed(4),
+    parse: (s) => Number(String(s).replace(/[^\d.]/g, '')),
+    onInput: set,
+    onChange: set,
+    defaultValue: 1,
+  });
+  ctx.subscribe((v) => hot.setValue(pitchRatio(v.semitones, v.cents)));
+  return hot;
+}
+
 function shifterView(ctx) {
   const rate = ctx.doc?.sampleRate || 48000;
   // With automatic settings the shifter works on spectral frames; say what they amount to.
@@ -82,7 +110,7 @@ function shifterView(ctx) {
   }, 'faint'), (v) => v.autoSplice);
   return h(
     'div.fx-stack',
-    groupBox('Pitch Transpose', controlsFor(ctx, ['semitones', 'cents']), h('div.sp-ratio', h('span.fx-label', 'Ratio:'), readout(ctx, (v) => pitchRatio(v.semitones, v.cents).toFixed(4)))),
+    groupBox('Pitch Transpose', controlsFor(ctx, ['semitones', 'cents']), h('div.sp-ratio', h('span.fx-label', 'Ratio:'), ratioField(ctx))),
     h(
       'div.fx-split.ps-split',
       groupBox('Precision', enableWhen(ctx, radioChoice(ctx, 'precision', { label: null, className: 'fx-radios-v' }), (v) => v.autoSplice)),

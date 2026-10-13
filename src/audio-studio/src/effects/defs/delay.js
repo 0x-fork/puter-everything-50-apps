@@ -70,7 +70,7 @@ registerEffect({
     ...section('Right Channel', 'right', [ms('delay', 'Delay Time', 1, 5000, 300), pct('feedback', 'Feedback', 40), pct('level', 'Echo Level', 60)]).map((p) => ({ ...p, enabledIf: (v) => !v.lock })),
     bool('lock', 'Lock Left and Right', true),
     bool('bounce', 'Echo Bounce', false),
-    ...ECHO_BANDS.map((f, i) => db(`eq${i}`, bandLabel(f), -24, 12, 0, { section: 'Successive Echo Equalizer', short: bandLabel(f).replace(' Hz', '').replace(' kHz', 'k') })),
+    ...ECHO_BANDS.map((f, i) => db(`eq${i}`, bandLabel(f), -24, 15, 0, { section: 'Successive Echo Equalizer', short: bandLabel(f).replace(' Hz', '').replace(' kHz', 'k') })),
     pct('dry', 'Dry Level', 100),
   ],
   about: 'Repeats the sound with each echo quieter than the last. The equalizer shapes every repeat again, so echoes darken or thin out as they fade; Echo Bounce alternates them between the channels.',

@@ -678,3 +678,10 @@ input[type='range'].slider.fx-vrange::-moz-range-track {
   min-height: 1.4em;
   font-size: var(--fs-sm);
 }
+
+.dist-caption-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}

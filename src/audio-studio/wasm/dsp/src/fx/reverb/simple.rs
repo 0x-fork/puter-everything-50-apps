@@ -111,7 +111,7 @@ impl Reverb {
 impl Effect for Reverb {
     fn set_param(&mut self, idx: u32, v: f32) {
         match idx {
-            0 => self.decay = v.clamp(50.0, 30000.0),
+            0 => self.decay = v.clamp(20.0, 30000.0),
             1 => self.predelay = v.clamp(0.0, MAX_PREDELAY_MS),
             2 => self.attack = v.clamp(0.0, MAX_ATTACK_MS),
             3 => self.high_cut = v.clamp(500.0, 22000.0),

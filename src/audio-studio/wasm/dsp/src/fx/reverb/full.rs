@@ -154,7 +154,7 @@ impl Effect for FullReverb {
             return;
         }
         self.p[i] = match i {
-            0 => v.clamp(50.0, 30000.0),
+            0 => v.clamp(20.0, 30000.0),
             1 => v.clamp(0.0, MAX_PREDELAY_MS),
             _ => v,
         };

@@ -214,7 +214,18 @@ function curveGraph(ctx, side) {
   ctx.subscribe(update);
   update();
   const kindRow = enableWhen(ctx, controlsFor(ctx, [side], { labels: { [side]: 'Curve' } }), (v) => side === 'positive' || !v.symmetric);
-  return groupBox(side === 'positive' ? 'Positive' : 'Negative', wrap, caption, kindRow);
+  // Back to a straight (unity) drawn curve for this half.
+  const reset = h('button.icon-btn.dist-reset', {
+    type: 'button',
+    'aria-label': `Reset the ${side} curve`,
+    title: `Reset the ${side} curve to a straight line`,
+    onclick: () => {
+      if (side === 'negative' && ctx.values.symmetric) ctx.set('symmetric', false);
+      ctx.set(side === 'positive' ? 'posCurve' : 'negCurve', [{ x: LO, y: LO }, { x: 0, y: 0 }]);
+      ctx.set(side, DRAWN);
+    },
+  }, icon('rotate-ccw', 15));
+  return groupBox(side === 'positive' ? 'Positive' : 'Negative', wrap, h('div.dist-caption-row', caption, reset), kindRow);
 }
 
 /** Output dB of drawn points at input xDb (straight in dB between points). */

@@ -360,7 +360,7 @@ registerEffect({
     choice('mode', 'Mode', ['Broadband', 'Multiband'], 1),
     hz('frequency', 'Center Frequency', 1000, 16000, 6500),
     hz('bandwidth', 'Bandwidth', 100, 10000, 3000),
-    db('threshold', 'Threshold', -60, 0, -30),
+    db('threshold', 'Threshold', -80, 0, -30),
     db('reduction', 'Maximum Reduction', 0, 40, 12),
     bool('sibilanceOnly', 'Output Sibilance Only', false),
   ],

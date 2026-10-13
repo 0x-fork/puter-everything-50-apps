@@ -17,7 +17,7 @@ function pow2(v, lo, hi) {
   return Math.min(hi, Math.max(lo, n));
 }
 
-const FOCUS = ['All frequencies', 'Low frequencies', 'Mid frequencies', 'High frequencies'];
+const FOCUS = ['All frequencies', 'Low frequencies', 'Mid frequencies', 'High frequencies', 'Low and high frequencies'];
 
 // ------------------------------------------------------------------- DeHummer
 
@@ -130,7 +130,7 @@ registerEffect({
   kind: 131,
   params: [
     db('noiseFloor', 'Noise Floor', -40, 40, 0),
-    db('reduceBy', 'Reduce By', 0, 80, 18),
+    db('reduceBy', 'Reduce By', 0, 100, 18),
     pct('decay', 'Spectral Decay Rate', 60),
     num('precision', 'Precision Factor', 1, 20, 7, '', { step: 1 }),
     db('transition', 'Transition Width', 0, 40, 6),
@@ -206,7 +206,7 @@ registerEffect({
     db('reduceBy', 'Reduce Noise By', 0, 60, 12),
     pct('noisiness', 'Noisiness', 20),
     db('noiseFloor', 'Fine Tune Noise Floor', -20, 20, 0),
-    db('threshold', 'Signal Threshold', -10, 30, 3),
+    db('threshold', 'Signal Threshold', -20, 30, 3),
     num('decay', 'Spectral Decay Rate', 0, 2000, 150, 'ms', { step: 10 }),
     num('broadband', 'Broadband Preservation', 0, 500, 100, 'Hz', { step: 5 }),
     fftChoice('fftSize', 'FFT Size', [256, 512, 1024, 2048, 4096, 8192], 1024),

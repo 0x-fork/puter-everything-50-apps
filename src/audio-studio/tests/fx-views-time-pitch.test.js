@@ -71,8 +71,14 @@ describe('time and pitch views', () => {
     const p = openEffectDialog(app, getEffect('pitchShifter'), { doc, values: { semitones: 12 } });
     const dlg = document.querySelector('.fx-dialog');
     expect(dlg.querySelector('.sp-ratio').textContent).toContain('2.0000');
-    dlg.querySelector('.dialog-head .icon-btn').click();
-    await p;
+    // Typing a ratio sets the nearest semitones and cents.
+    const hot = dlg.querySelector('.sp-ratio .hot');
+    hot.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const input = dlg.querySelector('.sp-ratio .hot-edit');
+    input.value = '1.5';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    dlg.querySelector('.btn.primary').click();
+    expect(await p).toMatchObject({ semitones: 7, cents: 2 });
   });
   it('pitch shifter switches to manual splicing settings', async () => {
     const { app, doc } = setup();

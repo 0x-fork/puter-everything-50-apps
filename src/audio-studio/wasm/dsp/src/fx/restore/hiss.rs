@@ -118,7 +118,7 @@ impl Effect for HissReduction {
     fn set_param(&mut self, idx: u32, v: f32) {
         match idx {
             0 => self.offset = v.clamp(-40.0, 40.0),
-            1 => self.reduce_db = v.clamp(0.0, 80.0),
+            1 => self.reduce_db = v.clamp(0.0, 100.0),
             2 => self.decay = v.clamp(0.0, 100.0),
             3 => {
                 let old = self.overlap();

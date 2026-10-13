@@ -23,7 +23,7 @@ const qParam = (def, max = 100) => num('q', 'Q', 0.1, max, def, '', { step: 0.01
 const BAND_FREQS = [120, 400, 1000, 3000, 8000];
 
 const parametricParams = [
-  db('gain', 'Master Gain', -24, 24, 0),
+  db('gain', 'Master Gain', -80, 40, 0),
   choice('qMode', 'Constant', ['Q', 'Width'], 0),
   ...section('High Pass', 'hp', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 60), choice('slope', 'Slope', SLOPES, 2)]),
   ...section('Low Shelf', 'ls', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 100), db('gain', 'Gain', -48, 48, 0), qParam(0.7071, 4)]),
@@ -107,7 +107,7 @@ function shortLabel(f, i, n) {
 function graphicDef(id, name, kind, centres, octaves) {
   const q = F.bandQ(octaves);
   const params = [
-    db('gain', 'Master Gain', -24, 24, 0),
+    db('gain', 'Master Gain', -50, 50, 0),
     choice('accuracy', 'Accuracy', ['Standard', 'High'], 1),
     ...centres.map((f, i) => db(`band${i + 1}`, freqLabel(f), -24, 24, 0, { section: 'Bands', short: shortLabel(f, i, centres.length) })),
     // The span of the band sliders (a dialog setting the processor ignores): 48 dB is +/-24 dB.
@@ -261,7 +261,7 @@ registerEffect({
     hz('cutoff', 'Cutoff', 10, 20000, 1000, { order: 1 }),
     hz('highCutoff', 'High Cutoff', 10, 20000, 4000, { order: 1, enabledIf: (v) => v.mode >= 2 }),
     db('ripple', 'Passband Ripple', 0.01, 6, 1, { order: 1, step: 0.01, enabledIf: (v) => v.type === 1 }),
-    db('gain', 'Master Gain', -24, 24, 0, { order: 1 }),
+    db('gain', 'Master Gain', -50, 50, 0, { order: 1 }),
     // Design by order, or by a transition band: the dialog then sets the
     // lowest order that is down by the stop attenuation within that width.
     choice('designBy', 'Design By', ['Order', 'Transition Bandwidth'], 0, { control: 'radio', order: -1 }),
@@ -313,7 +313,7 @@ registerEffect({
     choice('fftSize', 'FFT Size', FFT_SIZES, 4096, { section: 'Advanced' }),
     choice('scale', 'Scale', ['Logarithmic', 'Linear'], 0),
     db('gain', 'Master Gain', -24, 24, 0, { section: 'Advanced' }),
-    { id: 'curve', label: 'Curve', type: 'curve', default: curve([[20, 0], [20000, 0]]), min: -60, max: 24, unit: 'dB', order: -1 },
+    { id: 'curve', label: 'Curve', type: 'curve', default: curve([[20, 0], [20000, 0]]), min: -100, max: 24, unit: 'dB', order: -1 },
     // Smooths the drawn curve between its points; the processor receives the smoothed curve.
     bool('spline', 'Spline Curves', false),
   ],
