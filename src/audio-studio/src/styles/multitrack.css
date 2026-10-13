@@ -15,7 +15,7 @@
 .mt-ruler-row,
 .mt-main {
   display: grid;
-  grid-template-columns: var(--mt-header-w) 4px minmax(0, 1fr) 12px;
+  grid-template-columns: var(--mt-header-w) 4px minmax(0, 1fr) 14px;
   min-width: 0;
   min-height: 0;
 }
@@ -115,14 +115,43 @@
   pointer-events: none;
 }
 
-.mt-vscroll {
-  overflow-x: hidden;
-  overflow-y: auto;
+.mt-vnav {
+  position: relative;
   min-height: 0;
+  margin: 0 2px 0 3px;
+  touch-action: none;
+  cursor: default;
 }
 
-.mt-vscroll-inner {
-  width: 1px;
+.mt-vnav-segs {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--bg-input);
+}
+
+.mt-vnav-seg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-bottom: 1px solid var(--bg-panel);
+  background: color-mix(in srgb, var(--track-color) 45%, var(--bg-input));
+}
+
+.mt-vnav-thumb {
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  min-height: 10px;
+  border: 1px solid var(--text-dim);
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-panel) 60%, transparent);
+  pointer-events: none;
+}
+
+.mt-vnav:hover .mt-vnav-thumb {
+  border-color: var(--text-strong);
 }
 
 /* ------------------------------------------------------- track header */

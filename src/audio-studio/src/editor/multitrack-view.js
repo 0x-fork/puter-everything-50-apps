@@ -29,6 +29,7 @@ import { stretcherFor } from '../multitrack/stretch.js';
 import { isRemixed, remixSeams, MIN_REMIX_SECONDS } from '../model/clip-remix.js';
 import { runRemix } from '../multitrack/remix-commands.js';
 import { VideoLane } from '../video/video-lane.js';
+import { TrackNav } from './track-nav.js';
 
 const HEADER_BAR = 16;
 const AUTO_H = 46;
@@ -136,13 +137,7 @@ export class MultitrackView {
     );
     this.renderer = new ClipWaveRenderer(this.glCanvas);
     this.renderer.onRestore = () => this.invalidate('wave');
-    this.vscrollInner = h('div.mt-vscroll-inner');
-    this.vscroll = h('div.mt-vscroll', { 'aria-hidden': 'true' }, this.vscrollInner);
-    this.vscroll.addEventListener('scroll', () => {
-      const top = this.vscroll.scrollTop;
-      if (Math.abs(top - this.scrollY) > 0.5) this.setScroll(top, { fromBar: true });
-      else this.barTop = top;
-    });
+    this.nav = new TrackNav(this);
 
     // The session's video track sits between the ruler and the audio tracks (hidden without a video).
     this.videoLane = new VideoLane(this);
@@ -152,7 +147,7 @@ export class MultitrackView {
       h('div.mt-top', this.overview.el, h('div.mt-top-corner')),
       h('div.mt-ruler-row', this.headTools, h('div.mt-splitter-gap'), this.ruler.el, h('div.mt-ruler-corner')),
       this.videoLane.el,
-      h('div.mt-main', this.headersEl, this.splitter, this.surface, this.vscroll),
+      h('div.mt-main', this.headersEl, this.splitter, this.surface, this.nav.el),
       this.status,
     );
     this.#applyHeaderMode();
@@ -234,8 +229,8 @@ export class MultitrackView {
     }
     this.rows = rows;
     this.contentHeight = y;
-    if (this.vscrollInner.style.height !== `${y}px`) this.vscrollInner.style.height = `${y}px`;
     this.setScroll(this.scrollY, { silent: true });
+    this.nav.update();
     return rows;
   }
 
@@ -250,18 +245,14 @@ export class MultitrackView {
     return null;
   }
 
-  setScroll(y, { silent = false, fromBar = false } = {}) {
+  setScroll(y, { silent = false } = {}) {
     const max = Math.max(0, (this.contentHeight || 0) - (this.height || 0));
     const next = Math.max(0, Math.min(max, y));
     const changed = next !== this.scrollY;
     this.scrollY = next;
-    // Avoid reading layout (scrollTop) on every change: remember what was set.
-    if (changed || this.barTop === undefined) this.headersInner.style.transform = `translateY(${-Math.round(next)}px)`;
-    if (fromBar) this.barTop = next;
-    else if (this.barTop !== next) {
-      this.vscroll.scrollTop = next;
-      this.barTop = next;
-    }
+    if (changed || !this.scrolled) this.headersInner.style.transform = `translateY(${-Math.round(next)}px)`;
+    this.scrolled = true;
+    if (changed || !silent) this.nav.update();
     if (changed && !silent) this.invalidate('lanes');
   }
 
@@ -822,9 +813,15 @@ export class MultitrackView {
         ctx.beginPath();
         ctx.rect(Math.max(0, x0), r.y, Math.min(W, x1) - Math.max(0, x0), r.hb);
         ctx.clip();
-        // Text moves inward to clear the fade handles (further in when stretch handles show).
+        // Text moves inward to clear the fade handles (further in when stretch
+        // handles show), and past a fade handle that sits further in.
         const pad = 10 + this.fadeInset;
+        const handles = showFades && w > 18;
+        const hIn = x0 + Math.max(this.fadeInset, fadeIn / this.fpp);
+        const hOut = x1 - Math.max(this.fadeInset, fadeOut / this.fpp);
         let tx = Math.max(0, x0) + pad;
+        if (handles && hIn + 7 > tx - 4) tx = Math.max(tx, Math.min(hIn + 8, x0 + w * 0.5));
+        const textEnd = handles && hOut - 7 < Math.min(W, x1) - pad ? Math.max(hOut - 8, x0 + w * 0.5) : Math.min(W, x1) - pad;
         ctx.fillStyle = textColor;
         const st = stretchOf(c);
         const pending = doc.pool.get(c.sourceId)?.pending;
@@ -836,7 +833,7 @@ export class MultitrackView {
         const type = c.soundAssistant && ASSISTANT_TYPES[c.soundAssistant.type];
         // Keep the badges clear of the gain readout (shown on wider clips).
         const gainShown = w > 90 && prefs.get('clipGainControls') !== false;
-        const room = Math.min(W, x1) - (gainShown ? ctx.measureText(formatGain(c.gain)).width + pad + 6 : 8);
+        const room = gainShown ? textEnd - ctx.measureText(formatGain(c.gain)).width - 6 : Math.min(W, x1) - 8;
         let bx = tx + ctx.measureText(label).width + 6;
         if (isRemixed(c)) {
           // Remix badge: an outlined accent tag (it reads "remixing" until the crossfaded render is done).
@@ -868,16 +865,14 @@ export class MultitrackView {
           const g = formatGain(c.gain);
           const gw = ctx.measureText(g).width;
           ctx.globalAlpha = Math.abs(c.gain) >= 0.05 ? 1 : 0.55;
-          ctx.fillText(g, Math.min(W, x1) - gw - pad, r.y + r.hb / 2 + 0.5);
+          ctx.fillText(g, textEnd - gw, r.y + r.hb / 2 + 0.5);
           ctx.globalAlpha = 1;
         }
         ctx.restore();
-        if (showFades && w > 18) {
+        if (handles) {
           ctx.fillStyle = textColor;
-          const hx0 = x0 + Math.max(this.fadeInset, fadeIn / this.fpp);
-          const hx1 = x1 - Math.max(this.fadeInset, fadeOut / this.fpp);
-          ctx.fillRect(Math.round(hx0 - 3), r.y + 4, 7, 7);
-          ctx.fillRect(Math.round(hx1 - 4), r.y + 4, 7, 7);
+          ctx.fillRect(Math.round(hIn - 3), r.y + 4, 7, 7);
+          ctx.fillRect(Math.round(hOut - 4), r.y + 4, 7, 7);
         }
       }
       // Stretch handles: triangles in the top corners.
@@ -1123,13 +1118,18 @@ export class MultitrackView {
         if (x >= r.x1 - STRETCH_HANDLE - 2) return { ...hit, part: 'stretchOut' };
       }
       if (r.hb && y <= r.y + r.hb) {
-        if (prefs.get('clipFadeHandles') !== false) {
+        const handles = prefs.get('clipFadeHandles') !== false;
+        const hx1 = r.x1 - Math.max(this.fadeInset, c.fadeOut.length / this.fpp);
+        if (handles) {
           const hx0 = r.x0 + Math.max(this.fadeInset, c.fadeIn.length / this.fpp);
-          const hx1 = r.x1 - Math.max(this.fadeInset, c.fadeOut.length / this.fpp);
           if (Math.abs(x - hx0) <= 6) return { ...hit, part: 'fadeIn' };
           if (Math.abs(x - hx1) <= 6) return { ...hit, part: 'fadeOut' };
         }
-        if (x > r.x1 - 62 && r.x1 - r.x0 > 90 && this.app.prefs.get('clipGainControls') !== false) return { ...hit, part: 'gain' };
+        // The gain readout ends before the fade-out handle (as drawn).
+        const pad = 10 + this.fadeInset;
+        const w = r.x1 - r.x0;
+        const gainEnd = handles && w > 18 && hx1 - 7 < r.x1 - pad ? Math.max(hx1 - 8, r.x0 + w * 0.5) : r.x1 - pad;
+        if (x > gainEnd - 52 && x < gainEnd + 4 && w > 90 && this.app.prefs.get('clipGainControls') !== false) return { ...hit, part: 'gain' };
         return { ...hit, part: 'header' };
       }
       // Keyframes first, then edges, then envelope lines.

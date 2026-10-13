@@ -56,6 +56,43 @@ describe('multitrack view', () => {
     expect(view.el.querySelector('.mt-th.master .mt-tb-arm')).toBeNull();
   });
 
+  it('inverts polarity from the header and hides effects power without effects', () => {
+    const { view, doc } = ctx;
+    const hd = view.el.querySelector('.mt-th');
+    expect(hd.querySelector('.mt-tb-fx').hidden).toBe(true);
+    hd.querySelector('.mt-tb-invert').click();
+    expect(doc.state.tracks[0].invert).toBe(true);
+    expect(view.el.querySelector('.mt-th .mt-tb-invert').getAttribute('aria-pressed')).toBe('true');
+    expect([...hd.querySelectorAll('.mt-th-select option')].map((o) => o.textContent)).toContain('Default Stereo Input');
+  });
+
+  it('offers Add Video Track while the session has no video', async () => {
+    const { app, doc } = ctx;
+    const { MENUS } = await import('../src/ui/menus.js');
+    const tracks = MENUS.find((m) => m.label === 'Multitrack').submenu.find((x) => x.label === 'Tracks').submenu;
+    expect(tracks).toContain('mt.addVideoTrack');
+    expect(app.commands.isEnabled('mt.addVideoTrack')).toBe(true);
+    doc.amendView((st) => ({ ...st, video: { id: 'v1', sourceId: 'x', name: 'V', start: 0, offset: 0, length: 10 } }));
+    expect(app.commands.isEnabled('mt.addVideoTrack')).toBe(false);
+  });
+
+  it('shows every visible track in the navigator and scrolls with it', () => {
+    const { view, doc } = ctx;
+    const segs = () => [...view.el.querySelectorAll('.mt-vnav-seg')];
+    expect(segs()).toHaveLength(doc.state.tracks.length + 1);
+    view.height = 200;
+    view.computeRows();
+    const thumb = view.el.querySelector('.mt-vnav-thumb');
+    const span = view.contentHeight;
+    expect(parseFloat(thumb.style.height)).toBeCloseTo((200 / span) * 100, 1);
+    view.el.querySelector('.mt-vnav').dispatchEvent(new WheelEvent('wheel', { deltaY: 100, cancelable: true }));
+    expect(view.scrollY).toBe(100);
+    expect(parseFloat(thumb.style.top)).toBeCloseTo((100 / span) * 100, 1);
+    doc.amendView((st) => ({ ...st, tracks: st.tracks.map((t, i) => (i === 1 ? { ...t, hidden: true } : t)) }));
+    view.computeRows();
+    expect(segs()).toHaveLength(doc.state.tracks.length);
+  });
+
   it('toggles mute from the header as one undo step and updates the button', () => {
     const { view, doc } = ctx;
     const btn = view.el.querySelector('.mt-th .mt-tb-mute');

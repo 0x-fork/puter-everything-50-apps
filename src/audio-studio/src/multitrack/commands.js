@@ -12,7 +12,8 @@ import { AudioFile } from '../model/audio-file.js';
 import { Channel } from '../audio/channel.js';
 import { createMarker, sortMarkers, MARKER_TYPES } from '../model/markers.js';
 import { pickLocalFiles, saveDocument, downloadBlob } from '../storage/files.js';
-import { AUDIO_ACCEPT, baseName } from '../audio/decode.js';
+import { AUDIO_ACCEPT, VIDEO_EXTENSIONS, baseName } from '../audio/decode.js';
+import { videoClip } from '../model/session-video.js';
 import * as puter from '../storage/puter.js';
 import { insertDocs, insertFiles, linkSource, newTrack, channelsAtRate, placementOptions, freeTrackShift } from './insert.js';
 import { renderSession, renderedDoc, clipsRange } from './render.js';
@@ -729,6 +730,18 @@ export function installMultitrackCommands(app) {
     { id: 'mt.addStereo', label: 'Add Stereo Track', shortcut: 'Alt+A', enabled: hasSession, run: addTrack('audio', 2) },
     { id: 'mt.addMonoBus', label: 'Add Mono Bus Track', enabled: hasSession, run: addTrack('bus', 1) },
     { id: 'mt.addBus', label: 'Add Stereo Bus Track', shortcut: 'Alt+B', enabled: hasSession, run: addTrack('bus', 2) },
+    {
+      // A session has one video track: picking a video fills it (and puts the video's audio on a track).
+      id: 'mt.addVideoTrack',
+      label: 'Add Video Track...',
+      enabled: (a) => hasSession(a) && !videoClip(session(a).state),
+      run: async () => {
+        const doc = session(app);
+        const accept = `${VIDEO_EXTENSIONS.map((e) => `.${e}`).join(',')},video/*`;
+        const items = puter.sdk() && puter.isSignedIn() ? await puter.pickFiles({ multiple: false, accept }) : await pickLocalFiles({ accept });
+        if (items?.length) await insertFiles(app, doc, items.slice(0, 1), { at: doc.cursor });
+      },
+    },
     {
       id: 'mt.addTracks',
       label: 'Add Tracks...',

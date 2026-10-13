@@ -153,6 +153,6 @@ export const VISIBILITY_MENU = [
   'mt.showWithClipsInSelection',
   'mt.showWithClipsAtPlayhead',
   '-',
-  { label: 'Save Track Visibility', submenu: Array.from({ length: PRESET_SLOTS }, (_, i) => `mt.saveVisibility${i + 1}`) },
   { label: 'Load Track Visibility', submenu: Array.from({ length: PRESET_SLOTS }, (_, i) => `mt.loadVisibility${i + 1}`) },
+  { label: 'Save Track Visibility', submenu: Array.from({ length: PRESET_SLOTS }, (_, i) => `mt.saveVisibility${i + 1}`) },
 ];
