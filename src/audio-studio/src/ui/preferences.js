@@ -136,6 +136,15 @@ export const CATEGORIES = [
           { type: 'custom', label: 'Recover unsaved files', keys: [], keywords: 'restore crash recovery', render: recoverButton },
         ],
       },
+      {
+        title: 'Multitrack Session Backups',
+        items: [
+          check('sessionBackup', 'Back up open multitrack sessions automatically', { keywords: 'backup history versions', help: 'Backups are kept in this browser, with the audio the session uses. A session that closed with unsaved changes is offered for restore the next time Audio Studio starts.' }),
+          number('sessionBackupInterval', 'Back up every', { min: 1, max: 120, step: 1, unit: 'minutes', enabledIf: (p) => p.get('sessionBackup') !== false }),
+          number('sessionBackupMax', 'Backups kept per session', { min: 1, max: 100, step: 1, enabledIf: (p) => p.get('sessionBackup') !== false, help: 'The oldest backup is deleted when a session has more.' }),
+          { type: 'custom', label: 'Session backups', keys: [], keywords: 'restore backup session open', render: restoreBackupButton },
+        ],
+      },
     ],
   },
   {
@@ -681,6 +690,10 @@ function resetNotices({ app, row }) {
 
 function recoverButton({ app }) {
   return h('button.btn', { type: 'button', disabled: !app.commands.isEnabled('file.recover'), onclick: () => app.commands.run('file.recover') }, 'Recover Unsaved Files...');
+}
+
+function restoreBackupButton({ app }) {
+  return h('button.btn', { type: 'button', disabled: !app.commands.isEnabled('file.restoreBackup'), onclick: () => app.commands.run('file.restoreBackup') }, 'Restore Session Backup...');
 }
 
 // ------------------------------------------------------------- page model

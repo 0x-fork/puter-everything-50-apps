@@ -72,6 +72,9 @@ export const DEFAULTS = {
   // Auto Save
   autosave: true,
   autosaveInterval: 60, // seconds
+  sessionBackup: true, // periodic backups of open multitrack sessions
+  sessionBackupInterval: 3, // minutes
+  sessionBackupMax: 10, // backups kept per session
   // Effects
   fxOpenOnAdd: false,
   fxProcessBypassed: false,

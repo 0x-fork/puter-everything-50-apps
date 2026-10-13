@@ -84,6 +84,7 @@ export const MENUS = [
       'file.saveAll',
       'file.saveAllBatch',
       'file.revert',
+      'file.restoreBackup',
       '-',
       {
         label: 'Export',
