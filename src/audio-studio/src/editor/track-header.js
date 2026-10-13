@@ -11,7 +11,7 @@ import { AUTOMATION_MODES, TRACK_COLORS, SILENT_DB, MAX_DB, wouldCycle } from '.
 import { formatGainShort, formatPan, parseGain, parsePan, formatGain } from '../multitrack/levels.js';
 import { getEffect } from '../effects/registry.js';
 import { MeterBar } from '../multitrack/meter.js';
-import { SendControls, EqControls } from '../multitrack/send-eq.js';
+import { SendControls, EqControls, toggleTrackEffect } from '../multitrack/send-eq.js';
 
 export class TrackHeader {
   /**
@@ -214,11 +214,21 @@ export class TrackHeader {
     if (this.paramSel) this.paramSel.value = track.autoParam;
     this.autoToggle.setAttribute('aria-expanded', String(track.showAutomation));
     this.autoToggle.classList.toggle('open', track.showAutomation);
-    this.fxList.replaceChildren(
-      ...(fx.length
-        ? fx.slice(0, 4).map((s) => h(`span.mt-th-fxname${s.enabled === false ? '.off' : ''}`, getEffect(s.effect)?.name || s.name || 'Effect'))
-        : [h('span.mt-th-fxname.empty', 'No effects')]),
-    );
+    // Each effect with its own power switch (the first six; the editor lists them all).
+    const chips = track.fx
+      .map((s, i) => [s, i])
+      .filter(([s]) => s)
+      .slice(0, 6)
+      .map(([s, i]) => {
+        const name = getEffect(s.effect)?.name || s.name || 'Effect';
+        const on = s.enabled !== false;
+        return h(
+          `span.mt-th-fxname${on ? '' : '.off'}`,
+          h('button.mt-th-fxpower', { type: 'button', 'aria-pressed': String(on), 'aria-label': `${name} power`, title: on ? 'Bypass this effect' : 'Turn this effect on', onclick: () => toggleTrackEffect(this.doc, this.id, i) }, icon('power', 10)),
+          h('span.mt-th-fxlabel', name),
+        );
+      });
+    this.fxList.replaceChildren(...(chips.length ? chips : [h('span.mt-th-fxname.empty', 'No effects')]));
     this.sendCtl?.update(track);
     this.eqCtl.update(track);
     this.meter.label = `${track.name} level`;

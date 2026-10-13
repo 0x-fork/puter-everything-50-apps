@@ -76,6 +76,20 @@ describe('multitrack view', () => {
     expect(app.commands.isEnabled('mt.addVideoTrack')).toBe(false);
   });
 
+  it('switches single effects from the header in effects mode', () => {
+    const { app, view, doc } = ctx;
+    const id = doc.state.tracks[0].id;
+    doc.apply('Track Effects', S.updateTrack(doc.state, id, { fx: [{ id: 'e1', effect: 'amplify', values: {}, enabled: true }] }));
+    app.prefs.set('mtHeaderMode', 'fx');
+    view.syncHeaders();
+    const chip = view.el.querySelector('.mt-th .mt-th-fxname');
+    expect(chip.textContent).toBe('Amplify');
+    chip.querySelector('.mt-th-fxpower').click();
+    expect(doc.state.tracks[0].fx[0].enabled).toBe(false);
+    view.syncHeaders();
+    expect(view.el.querySelector('.mt-th .mt-th-fxname').classList.contains('off')).toBe(true);
+  });
+
   it('shows every visible track in the navigator and scrolls with it', () => {
     const { view, doc } = ctx;
     const segs = () => [...view.el.querySelectorAll('.mt-vnav-seg')];

@@ -11,8 +11,8 @@ import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
 import { knob, hotNumber } from '../ui/controls.js';
 import { getEffect } from '../effects/registry.js';
-import { allTracks, wouldCycle, updateTrack, SILENT_DB, MAX_DB, AUTOMATION_MODES } from '../model/session-edits.js';
-import { SendControls, EqControls } from '../multitrack/send-eq.js';
+import { allTracks, wouldCycle, SILENT_DB, MAX_DB, AUTOMATION_MODES } from '../model/session-edits.js';
+import { SendControls, EqControls, toggleTrackEffect } from '../multitrack/send-eq.js';
 import { dbToFader, faderToDb, formatGain, formatGainShort, formatPan, parseGain } from '../multitrack/levels.js';
 import { MeterBar, METER_RANGE } from '../multitrack/meter.js';
 
@@ -171,7 +171,7 @@ class Strip {
       const on = s.enabled !== false;
       return h(
         `div.mx-fx-slot${on ? '' : '.off'}`,
-        h('button.mx-fx-power', { type: 'button', 'aria-pressed': String(on), 'aria-label': `${name} power`, title: on ? 'Bypass this effect' : 'Turn this effect on', onclick: () => this.#toggleSlot(i) }, icon('power', 10)),
+        h('button.mx-fx-power', { type: 'button', 'aria-pressed': String(on), 'aria-label': `${name} power`, title: on ? 'Bypass this effect' : 'Turn this effect on', onclick: () => toggleTrackEffect(this.doc, this.id, i) }, icon('power', 10)),
         h('button.mx-fx-name', { type: 'button', 'aria-label': `${name}${on ? '' : ' (off)'}, edit effects`, onclick: edit }, name),
       );
     });
@@ -181,16 +181,6 @@ class Strip {
     this.sends?.update(track);
     this.eq.update(track);
     this.values();
-  }
-
-  #toggleSlot(index) {
-    const doc = this.doc;
-    const fx = this.track.fx.slice();
-    const slot = fx[index];
-    if (!slot) return;
-    fx[index] = { ...slot, enabled: slot.enabled === false };
-    doc.endGesture();
-    doc.apply(slot.enabled === false ? 'Effect On' : 'Effect Off', updateTrack(doc.state, this.id, { fx }));
   }
 
   values() {
