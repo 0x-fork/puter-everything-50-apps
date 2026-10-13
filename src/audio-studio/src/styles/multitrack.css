@@ -651,16 +651,53 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  max-height: 71px;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .mx-fx-slot {
-  height: 16px;
-  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  flex: none;
+  height: 17px;
+  padding: 0;
   border: 1px solid var(--divider);
   border-radius: 2px;
   background: var(--bg-input);
   color: var(--text);
   font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.mx-fx-power {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--divider);
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.mx-fx-power[aria-pressed='false'] {
+  color: var(--text-faint);
+}
+
+.mx-fx-name {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
@@ -670,7 +707,7 @@
 
 .mx-fx-slot.empty {
   border-style: dashed;
-  border-color: var(--border-soft);
+  border-color: var(--divider);
   background: transparent;
 }
 

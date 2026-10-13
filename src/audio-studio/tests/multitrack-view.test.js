@@ -241,6 +241,24 @@ describe('mixer panel', () => {
     panel.el.remove();
   });
 
+  it('turns a single track effect on and off from its strip', () => {
+    const { app, doc } = setup();
+    const id = doc.state.tracks[0].id;
+    doc.apply('Track Effects', S.updateTrack(doc.state, id, { fx: [null, { id: 'e1', effect: 'amplify', values: {}, enabled: true }] }));
+    const panel = mixerPanel(app);
+    document.body.append(panel.el);
+    panel.show();
+    const strip = panel.el.querySelector('.mx-strip');
+    expect([...strip.querySelectorAll('.mx-fx-slot')]).toHaveLength(4);
+    strip.querySelector('.mx-fx-power').click();
+    expect(doc.state.tracks[0].fx[1].enabled).toBe(false);
+    expect(doc.history.undoLabel).toBe('Effect Off');
+    expect(panel.el.querySelector('.mx-strip .mx-fx-slot').classList.contains('off')).toBe(true);
+    panel.el.querySelector('.mx-strip .mx-fx-power').click();
+    expect(doc.state.tracks[0].fx[1].enabled).toBe(true);
+    panel.el.remove();
+  });
+
   it('fader keys reach silence and back', () => {
     const changes = [];
     const el = fader({ value: -59, label: 'Test', onChange: (v) => changes.push(v) });

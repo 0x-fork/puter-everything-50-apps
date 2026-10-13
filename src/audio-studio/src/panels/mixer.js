@@ -11,7 +11,7 @@ import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
 import { knob, hotNumber } from '../ui/controls.js';
 import { getEffect } from '../effects/registry.js';
-import { allTracks, wouldCycle, SILENT_DB, MAX_DB, AUTOMATION_MODES } from '../model/session-edits.js';
+import { allTracks, wouldCycle, updateTrack, SILENT_DB, MAX_DB, AUTOMATION_MODES } from '../model/session-edits.js';
 import { SendControls, EqControls } from '../multitrack/send-eq.js';
 import { dbToFader, faderToDb, formatGain, formatGainShort, formatPan, parseGain } from '../multitrack/levels.js';
 import { MeterBar, METER_RANGE } from '../multitrack/meter.js';
@@ -163,23 +163,34 @@ class Strip {
     if (track.type !== 'master') for (const b of state.tracks) if (b.type === 'bus' && b.id !== track.id && !wouldCycle(state, track.id, b.id)) outs.push(h('option', { value: b.id }, b.name));
     this.output.replaceChildren(...outs);
     this.output.value = track.output || 'master';
-    const rows = [];
-    for (let i = 0; i < 4; i++) {
-      const s = track.fx.filter(Boolean)[i];
-      const def = s && getEffect(s.effect);
-      rows.push(
-        h(
-          `button.mx-fx-slot${s ? '' : '.empty'}${s && s.enabled === false ? '.off' : ''}`,
-          { type: 'button', 'aria-label': s ? `${def?.name || 'Effect'}${s.enabled === false ? ' (off)' : ''}, edit effects` : `Empty effect slot ${i + 1}, add an effect`, onclick: () => this.app.commands.run('mt.trackEffects', { id: this.id }) },
-          s ? def?.name || 'Effect' : '',
-        ),
+    // Every effect (the list scrolls past four), each with its own power, then empty slots up to four.
+    const edit = () => this.app.commands.run('mt.trackEffects', { id: this.id });
+    const filled = track.fx.map((s, i) => [s, i]).filter(([s]) => s);
+    const rows = filled.map(([s, i]) => {
+      const name = getEffect(s.effect)?.name || 'Effect';
+      const on = s.enabled !== false;
+      return h(
+        `div.mx-fx-slot${on ? '' : '.off'}`,
+        h('button.mx-fx-power', { type: 'button', 'aria-pressed': String(on), 'aria-label': `${name} power`, title: on ? 'Bypass this effect' : 'Turn this effect on', onclick: () => this.#toggleSlot(i) }, icon('power', 10)),
+        h('button.mx-fx-name', { type: 'button', 'aria-label': `${name}${on ? '' : ' (off)'}, edit effects`, onclick: edit }, name),
       );
-    }
+    });
+    for (let i = rows.length; i < 4; i++) rows.push(h('button.mx-fx-slot.empty', { type: 'button', 'aria-label': `Empty effect slot ${i + 1}, add an effect`, onclick: edit }));
     this.fxRows.replaceChildren(...rows);
     this.fader.setAttribute('aria-label', `${track.name} volume`);
     this.sends?.update(track);
     this.eq.update(track);
     this.values();
+  }
+
+  #toggleSlot(index) {
+    const doc = this.doc;
+    const fx = this.track.fx.slice();
+    const slot = fx[index];
+    if (!slot) return;
+    fx[index] = { ...slot, enabled: slot.enabled === false };
+    doc.endGesture();
+    doc.apply(slot.enabled === false ? 'Effect On' : 'Effect Off', updateTrack(doc.state, this.id, { fx }));
   }
 
   values() {
