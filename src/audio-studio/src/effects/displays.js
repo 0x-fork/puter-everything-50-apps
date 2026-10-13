@@ -4,11 +4,13 @@
 
 import { autoEditor } from './editors.js';
 import { dynamicsProcessingEditor, deesserEditor, multibandEditor } from './dyn-editors.js';
+import { scientificEditor } from './filter-editors.js';
 
 const DISPLAYS = {
   dynamicsProcessing: () => dynamicsProcessingEditor(),
   deesser: () => deesserEditor(),
   multiband: () => multibandEditor(),
+  scientific: () => scientificEditor(),
   none: () => null,
 };
 

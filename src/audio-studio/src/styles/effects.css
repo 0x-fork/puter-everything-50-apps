@@ -362,11 +362,39 @@ input[type='range'].fx-slider:disabled {
   gap: 4px;
 }
 
+.fx-plot.fx-curve {
+  height: 240px;
+}
+
+.fx-envelope-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.fx-sci-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fx-plot.fx-sci {
+  height: 200px;
+}
+
+.fx-sci-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  margin-left: 2px;
+  border-radius: 1px;
+}
+
 /* Vertical sliders (graphic EQ bands, echo equalizer). */
 .fx-vsliders {
   display: flex;
   justify-content: space-between;
-  gap: 2px;
+  gap: 0;
   padding-top: 4px;
   overflow-x: auto;
 }
@@ -377,12 +405,16 @@ input[type='range'].fx-slider:disabled {
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  min-width: 28px;
+  min-width: 24px;
+}
+
+.fx-vslider .fx-value .hot {
+  font-size: var(--fs-sm);
 }
 
 .fx-vlabel {
   color: var(--text);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   white-space: nowrap;
 }
 
@@ -524,6 +556,61 @@ input[type='range'].fx-slider:disabled {
 
 .fx-lm-bar.gate.on {
   background: var(--meter-green);
+}
+
+/* Band tables (Parametric EQ, Notch Filter). */
+.fx-table {
+  display: grid;
+  grid-template-columns: max-content repeat(var(--cols), minmax(0, 1fr));
+  align-items: center;
+  justify-items: center;
+  gap: 4px 2px;
+  padding: 6px 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.fx-table-head {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.fx-table .fx-table-row {
+  justify-self: end;
+  margin-right: 6px;
+}
+
+.fx-table-cell {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+
+.fx-table-cell .hot {
+  min-width: 0;
+}
+
+.fx-table-cell .select {
+  max-width: 100%;
+  font-size: var(--fs-sm);
+}
+
+.fx-band-toggle {
+  min-width: 34px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.fx-band-toggle[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
 }
 
 /* Knob grids (Dynamics). */

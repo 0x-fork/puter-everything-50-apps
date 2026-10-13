@@ -18,6 +18,11 @@
 //     collapsed: ['Advanced'],     // sections in a collapsible disclosure, closed at first
 //     tabs: [{ label: 'Dynamics', sections: [...], editor: true }, ...] // tabbed pages (dialog.js)
 //     meters: { Compressor: [{ index: 1, label: 'Reduction', kind: 'gr' }] } // live readout meters
+//     table: {                     // sections as the columns of a compact table (EQ bands)
+//       columns: [{ section: 'Band 1', label: '1' }, ...],
+//       rows: [{ label: 'Frequency', suffix: ['Freq'] }, { label: 'Band', suffix: ['On'] }],
+//     }                            // a cell is the column section's param whose id ends with a suffix
+//     order: [null, 'Advanced'],   // frame order (null = params outside any section)
 //     wide: true                   // a wider dialog
 //   }
 // Per param: `ends: ['Dry', 'Wet']` labels the slider's ends; `enabledIf(values)`
@@ -27,6 +32,7 @@
 
 import { h } from '../lib/dom.js';
 import { hotNumber, select, knob } from '../ui/controls.js';
+import { icon } from '../ui/icons.js';
 import { paramType, toPosition, fromPosition, formatValue, formatParts, parseValue, coerce, scaleTicks } from './params.js';
 import { envelopeControl, curveControl } from './editors.js';
 import { meterStrip } from './meters-ui.js';
@@ -151,15 +157,17 @@ export function paramControl(p, getValues, onSet, { doc = null, range = null, sm
     return { kind: 'row', cells: [h('label.fx-label', `${label}:`), h('div.fx-choice', sel)], show: (v) => (sel.value = String(v[p.id])), setDisabled: (off) => (sel.disabled = off) };
   }
   if (type === 'curve' || type === 'envelope') {
+    const smoothNow = () => Boolean(smooth?.(getValues()));
     const env =
       type === 'curve'
-        ? curveControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points) })
-        : envelopeControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points), doc, range, smooth: () => Boolean(smooth?.(getValues())) });
+        ? curveControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points), smooth: smoothNow })
+        : envelopeControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points), doc, range, smooth: smoothNow });
     const show = (v, from) => {
       if (from !== p.id) env.setPoints(v[p.id]);
       else env.redraw();
     };
-    return { kind: 'wide', cells: [h('div.fx-envelope-row', h('div.fx-label', label), env)], show, setDisabled: () => {} };
+    const reset = h('button.icon-btn.fx-reset', { type: 'button', 'aria-label': `Reset ${label.toLowerCase()}`, title: `Reset ${label.toLowerCase()}`, onclick: () => onSet(p.id, structuredClone(p.default)) }, icon('rotate-ccw', 14));
+    return { kind: 'wide', cells: [h('div.fx-envelope-row', h('div.fx-envelope-head', h('div.fx-label', label), reset), env)], show, setDisabled: () => {} };
   }
   const c = numberControl(p, getValues, onSet);
   const lab = h('label.fx-label', { onclick: () => c.hot.focus() }, `${label}:`);
@@ -224,8 +232,10 @@ export function paramControls(def, getValues, onSet, { doc = null, range = null,
   const refreshers = [];
   const toggles = [];
   const built = new Map();
+  const tabled = new Set((layout.table?.columns || []).map((c) => c.section));
   for (const g of sectionGroups(params)) {
     if (sections && !sections.includes(g.name)) continue;
+    if (tabled.has(g.name)) continue;
     built.set(g.name, buildGroup(g));
   }
 
@@ -307,7 +317,51 @@ export function paramControls(def, getValues, onSet, { doc = null, range = null,
     return h('fieldset.fx-group', { dataset: { section: name } }, h('legend', title), meters?.el, grid);
   }
 
-  const el = h('div.fx-controls');
+  // Band table: one column per section, one row per param role.
+  let table = null;
+  if (layout.table) {
+    const t = layout.table;
+    const cols = t.columns.filter((c) => !sections || sections.includes(c.section));
+    const inSection = (sec) => params.filter((p) => p.section === sec);
+    const cells = [h('span.fx-table-corner')];
+    for (const c of cols) cells.push(h('span.fx-table-head', c.label));
+    for (const row of t.rows) {
+      cells.push(h('span.fx-label.fx-table-row', row.label));
+      for (const c of cols) {
+        const p = inSection(c.section).find((q) => row.suffix.some((sfx) => q.id.endsWith(sfx)));
+        if (!p) {
+          cells.push(h('span.fx-table-cell'));
+          continue;
+        }
+        const type = paramType(p);
+        let el;
+        let show;
+        let setDisabled;
+        if (type === 'bool') {
+          el = h('button.fx-band-toggle', { type: 'button', 'aria-label': `${c.section} on`, title: `Turn ${c.section} on or off`, onclick: () => onSet(p.id, !getValues()[p.id]) }, c.label);
+          show = (v) => el.setAttribute('aria-pressed', String(Boolean(v[p.id])));
+          setDisabled = (off) => (el.disabled = off);
+        } else if (type === 'choice') {
+          el = select({ value: getValues()[p.id], options: p.options || [], label: `${c.section} ${p.label || p.id}`, onChange: (val) => onSet(p.id, coerce(p, val)) });
+          show = (v) => (el.value = String(v[p.id]));
+          setDisabled = (off) => (el.disabled = off);
+        } else {
+          const n = numberControl({ ...p, label: `${c.section} ${p.label || p.id}` }, getValues, onSet);
+          el = n.hot;
+          show = n.show;
+          setDisabled = n.setDisabled;
+        }
+        cells.push(h('span.fx-table-cell', { dataset: { section: c.section } }, el));
+        refreshers.push((v) => {
+          show(v);
+          if (p.enabledIf) setDisabled(!p.enabledIf(v));
+        });
+      }
+    }
+    table = h('div.fx-table', { role: 'group', 'aria-label': t.label || 'Bands', style: { '--cols': String(cols.length) } }, cells);
+  }
+
+  const el = h('div.fx-controls', table);
   const placed = new Set();
   const cols = (layout.columns || []).map((names) => names.filter((n) => built.has(n)));
   if (cols.some((c) => c.length)) {
@@ -327,7 +381,10 @@ export function paramControls(def, getValues, onSet, { doc = null, range = null,
       ),
     );
   }
-  for (const [name, node] of built) if (!placed.has(name)) el.append(node);
+  // layout.order lists frames (null = the unsectioned params) to show in that order.
+  const order = layout.order || [];
+  const rank = (name) => (order.includes(name) ? order.indexOf(name) : order.length);
+  [...built.entries()].map(([name, node], i) => ({ name, node, k: rank(name) * 1000 + i })).sort((a, b) => a.k - b.k).forEach(({ name, node }) => !placed.has(name) && el.append(node));
 
   const refresh = (values, from) => {
     refreshers.forEach((f) => f(values, from));
