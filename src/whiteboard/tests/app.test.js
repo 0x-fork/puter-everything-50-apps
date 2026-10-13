@@ -11676,6 +11676,67 @@ test("automatically growing text exports its final line and image copying keeps 
   }
 });
 
+test("selecting many notes never laid out says whether their text fits once each is fitted, a few at a time", async () => {
+  const app = await setup();
+  const { doc, w, click, tick } = app;
+  try {
+    await click('[data-action="new"]');
+    const notes = Array.from({ length: 80 }, (_, n) =>
+      item("note", (n % 10) * 220, Math.floor(n / 10) * 220, {
+        text: `Idea ${n} with a few words`,
+      }),
+    );
+    // The last note holds more than fits at the smallest size.
+    notes.push(
+      item("note", 0, 2000, { w: 60, h: 60, text: "many lines\n".repeat(80) }),
+    );
+    dispatchTransfer(app, "paste", transferData(clipboardFormats(notes)));
+    const status = () => doc.querySelector("#text-fit-status");
+    // Ten are laid out at once, the rest between other work.
+    for (let n = 0; n < 40 && status().hidden; n++) await tick();
+    assert.equal(status().hidden, false);
+    assert.match(status().textContent, /Enlarge/);
+    const message = status().textContent;
+    await click('[data-action="undo"]');
+    dispatchTransfer(app, "paste", transferData(clipboardFormats(notes)));
+    // Copies are laid out afresh. With every layout past its time, the
+    // first pass fits only a few, and the status waits for the rest.
+    const now = w.performance.now.bind(w.performance);
+    let clock = 0;
+    w.performance.now = () => now() + (clock += 100);
+    try {
+      doc.querySelector("#canvas").dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await tick();
+      doc.querySelector("#canvas").dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key: "a",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      assert.equal(
+        doc.querySelectorAll("#board-outline [aria-pressed='true']").length,
+        81,
+      );
+      assert.equal(status().hidden, true, "not known yet");
+      for (let n = 0; n < 40 && status().hidden; n++) await tick();
+      assert.equal(status().hidden, false);
+      assert.equal(status().textContent, message);
+    } finally {
+      w.performance.now = now;
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 test("automatic text fitting updates live, cancels drafts, resizes, and persists with accessible controls", async () => {
   const app = await setup();
   const { doc, w, click } = app;
@@ -19494,6 +19555,69 @@ async function openSelectionSettings(app, enabled) {
   )
     await app.click("#precise-selection");
 }
+
+test("a marquee says whether the selected text fits once it ends", async () => {
+  const app = await setup(),
+    { doc, w } = app;
+  try {
+    await app.click('[data-action="new"]');
+    const canvas = doc.querySelector("#canvas");
+    canvas.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 1200,
+      height: 900,
+    });
+    dispatchTransfer(
+      app,
+      "drop",
+      transferData(
+        clipboardFormats([
+          item("note", 0, 0, { text: "Fits" }),
+          item("note", 300, 0, {
+            w: 60,
+            h: 60,
+            text: "many lines\n".repeat(80),
+          }),
+        ]),
+      ),
+      canvas,
+      { clientX: 300, clientY: 300 },
+    );
+    const [fits, full] = selectedClipboard(app),
+      view = renderedView(app);
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    const pointer = (type, x, y) =>
+      canvasPointer(app, type, 1, view.x + x * view.z, view.y + y * view.z, {
+        pointerType: "mouse",
+      });
+    const status = () => doc.querySelector("#text-fit-status");
+    pointer("pointerdown", fits.x - 20, fits.y - 20);
+    pointer("pointermove", fits.x + 50, fits.y + 50);
+    pointer("pointermove", full.x + 50, full.y + 50);
+    // Out of sight while the marquee goes on.
+    assert.ok(
+      doc
+        .querySelector("#selection-tools")
+        .classList.contains("is-interacting"),
+    );
+    pointer("pointerup", full.x + 50, full.y + 50);
+    assert.equal(
+      doc.querySelectorAll("#board-outline [aria-pressed='true']").length,
+      2,
+    );
+    assert.equal(status().hidden, false);
+    assert.match(status().textContent, /Enlarge/);
+  } finally {
+    await app.close();
+  }
+});
 
 test("marquee crossing and precise coverage retain history, Shift additions, cancellation and device preferences", async () => {
   const app = await setup(),

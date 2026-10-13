@@ -403,8 +403,10 @@ import {
   textValign,
   canAutoFitText,
   fitTextLayout,
+  cachedFitTextLayout,
   growsWithText,
   autoHeightLayout,
+  cachedAutoHeightLayout,
   reflowTextItems,
   TABLE_TEXT_KEYS,
 } from "./text.js";
@@ -6314,36 +6316,83 @@ function pasteStyle() {
   mutate(() => changes.forEach(({ i, patch }) => applyObjectStyle(i, patch)));
   toast("Style pasted.");
 }
-function updateTextFitStatus() {
+// Whether the selected text fits is read from each object's fitted layout.
+// Layouts already made cost next to nothing, but selecting thousands of
+// notes whose text was never laid out, as at a zoom too far out to show
+// it, would fit them all at once, freezing the board for a second. A draw
+// lays out at most ten of them, enough for an edit or a small selection;
+// the rest are laid out while the browser is idle, and the status changes
+// once every one is known.
+let fitStatusLater = 0;
+function updateTextFitStatus(budget = 0) {
   const status = document.querySelector("#text-fit-status");
-  if (!status) return;
+  // While a marquee, a move or a resize goes on, the toolbar is out of
+  // sight and hearing, and the selection changes with every pointer move:
+  // the status is worked out once it ends, when the toolbar shows again.
+  if (!status || status.closest(".is-interacting")) return;
   const ctx = document.querySelector("#canvas").getContext("2d");
-  const overflow = current.items.some(
-    (i) =>
-      selection.has(i.id) &&
-      i.autoFontSize &&
-      canAutoFitText(i) &&
-      fitTextLayout(
-        i,
-        ctx,
-        editing?.item.id === i.id ? editing.input.value : i.text || "",
-        undefined,
-        editing?.item.id === i.id ? editing.input.textRuns : i.textRuns,
-        editing?.item.id === i.id ? editing.input.textBlocks : i.textBlocks,
-      ).overflow,
-  );
-  const tooTall = current.items.some(
-    (i) =>
-      selection.has(i.id) &&
-      growsWithText(i) &&
-      autoHeightLayout(
-        i,
-        ctx,
-        editing?.item.id === i.id ? editing.input.value : i.text || "",
-        editing?.item.id === i.id ? editing.input.textRuns : i.textRuns,
-        editing?.item.id === i.id ? editing.input.textBlocks : i.textBlocks,
-      ).overflow,
-  );
+  // Ten new layouts are always made, so each pass gets on, however slow.
+  const until = performance.now() + budget,
+    editingId = editing?.item.id;
+  let made = 0,
+    unknown = false,
+    overflow = false;
+  for (const i of current.items) {
+    if (!selection.has(i.id) || !i.autoFontSize || !canAutoFitText(i)) continue;
+    const own = i.id === editingId,
+      text = own ? editing.input.value : i.text || "",
+      runs = own ? editing.input.textRuns : i.textRuns,
+      blocks = own ? editing.input.textBlocks : i.textBlocks;
+    let layout = cachedFitTextLayout(i, ctx, text, undefined, runs, blocks);
+    if (!layout) {
+      if (made++ >= 10 && performance.now() > until) {
+        unknown = true;
+        continue;
+      }
+      layout = fitTextLayout(i, ctx, text, undefined, runs, blocks);
+    }
+    if (layout.overflow) {
+      overflow = true;
+      break;
+    }
+  }
+  const overflowKnown = overflow || !unknown;
+  unknown = false;
+  let tooTall = false;
+  for (const i of current.items) {
+    if (!selection.has(i.id) || !growsWithText(i)) continue;
+    const own = i.id === editingId,
+      text = own ? editing.input.value : i.text || "",
+      runs = own ? editing.input.textRuns : i.textRuns,
+      blocks = own ? editing.input.textBlocks : i.textBlocks;
+    let layout = cachedAutoHeightLayout(i, ctx, text, runs, blocks);
+    if (!layout) {
+      if (made++ >= 10 && performance.now() > until) {
+        unknown = true;
+        continue;
+      }
+      layout = autoHeightLayout(i, ctx, text, runs, blocks);
+    }
+    if (layout.overflow) {
+      tooTall = true;
+      break;
+    }
+  }
+  // Too tall is said first, so overflow alone waits until no object can
+  // be too tall. Until then the status stays as it was.
+  if (!tooTall && (unknown || !overflowKnown)) {
+    if (!fitStatusLater) {
+      const again = (deadline) => {
+        fitStatusLater = 0;
+        // An idle browser lends more time, short of a long task.
+        updateTextFitStatus(Math.min(16, deadline?.timeRemaining?.() || 0));
+      };
+      fitStatusLater = window.requestIdleCallback
+        ? requestIdleCallback(again, { timeout: 500 })
+        : setTimeout(again, 0);
+    }
+    return;
+  }
   status.hidden = !overflow && !tooTall;
   const message = tooTall
     ? t(
