@@ -34,7 +34,8 @@ describe('workspace groups', () => {
 
   it('reads groups from preferences and leaves hidden ones out of the overflow menu', async () => {
     const app = await makeApp();
-    const all = app.workspaceNames();
+    // The current workspace always stays reachable, so test with others.
+    const all = app.workspaceNames().filter((n) => n !== app.prefs.get('workspace'));
     app.prefs.set('workspaceTabs', [all[0]]);
     app.prefs.set('workspaceHidden', [all[2]]);
     const g = workspaceGroups(app);
