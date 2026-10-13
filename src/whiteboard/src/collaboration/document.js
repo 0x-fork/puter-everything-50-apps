@@ -28,6 +28,7 @@ import {
 } from "../rich-text.js";
 import * as Y from "yjs";
 import { validateBoard, sharedCopy } from "../model.js";
+import { sameJSON } from "../same-json.js";
 import { normalizeEmbed } from "../content/providers.js";
 import {
   commitPlanning,
@@ -62,7 +63,7 @@ import {
   readSharedTableSizes,
 } from "./table-sizes.js";
 
-const equal = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+const equal = sameJSON;
 // IDs order the same on every device, whatever its language: localeCompare
 // sorts some letter pairs differently by locale, such as "aa" in Danish.
 const byCode = (a, b) => (a < b ? -1 : a > b ? 1 : 0);

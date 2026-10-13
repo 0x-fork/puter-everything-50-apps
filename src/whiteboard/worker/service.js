@@ -15,6 +15,7 @@ import {
   workshopEvents,
 } from "../src/facilitation/model.js";
 import { SharedDocument } from "../src/collaboration/document.js";
+import { sameJSON } from "../src/same-json.js";
 import { ListingQueue } from "./listings.js";
 import { oversized } from "../src/model.js";
 import { providerGroup } from "../src/content/providers.js";
@@ -287,14 +288,15 @@ const UPDATE_LIMIT = 8_000_000;
 // Everything a commenter must not change. Comments and workshop registers
 // (votes, poll answers, reactions) are excluded here and checked per author
 // by validateCommentChanges and validateWorkshopChanges instead.
-const contentSignature = (board) =>
-  JSON.stringify([
-    board.title,
-    board.items,
-    board.tags || [],
-    board.timer || null,
-    board.planning || null,
-  ]);
+// Whether two projections of a board hold the same content, as their JSON
+// would say, comparing object by object.
+const sameContent = (a, b) =>
+  sameJSON(
+    [a.title, a.tags || [], a.timer || null, a.planning || null],
+    [b.title, b.tags || [], b.timer || null, b.planning || null],
+  ) &&
+  a.items.length === b.items.length &&
+  a.items.every((item, n) => sameJSON(item, b.items[n]));
 
 export function appUid(token) {
   try {
@@ -2603,7 +2605,7 @@ export class BoardService {
       ([...written.roots].some(
         (root) => root !== "comments" && root !== "workshop",
       ) ||
-        contentSignature(before) !== contentSignature(after))
+        !sameContent(before, after))
     )
       fail(422, "Commenters can add comments but cannot change board content.");
     // The next commit starts from this projection.
