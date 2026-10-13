@@ -680,6 +680,9 @@ function packedPoints(drawing) {
   }
   return drawing.points;
 }
+// Whether these are a finished drawing's points as copies share them, which
+// nothing changes in place.
+export const sharedPoints = (points) => packed.has(points);
 // An undo step, or the board as a gesture found it. It shares finished
 // drawings' points with the board: copying a board of long drawings on
 // every step and press took tens of megabytes each time.
