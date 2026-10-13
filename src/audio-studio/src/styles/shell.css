@@ -506,32 +506,74 @@
 
 /* Edit Workspaces dialog */
 .ws-edit {
-  min-width: min(380px, 80vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(440px, 82vw);
+}
+.ws-main {
+  display: flex;
+  gap: 6px;
+  min-height: 0;
+}
+.ws-side {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .ws-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  max-height: 50vh;
+  flex: 1;
+  min-width: 0;
+  max-height: 52vh;
   overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  outline: none;
+}
+.ws-list:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.ws-group {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px 4px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.ws-empty {
+  padding: 6px 10px 6px 34px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: var(--fs-sm);
 }
 .ws-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px 4px 10px;
+  padding: 5px 10px 5px 14px;
   border-bottom: 1px solid var(--border-soft);
+  cursor: grab;
 }
-.ws-row:last-child {
-  border-bottom: 0;
+.ws-row > svg {
+  flex: none;
+  color: var(--text-faint);
+}
+.ws-row[aria-selected='true'] {
+  background: var(--accent-soft);
+  color: var(--text-strong);
+}
+.ws-row.dragging {
+  opacity: 0.5;
 }
 .ws-name {
   flex: 1;
   min-width: 0;
 }
-.ws-actions {
+.ws-note {
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
 }

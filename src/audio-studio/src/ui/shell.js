@@ -47,7 +47,7 @@ export function createShell(app, root) {
   const workspaceMore = h('button.icon-btn', { type: 'button', 'aria-label': 'All workspaces', title: 'Workspaces', 'aria-haspopup': 'menu' }, icon('chevrons-right', 16));
   workspaceMore.addEventListener('click', () => {
     const r = workspaceMore.getBoundingClientRect();
-    app.openMenu(app.workspaceMenuItems(), { x: r.left - 160, y: r.bottom + 2, anchor: workspaceMore, label: 'Workspaces' });
+    app.openMenu(app.workspaceMenuItems({ overflow: true }), { x: r.left - 160, y: r.bottom + 2, anchor: workspaceMore, label: 'Workspaces' });
   });
   const search = h('input.input.command-search', { type: 'search', placeholder: 'Search commands', 'aria-label': 'Search commands', autocomplete: 'off' });
   const searchWrap = h('div.command-search-wrap', icon('search', 14), search);
