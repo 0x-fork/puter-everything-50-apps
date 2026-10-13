@@ -663,3 +663,18 @@ input[type='range'].slider.fx-vrange::-moz-range-track {
 .nm-target .hot {
   min-width: 64px;
 }
+
+/* Pitch Shifter: precision choices in a narrow column, splicing settings beside them. */
+.fx-split.ps-split {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.fx-radios.fx-radios-v {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.ps-auto {
+  min-height: 1.4em;
+  font-size: var(--fs-sm);
+}

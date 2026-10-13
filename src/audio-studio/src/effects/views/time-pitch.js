@@ -84,9 +84,15 @@ function shifterView(ctx) {
     'div.fx-stack',
     groupBox('Pitch Transpose', controlsFor(ctx, ['semitones', 'cents']), h('div.sp-ratio', h('span.fx-label', 'Ratio:'), readout(ctx, (v) => pitchRatio(v.semitones, v.cents).toFixed(4)))),
     h(
-      'div.fx-split.fx-split-even',
-      groupBox('Precision', enableWhen(ctx, radioChoice(ctx, 'precision', { label: null }), (v) => v.autoSplice)),
-      groupBox('Pitch Settings', enableWhen(ctx, controlsFor(ctx, ['splice', 'overlap']), (v) => !v.autoSplice), checkbox(ctx, 'autoSplice'), auto, enableWhen(ctx, checkbox(ctx, 'formants'), (v) => v.autoSplice)),
+      'div.fx-split.ps-split',
+      groupBox('Precision', enableWhen(ctx, radioChoice(ctx, 'precision', { label: null, className: 'fx-radios-v' }), (v) => v.autoSplice)),
+      groupBox(
+        'Pitch Settings',
+        enableWhen(ctx, controlsFor(ctx, ['splice', 'overlap']), (v) => !v.autoSplice),
+        h('div', checkbox(ctx, 'autoSplice')),
+        h('div.ps-auto', auto),
+        enableWhen(ctx, h('div', checkbox(ctx, 'formants')), (v) => v.autoSplice),
+      ),
     ),
   );
 }

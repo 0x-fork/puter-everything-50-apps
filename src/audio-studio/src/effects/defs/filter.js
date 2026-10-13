@@ -255,16 +255,16 @@ registerEffect({
   group: GROUP,
   kind: 15,
   params: [
-    choice('type', 'Type', ['Butterworth', 'Chebyshev', 'Bessel'], 0),
-    choice('mode', 'Mode', ['Low Pass', 'High Pass', 'Band Pass', 'Band Stop'], 0),
+    choice('type', 'Type', ['Butterworth', 'Chebyshev', 'Bessel'], 0, { order: -2 }),
+    choice('mode', 'Mode', ['Low Pass', 'High Pass', 'Band Pass', 'Band Stop'], 0, { order: -2 }),
     num('order', 'Order', 1, 8, 4, '', { step: 1, enabledIf: (v) => v.designBy !== 1 }),
-    hz('cutoff', 'Cutoff', 10, 20000, 1000),
-    hz('highCutoff', 'High Cutoff', 10, 20000, 4000, { enabledIf: (v) => v.mode >= 2 }),
-    db('ripple', 'Passband Ripple', 0.01, 6, 1, { step: 0.01, enabledIf: (v) => v.type === 1 }),
-    db('gain', 'Master Gain', -24, 24, 0),
+    hz('cutoff', 'Cutoff', 10, 20000, 1000, { order: 1 }),
+    hz('highCutoff', 'High Cutoff', 10, 20000, 4000, { order: 1, enabledIf: (v) => v.mode >= 2 }),
+    db('ripple', 'Passband Ripple', 0.01, 6, 1, { order: 1, step: 0.01, enabledIf: (v) => v.type === 1 }),
+    db('gain', 'Master Gain', -24, 24, 0, { order: 1 }),
     // Design by order, or by a transition band: the dialog then sets the
     // lowest order that is down by the stop attenuation within that width.
-    choice('designBy', 'Design By', ['Order', 'Transition Bandwidth'], 0, { control: 'radio' }),
+    choice('designBy', 'Design By', ['Order', 'Transition Bandwidth'], 0, { control: 'radio', order: -1 }),
     hz('transition', 'Transition Bandwidth', 1, 10000, 1000, { enabledIf: (v) => v.designBy === 1 }),
     db('stopAtten', 'Stop Attenuation', 3, 120, 40, { step: 1 }),
   ],
