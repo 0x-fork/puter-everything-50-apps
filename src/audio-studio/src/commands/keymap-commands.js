@@ -18,10 +18,11 @@ const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
 const session = (app) => (app.active?.kind === 'session' ? app.active : null);
 const limit = (d) => d.extent ?? d.length;
 
-/** Frames for one small keyboard step: ten screen pixels at the current zoom. */
+/** Frames for one small keyboard step: ten screen pixels at the current zoom, at most 5% of the view. */
 export function stepFrames(app, d = doc(app)) {
-  const fpp = app.currentView?.()?.fpp || (d.view.end - d.view.start) / 1000;
-  return Math.max(1, Math.round(fpp * 10));
+  const span = d.view.end - d.view.start;
+  const fpp = app.currentView?.()?.fpp || span / 1000;
+  return Math.max(1, Math.round(Math.min(fpp * 10, span / 20)));
 }
 
 /** Scrolls the view (keeping its zoom) so `frame` is visible. */
