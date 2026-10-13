@@ -132,6 +132,11 @@ export function registerCommands(app: App, files: FileOps) {
     { id: 'exportStl', label: 'Export STL...', icon: 'export', keywords: '3d print mesh', description: 'Export the solid as an STL mesh for 3D printing.', enabled: hasBody, run: () => files.exportAs('stl') },
     { id: 'importStep', label: 'Import...', icon: 'import', keywords: 'stp step sldprt solidworks import', description: 'Insert a STEP file or SolidWorks part as a solid body.', run: () => files.importStep() },
     { id: 'rename', label: 'Rename Part...', icon: 'edit', run: () => files.rename() },
+    {
+      id: 'assistant', label: 'Assistant', icon: 'assistant', shortcut: 'Ctrl+J', keywords: 'ai chat copilot design help agent claude',
+      description: 'Design and change the part by describing what you want.',
+      checked: () => app.taskPaneOpen() === 'assistant', run: () => app.toggleTaskPane('assistant'),
+    },
     { id: 'share', label: 'Share...', icon: 'share', keywords: 'collaborate invite team access', description: 'Let other Puter users view or edit this part.', run: () => shareDialog(app, files) },
     { id: 'properties', label: 'Part Properties...', icon: 'part', keywords: 'units decimals', description: 'Name, units and precision.', run: () => propertiesDialog(app) },
     // ---- edit ----

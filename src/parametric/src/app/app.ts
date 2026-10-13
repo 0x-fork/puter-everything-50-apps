@@ -370,6 +370,9 @@ export class App {
 
   /** Opens a task pane panel by id (set up by the task pane module). */
   openTaskPane: (id: string) => void = () => {};
+  toggleTaskPane: (id: string) => void = () => {};
+  /** The open task pane panel, if any. */
+  taskPaneOpen: () => string | null = () => null;
 
   openViewMenu() {
     const m = this.viewport.mouse;
@@ -622,8 +625,24 @@ export class App {
     this.rebuildQueued = true;
     queueMicrotask(() => {
       this.rebuildQueued = false;
-      void this.rebuild();
+      this.rebuildsRunning++;
+      void this.rebuild().finally(() => {
+        if (--this.rebuildsRunning > 0 || this.rebuildQueued) return;
+        const waiters = this.idleWaiters;
+        this.idleWaiters = [];
+        for (const w of waiters) w();
+      });
     });
+  }
+
+  private rebuildsRunning = 0;
+  private idleWaiters: (() => void)[] = [];
+
+  /** Resolves once the model shown reflects the document (no rebuild pending or running). */
+  async whenBuilt(): Promise<void> {
+    await this.kernel.ready.catch(() => undefined);
+    if (!this.rebuildQueued && this.rebuildsRunning === 0) return;
+    await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
   }
 
   /** Number of features the model shows (rollback, sketch or edit position). */

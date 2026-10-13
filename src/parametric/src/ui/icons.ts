@@ -7,7 +7,8 @@ import {
   EyeOff, FileInput, FileOutput, FilePlus, FolderOpen, Keyboard, LogIn, LogOut, Menu, Monitor, Moon, MoreHorizontal,
   Palette, Pencil, Redo2, Save, Search, Settings, Share2, Sigma, Sun, Trash2, Undo2, Upload, X, Info, TriangleAlert,
   CircleX, Ruler, Weight, Lock, Unlock, ListTree, PanelLeft, PanelRight, Files, Plus, Minus, GripVertical, RotateCcw,
-  Cloud, HardDrive, Pin, Scissors, MousePointer2, Hand, ZoomIn, ZoomOut, Rotate3d, Type, FileText, Users,
+  Cloud, HardDrive, Pin, Scissors, MousePointer2, Hand, ZoomIn, ZoomOut, Rotate3d, Type, FileText, Users, Sparkles, ArrowUp, Square,
+  SquarePen, Camera, Paperclip, Image as ImageIcon,
 } from 'lucide';
 
 type IconNode = [string, Record<string, string | number>][];
@@ -175,6 +176,13 @@ const LUCIDE: Record<string, IconNode> = {
   file: FileText as unknown as IconNode,
   upToLine: ArrowUpFromLine as unknown as IconNode,
   downToLine: ArrowDownToLine as unknown as IconNode,
+  assistant: Sparkles as unknown as IconNode,
+  send: ArrowUp as unknown as IconNode,
+  stop: Square as unknown as IconNode,
+  newChat: SquarePen as unknown as IconNode,
+  camera: Camera as unknown as IconNode,
+  attach: Paperclip as unknown as IconNode,
+  image: ImageIcon as unknown as IconNode,
 };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';

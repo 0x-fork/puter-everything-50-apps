@@ -71,6 +71,8 @@ export class DocStore {
   private batchDepth = 0;
   private batchSnap: string | null = null;
   private batchLabel = '';
+  /** Old steps dropped from the bottom of the undo stack. */
+  private dropped = 0;
 
   constructor(doc: PartDocument = newDocument()) {
     this.doc = doc;
@@ -90,6 +92,7 @@ export class DocStore {
     this.doc = doc;
     this.undoStack = [];
     this.redoStack = [];
+    this.dropped = 0;
     this.dirty = false;
     this.emit('load');
   }
@@ -120,7 +123,7 @@ export class DocStore {
     if (after === before) return;
     this.doc.modified = Date.now();
     this.undoStack.push({ snap: before, label });
-    if (this.undoStack.length > MAX_UNDO) this.undoStack.shift();
+    if (this.undoStack.length > MAX_UNDO) { this.undoStack.shift(); this.dropped++; }
     this.redoStack = [];
     this.dirty = true;
     this.emit(reason);
@@ -139,7 +142,7 @@ export class DocStore {
     if (--this.batchDepth === 0 && this.batchSnap) {
       if (this.snapshot() !== this.batchSnap) {
         this.undoStack.push({ snap: this.batchSnap, label: this.batchLabel });
-        if (this.undoStack.length > MAX_UNDO) this.undoStack.shift();
+        if (this.undoStack.length > MAX_UNDO) { this.undoStack.shift(); this.dropped++; }
         this.redoStack = [];
       }
       this.batchSnap = null;
@@ -177,6 +180,37 @@ export class DocStore {
     this.restore(s.snap);
     this.dirty = true;
     this.emit('redo');
+  }
+
+  /**
+   * Position in the undo history that stays valid while steps are added
+   * (unlike undoDepth, which stops growing once old steps are dropped).
+   */
+  get undoMark(): number {
+    return this.dropped + this.undoStack.length;
+  }
+
+  /**
+   * Restores the document as it was at an undo mark, dropping the steps made
+   * since (they cannot be redone).
+   */
+  revertTo(mark: number) {
+    const i = mark - this.dropped;
+    if (this.batchDepth > 0 || i < 0 || i >= this.undoStack.length) return;
+    const snap = this.undoStack[i].snap;
+    this.undoStack.length = i;
+    this.restore(snap);
+    this.dirty = true;
+    this.emit('undo');
+  }
+
+  /** Merges the undo steps made since an undo mark into one step with this label. */
+  squash(mark: number, label: string) {
+    const i = Math.max(0, mark - this.dropped);
+    if (i >= this.undoStack.length) return;
+    const first = this.undoStack[i];
+    this.undoStack.length = i;
+    this.undoStack.push({ snap: first.snap, label });
   }
 
   nextId(prefix = 'f'): Id {

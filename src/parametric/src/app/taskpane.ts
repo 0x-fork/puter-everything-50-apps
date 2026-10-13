@@ -1,4 +1,5 @@
-// Task pane (right side): parts browser, appearance and getting-started help.
+// Task pane (right side): the assistant, parts browser, appearance and
+// getting-started help.
 
 import { listParts, locationLabel, recentParts } from '../platform/files';
 import { cloudAvailable, storageError } from '../platform/puter';
@@ -7,17 +8,18 @@ import { icon } from '../ui/icons';
 import { attachTooltip } from '../ui/overlay';
 import type { App } from './app';
 import type { FileOps } from './fileops';
+import type { AssistantPanel } from '../assistant/panel';
 
 const SWATCHES = ['#b8c4d2', '#d0d3d8', '#8e9aa8', '#5d6b7c', '#3a4452', '#c9b28b', '#d48a4e', '#c45a4a', '#c9a33d', '#6aa36a', '#4f8fc0', '#7a6bc2'];
 
-type PaneId = 'files' | 'appearance' | 'help';
+type PaneId = 'assistant' | 'files' | 'appearance' | 'help';
 
 export class TaskPane {
   private current: PaneId | null = null;
 
-  constructor(private app: App, private files: FileOps) {
+  constructor(private app: App, private files: FileOps, private assistant: AssistantPanel) {
     const s = app.shell;
-    const tabs: [PaneId, string, string][] = [['files', 'files', 'Parts'], ['appearance', 'appearance', 'Appearance'], ['help', 'help', 'Getting started']];
+    const tabs: [PaneId, string, string][] = [['assistant', 'assistant', 'Assistant'], ['files', 'files', 'Parts'], ['appearance', 'appearance', 'Appearance'], ['help', 'help', 'Getting started']];
     for (const [id, ic, label] of tabs) {
       const b = h('button', { role: 'tab', type: 'button', 'aria-selected': 'false', 'aria-label': label, 'data-pane': id }, icon(ic, 18));
       attachTooltip(b, label);
@@ -25,6 +27,8 @@ export class TaskPane {
       s.tpStrip.append(b);
     }
     app.openTaskPane = (id) => this.open(id as PaneId);
+    app.toggleTaskPane = (id) => this.toggle(id as PaneId);
+    app.taskPaneOpen = () => this.current;
   }
 
   toggle(id: PaneId) {
@@ -35,6 +39,7 @@ export class TaskPane {
   close() {
     this.current = null;
     this.app.shell.tpPanel.hidden = true;
+    this.app.shell.tpPanel.classList.remove('wide');
     this.sync();
     this.app.viewport.resize();
   }
@@ -43,11 +48,20 @@ export class TaskPane {
     this.current = id;
     const p = this.app.shell.tpPanel;
     p.hidden = false;
-    const title = id === 'files' ? 'Parts' : id === 'appearance' ? 'Appearance' : 'Getting Started';
+    const title = id === 'assistant' ? 'Assistant' : id === 'files' ? 'Parts' : id === 'appearance' ? 'Appearance' : 'Getting Started';
     const close = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close task pane' }, icon('close', 16));
     close.addEventListener('click', () => this.close());
+    const head = h('div', { class: 'tp-head' }, h('span', { class: 'grow', role: 'heading', 'aria-level': '2' }, title), close);
+    p.classList.toggle('wide', id === 'assistant');
+    if (id === 'assistant') {
+      p.replaceChildren(head, this.assistant.el);
+      this.assistant.focus();
+      this.sync();
+      this.app.viewport.resize();
+      return;
+    }
     const body = h('div', { class: 'tp-body' });
-    p.replaceChildren(h('div', { class: 'tp-head' }, h('span', { class: 'grow', role: 'heading', 'aria-level': '2' }, title), close), body);
+    p.replaceChildren(head, body);
     if (id === 'files') void this.renderFiles(body);
     else if (id === 'appearance') this.renderAppearance(body);
     else renderHelp(body);
@@ -57,6 +71,8 @@ export class TaskPane {
 
   private sync() {
     for (const b of this.app.shell.tpStrip.querySelectorAll<HTMLElement>('[role="tab"]')) b.setAttribute('aria-selected', String(b.dataset.pane === this.current));
+    this.app.shell.root.classList.toggle('assistant-open', this.current === 'assistant');
+    this.app.commands.changed();
   }
 
   private async renderFiles(body: HTMLElement) {

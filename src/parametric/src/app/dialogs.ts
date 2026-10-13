@@ -2,14 +2,16 @@
 // mass properties, keyboard shortcuts, about, measure, section view, and the
 // sketch Offset / Mirror / Convert Entities tools.
 
-import type { Vec2, Vec3 } from '../math/vec';
-import { cross, dist, dot, len, normalize, sub, toLocal } from '../math/vec';
+import type { Vec3 } from '../math/vec';
+import { dist, dot, normalize, sub } from '../math/vec';
 import { evaluateVariables, referencedNames } from '../model/expr';
 import type { MaterialRef, SkDimension, UnitSystem, Variable } from '../model/types';
 import { isDimension } from '../model/types';
 import { UNIT_SYSTEMS, formatNumber } from '../model/units';
 import { BASE_FRAMES } from '../model/planes';
+import { MATERIALS } from '../model/materials';
 import { mirrorEntities, offsetCurves } from '../sketch/ops';
+import { convertEdges } from '../sketch/convert';
 import { setThemeChoice, getThemeChoice, type ThemeChoice } from '../platform/theme';
 import { h, formatShortcut, isMac } from '../ui/dom';
 import { icon } from '../ui/icons';
@@ -87,26 +89,6 @@ export async function equationsDialog(app: App) {
 
 // ---------- material ----------
 
-export const MATERIALS: MaterialRef[] = [
-  { name: 'Plain Carbon Steel', density: 7800 },
-  { name: 'Stainless Steel (304)', density: 8000 },
-  { name: 'Alloy Steel', density: 7700 },
-  { name: 'Cast Iron', density: 7200 },
-  { name: 'Aluminum 6061', density: 2700 },
-  { name: 'Aluminum 7075', density: 2810 },
-  { name: 'Brass', density: 8500 },
-  { name: 'Copper', density: 8900 },
-  { name: 'Titanium (Ti-6Al-4V)', density: 4430 },
-  { name: 'ABS', density: 1040 },
-  { name: 'PLA', density: 1240 },
-  { name: 'PETG', density: 1270 },
-  { name: 'Nylon 6/6', density: 1140 },
-  { name: 'Acrylic (PMMA)', density: 1190 },
-  { name: 'Polycarbonate', density: 1200 },
-  { name: 'Oak', density: 750 },
-  { name: 'Pine', density: 510 },
-  { name: 'Glass', density: 2500 },
-];
 
 export async function materialDialog(app: App) {
   const cur = app.store.doc.material;
@@ -510,42 +492,8 @@ export function convertEntities(app: App) {
     for (const e of app.edges) if (e.faces.includes(fi) && !edges.includes(e)) edges.push(e);
   }
   if (!edges.length) { toast({ kind: 'warning', message: 'Select model edges or faces to convert into the sketch.' }); return; }
-  const fr = ed.frame;
   let skipped = 0;
-  ed.edit('Convert entities', (sk, newId) => {
-    const pointAt = (p: Vec2) => {
-      for (const e of sk.entities) if (e.t === 'point' && Math.hypot(e.x - p[0], e.y - p[1]) < 1e-6) return e.id;
-      const id = newId('p');
-      sk.entities.push({ id, t: 'point', x: p[0], y: p[1] });
-      return id;
-    };
-    for (const e of edges) {
-      const a = toLocal(fr, e.a), b = toLocal(fr, e.b);
-      if (e.type === 'line') {
-        if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-9) { skipped++; continue; }
-        const id = newId('l');
-        sk.entities.push({ id, t: 'line', a: pointAt(a), b: pointAt(b) });
-        sk.constraints.push({ id: newId('r'), type: 'fix', refs: [id] });
-      } else if (e.type === 'circle' && e.center && e.axis && e.radius && len(cross(normalize(e.axis), fr.n)) < 1e-6) {
-        const c = toLocal(fr, e.center);
-        const full = Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-7;
-        if (full) {
-          const cid = newId('p');
-          sk.entities.push({ id: cid, t: 'point', x: c[0], y: c[1] });
-          const id = newId('c');
-          sk.entities.push({ id, t: 'circle', c: cid, r: e.radius });
-          sk.constraints.push({ id: newId('r'), type: 'fix', refs: [id] });
-        } else {
-          const cid = pointAt(c);
-          const m = toLocal(fr, e.mid);
-          const ccw = (a[0] - c[0]) * (m[1] - c[1]) - (a[1] - c[1]) * (m[0] - c[0]) > 0;
-          const id = newId('a');
-          sk.entities.push(ccw ? { id, t: 'arc', c: cid, a: pointAt(a), b: pointAt(b) } : { id, t: 'arc', c: cid, a: pointAt(b), b: pointAt(a) });
-          sk.constraints.push({ id: newId('r'), type: 'fix', refs: [id] });
-        }
-      } else skipped++;
-    }
-  });
+  ed.edit('Convert entities', (sk, newId) => { skipped = convertEdges(sk, ed.frame, edges, newId).skipped; });
   app.selection.clear();
   if (skipped) toast({ kind: 'warning', message: `${skipped} edge(s) could not be converted (only lines, and circles parallel to the sketch plane are supported).` });
 }

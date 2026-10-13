@@ -139,6 +139,7 @@ export function buildShell(cmds: CommandRegistry, menus: { label: string; items:
     menubar, h('span', { class: 'tb-sep hide-mobile' }), quick,
     h('div', { class: 'tb-center' }, docTitle, docState),
     h('div', { class: 'tb-right' }, h('div', { class: 'cmd-search' }, icon('search', 14), search, searchResults),
+      commandButton(cmds, 'assistant'),
       (() => { const b = commandButton(cmds, 'share'); b.classList.add('hide-mobile'); return b; })(), github, account));
 
   const cmTools = h('div', { class: 'cm-tools', role: 'toolbar', 'aria-label': 'Commands' });

@@ -4,6 +4,7 @@ import { makeHooks, registerCommands } from './app/actions';
 import { FileOps } from './app/fileops';
 import { StartScreen, bindAccountMenu, refreshAccount, showAlphaNotice } from './app/start';
 import { TaskPane, recentItems } from './app/taskpane';
+import { AssistantPanel } from './assistant/panel';
 import { KV_SETTINGS_KEY, kvGet, kvSet, loadPuter, puter } from './platform/puter';
 import { applyTheme } from './platform/theme';
 import { toast } from './ui/overlay';
@@ -48,7 +49,7 @@ async function boot() {
   };
   // Development builds expose the app for debugging and browser tests.
   if (import.meta.env.DEV) (window as unknown as { __parametric: App }).__parametric = app;
-  new TaskPane(app, files);
+  new TaskPane(app, files, new AssistantPanel(app));
   start = new StartScreen(app, files);
   bindAccountMenu(app);
   root.removeAttribute('aria-busy');

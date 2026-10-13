@@ -31,6 +31,12 @@ It runs entirely in the browser. The geometry kernel is OpenCascade compiled to 
 - Open SolidWorks parts (.sldprt, SolidWorks 2003 and later) without SolidWorks: the exact solid is read from the file and becomes an imported body you can keep modeling on. The SolidWorks feature tree is not carried over.
 - References to faces and edges are stored by name, so fillets and sketches on faces survive dimension changes.
 
+**Assistant**
+- An AI design assistant in the right sidebar (Ctrl+J, or the sparkle button). Describe a part or a change ("a 100 × 60 × 8 mm plate with four M5 holes and rounded corners", "make the wall 3 mm", "fillet the top edges") and it builds it with the same features you use: sketches with exact geometry, relations and dimensions, extrudes, revolves, holes, fillets, chamfers, shells, patterns, mirrors, planes, lofts, sweeps and drafts, global variables and equations.
+- It reads the part precisely (feature parameters, sketch entities, faces and edges by name, measurements, mass properties), checks every change by rebuilding, undoes steps that would break a feature, and looks at the model to verify its work.
+- Attach files to a message (paperclip, paste or drop): photos and sketches of a part, dimensioned drawings and datasheets as images or PDFs, DXF outlines or CSV tables. It reads sizes and geometry from them.
+- Everything it changes in one message is a single undo step. It runs on Puter AI (Claude models; pick one at the top of the panel).
+
 **Drawings**
 - A 2D drawing sheet for each part (Drawing tab in the status bar): front, top, right, left, back, bottom and isometric views projected from the solid, with hidden lines and overall dimensions.
 - Sheet sizes A4 to A1, Letter and Tabloid, standard scales, drag to arrange views, title block.
@@ -76,6 +82,7 @@ npm run build      # type check, license check, production build in dist/
 | Renderer | `src/render` | WebGL2: shaded meshes with per-face state in a data texture, screen-space thick edges, GPU picking with depth (asynchronous readback for hover), section clipping, render on demand. |
 | Interface | `src/app`, `src/ui` | No framework. CommandManager, design tree, PropertyManager panels, sketch editor, dialogs. |
 | SolidWorks import | `src/formats/sldprt` | Reads the SolidWorks container (2015+ chunk format and the older OLE2), decodes the embedded Parasolid transmit and writes it as exact STEP for the kernel. Runs in the geometry worker. |
+| Assistant | `src/assistant` | Tool-calling agent on Puter AI. Tools work on the document through a host interface (the app, or the kernel in Node for tests); each change rebuilds and is checked, failing steps are reverted, and a message's changes are squashed into one undo step. |
 | Platform | `src/platform` | Puter.js access, files (Puter or browser storage), theme. |
 
 Settings are kept in a single key-value entry; part files are stored as files, never in the key-value store.

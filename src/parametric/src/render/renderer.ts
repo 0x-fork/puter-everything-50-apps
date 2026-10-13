@@ -654,6 +654,25 @@ export class Renderer {
     if (!this.raf) this.raf = requestAnimationFrame((t) => this.frame(t));
   }
 
+  /**
+   * Draws a frame now and returns it as a JPEG data URL, scaled so its longer
+   * side is at most maxSide pixels. The drawing buffer is read in the same
+   * task as the draw, so it does not need to be preserved.
+   */
+  capture(maxSide = 1024): string | null {
+    if (this.lost) return null;
+    this.draw();
+    const src = this.canvas;
+    const s = Math.min(1, maxSide / Math.max(src.width, src.height));
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(src.width * s));
+    out.height = Math.max(1, Math.round(src.height * s));
+    const ctx = out.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(src, 0, 0, out.width, out.height);
+    return out.toDataURL('image/jpeg', 0.85);
+  }
+
   private frame(now: number) {
     this.raf = 0;
     const animating = this.camera.tick(now);
