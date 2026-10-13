@@ -35,9 +35,6 @@ pub struct ParametricEq {
     cascade: Cascade,
     master: Smooth,
     orders: [usize; 2],
-    /// Ultra-quiet: double-precision filter state per [channel][stage] while on.
-    wide: Option<Vec<Vec<(f64, f64)>>>,
-    channels: usize,
 }
 
 fn spec() -> Vec<(f32, Glide)> {
@@ -54,7 +51,7 @@ fn spec() -> Vec<(f32, Glide)> {
 
 impl ParametricEq {
     pub fn new(rate: f32, channels: usize) -> ParametricEq {
-        ParametricEq { rate, p: SmoothParams::new(rate, &spec()), cascade: Cascade::new(channels, STAGES), master: Smooth::new(1.0, rate, 20.0), orders: [2, 2], wide: None, channels }
+        ParametricEq { rate, p: SmoothParams::new(rate, &spec()), cascade: Cascade::new(channels, STAGES), master: Smooth::new(1.0, rate, 20.0), orders: [2, 2] }
     }
 
     fn design(&mut self) {
@@ -96,11 +93,7 @@ impl ParametricEq {
 impl Effect for ParametricEq {
     fn set_param(&mut self, idx: u32, value: f32) {
         if idx == 36 {
-            let on = value >= 0.5;
-            if on != self.wide.is_some() {
-                self.wide = if on { Some(vec![vec![(0.0, 0.0); STAGES]; self.channels]) } else { None };
-                self.cascade.reset();
-            }
+            self.cascade.set_precise(value >= 0.5);
             return;
         }
         self.p.set(idx as usize, value);
@@ -113,10 +106,7 @@ impl Effect for ParametricEq {
             if self.p.advance() {
                 self.design();
             }
-            match &mut self.wide {
-                Some(w) => self.cascade.run_precise(w, buf, frames, at, len),
-                None => self.cascade.run(buf, frames, at, len),
-            }
+            self.cascade.run(buf, frames, at, len);
             at += len;
         }
         // Master gain, smoothed per sample.
@@ -139,9 +129,6 @@ impl Effect for ParametricEq {
         self.design();
         self.master.settle();
         self.cascade.reset();
-        if let Some(w) = &mut self.wide {
-            w.iter_mut().flatten().for_each(|st| *st = (0.0, 0.0));
-        }
     }
 }
 

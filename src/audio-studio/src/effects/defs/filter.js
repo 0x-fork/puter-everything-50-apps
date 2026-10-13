@@ -155,6 +155,8 @@ const notchParams = [
   ...[60, 120, 180, 240, 300, 360].flatMap((f, i) =>
     section(`Notch ${i + 1}`, `band${i + 1}`, [bool('on', 'On', i === 0), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -90, 0, -30, i ? { enabledIf: (v) => !v.fixGains } : {})]),
   ),
+  // Double-precision filtering: a lower noise floor for deep, narrow or very low notches.
+  bool('ultraQuiet', 'Ultra-Quiet', false),
 ];
 
 const notchSet = (freqs, gain, width = 1) => ({

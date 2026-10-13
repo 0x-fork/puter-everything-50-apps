@@ -3,7 +3,8 @@
 //!
 //! Params: 0 master gain dB, 1 width (0 super narrow, 1 narrow, 2 medium,
 //! 3 wide), 2 fix gains (all notches use notch 1's gain),
-//! 3 + 3n .. notch n (0..5): on, freq Hz, gain dB (<= 0).
+//! 3 + 3n .. notch n (0..5): on, freq Hz, gain dB (<= 0), 21 ultra-quiet
+//! (0/1: double-precision filtering).
 
 use super::{Cascade, Glide, SmoothParams, SUB};
 use crate::fx::util::{db_to_gain, Coefs};
@@ -73,6 +74,10 @@ impl NotchFilter {
 
 impl Effect for NotchFilter {
     fn set_param(&mut self, idx: u32, value: f32) {
+        if idx == 21 {
+            self.cascade.set_precise(value >= 0.5);
+            return;
+        }
         self.p.set(idx as usize, value);
     }
 
@@ -122,5 +127,25 @@ mod tests {
         // Fixed gains: notch 2 takes notch 1's depth.
         let p = [(6, 1.0), (7, 1000.0), (8, -6.0), (2, 1.0), (5, -30.0)];
         assert!((sine_gain_db(14, &p, 1000.0, r) + 30.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn ultra_quiet_lowers_rounding_noise_of_a_deep_low_notch() {
+        // A -90 dB notch at 30 Hz on a 1 kHz tone: away from the notch the output
+        // should equal the input; what differs is mostly rounding noise.
+        let x = sine(1000.0, 48000.0, 48000, 0.5);
+        let err = |quiet: f32| {
+            let mut fx = make(14, 48000.0, 1);
+            fx.set_param(4, 30.0);
+            fx.set_param(5, -90.0);
+            fx.set_param(1, 0.0);
+            fx.set_param(21, quiet);
+            fx.reset();
+            let y = run_mono(fx.as_mut(), &x);
+            let d: Vec<f32> = y.iter().zip(&x).map(|(a, b)| a - b).collect();
+            rms(&d[24000..])
+        };
+        let (plain, quiet) = (err(0.0), err(1.0));
+        assert!(quiet < plain, "plain {plain} quiet {quiet}");
     }
 }

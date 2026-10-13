@@ -148,6 +148,14 @@ describe('Filter and EQ dialogs', () => {
     await close();
   });
 
+  it('Notch Filter offers Ultra-Quiet as processor param 21', async () => {
+    const def = getEffect('notchFilter');
+    expect(def.params.findIndex((p) => p.id === 'ultraQuiet')).toBe(21);
+    const { dlg, close } = open('notchFilter');
+    expect([...dlg.querySelectorAll('label.check')].some((l) => l.textContent === 'Ultra-Quiet')).toBe(true);
+    await close();
+  });
+
   it('computes phase and group delay of a filter design', () => {
     const lp = butterworth(RATE, 1000, 2, false);
     const [ph] = cascadePhase(lp, [1000], RATE);
