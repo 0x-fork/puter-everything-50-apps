@@ -9,6 +9,7 @@ import { AudioFile } from '../src/model/audio-file.js';
 import { Channel } from '../src/audio/channel.js';
 import { correlationLabelStep, meterIsVertical, correlationText } from '../src/analysis/phase.js';
 import { MENUS } from '../src/ui/menus.js';
+import { HOLD_COLORS, spectrumBars } from '../src/analysis/frequency.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
 
 const RATE = 1000;
@@ -77,3 +78,45 @@ describe('Phase Analysis and Phase Meter', () => {
   });
 });
 
+
+describe('Frequency Analysis', () => {
+  it('has eight colored hold slots and an Advanced section', () => {
+    const app = makeApp();
+    const p = create(app, 'frequency');
+    const slots = p.el.querySelectorAll('.freq-hold');
+    expect(slots.length).toBe(HOLD_COLORS.length);
+    expect(slots.length).toBe(8);
+    expect(new Set(HOLD_COLORS).size).toBe(8);
+    // Nothing to hold yet: the slots stay empty.
+    slots[0].click();
+    expect(slots[0].getAttribute('aria-pressed')).toBe('false');
+    const adv = p.el.querySelector('.freq-adv-toggle');
+    expect(p.el.querySelector('.freq-advanced').hidden).toBe(true);
+    adv.click();
+    expect(app.prefs.get('frequencyAnalysis').advanced).toBe(true);
+    expect(p.el.querySelector('.freq-advanced').hidden).toBe(false);
+    expect(adv.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('switches display and enables Scan for audio files', () => {
+    const app = makeApp();
+    const p = create(app, 'frequency');
+    const scan = [...p.el.querySelectorAll('button')].find((b) => b.textContent === 'Scan');
+    expect(scan.disabled).toBe(true);
+    app.addDocument(audioDoc());
+    expect(scan.disabled).toBe(false);
+    const display = p.el.querySelector('select[aria-label=Display]');
+    display.value = 'bars';
+    display.dispatchEvent(new Event('change'));
+    expect(app.prefs.get('frequencyAnalysis').display).toBe('bars');
+  });
+
+  it('reduces a spectrum to bars of the loudest bin', () => {
+    const db = Float32Array.from({ length: 513 }, (_, k) => (k === 100 ? -10 : -80));
+    const bars = spectrumBars(db, 1024, 1024, (f) => f * 512, 8);
+    expect(bars.length).toBe(8);
+    expect(bars[1]).toBe(-10); // bin 100 (100 Hz) falls in the second slice of 0..512 Hz
+    expect(bars[0]).toBe(-80);
+    expect(bars[7]).toBe(-80);
+  });
+});

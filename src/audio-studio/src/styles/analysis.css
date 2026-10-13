@@ -99,6 +99,119 @@
   inset: 0;
 }
 
+.freq-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.freq-holds {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.freq-holds-label {
+  margin-right: 3px;
+  color: var(--text-dim);
+}
+
+/* A numbered slot with its trace color underneath; filled when it holds a trace. */
+.freq-hold {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: var(--fs-xs, 10px);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.freq-hold::after {
+  position: absolute;
+  right: 1px;
+  bottom: -4px;
+  left: 1px;
+  height: 2px;
+  background: var(--hold);
+  content: '';
+}
+
+.freq-hold:hover {
+  color: var(--text-strong);
+}
+
+.freq-hold[aria-pressed='true'] {
+  border-color: var(--hold);
+  background: color-mix(in srgb, var(--hold) 30%, var(--bg-input));
+  color: var(--text-strong);
+}
+
+.freq-hold:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.analysis-toolbar .freq-holds + .icon-btn {
+  margin-left: 2px;
+}
+
+.freq-bottom {
+  border-top: 1px solid var(--border-soft);
+}
+
+.freq-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 4px 8px;
+}
+
+.freq-controls + .freq-controls {
+  padding-top: 0;
+}
+
+.freq-controls .spacer {
+  flex: 1;
+}
+
+.freq-controls .select {
+  max-width: 150px;
+}
+
+.freq-adv-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.freq-adv-toggle .icon {
+  transition: transform 0.12s;
+}
+
+.freq-adv-toggle[aria-expanded='true'] .icon {
+  transform: rotate(90deg);
+}
+
+.freq-advanced {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
 .freq-legend {
   display: flex;
   flex-wrap: wrap;
