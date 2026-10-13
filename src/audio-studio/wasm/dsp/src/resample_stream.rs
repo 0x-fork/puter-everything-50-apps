@@ -48,21 +48,48 @@ pub struct Stream {
     j: u64,
 }
 
+/// Kernel settings for a conversion: (half length in input samples, Kaiser
+/// beta, cutoff as a fraction of the input Nyquist frequency).
+///
+/// `quality` (0..100) sets the kernel length (8 to 128 zero crossings per side
+/// at the lower rate) and the stopband depth (about 54 to 118 dB). With the
+/// pre/post `filter` on, the cutoff sits low enough that the transition band
+/// ends at the lower Nyquist frequency, so nothing aliases or images; off, the
+/// cutoff sits at the Nyquist frequency, keeping more of the top octave at the
+/// cost of some aliasing just below it.
+pub fn kernel_params(from: u64, to: u64, quality: f64, filter: bool) -> (usize, f64, f64) {
+    let q = if quality.is_finite() { quality.clamp(0.0, 100.0) / 100.0 } else { 0.5 };
+    let ratio = to as f64 / from as f64;
+    let shrink = ratio.min(1.0);
+    let base = 8.0 * (2.0f64).powf(4.0 * q);
+    let beta = 5.0 + 7.0 * q;
+    // Equal rates use a full-band kernel, which is a unit impulse: samples pass through.
+    if from == to {
+        return (base.round() as usize, beta, 1.0);
+    }
+    // Kaiser's estimate of the transition width, as a fraction of Nyquist.
+    let atten = beta / 0.1102 + 8.7;
+    let width = (atten - 8.0) / (2.285 * 2.0 * base * std::f64::consts::PI);
+    let edge = if filter { (1.0 - width / 2.0).max(0.5) } else { 1.0 };
+    // Widen the kernel when downsampling so the filter keeps its shape.
+    let half = ((base / shrink).ceil() as usize).clamp(4, 1024);
+    (half, beta, shrink * edge)
+}
+
 impl Stream {
     pub fn new(from: u32, to: u32) -> Stream {
+        Stream::with_quality(from, to, 50.0, true)
+    }
+
+    pub fn with_quality(from: u32, to: u32, quality: f64, filter: bool) -> Stream {
         let from = from.max(1) as u64;
         let to = to.max(1) as u64;
-        let ratio = to as f64 / from as f64;
-        // Equal rates use a full-band kernel, which is a unit impulse: samples pass through.
-        let cutoff = if from == to { 1.0 } else { ratio.min(1.0) * 0.97 };
-        // Widen the kernel when downsampling so the filter keeps its shape.
-        let half = ((32.0 / ratio.min(1.0)).ceil() as usize).min(256);
+        let (half, beta, cutoff) = kernel_params(from, to, quality, filter);
         let taps = 2 * half;
         let g = gcd(from, to);
         let period = to / g;
         let exact = period <= MAX_EXACT_PHASES;
         let phases = if exact { period as usize } else { TABLE_PHASES + 1 };
-        let beta = 8.6;
         let i0b = bessel_i0(beta);
         let mut table = vec![0.0f32; phases * taps];
         let mut kernel = vec![0.0f64; taps];
@@ -161,6 +188,11 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 #[no_mangle]
 pub extern "C" fn rs_new(from: u32, to: u32) -> u32 {
     Box::into_raw(Box::new(Stream::new(from, to))) as u32
+}
+
+#[no_mangle]
+pub extern "C" fn rs_new_q(from: u32, to: u32, quality: f64, filter: u32) -> u32 {
+    Box::into_raw(Box::new(Stream::with_quality(from, to, quality, filter != 0))) as u32
 }
 
 #[no_mangle]

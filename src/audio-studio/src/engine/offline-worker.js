@@ -6,7 +6,7 @@
 //      { type: 'chunk', key, index, channels }     reply to 'need'
 //      { type: 'cancel', id }
 // out: { type: 'need', id, key, index }
-//      { type: 'data', id, at, channels: [L, R] }  rendered output, in order
+//      { type: 'data', id, at, channels }  rendered output, in order ([L, R], or six channels for a 5.1 graph)
 //      { type: 'progress', id, done, total }
 //      { type: 'done', id } | { type: 'error', id, message }
 
@@ -55,9 +55,9 @@ async function run({ id, graph, start, end, module, block = 8192 }) {
       if (job.cancelled) throw new Error('cancelled');
       const n = Math.min(block, end - at);
       await ensureChunks(id, job, graph, at, n);
-      const out = [new Float32Array(n), new Float32Array(n)];
+      const out = Array.from({ length: graph.surround ? 6 : 2 }, () => new Float32Array(n));
       renderBlock(graph, job.store, at, n, out, scratch, { runFx: host ? (chain, buf, f) => host.run(chain, buf, f) : null });
-      self.postMessage({ type: 'data', id, at: at - start, channels: out }, [out[0].buffer, out[1].buffer]);
+      self.postMessage({ type: 'data', id, at: at - start, channels: out }, out.map((c) => c.buffer));
       dropBehind(job, graph, at);
       const done = at + n - start;
       if (done - lastProgress > total / 50 || done === total) {

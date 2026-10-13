@@ -35,6 +35,7 @@ export async function applyEffectToDoc(app, doc, def, values, { applyChain = laz
     return false;
   }
   const hadSelection = doc.hasSelection;
+  const selBefore = [doc.selection.start, doc.selection.end];
   const before = doc.state;
   try {
     let { state, length } = await withProgress(app, `Applying ${def.name}`, (signal, onProgress) =>
@@ -48,7 +49,7 @@ export async function applyEffectToDoc(app, doc, def, values, { applyChain = laz
     }
     doc.apply(def.name, state, hadSelection ? { selection: { start, end: start + length } } : {});
     rememberValues(app.prefs, def, values);
-    app.emit('fx-applied', { effect: def.id, values, name: def.name });
+    app.emit('fx-applied', { effect: def.id, values, name: def.name, doc, before: selBefore });
     if (!quiet) app.setStatus(`${def.name} applied`);
     return true;
   } catch (err) {

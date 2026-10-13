@@ -2,7 +2,7 @@
 // (src/export/export-worker.js); cancelling terminates it immediately.
 
 import ExportWorker from './export-worker.js?worker';
-import { dspModule } from '../audio/dsp.js';
+import { dspModule, resampleSettings } from '../audio/dsp.js';
 import { conformOptions, exportMarkers } from './formats.js';
 
 /**
@@ -47,7 +47,7 @@ export async function exportAudio(source, options, { onProgress, signal } = {}) 
     worker.postMessage({
       type: 'start',
       module,
-      job: { options: opts, sourceRate: sampleRate, frames: Math.max(0, end - start), markers, meta: source.meta || {} },
+      job: { options: opts, sourceRate: sampleRate, frames: Math.max(0, end - start), markers, meta: source.meta || {}, resampler: options.resampler || resampleSettings() },
     });
   });
 }

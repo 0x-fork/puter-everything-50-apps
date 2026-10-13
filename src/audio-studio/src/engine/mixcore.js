@@ -32,6 +32,19 @@
 // joins the track: segments sharing a clip id mix into one per-clip buffer,
 // the chain runs once per block, and it keeps running `fxTail` frames past
 // the clip's end so reverb tails ring out.
+//
+// 5.1 surround: with `graph.surround` the master is 6 channels (L, R, C, LFE,
+// Ls, Rs; see surround.js) and renderBlock needs 6 master buffers. Tracks
+// with `six` carry 6 channels end to end (5.1 audio tracks read 6-channel
+// sources, stereo ones into L/R and mono ones into C; 5.1 buses collect
+// their inputs in 6 channels). Mono and stereo tracks keep their effects and
+// are placed in the field by their `surround` panner settings, instead of
+// the stereo pan, when they feed the master or a 5.1 bus. Effect chains on
+// 6-channel tracks and on a 5.1 master are not run (the effects are stereo),
+// sends from 5.1 tracks are skipped, and sends into a 5.1 bus feed its front
+// pair. A 6-channel track routed to a stereo bus is downmixed.
+
+import { surroundMatrix, channelMap } from './surround.js';
 
 export const CHUNK = 32768;
 export const QUANTUM = 128;
@@ -158,6 +171,78 @@ export class ChunkStore {
 }
 
 /**
+ * Adds `count` frames of a source into the 6-channel planar `out` at `at`,
+ * placing its channels by channelMap (see surround.js). Returns false when a
+ * chunk is missing.
+ */
+function mixIntoSix(store, key, srcChannels, from, count, gains, out, at) {
+  const m = store.sources.get(key);
+  const map = channelMap(srcChannels);
+  let ok = true;
+  let done = 0;
+  while (done < count) {
+    const f = from + done;
+    const index = Math.floor(f / CHUNK);
+    const inChunk = f - index * CHUNK;
+    const take = Math.min(count - done, CHUNK - inChunk);
+    const chunk = m && m.get(index);
+    if (!chunk) ok = false;
+    else {
+      for (let c = 0; c < 6; c++) {
+        const sc = map[c];
+        if (sc < 0 || !chunk[sc]) continue;
+        const src = chunk[sc];
+        const o = out[c];
+        const n = Math.min(take, src.length - inChunk);
+        for (let i = 0; i < n; i++) o[at + done + i] += src[inChunk + i] * gains[done + i];
+      }
+    }
+    done += take;
+  }
+  return ok;
+}
+
+/** Surround panner gains of a track (cached on the track object), one vector per input channel. */
+function trackMatrix(track) {
+  if (!track.matrix) track.matrix = surroundMatrix(track.surround, track.monoIn ? 1 : 2);
+  return track.matrix;
+}
+
+/** Adds the track buffer `src` (2 or 6 channels) into the destination `dst` (2 or 6 channels). */
+function addInto(track, src, dst, frames) {
+  if (src.length >= 6 && dst.length >= 6) {
+    for (let c = 0; c < 6; c++) {
+      const s = src[c];
+      const d = dst[c];
+      for (let i = 0; i < frames; i++) d[i] += s[i];
+    }
+  } else if (src.length >= 6) {
+    const k = Math.SQRT1_2;
+    const [L, R, C, , Ls, Rs] = src;
+    for (let i = 0; i < frames; i++) {
+      dst[0][i] += L[i] + k * (C[i] + Ls[i]);
+      dst[1][i] += R[i] + k * (C[i] + Rs[i]);
+    }
+  } else if (dst.length >= 6) {
+    const [gl, gr] = trackMatrix(track);
+    const [L, R] = src;
+    for (let c = 0; c < 6; c++) {
+      const a = gl[c];
+      const b = gr ? gr[c] : 0;
+      if (!a && !b) continue;
+      const d = dst[c];
+      if (!gr) for (let i = 0; i < frames; i++) d[i] += (L[i] + R[i]) * 0.5 * a;
+      else for (let i = 0; i < frames; i++) d[i] += L[i] * a + R[i] * b;
+    }
+  } else {
+    for (let i = 0; i < frames; i++) {
+      dst[0][i] += src[0][i];
+      dst[1][i] += src[1][i];
+    }
+  }
+}
+
+/**
  * Runs a track's effect chain in place. With `fxMix` < 1 the first `fxWet`
  * specs (the effects rack: input gain and slots) are blended with the dry
  * signal (scaled by `fxDry`, the rack input gain) before the rest of the chain.
@@ -249,27 +334,28 @@ export function routingPlan(graph) {
     }
     for (const id of keep) if (!byId.get(id).mute) audible.add(id);
   }
-  plan = { order, audible, dest };
+  const six = new Set(graph.surround ? tracks.filter((t) => t.six).map((t) => t.id) : []);
+  plan = { order, audible, dest, six };
   plans.set(graph, plan);
   return plan;
 }
 
-function busBuffer(scratch, id, frames) {
+function busBuffer(scratch, id, frames, channels = 2) {
   if (!scratch.buses) scratch.buses = new Map();
   let b = scratch.buses.get(id);
-  if (!b || b.buf[0].length < frames) {
-    b = { buf: [new Float32Array(Math.max(frames, scratch.gains.length)), new Float32Array(Math.max(frames, scratch.gains.length))], used: false };
+  if (!b || b.buf[0].length < frames || b.buf.length !== channels) {
+    const n = Math.max(frames, scratch.gains.length);
+    b = { buf: Array.from({ length: channels }, () => new Float32Array(n)), used: false };
     scratch.buses.set(id, b);
   }
   return b;
 }
 
 /** Adds `src` (stereo planar) times a send's gain and balance into the bus it targets. */
-function feedSend(scratch, send, src, frames, law, pg) {
-  const b = busBuffer(scratch, send.target, frames);
+function feedSend(scratch, send, src, frames, law, pg, channels = 2) {
+  const b = busBuffer(scratch, send.target, frames, channels);
   if (!b.used) {
-    b.buf[0].fill(0, 0, frames);
-    b.buf[1].fill(0, 0, frames);
+    for (const c of b.buf) c.fill(0, 0, frames);
     b.used = true;
   }
   panGains(send.pan || 0, law, pg);
@@ -303,9 +389,10 @@ function clipBuffer(scratch, id, frames) {
  * applies an effect chain in place to a stereo planar buffer.
  */
 export function renderBlock(graph, store, pos, frames, master, scratch, { meters, runFx, missing } = {}) {
-  master[0].fill(0, 0, frames);
-  master[1].fill(0, 0, frames);
+  const surround = Boolean(graph.surround) && master.length >= 6;
+  for (const c of master) c.fill(0, 0, frames);
   const plan = routingPlan(graph);
+  const chOf = (id) => (surround && plan.six.has(id) ? 6 : 2);
   const gains = scratch.gains;
   if (!scratch.gainsR || scratch.gainsR.length < gains.length) scratch.gainsR = new Float32Array(gains.length);
   const gainsR = scratch.gainsR;
@@ -317,6 +404,11 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
   for (const track of plan.order) {
     const audible = plan.audible.has(track.id);
     if (!audible && !meters) continue;
+    const six = surround && plan.six.has(track.id);
+    if (six) {
+      renderSix(graph, store, pos, frames, track, plan, master, scratch, { meters, missing, audible, chOf });
+      continue;
+    }
     tbuf[0].fill(0, 0, frames);
     tbuf[1].fill(0, 0, frames);
     let active = false;
@@ -406,7 +498,10 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
       continue;
     }
     const sends = audible && track.sends && track.sends.length ? track.sends : null;
-    if (sends) for (const snd of sends) if (snd.pre) feedSend(scratch, snd, tbuf, frames, law, pg);
+    if (sends) for (const snd of sends) if (snd.pre) feedSend(scratch, snd, tbuf, frames, law, pg, chOf(snd.target));
+    const to = plan.dest(track);
+    // Feeding a 6-channel destination, the surround panner places the track instead of the stereo pan.
+    const toSix = surround && (to ? plan.six.has(to) : true);
     const v0 = track.gain * envelopeAt(track.volumeEnv, pos);
     const v1 = track.gain * envelopeAt(track.volumeEnv, pos + frames);
     const p0 = Math.max(-1, Math.min(1, track.pan + envelopeAt(track.panEnv, pos, 0)));
@@ -415,8 +510,9 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
     let pkR = 0;
     const L = tbuf[0];
     const R = tbuf[1];
-    const steady = p0 === p1;
-    if (steady) panGains(p0, law, pg);
+    const steady = toSix || p0 === p1;
+    if (toSix) pg[0] = pg[1] = 1;
+    else if (steady) panGains(p0, law, pg);
     for (let i = 0; i < frames; i++) {
       const x = i / frames;
       const v = v0 + (v1 - v0) * x;
@@ -432,17 +528,15 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
     }
     if (meters) meters.set(track.id, [pkL, pkR]);
     if (!audible) continue;
-    if (sends) for (const snd of sends) if (!snd.pre) feedSend(scratch, snd, tbuf, frames, law, pg);
-    const to = plan.dest(track);
+    if (sends) for (const snd of sends) if (!snd.pre) feedSend(scratch, snd, tbuf, frames, law, pg, chOf(snd.target));
+    if (toSix) {
+      addInto(track, tbuf, to ? usedBus(scratch, to, frames, 6).buf : master, frames);
+      continue;
+    }
     let mL = master[0];
     let mR = master[1];
     if (to) {
-      const b = busBuffer(scratch, to, frames);
-      if (!b.used) {
-        b.buf[0].fill(0, 0, frames);
-        b.buf[1].fill(0, 0, frames);
-        b.used = true;
-      }
+      const b = usedBus(scratch, to, frames, 2);
       mL = b.buf[0];
       mR = b.buf[1];
     }
@@ -452,17 +546,88 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
     }
   }
   const m = graph.master || {};
-  if (m.fx && m.fx.length && runFx) runChain(m, master, frames, scratch, runFx);
+  if (m.fx && m.fx.length && runFx && !surround) runChain(m, master, frames, scratch, runFx);
   const mg = (m.invert ? -1 : 1) * (m.gain ?? 1) * (m.volumeEnv ? envelopeAt(m.volumeEnv, pos) : 1);
   if (mg !== 1) {
-    for (let i = 0; i < frames; i++) {
-      master[0][i] *= mg;
-      master[1][i] *= mg;
-    }
+    for (const c of master) for (let i = 0; i < frames; i++) c[i] *= mg;
   }
-  if (m.mono) {
+  if (m.mono && !surround) {
     for (let i = 0; i < frames; i++) master[0][i] = master[1][i] = (master[0][i] + master[1][i]) * 0.5;
   }
+}
+
+/** A bus buffer cleared for this block on first use. */
+function usedBus(scratch, id, frames, channels) {
+  const b = busBuffer(scratch, id, frames, channels);
+  if (!b.used) {
+    for (const c of b.buf) c.fill(0, 0, frames);
+    b.used = true;
+  }
+  return b;
+}
+
+/** Renders a 6-channel track (5.1 audio or bus track) into its destination. */
+function renderSix(graph, store, pos, frames, track, plan, master, scratch, { meters, missing, audible, chOf }) {
+  if (!scratch.six || scratch.six[0].length < frames) scratch.six = Array.from({ length: 6 }, () => new Float32Array(Math.max(frames, scratch.gains.length)));
+  const buf = scratch.six;
+  for (const c of buf) c.fill(0, 0, frames);
+  const gains = scratch.gains;
+  let active = false;
+  if (track.bus) {
+    const b = scratch.buses?.get(track.id);
+    if (b && b.used) {
+      for (let c = 0; c < 6; c++) buf[c].set((b.buf[c] || b.buf[c % 2]).subarray(0, frames));
+      active = true;
+    }
+  }
+  for (const clip of track.clips) {
+    if (clip.mute) continue;
+    const cs = clip.start;
+    const ce = clip.start + clip.length;
+    if (ce <= pos || cs >= pos + frames) continue;
+    const a = Math.max(pos, cs);
+    const b = Math.min(pos + frames, ce);
+    const n = b - a;
+    const base = clip.base || 0;
+    const full = clip.full ?? clip.length;
+    for (let i = 0; i < n; i++) {
+      const t = a + i - cs + base;
+      let g = clip.gain;
+      if (clip.fadeIn > 0 && t < clip.fadeIn) g *= fadeShape(t / clip.fadeIn, clip.fadeInCurve);
+      const fromEnd = full - t;
+      if (clip.fadeOut > 0 && fromEnd < clip.fadeOut) g *= fadeShape(fromEnd / clip.fadeOut, clip.fadeOutCurve);
+      if (clip.gainEnv) g *= envelopeAt(clip.gainEnv, t);
+      gains[i] = g;
+    }
+    const ok = mixIntoSix(store, clip.source, clip.channels, clip.offset + (a - cs), n, gains, buf, a - pos);
+    if (!ok && missing) missing(clip.source, clip.offset + (a - cs), n);
+    active = true;
+  }
+  if (!active) {
+    if (meters) meters.set(track.id, [0, 0]);
+    return;
+  }
+  const v0 = (track.invert ? -1 : 1) * track.gain * envelopeAt(track.volumeEnv, pos);
+  const v1 = (track.invert ? -1 : 1) * track.gain * envelopeAt(track.volumeEnv, pos + frames);
+  let pkL = 0;
+  let pkR = 0;
+  for (let c = 0; c < 6; c++) {
+    const x = buf[c];
+    let pk = 0;
+    for (let i = 0; i < frames; i++) {
+      const y = x[i] * (v0 + ((v1 - v0) * i) / frames);
+      x[i] = y;
+      const ay = y < 0 ? -y : y;
+      if (ay > pk) pk = ay;
+    }
+    // Left meter: L, C, LFE, Ls; right meter: R, C, LFE, Rs.
+    if (c !== 1 && c !== 5 && pk > pkL) pkL = pk;
+    if (c !== 0 && c !== 4 && pk > pkR) pkR = pk;
+  }
+  if (meters) meters.set(track.id, [pkL, pkR]);
+  if (!audible) return;
+  const to = plan.dest(track);
+  addInto(track, buf, to ? usedBus(scratch, to, frames, chOf(to)).buf : master, frames);
 }
 
 export function createScratch(frames = QUANTUM) {

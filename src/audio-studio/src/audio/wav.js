@@ -4,6 +4,7 @@
 // mu-law/A-law and LIST/INFO metadata (title, artist, ...).
 
 import { parseRiffInfo, parseBext, parseCart } from './meta.js';
+import { parseXmp } from './xmp.js';
 import { ulaw, alaw } from './aiff.js';
 
 const ascii = (dv, o, n) => {
@@ -58,6 +59,9 @@ export function parseWav(buffer) {
       }
     } else if (id === 'LIST' && body + 4 <= buffer.byteLength && ascii(dv, body, 4) === 'INFO') {
       meta = { ...meta, ...parseRiffInfo(new Uint8Array(buffer, body, Math.min(size, buffer.byteLength - body))) };
+    } else if (id === '_PMX') {
+      // XMP packet: fills fields the other chunks did not set.
+      meta = { ...parseXmp(new TextDecoder().decode(new Uint8Array(buffer, body, Math.max(0, Math.min(size, buffer.byteLength - body))))), ...meta };
     } else if (id === 'bext' || id === 'cart') {
       const bytes = new Uint8Array(buffer, body, Math.max(0, Math.min(size, buffer.byteLength - body)));
       // INFO wins for the shared title and artist; the cart chunk fills them in only when missing.

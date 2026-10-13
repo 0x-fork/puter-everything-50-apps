@@ -94,8 +94,8 @@ async function newSessionDialog(app) {
   fillTemplates();
   const rate = h('select.select', { 'aria-label': 'Sample rate' }, [22050, 32000, 44100, 48000, 88200, 96000, 192000].map((r) => h('option', { value: r, selected: r === (app.prefs.get('defaultRate') || 48000) }, `${r} Hz`)));
   const bits = h('select.select', { 'aria-label': 'Bit depth' }, [16, 24, 32].map((b) => h('option', { value: b, selected: b === 32 }, b === 32 ? '32 (float)' : String(b))));
-  const master = h('select.select', { 'aria-label': 'Mix' }, h('option', { value: '2' }, 'Stereo'), h('option', { value: '1' }, 'Mono'));
-  master.value = String(app.prefs.get('newSessionMix') === 1 ? 1 : 2);
+  const master = h('select.select', { 'aria-label': 'Mix' }, h('option', { value: '2' }, 'Stereo'), h('option', { value: '1' }, 'Mono'), h('option', { value: '6' }, '5.1'));
+  master.value = String([1, 6].includes(app.prefs.get('newSessionMix')) ? app.prefs.get('newSessionMix') : 2);
   const r = await openDialog({
     title: 'New Multitrack Session',
     body: h('div.form-grid', h('label', 'Session Name:'), name, h('label', 'Template:'), h('div.row', template, delTemplate), h('label', 'Sample Rate:'), rate, h('label', 'Bit Depth:'), bits, h('label', 'Mix:'), master),
@@ -112,7 +112,7 @@ async function newSessionDialog(app) {
 
 async function addTracksDialog(app) {
   const count = h('input.input.num', { type: 'number', min: 1, max: 64, value: 1, 'aria-label': 'Number of tracks' });
-  const type = h('select.select', { 'aria-label': 'Track type' }, h('option', { value: 'stereo' }, 'Stereo Audio Track'), h('option', { value: 'mono' }, 'Mono Audio Track'), h('option', { value: 'bus' }, 'Stereo Bus Track'), h('option', { value: 'monoBus' }, 'Mono Bus Track'));
+  const type = h('select.select', { 'aria-label': 'Track type' }, h('option', { value: 'stereo' }, 'Stereo Audio Track'), h('option', { value: 'mono' }, 'Mono Audio Track'), h('option', { value: 'bus' }, 'Stereo Bus Track'), h('option', { value: 'monoBus' }, 'Mono Bus Track'), h('option', { value: 'surround' }, '5.1 Audio Track'), h('option', { value: 'surroundBus' }, '5.1 Bus Track'));
   const r = await openDialog({
     title: 'Add Tracks',
     body: h('div.form-grid', h('label', 'Add:'), count, h('label', 'Type:'), type),
@@ -385,7 +385,7 @@ function newSession(app, o) {
   const name = app.uniqueName(sessionBaseName(o.name), '.asesx');
   // Saved templates also carry master settings, tempo and meter.
   let state = o.template?.master ? stateFromTemplate(o.template, { sampleRate: o.sampleRate, bitDepth: o.bitDepth, autoCrossfade }) : undefined;
-  if (state && o.masterChannels) state = { ...state, master: { ...state.master, channels: o.masterChannels === 1 ? 1 : 2 } };
+  if (state && o.masterChannels) state = { ...state, master: { ...state.master, channels: o.masterChannels === 1 ? 1 : o.masterChannels === 6 ? 6 : 2 } };
   const doc = new Session({ name, sampleRate: o.sampleRate, bitDepth: o.bitDepth, state, template: state ? undefined : tracks || undefined, tracks: tracks ? undefined : 6, autoCrossfade, masterChannels: o.masterChannels });
   app.addDocument(doc);
   return doc;
@@ -734,6 +734,8 @@ export function installMultitrackCommands(app) {
     { id: 'mt.addStereo', label: 'Add Stereo Audio Track', shortcut: 'Alt+A', enabled: hasSession, run: addTrack('audio', 2) },
     { id: 'mt.addMonoBus', label: 'Add Mono Bus Track', enabled: hasSession, run: addTrack('bus', 1) },
     { id: 'mt.addBus', label: 'Add Stereo Bus Track', shortcut: 'Alt+B', enabled: hasSession, run: addTrack('bus', 2) },
+    { id: 'mt.add51', label: 'Add 5.1 Audio Track', enabled: hasSession, run: addTrack('audio', 6) },
+    { id: 'mt.add51Bus', label: 'Add 5.1 Bus Track', enabled: hasSession, run: addTrack('bus', 6) },
     {
       // A session has one video track: picking a video fills it (and puts the video's audio on a track).
       id: 'mt.addVideoTrack',
@@ -757,7 +759,7 @@ export function installMultitrackCommands(app) {
         let state = doc.state;
         let after = S.findTrack(state, doc.selectedTrack)?.type === 'master' ? undefined : doc.selectedTrack;
         for (let i = 0; i < o.count; i++) {
-          const made = newTrack(state, { type: o.type === 'bus' || o.type === 'monoBus' ? 'bus' : 'audio', channels: o.type === 'mono' || o.type === 'monoBus' ? 1 : 2, afterId: after });
+          const made = newTrack(state, { type: /bus/i.test(o.type) ? 'bus' : 'audio', channels: o.type === 'mono' || o.type === 'monoBus' ? 1 : /surround/.test(o.type) ? 6 : 2, afterId: after });
           state = made.state;
           after = made.track.id;
         }

@@ -18,7 +18,9 @@ import { recordingName } from '../record/take.js';
 import { mediaBrowserPanel, PUTER_DRAG_TYPE, resolveMediaItems } from '../panels/media-browser.js';
 import { metadataPanel } from '../panels/metadata.js';
 import { parseMarkerText } from '../storage/markers-io.js';
-import { installAutosave, recoveryDialog } from '../storage/autosave-controller.js';
+import { installAutosave, recoveryDialog, opfsAvailable } from '../storage/autosave-controller.js';
+import { newSessionId, LOCK_PREFIX } from '../storage/autosave.js';
+import { installSessionBackup, SessionBackupStore, sessionRestoreDialog, backupBrowserDialog } from '../storage/session-backup.js';
 
 const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
 const hasAudio = (app) => Boolean(audio(app));
@@ -55,6 +57,12 @@ export function installIo(app) {
         if (!list.length) return app.notify('There are no autosaved files to recover.');
         return recoveryDialog(app, autosave, list);
       },
+    },
+    {
+      id: 'file.restoreBackup',
+      label: 'Restore Session Backup...',
+      enabled: () => Boolean(app.sessionBackup),
+      run: () => backupBrowserDialog(app, app.sessionBackup),
     },
     {
       id: 'transport.record',
@@ -146,10 +154,29 @@ export function installIo(app) {
   };
   if (app.prefs.get('autosave') !== false) startAutosave();
   app.autosave = autosave;
-  if (autosave) {
+  // Multitrack session backups share the tab id (and its Web Lock) with autosave.
+  let tab = autosave?.session;
+  if (!tab) {
+    tab = newSessionId();
+    navigator.locks?.request?.(`${LOCK_PREFIX}${tab}`, () => new Promise(() => {})).catch(() => {});
+  }
+  try {
+    app.sessionBackup = opfsAvailable() ? installSessionBackup(app, { store: new SessionBackupStore(() => navigator.storage.getDirectory()), tab }) : null;
+  } catch (err) {
+    console.warn('[session backup]', err);
+    app.sessionBackup = null;
+  }
+  if (app.sessionBackup) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' && app.prefs.get('sessionBackup') !== false) app.sessionBackup.run();
+    });
+  }
+  if (autosave || app.sessionBackup) {
     setTimeout(async () => {
-      const list = await autosave.check();
-      if (list.length) recoveryDialog(app, autosave, list);
+      const list = autosave ? await autosave.check() : [];
+      if (list.length) await recoveryDialog(app, autosave, list);
+      const sessions = app.sessionBackup ? await app.sessionBackup.check() : [];
+      if (sessions.length) await sessionRestoreDialog(app, app.sessionBackup, sessions);
     }, 600);
   }
   // Preferences > Auto Save apply right away.

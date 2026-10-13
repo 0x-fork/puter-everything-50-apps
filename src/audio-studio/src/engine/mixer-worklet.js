@@ -4,6 +4,7 @@
 
 import { ChunkStore, renderBlock, createScratch, QUANTUM } from './mixcore.js';
 import { FxHost, graphFxKeys } from './fxhost.js';
+import { downmixStereo } from './surround.js';
 
 const TAP_SIZE = 8192;
 
@@ -52,6 +53,8 @@ class MixerProcessor extends AudioWorkletProcessor {
         break;
       case 'graph':
         this.graph = m.graph;
+        // A 5.1 session renders six channels, monitored through a stereo downmix.
+        this.six = this.graph.surround ? this.six || Array.from({ length: 6 }, () => new Float32Array(QUANTUM)) : null;
         if (this.host) {
           for (const t of this.graph.tracks) {
             t.fx = this.host.sync(t.fx);
@@ -154,7 +157,10 @@ class MixerProcessor extends AudioWorkletProcessor {
         ended = !this.loop;
         break;
       }
-      renderBlock(this.graph, this.store, this.pos, frames, this.master, this.scratch, opts);
+      if (this.six) {
+        renderBlock(this.graph, this.store, this.pos, frames, this.six, this.scratch, opts);
+        downmixStereo(this.six, this.master, frames);
+      } else renderBlock(this.graph, this.store, this.pos, frames, this.master, this.scratch, opts);
       oL.set(L.subarray(0, frames), done);
       if (oR !== oL) oR.set(R.subarray(0, frames), done);
       this.pos += frames;

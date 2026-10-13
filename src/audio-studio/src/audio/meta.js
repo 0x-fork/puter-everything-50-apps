@@ -2,8 +2,11 @@
 // for the tag formats audio files carry and writers for the ones exports produce.
 //   RIFF INFO list (WAV), broadcast extension "bext" and radio "cart" chunks
 //   (WAV), ID3v2 (MP3, and the AIFF "ID3 " chunk), Vorbis comments (FLAC, Ogg
-//   Opus/Vorbis), AIFF text chunks, MP4 ilst atoms.
+//   Opus/Vorbis), AIFF text chunks, MP4 ilst atoms, and XMP packets (see xmp.js)
+//   in WAV "_PMX" chunks and ID3v2 PRIV frames.
 // Documents keep metadata in state.meta as plain strings keyed by field id.
+
+import { parseXmp, id3XmpPriv } from './xmp.js';
 
 /** The general fields every tag format carries. */
 export const META_FIELDS = [
@@ -52,9 +55,18 @@ export const ALL_META_FIELDS = [
   { id: 'cartUserDef', label: 'User Defined', max: 64 },
   { id: 'cartUrl', label: 'URL', max: 1024 },
   { id: 'cartTagText', label: 'Tag Text', multiline: true },
+  // XMP (Dublin Core) only.
+  { id: 'description', label: 'Description', multiline: true },
+  { id: 'publisher', label: 'Publisher' },
+  { id: 'contributor', label: 'Contributors' },
+  { id: 'language', label: 'Language' },
+  { id: 'xmpDate', label: 'Date', kind: 'date' },
+  { id: 'identifier', label: 'Identifier' },
+  { id: 'relation', label: 'Relation' },
 ];
 
 const IDS = ALL_META_FIELDS.map((f) => f.id);
+const XMP_FIELDS = ['description', 'publisher', 'contributor', 'language', 'xmpDate', 'identifier', 'relation'];
 
 /** Only known, non-empty, trimmed fields. */
 export function cleanMeta(meta = {}) {
@@ -72,6 +84,11 @@ export function hasMeta(meta) {
 
 const enc = new TextEncoder();
 const utf8 = new TextDecoder('utf-8');
+
+/** Whether meta has a field only XMP stores (exports then add an XMP packet). */
+export function hasXmpOnly(meta) {
+  return XMP_FIELDS.some((id) => meta?.[id]);
+}
 
 function latin1(bytes) {
   let s = '';
@@ -310,6 +327,9 @@ export function id3v2Tag(meta, { padding = 0 } = {}) {
     // encoding, language, empty short description (terminated), text
     frame('COMM', concat([Uint8Array.of(t.encoding), ascii4('eng').subarray(0, 3), t.encoding ? Uint8Array.of(0xff, 0xfe, 0, 0) : new Uint8Array(1), t.bytes]));
   }
+  // An XMP packet (with every field it maps) once an XMP-only field is set.
+  const xmp = hasXmpOnly(m) ? id3XmpPriv(m) : null;
+  if (xmp) frame('PRIV', xmp);
   if (!frames.length) return null;
   const body = concat([...frames, new Uint8Array(padding)]);
   return concat([ascii4('ID3'), Uint8Array.of(3, 0, 0), syncsafe(body.length), body]);
@@ -356,6 +376,7 @@ export function parseId3v2(bytes) {
   const idLen = version === 2 ? 3 : 4;
   const headLen = version === 2 ? 6 : 10;
   const out = {};
+  let xmp = null;
   while (o + headLen <= end) {
     const id = latin1(bytes.subarray(o, o + idLen));
     if (!/^[A-Z0-9]+$/.test(id)) break;
@@ -364,6 +385,7 @@ export function parseId3v2(bytes) {
     else if (version === 4) fsize = ((bytes[o + 4] & 0x7f) << 21) | ((bytes[o + 5] & 0x7f) << 14) | ((bytes[o + 6] & 0x7f) << 7) | (bytes[o + 7] & 0x7f);
     else fsize = ((bytes[o + 4] << 24) | (bytes[o + 5] << 16) | (bytes[o + 6] << 8) | bytes[o + 7]) >>> 0;
     const body = bytes.subarray(o + headLen, Math.min(end, o + headLen + fsize));
+    if (id === 'PRIV' && latin1(body.subarray(0, 4)) === 'XMP\0') xmp = parseXmp(utf8.decode(body.subarray(4)));
     const field = map[id];
     if (field && body.length > 1 && !out[field]) {
       const encoding = body[0];
@@ -389,7 +411,8 @@ export function parseId3v2(bytes) {
     }
     o += headLen + fsize;
   }
-  return cleanMeta(out);
+  // The ID3 frames win for fields both carry.
+  return cleanMeta({ ...(xmp || {}), ...out });
 }
 
 // ------------------------------------------------------------ Vorbis comments
