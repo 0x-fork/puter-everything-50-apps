@@ -346,6 +346,68 @@ test("offline edits larger than one commit are sent in several and all saved", a
   }
 });
 
+test("offline edits too large to send in time over a slow connection go up in smaller batches", async () => {
+  const env = environment();
+  const b = board("Slow connection");
+  b.items = Array.from({ length: 5 }, (_, n) =>
+    item("note", n * 300, 0, { text: "x" }),
+  );
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const puter = env.sdk(owner);
+  // Requests carrying more than about 1 MB never complete in time.
+  const exec = puter.workers.exec;
+  puter.workers.exec = (url, options) =>
+    (options.body?.length || 0) > 1_000_000
+      ? Promise.reject(
+          new DOMException("The operation was aborted.", "AbortError"),
+        )
+      : exec(url, options);
+  const session = new CollaborationSession({
+    puter,
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed() {},
+    activity() {},
+    status() {},
+  });
+  const text = (n, seed) =>
+    Array.from({ length: n }, (_, k) =>
+      ((k * 7919 + seed) % 36).toString(36),
+    ).join("");
+  try {
+    await session.start();
+    env.offline = true;
+    for (let n = 0; n < 20; n++) {
+      const before = session.shared.snapshot(),
+        next = structuredClone(before);
+      next.items.forEach((i, k) => (i.text = text(20000, n * 5 + k)));
+      await session.commit(next, before);
+    }
+    await session.queue;
+    env.offline = false;
+    const deadline = Date.now() + 60_000;
+    while (session.pending.size && Date.now() < deadline) {
+      await session.flush().catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(session.pending.size, 0, "Every edit was saved");
+    const { doc } = await env.service.load(b.id);
+    assert.equal(doc.snapshot().items[0].text, text(20000, 19 * 5));
+    doc.destroy();
+  } finally {
+    session.close();
+  }
+});
+
 test("archiving makes open sessions read-only, and peers return after access does", async () => {
   const env = environment(),
     hub = createPeerHub();

@@ -945,6 +945,11 @@ export class CollaborationSession {
             this.batchRows = Math.ceil(rows.length / 2);
             this.soon = true;
             continue;
+          } else if (error.status === undefined && rows.length > 1) {
+            // A batch that times out or is cut off on a slow connection
+            // would every time; the next try sends half as much.
+            this.batchRows = Math.ceil(rows.length / 2);
+            throw error;
           } else if (![413, 422].includes(error.status) || this.closed)
             throw error;
           await this.recover(rows);
