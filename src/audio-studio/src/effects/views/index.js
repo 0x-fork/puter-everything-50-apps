@@ -7,3 +7,4 @@ import './special.js';
 import './distortion.js';
 import './stereo.js';
 import './time-pitch.js';
+import './reverb.js';

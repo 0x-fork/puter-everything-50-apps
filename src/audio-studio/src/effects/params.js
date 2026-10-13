@@ -5,7 +5,8 @@
 // Param types (see registry.js): 'number' (default), 'bool', 'choice', plus
 // the data types 'envelope' ([{ t: 0..1, v }], fade/gain envelopes, pitch
 // bend), 'curve' ([{ f: Hz, g: dB }], FFT filter) and 'transfer' ([{ x, y }],
-// input to output level in dB, Dynamics Processing), edited graphically.
+// input to output level in dB, Dynamics Processing), edited graphically,
+// and 'text' (a short string, e.g. the name of a loaded impulse response).
 //
 // Linked sliders: a bool param with id 'linked' (or 'link') ties together the
 // number params before it that share its group's unit and range (Amplify's
@@ -34,6 +35,7 @@ export function roundToStep(v, step, min = 0) {
 export function coerce(p, v) {
   const t = typeOf(p);
   if (t === 'bool') return typeof v === 'string' ? v === 'true' || v === '1' : Boolean(v);
+  if (t === 'text') return typeof v === 'string' ? v.slice(0, 200) : (p.default ?? '');
   if (t === 'choice') {
     const opts = p.options || [];
     const hit = opts.find((o) => String(o.value) === String(v));
@@ -112,6 +114,7 @@ function roundLog(v, step) {
 export function formatValue(p, v) {
   const t = typeOf(p);
   if (t === 'bool') return v ? 'On' : 'Off';
+  if (t === 'text') return String(v ?? '');
   if (t === 'choice') return (p.options || []).find((o) => String(o.value) === String(v))?.label ?? String(v);
   if (t === 'envelope' || t === 'curve' || t === 'transfer') return `${v?.length || 0} points`;
   if (!Number.isFinite(v)) return v === -Infinity ? '-inf' : String(v);

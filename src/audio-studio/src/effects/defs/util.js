@@ -85,3 +85,30 @@ export const pause = () => new Promise((r) => setTimeout(r, 0));
 export function checkAbort(signal) {
   if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
 }
+
+/** RBJ biquad magnitude in dB at frequency f. */
+export function biquadDb(type, f0, gainDb, q, f, rate) {
+  const w0 = (2 * Math.PI * Math.min(f0, rate * 0.4999)) / rate;
+  const cw = Math.cos(w0);
+  const alpha = Math.sin(w0) / (2 * q);
+  const A = 10 ** (gainDb / 40);
+  let b0, b1, b2, a0, a1, a2;
+  if (type === 'peak') {
+    [b0, b1, b2, a0, a1, a2] = [1 + alpha * A, -2 * cw, 1 - alpha * A, 1 + alpha / A, -2 * cw, 1 - alpha / A];
+  } else {
+    const sa = 2 * Math.sqrt(A) * alpha;
+    const s = type === 'low' ? 1 : -1;
+    b0 = A * (A + 1 - s * (A - 1) * cw + sa);
+    b1 = s * 2 * A * (A - 1 - s * (A + 1) * cw);
+    b2 = A * (A + 1 - s * (A - 1) * cw - sa);
+    a0 = A + 1 + s * (A - 1) * cw + sa;
+    a1 = -s * 2 * (A - 1 + s * (A + 1) * cw);
+    a2 = A + 1 + s * (A - 1) * cw - sa;
+  }
+  const w = (2 * Math.PI * f) / rate;
+  const re = (c0, c1, c2) => c0 + c1 * Math.cos(w) + c2 * Math.cos(2 * w);
+  const im = (c1, c2) => -c1 * Math.sin(w) - c2 * Math.sin(2 * w);
+  const num2 = re(b0, b1, b2) ** 2 + im(b1, b2) ** 2;
+  const den2 = re(a0, a1, a2) ** 2 + im(a1, a2) ** 2;
+  return 10 * Math.log10(num2 / den2);
+}

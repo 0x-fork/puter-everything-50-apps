@@ -18,7 +18,7 @@ export const EFFECT_GROUPS = [
   { label: 'Filter and EQ', ids: ['fftFilter', 'graphicEq10', 'graphicEq20', 'graphicEq30', 'notchFilter', 'parametricEq', 'scientificFilter'] },
   { label: 'Modulation', ids: ['chorus', 'chorusFlanger', 'flanger', 'phaser'] },
   { label: 'Noise Reduction / Restoration', ids: ['captureNoisePrint', 'noiseReduction', '-', 'learnSoundModel', 'soundRemover', '-', 'clickPopEliminator', 'hissReduction', '-', 'adaptiveNoiseReduction', 'autoClickRemover', 'autoHeal', 'autoPhaseCorrection', 'dehummer', 'denoise', 'dereverb'] },
-  { label: 'Reverb', ids: ['convolutionReverb', 'fullReverb', 'reverb', 'studioReverb'] },
+  { label: 'Reverb', ids: ['convolutionReverb', 'fullReverb', 'reverb', 'studioReverb', 'surroundReverb'] },
   { label: 'Special', ids: ['distortion', 'dopplerShifter', 'guitarSuite', 'loudnessMaximizer', 'mastering', 'loudnessMeter', 'vocalEnhancer'] },
   { label: 'Stereo Imagery', ids: ['centerChannelExtractor', 'graphicPhaseShifter', 'stereoExpander'] },
   { label: 'Time and Pitch', ids: ['automaticPitchCorrection', 'manualPitchCorrection', 'pitchBender', 'pitchShifter', 'stretchPitch'] },

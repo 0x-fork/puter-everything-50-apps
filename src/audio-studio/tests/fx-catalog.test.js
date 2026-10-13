@@ -13,6 +13,7 @@ const DATA_TYPES = new Set(['curve', 'envelope', 'transfer']);
 
 function validValue(p, v) {
   if (p.type === 'bool') return typeof v === 'boolean';
+  if (p.type === 'text') return typeof v === 'string';
   if (p.type === 'choice') return p.options.some((o) => o.value === v);
   if (DATA_TYPES.has(p.type)) return Array.isArray(v);
   return typeof v === 'number' && v >= p.min && v <= p.max;

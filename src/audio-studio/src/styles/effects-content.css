@@ -552,3 +552,45 @@ input[type='range'].slider.fx-vrange::-moz-range-track {
   right: 3px;
   height: 0;
 }
+
+/* Reverb views. */
+.fx-split.rv-split {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.rv-faders {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  padding-top: 6px;
+}
+
+.rv-checks {
+  margin-top: 10px;
+  gap: 4px;
+}
+
+.rv-impulse {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rv-impulse > .fx-controls {
+  flex: 1;
+  min-width: 0;
+}
+
+.rv-surround {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .rv-surround,
+  .fx-split.rv-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
