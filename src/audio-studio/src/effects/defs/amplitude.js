@@ -27,6 +27,9 @@ function limiterLatency(lookMs, rate) {
   return look - 1;
 }
 
+/** Frames the Hard Limiter's true-peak detector adds (fx/dynamics/limiter.rs TP_DELAY). */
+const TRUE_PEAK_DELAY = 8;
+
 /** util::compress_db */
 export function compressDb(level, threshold, ratio, knee = 0) {
   const slope = 1 / Math.max(1, ratio) - 1;
@@ -59,22 +62,25 @@ registerEffect({
   name: 'Hard Limiter',
   group: AMP,
   kind: 30,
+  about: 'Keeps peaks under a ceiling without audible clipping, looking ahead so it can turn the level down just before each peak. True Peak also catches peaks that fall between samples.',
   params: [
-    db('ceiling', 'Maximum Amplitude', -30, 0, -0.1),
-    db('inputBoost', 'Input Boost', 0, 30, 0),
+    db('ceiling', 'Maximum Amplitude', -60, 0, -0.1),
+    db('inputBoost', 'Input Boost', -24, 48, 0),
     ms('lookahead', 'Look-Ahead Time', 0.5, 10, 5),
     release(80, { min: 10, max: 1000 }),
     bool('link', 'Link Channels', true),
+    choice('truePeak', 'Detection', ['Peak', 'True Peak'], 0, { order: -1 }),
   ],
   presets: [
     preset('Default', { ceiling: -0.1, inputBoost: 0, lookahead: 5, release: 80, link: true }),
     preset('Transparent Peak Catch', { ceiling: -0.3, inputBoost: 0, lookahead: 7, release: 150, link: true }),
     preset('Broadcast Safe -1 dB', { ceiling: -1, inputBoost: 0, lookahead: 5, release: 100, link: true }),
+    preset('Streaming True Peak -1 dB', { ceiling: -1, inputBoost: 0, lookahead: 5, release: 100, link: true, truePeak: 1 }),
     preset('Gentle Lift +3 dB', { ceiling: -0.5, inputBoost: 3, lookahead: 7, release: 200, link: true }),
     preset('Loud and Tight +6 dB', { ceiling: -0.1, inputBoost: 6, lookahead: 4, release: 50, link: true }),
     preset('Dialogue -2 dB Ceiling', { ceiling: -2, inputBoost: 4, lookahead: 5, release: 120, link: true }),
   ],
-  latency: (v, rate) => limiterLatency(v.lookahead, rate),
+  latency: (v, rate) => limiterLatency(v.lookahead, rate) + (v.truePeak ? TRUE_PEAK_DELAY : 0),
   transfer: (v, inDb) => Math.min(inDb + v.inputBoost, v.ceiling),
 });
 
@@ -85,6 +91,7 @@ registerEffect({
   name: 'Single-band Compressor',
   group: AMP,
   kind: 31,
+  about: 'Turns down levels above the threshold by the ratio, smoothing the change with the attack and release times. Output gain makes up the lost level.',
   params: [
     db('threshold', 'Threshold', -60, 0, -20),
     num('ratio', 'Ratio', 1, 30, 4, ':1', { step: 0.1 }),
@@ -113,27 +120,43 @@ registerEffect({
   name: 'Dynamics',
   group: AMP,
   kind: 32,
+  about: 'A channel-strip dynamics section: a gate that closes on quiet passages, a compressor and an expander sharing one detector, and a limiter that holds the result under its threshold.',
   params: [
     bool('gateOn', 'AutoGate', false, { section: 'AutoGate' }),
-    db('gateThreshold', 'Gate Threshold', -80, 0, -50, { section: 'AutoGate' }),
-    ms('gateAttack', 'Gate Attack', 0.1, 100, 2, { scale: 'log', section: 'AutoGate' }),
-    ms('gateRelease', 'Gate Release', 1, 2000, 200, { scale: 'log', section: 'AutoGate' }),
-    ms('gateHold', 'Gate Hold', 0, 1000, 50, { section: 'AutoGate' }),
+    db('gateThreshold', 'Gate Threshold', -80, 0, -50, { section: 'AutoGate', short: 'Threshold' }),
+    ms('gateAttack', 'Gate Attack', 0.1, 100, 2, { scale: 'log', section: 'AutoGate', short: 'Attack' }),
+    ms('gateRelease', 'Gate Release', 1, 2000, 200, { scale: 'log', section: 'AutoGate', short: 'Release' }),
+    ms('gateHold', 'Gate Hold', 0, 1000, 50, { section: 'AutoGate', short: 'Hold' }),
     bool('compOn', 'Compressor', true, { section: 'Compressor' }),
-    db('threshold', 'Compressor Threshold', -60, 0, -20, { section: 'Compressor' }),
-    num('ratio', 'Compressor Ratio', 1, 30, 3, ':1', { step: 0.1, section: 'Compressor' }),
-    db('knee', 'Compressor Knee', 0, 24, 6, { section: 'Compressor' }),
+    db('threshold', 'Compressor Threshold', -60, 0, -20, { section: 'Compressor', short: 'Threshold' }),
+    num('ratio', 'Compressor Ratio', 1, 30, 3, ':1', { step: 0.1, section: 'Compressor', short: 'Ratio' }),
+    db('knee', 'Compressor Knee', 0, 24, 6, { section: 'Compressor', short: 'Knee' }),
     bool('expOn', 'Expander', false, { section: 'Expander' }),
-    db('expThreshold', 'Expander Threshold', -80, 0, -45, { section: 'Expander' }),
-    num('expRatio', 'Expander Ratio', 1, 30, 2, ':1', { step: 0.1, section: 'Expander' }),
+    db('expThreshold', 'Expander Threshold', -80, 0, -45, { section: 'Expander', short: 'Threshold' }),
+    num('expRatio', 'Expander Ratio', 1, 30, 2, ':1', { step: 0.1, section: 'Expander', short: 'Ratio' }),
     bool('limOn', 'Limiter', false, { section: 'Limiter' }),
-    db('limThreshold', 'Limiter Threshold', -30, 0, -1, { section: 'Limiter' }),
-    attack(5, { section: 'Settings' }),
-    release(150, { section: 'Settings' }),
+    db('limThreshold', 'Limiter Threshold', -30, 0, -1, { section: 'Limiter', short: 'Threshold' }),
+    // Attack and release shape the compressor and expander together.
+    attack(5, { section: 'Compressor', short: 'Attack' }),
+    release(150, { section: 'Compressor', short: 'Release' }),
     choice('detection', 'Detection', ['Peak', 'RMS'], 0, { section: 'Settings' }),
     bool('link', 'Link Channels', true, { section: 'Settings' }),
-    db('makeup', 'Make-up Gain', -30, 30, 0, { section: 'Settings' }),
+    db('makeup', 'Make-up Gain', -30, 30, 0, { section: 'Compressor', short: 'Make-up' }),
+    ms('limRelease', 'Limiter Release', 1, 1000, 60, { scale: 'log', section: 'Limiter', short: 'Release' }),
   ],
+  readout: true,
+  display: 'none',
+  layout: {
+    wide: true,
+    columns: [['AutoGate'], ['Compressor'], ['Expander', 'Limiter']],
+    knobs: ['AutoGate', 'Compressor', 'Expander', 'Limiter'],
+    meters: {
+      AutoGate: [{ index: 0, label: 'Open', kind: 'gate' }],
+      Compressor: [{ index: 1, label: 'Reduction', kind: 'gr', min: -24 }],
+      Expander: [{ index: 2, label: 'Reduction', kind: 'gr', min: -36 }],
+      Limiter: [{ index: 3, label: 'Limiting', kind: 'gr', min: -12 }],
+    },
+  },
   presets: [
     preset('Default', {}),
     preset('Clean Up Room Noise', { gateOn: true, gateThreshold: -48, gateAttack: 1, gateRelease: 250, gateHold: 80, compOn: true, threshold: -22, ratio: 2.5 }),
@@ -186,6 +209,9 @@ registerEffect({
   group: AMP,
   kind: 39,
   readout: true,
+  display: 'dynamicsProcessing',
+  about: 'Shapes dynamics with a drawn curve from input level to output level: flatten it above a level to compress or limit, steepen it below a level to expand or gate. The dot shows the level passing through while you preview.',
+  layout: { tabs: [{ label: 'Dynamics', editor: true, sections: ['Output'] }, { label: 'Settings', sections: ['Detector', 'Detector Band'] }] },
   params: [
     { id: 'curve', label: 'Transfer Curve', type: 'transfer', min: -100, max: 0, unit: 'dB', hidden: true, default: COMP_3 },
     choice('detection', 'Detection', ['Peak', 'RMS'], 0, { section: 'Detector' }),
@@ -194,8 +220,8 @@ registerEffect({
     ms('lookahead', 'Look-Ahead Time', 0, 20, 2, { section: 'Detector' }),
     bool('link', 'Link Channels', true, { section: 'Detector' }),
     bool('bandLimit', 'Band Limit Detector', false, { section: 'Detector Band' }),
-    hz('lowCut', 'Low Cut', 20, 20000, 100, { section: 'Detector Band' }),
-    hz('highCut', 'High Cut', 20, 20000, 10000, { section: 'Detector Band' }),
+    hz('lowCut', 'Low Cut', 20, 20000, 100, { section: 'Detector Band', enabledIf: (v) => v.bandLimit }),
+    hz('highCut', 'High Cut', 20, 20000, 10000, { section: 'Detector Band', enabledIf: (v) => v.bandLimit }),
     db('makeup', 'Make-up Gain', -30, 30, 0, { section: 'Output' }),
   ],
   presets: [
@@ -226,6 +252,7 @@ const BAND_TIMES = [
   [1, 80],
 ];
 
+// Band settings live in the band strips of the dialog's editor (dyn-editors.js).
 const bandParams = BAND_NAMES.flatMap((name, b) =>
   section(`${name} Band`, `band${b + 1}`, [
     db('threshold', `${name} Threshold`, -60, 0, -18),
@@ -235,7 +262,7 @@ const bandParams = BAND_NAMES.flatMap((name, b) =>
     ms('release', `${name} Release`, 1, 5000, BAND_TIMES[b][1], { scale: 'log' }),
     bool('solo', `Solo ${name}`, false),
     bool('bypass', `Bypass ${name}`, false),
-  ]),
+  ]).map((p) => ({ ...p, hidden: true })),
 );
 
 /** Multiband preset values from per-band [threshold, gain, ratio] triples. */
@@ -255,18 +282,22 @@ registerEffect({
   group: AMP,
   kind: 33,
   params: [
-    hz('xover1', 'Low Crossover', 20, 20000, 120, { section: 'Crossovers' }),
-    hz('xover2', 'Mid Crossover', 20, 20000, 2000, { section: 'Crossovers' }),
-    hz('xover3', 'High Crossover', 20, 20000, 10000, { section: 'Crossovers' }),
+    hz('xover1', 'Low Crossover', 20, 20000, 120, { hidden: true }),
+    hz('xover2', 'Mid Crossover', 20, 20000, 2000, { hidden: true }),
+    hz('xover3', 'High Crossover', 20, 20000, 10000, { hidden: true }),
     ...bandParams,
     db('outputGain', 'Output Gain', -18, 18, 0, { section: 'Output' }),
-    bool('limiter', 'Output Limiter', true, { section: 'Output' }),
-    db('limThreshold', 'Limiter Threshold', -30, 0, 0, { section: 'Output' }),
-    db('limMargin', 'Limiter Margin', -30, 0, -0.1, { section: 'Output' }),
-    ms('limRelease', 'Limiter Release', 10, 1000, 100, { scale: 'log', section: 'Output' }),
-    bool('brickwall', 'Brickwall Limiting', true, { section: 'Output' }),
-    bool('link', 'Link Channels', true, { section: 'Output' }),
+    bool('limiter', 'Limiter', true, { section: 'Limiter' }),
+    db('limThreshold', 'Threshold', -30, 0, 0, { section: 'Limiter' }),
+    db('limMargin', 'Margin', -30, 0, -0.1, { section: 'Limiter' }),
+    ms('limRelease', 'Release', 10, 1000, 100, { scale: 'log', section: 'Limiter' }),
+    bool('brickwall', 'Brickwall Limiter', true, { section: 'Options', enabledIf: (v) => v.limiter }),
+    bool('link', 'Link Channels', true, { section: 'Options' }),
   ],
+  readout: true,
+  display: 'multiband',
+  about: 'Splits the audio into four bands at the crossover frequencies and compresses each on its own, then limits the sum. Drag the crossover lines, solo a band to hear it alone, or bypass it to leave it untouched.',
+  layout: { wide: true, columns: [['Output'], ['Limiter'], ['Options']] },
   presets: [
     preset('Default', {}),
     preset('Gentle Master Polish', bands([[-20, 0, 1.5], [-18, 0, 1.5], [-18, 0.5, 1.5], [-20, 1, 1.5]], { limThreshold: -3, limMargin: -0.3 })),
@@ -285,6 +316,7 @@ registerEffect({
   name: 'Tube-modeled Compressor',
   group: AMP,
   kind: 34,
+  about: 'A compressor with the soft, rounded saturation of a tube stage. Drive adds harmonics; Character makes the saturation asymmetric for a warmer, even-order color.',
   params: [
     db('threshold', 'Threshold', -60, 0, -20),
     num('ratio', 'Ratio', 1, 30, 3, ':1', { step: 0.1 }),
@@ -294,6 +326,16 @@ registerEffect({
     db('drive', 'Drive', 0, 24, 6),
     pct('character', 'Character', 30),
   ],
+  readout: true,
+  layout: {
+    meters: {
+      main: [
+        { index: 0, label: 'Input', kind: 'level' },
+        { index: 1, label: 'Reduction', kind: 'gr', min: -24 },
+        { index: 2, label: 'Output', kind: 'level' },
+      ],
+    },
+  },
   presets: [
     preset('Default', { threshold: -20, ratio: 3, attack: 20, release: 250, outputGain: 0, drive: 6, character: 30 }),
     preset('Warm Vocal', { threshold: -22, ratio: 2.5, attack: 15, release: 200, outputGain: 3, drive: 8, character: 40 }),
@@ -311,6 +353,9 @@ registerEffect({
   name: 'DeEsser',
   group: AMP,
   kind: 35,
+  readout: true,
+  display: 'deesser',
+  about: 'Turns down harsh "s" and "sh" sounds. The detector listens to the shaded band; in Multiband mode only that band is reduced, in Broadband mode the whole signal is. Output Sibilance Only lets you hear what is being removed.',
   params: [
     choice('mode', 'Mode', ['Broadband', 'Multiband'], 1),
     hz('frequency', 'Center Frequency', 1000, 16000, 6500),
@@ -335,16 +380,21 @@ registerEffect({
   name: 'Speech Volume Leveler',
   group: AMP,
   kind: 36,
+  display: 'none',
+  about: 'Rides the level of speech toward a target, slowly enough to sound natural. Passages further below the target than the dynamic range are treated as background and left alone unless Boost Low Signals is on.',
   params: [
     db('target', 'Target Volume Level', -40, 0, -18),
     pct('amount', 'Leveling Amount', 60),
-    bool('gate', 'Noise Gate', true),
-    db('gateThreshold', 'Noise Gate Threshold', -80, -20, -50),
+    bool('gate', 'Noise Gate', true, { section: 'Advanced' }),
+    db('gateThreshold', 'Noise Gate Threshold', -80, -20, -50, { section: 'Advanced', enabledIf: (v) => v.gate }),
     ms('attack', 'Attack Time', 10, 2000, 300, { scale: 'log', section: 'Advanced' }),
     ms('release', 'Release Time', 100, 10000, 1500, { scale: 'log', section: 'Advanced' }),
     db('maxBoost', 'Maximum Boost', 0, 36, 15, { section: 'Advanced' }),
     db('maxCut', 'Maximum Cut', 0, 36, 15, { section: 'Advanced' }),
+    db('dynamicRange', 'Target Dynamic Range', 10, 80, 45, { step: 1, enabledIf: (v) => !v.boostLow }),
+    bool('boostLow', 'Boost Low Signals', false),
   ],
+  layout: { collapsed: ['Advanced'] },
   presets: [
     preset('Default', {}),
     preset('Podcast Conversation', { target: -16, amount: 75, gate: true, gateThreshold: -48, attack: 250, release: 1200 }),
@@ -361,14 +411,17 @@ registerEffect({
   name: 'Channel Mixer',
   group: AMP,
   kind: 37,
+  about: 'Builds each output channel from a mix of the input channels. Negative amounts invert that input; 100 % on its own channel leaves a channel unchanged.',
   params: [
-    pct('lToL', 'Left from Left', 100, { min: -200, max: 200, section: 'Left Output' }),
-    pct('rToL', 'Left from Right', 0, { min: -200, max: 200, section: 'Left Output' }),
-    bool('invertL', 'Invert Left', false, { section: 'Left Output' }),
-    pct('lToR', 'Right from Left', 0, { min: -200, max: 200, section: 'Right Output' }),
-    pct('rToR', 'Right from Right', 100, { min: -200, max: 200, section: 'Right Output' }),
-    bool('invertR', 'Invert Right', false, { section: 'Right Output' }),
+    pct('lToL', 'L', 100, { min: -200, max: 200, section: 'Left Output' }),
+    pct('rToL', 'R', 0, { min: -200, max: 200, section: 'Left Output' }),
+    bool('invertL', 'Invert Left Output', false, { section: 'Left Output' }),
+    pct('lToR', 'L', 0, { min: -200, max: 200, section: 'Right Output' }),
+    pct('rToR', 'R', 100, { min: -200, max: 200, section: 'Right Output' }),
+    bool('invertR', 'Invert Right Output', false, { section: 'Right Output' }),
   ],
+  // One page per output channel, each mixing the input channels into it.
+  layout: { tabs: [{ label: 'L', sections: ['Left Output'] }, { label: 'R', sections: ['Right Output'] }] },
   presets: [
     preset('Default', { lToL: 100, rToL: 0, invertL: false, lToR: 0, rToR: 100, invertR: false }),
     preset('Swap Channels', { lToL: 0, rToL: 100, lToR: 100, rToR: 0 }),
@@ -480,10 +533,11 @@ registerEffect({
   name: 'Normalize',
   group: AMP,
   kind: null,
+  about: 'Scales the selection so its loudest peak reaches the target. Equal normalization keeps the balance between channels; DC bias adjust centers each channel first.',
   params: [
-    choice('unit', 'Normalize To', ['Decibels', 'Percent'], 1),
-    num('targetPercent', 'Target (%)', 1, 200, 100, '%', { step: 0.1 }),
-    db('targetDb', 'Target (dB)', -60, 6, 0),
+    choice('unit', 'Normalize To', ['dB', '%'], 1),
+    num('targetPercent', 'Target (%)', 1, 200, 100, '%', { step: 0.1, enabledIf: (v) => v.unit === 1 }),
+    db('targetDb', 'Target (dB)', -60, 6, 0, { enabledIf: (v) => v.unit === 0 }),
     bool('equal', 'Normalize All Channels Equally', true),
     bool('removeDc', 'DC Bias Adjust', false),
   ],
@@ -587,6 +641,7 @@ registerEffect({
   name: 'Fade Envelope',
   group: AMP,
   kind: null,
+  about: 'Fades the selection along a drawn curve from silence to full level. Click to add points, drag them, double-click to remove one; Spline smooths the curve.',
   params: [
     { id: 'envelope', label: 'Envelope', type: 'envelope', min: 0, max: 1, unit: '%', default: [{ t: 0, v: 0 }, { t: 1, v: 1 }] },
     curveParam,
@@ -608,6 +663,7 @@ registerEffect({
   name: 'Gain Envelope',
   group: AMP,
   kind: null,
+  about: 'Raises or lowers the level across the selection along a drawn curve, up to four times louder. Click to add points, drag them, double-click to remove one.',
   params: [
     { id: 'envelope', label: 'Envelope', type: 'envelope', min: 0, max: 4, unit: '%', default: [{ t: 0, v: 1 }, { t: 1, v: 1 }] },
     curveParam,

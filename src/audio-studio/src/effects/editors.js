@@ -253,7 +253,10 @@ export function eqEditor(opts = {}) {
       if (handles.length !== bands.length) {
         view.layer.replaceChildren();
         handles = bands.map((b, i) => {
-          const btn = h('button.fx-handle', { type: 'button', role: 'slider', 'aria-label': `Band ${i + 1}` }, h('span', String(i + 1)));
+          // Band tables name their columns (HP, L, 1..5, H, LP); handles use the same names.
+          const sec = b.ids.freq && param(b.ids.freq)?.section;
+          const name = def.layout?.table?.columns.find((c) => c.section === sec)?.label || String(i + 1);
+          const btn = h('button.fx-handle', { type: 'button', role: 'slider', 'aria-label': sec || `Band ${i + 1}` }, h('span', name));
           draggable(btn, view.el, (fx, fy) => {
             const band = getBands(ctx.values)[i];
             if (band.ids.freq) {
@@ -561,7 +564,7 @@ export function formatPoint(param, v) {
 }
 
 /** Frequency curve editor for a param of type 'curve' ([{ f, g }], f in Hz on a log axis, g in dB). */
-export function curveControl({ param, value, onChange }) {
+export function curveControl({ param, value, onChange, smooth = () => false }) {
   const fMin = 20;
   const fMax = 20000;
   const toT = (f) => clamp(Math.log(Math.max(fMin, f) / fMin) / Math.log(fMax / fMin), 0, 1);
@@ -576,6 +579,7 @@ export function curveControl({ param, value, onChange }) {
     xLabel: (t) => fText(toF(t)),
     xTicks: ticks.map(toT),
     xTickLabels: ['100', '1k', '10k'],
+    smooth,
   });
   const set = el.setPoints;
   el.setPoints = (pts) => set(conv(pts));

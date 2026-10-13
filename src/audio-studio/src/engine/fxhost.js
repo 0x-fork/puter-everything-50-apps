@@ -1,11 +1,13 @@
 // Hosts WASM effect instances for one mixing context (the realtime worklet or
 // an offline render). Effect chains in the graph are arrays of slot specs:
-//   { key, kind, params: number[], enabled, mix, shadow?, readout? }
+//   { key, kind, params: number[], enabled, mix, shadow?, readout?, route? }
 // A `shadow` slot is switched off but still processed (output discarded).
 // `key` is stable across graph updates so an effect keeps its state (reverb
 // tails, compressor envelopes) while its parameters change. Slots with
 // `readout` measure what passes through them (meters, detector levels);
-// readouts() collects their latest values for the UI.
+// readouts() collects their latest values for the UI. A `route`
+// ({ in: [l, r], out: [l, r] }, see src/effects/routing.js) picks which
+// channels feed the effect and which channels receive its output.
 
 const MAX_FRAMES = 8192;
 const READOUT_MAX = 64;
@@ -59,7 +61,7 @@ export class FxHost {
       // (otherwise offline renders begin with a parameter ramp).
       if (created) this.x.fx_reset(s.handle);
       s.readout = Boolean(spec.readout);
-      live.push({ handle: s.handle, enabled: spec.enabled !== false, shadow: Boolean(spec.shadow), mix: spec.mix ?? 1, key: spec.key });
+      live.push({ handle: s.handle, enabled: spec.enabled !== false, shadow: Boolean(spec.shadow), mix: spec.mix ?? 1, key: spec.key, route: spec.route || null });
     }
     return live;
   }
@@ -101,6 +103,33 @@ export class FxHost {
     return out;
   }
 
+  /**
+   * Processes one routed slot over the stereo block in WASM memory: the inputs
+   * are picked from the dry channels, and each channel takes the chosen effect
+   * output (or stays dry), blended by the slot's mix.
+   */
+  runRouted(slot, n) {
+    const { in: ins, out } = slot.route;
+    let heap = new Float32Array(this.memory, this.buf, 2 * n);
+    const dry = heap.slice();
+    for (let c = 0; c < 2; c++) {
+      const s = ins[c];
+      if (s === 0 || s === 1) heap.set(dry.subarray(s * n, s * n + n), c * n);
+      else heap.fill(0, c * n, c * n + n);
+    }
+    this.x.fx_process(slot.handle, this.buf, n);
+    heap = new Float32Array(this.memory, this.buf, 2 * n);
+    const wet = heap.slice();
+    const w = Math.min(1, Math.max(0, slot.mix));
+    for (let c = 0; c < 2; c++) {
+      const o = out[c];
+      for (let i = 0; i < n; i++) {
+        const d = dry[c * n + i];
+        heap[c * n + i] = o === 0 || o === 1 ? d * (1 - w) + wet[o * n + i] * w : d;
+      }
+    }
+  }
+
   /** Runs a resolved chain over stereo planar `buf` (Float32Array[2]) in place. */
   run(chain, buf, frames) {
     if (!chain.some((c) => c.enabled || c.shadow)) return;
@@ -120,7 +149,9 @@ export class FxHost {
           }
           continue;
         }
-        if (slot.mix >= 1) {
+        if (slot.route) {
+          this.runRouted(slot, n);
+        } else if (slot.mix >= 1) {
           this.x.fx_process(slot.handle, this.buf, n);
         } else {
           heap = new Float32Array(this.memory, this.buf, 2 * n);
