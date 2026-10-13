@@ -24,6 +24,12 @@ export function wheelZoom(app, doc, e, x, width) {
   doc.setView(start, start + nspan);
 }
 
+/** View span factor for one Zoom In (Time) step: 0.5 halves the view (Preferences > General). */
+export function zoomInFactor(app) {
+  const pct = Number(app.prefs.get('zoomStep'));
+  return 1 - Math.max(5, Math.min(90, Number.isFinite(pct) ? pct : 50)) / 100;
+}
+
 /**
  * Keeps the playhead in view while playing. 'page' turns a page when the
  * playhead leaves the view; 'center' scrolls continuously with the playhead

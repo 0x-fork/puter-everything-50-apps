@@ -254,7 +254,7 @@ async function stretchDialog(app, doc, clips) {
   const semis = h('input.input.num', { type: 'number', min: -24, max: 24, step: 1, value: s.semitones, 'aria-label': 'Pitch shift in semitones' });
   const formants = h('input', { type: 'checkbox', checked: s.formants });
   const toOn = () => {
-    if (mode.value === 'off') mode.value = 'realtime';
+    if (mode.value === 'off') mode.value = app.prefs.get('clipStretchMode') === 'rendered' ? 'rendered' : 'realtime';
   };
   pct.addEventListener('input', () => {
     dur.value = ((origSeconds * (Number(pct.value) || 100)) / 100).toFixed(3);

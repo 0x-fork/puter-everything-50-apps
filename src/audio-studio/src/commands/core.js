@@ -16,7 +16,7 @@ import { baseName } from '../audio/decode.js';
 import * as puter from '../storage/puter.js';
 import { shortcutsDialog } from '../ui/shortcuts-dialog.js';
 import { preferencesDialog } from '../ui/preferences.js';
-import { deleteSmoothFrames } from '../editor/view-prefs.js';
+import { deleteSmoothFrames, zoomInFactor } from '../editor/view-prefs.js';
 import { shuttleCommands } from './shuttle.js';
 
 const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
@@ -680,9 +680,9 @@ export function installCoreCommands(app) {
       shortcut: '=',
       altShortcuts: ['Shift+=', '+'],
       enabled: anyDoc,
-      run: () => zoomTime(app, 0.5),
+      run: () => zoomTime(app, zoomInFactor(app)),
     },
-    { id: 'view.zoomOutTime', label: 'Zoom Out (Time)', shortcut: '-', enabled: anyDoc, run: () => zoomTime(app, 2) },
+    { id: 'view.zoomOutTime', label: 'Zoom Out (Time)', shortcut: '-', enabled: anyDoc, run: () => zoomTime(app, 1 / zoomInFactor(app)) },
     { id: 'view.zoomInAmp', label: 'Zoom In (Amplitude)', shortcut: 'Alt+=', enabled: hasAudio, run: () => audio(app).setAmp(audio(app).view.amp * 1.5) },
     { id: 'view.zoomOutAmp', label: 'Zoom Out (Amplitude)', shortcut: 'Alt+-', enabled: hasAudio, run: () => audio(app).setAmp(audio(app).view.amp / 1.5) },
     {

@@ -27,6 +27,15 @@ export function sourceKey(channels) {
     .join(':');
 }
 
+/** A two-entry channel map of device channel indices (-1 = none). */
+export function cleanMap(map) {
+  const v = Array.isArray(map) ? map : [];
+  return [0, 1].map((i) => {
+    const n = Math.round(Number(v[i]));
+    return Number.isFinite(n) && n >= -1 && n < 32 ? n : i;
+  });
+}
+
 export class Engine extends Emitter {
   constructor() {
     super();
@@ -43,6 +52,12 @@ export class Engine extends Emitter {
     this.meters = { master: [0, 0], tracks: new Map() };
     this.input = null;
     this.contextPromise = null;
+    // Preferences > Audio Hardware and Audio Channel Mapping.
+    this.latencyHint = 'interactive';
+    this.sinkId = '';
+    this.outputMap = [0, 1]; // device output for file channel 1 and 2 (-1 = none)
+    this.inputMap = [0, 1]; // device input feeding file channel 1 and 2 (-1 = none)
+    this.outputRoute = null;
   }
 
   get available() {
@@ -79,11 +94,11 @@ export class Engine extends Emitter {
     }
     let ctx;
     try {
-      ctx = new AudioContext({ sampleRate: rate, latencyHint: 'interactive' });
+      ctx = new AudioContext({ sampleRate: rate, latencyHint: this.latencyHint });
     } catch {
       // Some browsers limit the rates a context can run at; play at the device
       // rate instead (the graph is still mixed at its own rate).
-      ctx = new AudioContext({ latencyHint: 'interactive' });
+      ctx = new AudioContext({ latencyHint: this.latencyHint });
     }
     this.ctx = ctx;
     this.requestedRate = rate;
@@ -96,8 +111,10 @@ export class Engine extends Emitter {
     });
     node.port.onmessage = (e) => this.#onMessage(e.data);
     node.onprocessorerror = (e) => console.warn('[engine] processor error', e);
-    node.connect(ctx.destination);
     this.node = node;
+    this.outputRoute = null;
+    this.#routeOutput();
+    if (this.sinkId) await this.#applySink();
     let module = null;
     try {
       module = await dspModule();
@@ -111,6 +128,71 @@ export class Engine extends Emitter {
     if (ctx.state === 'suspended') await ctx.resume();
     this.emit('context', ctx);
     return ctx;
+  }
+
+  /** Chooses the device that plays output ('' = system default). Needs AudioContext.setSinkId. */
+  async setSink(id = '') {
+    this.sinkId = id || '';
+    if (this.ctx) await this.#applySink();
+  }
+
+  async #applySink() {
+    if (typeof this.ctx?.setSinkId !== 'function') return;
+    try {
+      await this.ctx.setSinkId(this.sinkId);
+    } catch (err) {
+      console.warn('[engine] output device', err);
+      this.emit('engine-error', 'The chosen output device is not available; playing through the system default.');
+    }
+  }
+
+  /** Latency mode for the next audio context: 'interactive' | 'balanced' | 'playback'. */
+  setLatencyHint(hint) {
+    if (hint === this.latencyHint) return;
+    this.latencyHint = hint;
+    // Recreated on the next ensure() (while stopped, so playback is not cut).
+    if (this.ctx && this.state !== 'playing') this.requestedRate = null;
+  }
+
+  /** Maps the two mix channels onto device outputs, e.g. [1, 0] swaps left and right. */
+  setOutputMap(map) {
+    this.outputMap = cleanMap(map);
+    if (this.node) this.#routeOutput();
+  }
+
+  /** Maps device input channels onto the two recorded channels (applies when an input next opens). */
+  setInputMap(map) {
+    this.inputMap = cleanMap(map);
+  }
+
+  #routeOutput() {
+    const { ctx, node } = this;
+    node.disconnect();
+    for (const n of this.outputRoute || []) n.disconnect();
+    this.outputRoute = null;
+    const map = this.outputMap;
+    if (map[0] === 0 && map[1] === 1) {
+      ctx.destination.channelCount = 2;
+      node.connect(ctx.destination);
+      return;
+    }
+    const max = Math.max(2, ctx.destination.maxChannelCount || 2);
+    const outs = Math.min(max, Math.max(2, ...map.map((c) => c + 1)));
+    try {
+      ctx.destination.channelCount = outs;
+      ctx.destination.channelCountMode = 'explicit';
+      ctx.destination.channelInterpretation = 'discrete';
+    } catch {
+      // Fixed channel count: map within it.
+    }
+    const split = ctx.createChannelSplitter(2);
+    const merge = ctx.createChannelMerger(outs);
+    node.connect(split);
+    map.forEach((dev, ch) => {
+      if (dev >= 0 && dev < outs) split.connect(merge, ch, dev);
+    });
+    merge.connect(ctx.destination);
+    this.outputRoute = [split, merge];
   }
 
   #onMessage(m) {
@@ -297,13 +379,27 @@ export class Engine extends Emitter {
     await this.ctx.audioWorklet.addModule(captureUrl);
     const src = this.ctx.createMediaStreamSource(stream);
     const node = new AudioWorkletNode(this.ctx, 'audio-studio-capture', { numberOfOutputs: 0 });
-    src.connect(node);
+    const deviceChannels = stream.getAudioTracks()[0]?.getSettings().channelCount || 1;
+    const map = this.inputMap;
+    let mapped = false;
+    if (!(map[0] === 0 && map[1] === 1)) {
+      // Pick device channels for the recorded left and right channels.
+      const n = Math.max(deviceChannels, ...map.map((c) => c + 1));
+      const split = this.ctx.createChannelSplitter(n);
+      const merge = this.ctx.createChannelMerger(2);
+      src.connect(split);
+      map.forEach((dev, ch) => {
+        if (dev >= 0 && dev < n) split.connect(merge, dev, ch);
+      });
+      merge.connect(node);
+      mapped = true;
+    } else src.connect(node);
     node.port.onmessage = (e) => {
       const m = e.data;
       if (m.type === 'data') this.emit('record-data', m.channels);
       else if (m.type === 'meter') this.emit('input-meter', m.peak);
     };
-    this.input = { stream, src, node, channels: stream.getAudioTracks()[0]?.getSettings().channelCount || 1 };
+    this.input = { stream, src, node, channels: mapped ? 2 : deviceChannels };
     return this.input;
   }
 

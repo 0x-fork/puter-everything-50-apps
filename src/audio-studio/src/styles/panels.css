@@ -421,16 +421,38 @@
 }
 
 .prefs-title {
-  margin: 0 0 8px;
+  margin: 0 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-soft);
   font-size: var(--fs-lg);
-  font-weight: 600;
-  color: var(--text-strong);
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+/* A titled section is a framed group with its title set into the top edge. */
+.prefs-group {
+  position: relative;
+  margin: 18px 0 6px;
+  padding: 14px 12px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
 }
 
 .prefs-pane .prefs-heading {
-  margin: 14px 0 6px;
-  padding-bottom: 3px;
-  border-bottom: 1px solid var(--border-soft);
+  position: absolute;
+  top: 0;
+  left: 8px;
+  margin: 0;
+  padding: 0 5px;
+  transform: translateY(-50%);
+  background: var(--bg-panel);
+  font-weight: 500;
+  color: var(--text-dim);
+  line-height: 1.2;
+}
+
+.prefs-pane > .prefs-section + .prefs-group {
+  margin-top: 20px;
 }
 
 .prefs-section {
@@ -551,12 +573,113 @@
 }
 
 .prefs-color {
-  width: 44px;
+  width: 64px;
   height: var(--control);
   padding: 1px 2px;
   border: 1px solid var(--divider);
   border-radius: var(--radius-sm);
   background: var(--bg-input);
+  cursor: pointer;
+}
+
+.prefs-preset {
+  min-width: 200px;
+}
+
+.prefs-color-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+
+.prefs-color-row {
+  display: grid;
+  grid-template-columns: minmax(10em, 13em) max-content max-content;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 8px;
+}
+
+.prefs-color-row + .prefs-color-row {
+  border-top: 1px solid var(--border-soft);
+}
+
+.prefs-color-row.own > .prefs-label {
+  color: var(--text);
+}
+
+.prefs-color-reset[disabled] {
+  visibility: hidden;
+}
+
+.prefs-slider-row {
+  flex-wrap: nowrap;
+}
+
+.prefs-range {
+  flex: 0 1 220px;
+  min-width: 100px;
+  accent-color: var(--accent);
+}
+
+.prefs-slider-row > .input.num {
+  flex: none;
+  width: 56px;
+}
+
+.prefs-chmap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.prefs-chmap-table {
+  display: grid;
+  grid-template-columns: 8em minmax(0, 18em);
+  align-items: center;
+  gap: 4px 12px;
+}
+
+.prefs-chmap-head {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.prefs-chmap-file {
+  font-variant-numeric: tabular-nums;
+}
+
+.prefs-chmap .prefs-help {
+  margin: 0;
+}
+
+.prefs-position {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 14px);
+  gap: 3px;
+  justify-self: start;
+}
+
+.prefs-position-cell {
+  width: 14px;
+  height: 11px;
+  padding: 0;
+  border: 1px solid var(--text-dim);
+  border-radius: 1px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.prefs-position-cell[aria-checked='true'] {
+  background: var(--text-strong);
+  border-color: var(--text-strong);
+}
+
+.prefs-position-cell:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
 }
 
 .prefs-ext {

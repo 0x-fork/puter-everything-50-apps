@@ -50,10 +50,17 @@ export const DEFAULTS = {
   rightClick: 'menu', // 'menu' | 'extend' (extend the time selection)
   hudSelectionOnly: false,
   syncFiles: false, // selection, zoom and playhead follow across open audio files
+  zoomStep: 50, // percent of the view each Zoom In/Out (Time) step removes
   // Appearance
   accentColor: 'blue',
   waveColors: null, // { wave, selection, background } or null for the theme colors
-  waveColorPresets: [], // [{ name, wave, selection, background }]
+  waveColorPresets: [], // [{ name, wave, selection, background, playhead, cue, subclip, cart, cd }]
+  uiBrightness: 0, // -100 (darker) .. 100 (lighter) for panels and backgrounds
+  // Audio Channel Mapping and Audio Hardware
+  inputMap: [0, 1], // device input channel recorded as file channel 1 and 2 (-1 = none)
+  outputMap: [0, 1], // device output channel that plays mix channel 1 and 2 (-1 = none)
+  latencyHint: 'interactive', // 'interactive' | 'balanced' | 'playback'
+  outputDevice: '', // sink id; '' = system default
   // Data
   smoothDelete: false,
   smoothDeleteMs: 2,
@@ -66,6 +73,9 @@ export const DEFAULTS = {
   fxOpenOnAdd: false,
   fxProcessBypassed: false,
   fxMenuSort: 'category', // 'category' | 'name'
+  previewAutoMode: 'length', // automatic Preview Editor for 'length'-changing effects or 'any' effect
+  // Memory
+  memoryWarnMb: 2048, // 0 = never warn
   // Markers & Metadata
   exportMarkers: true,
   markerUndo: true,
@@ -73,6 +83,7 @@ export const DEFAULTS = {
   showMarkerLines: true,
   markersInMixdowns: false,
   markerName: 'Marker',
+  markerLock: false, // markers keep their times when audio before them is deleted or inserted
   // Multitrack
   panLaw: 'balance', // 'balance' | 'equalPower'
   panLawDb: -3, // centre attenuation for equal power panning
@@ -85,6 +96,7 @@ export const DEFAULTS = {
   clipsToFront: false,
   clipGainWaveform: true,
   insertMultiple: 'tracks', // 'tracks' | 'same'
+  clipStretchMode: 'realtime', // mode for newly stretched clips: 'realtime' | 'rendered'
   // Playback and Recording
   returnToStartOn: 'first', // 'first' | 'second' stop
   scrollAfterReturn: false,
@@ -101,15 +113,26 @@ export const DEFAULTS = {
   spectralGrid: false,
   spectralGridOpacity: 15, // percent
   spectralPlaySelected: false,
+  pitchWindow: 0, // pitch contour analysis window in points; 0 = by sample rate
+  pitchMinHz: 50,
+  pitchMaxHz: 2000,
   // Time Display
   customFps: 12,
   beatNote: 4,
   subdivisions: 100,
+  // Video
+  videoZoom: 'fit',
+  videoFullscreen: true, // double-click the Video panel for full screen
+  videoTimecode: false,
+  videoTcSize: 30, // percent
+  videoTcOpacity: 65, // percent
+  videoTcPosition: 'bc', // [t|m|b][l|c|r]
+  videoTcReference: 'session', // 'session' | 'source'
   prefsCategory: 'general', // last page shown in Preferences
 };
 
 /** Keys left out of exported settings: they point at files on this device or account. */
-export const LOCAL_ONLY_KEYS = new Set(['recent', 'exportFolder', 'mediaFolder', 'inputDevice']);
+export const LOCAL_ONLY_KEYS = new Set(['recent', 'exportFolder', 'mediaFolder', 'inputDevice', 'outputDevice']);
 
 const SETTINGS_KIND = 'audio-studio-settings';
 

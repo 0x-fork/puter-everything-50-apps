@@ -8,6 +8,7 @@
 import { h } from '../lib/dom.js';
 import { rulerStep, rulerLabel, formatTime, musicalStep } from '../lib/time.js';
 import { cssVar, CANVAS_FONT } from '../ui/theme.js';
+import { markerColor } from '../ui/appearance.js';
 
 export class TimeRuler {
   constructor(app, host) {
@@ -175,12 +176,11 @@ export class TimeRuler {
       }
     }
     // Markers.
-    const markerColor = cssVar('--marker');
     for (const m of t.markers || []) {
       const x = Math.round(this.xOf(m.start)) + 0.5;
       const x2 = m.duration ? this.xOf(m.start + m.duration) : x;
       if (x2 < -10 || x > W + 10) continue;
-      ctx.fillStyle = m.selected ? cssVar('--text-strong') : markerColor;
+      ctx.fillStyle = m.selected ? cssVar('--text-strong') : markerColor(m.type);
       if (m.duration) {
         ctx.globalAlpha = 0.35;
         ctx.fillRect(x, H - 12, x2 - x, 5);
