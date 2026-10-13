@@ -1276,13 +1276,23 @@ export class CollaborationSession {
     const noticed = () => (changed = brought = true);
     const access = [this.role, this.readOnly, this.contentReadOnly].join();
     this.shared.doc.on("update", noticed);
+    let written;
     try {
-      this.shared.apply(decode(result.update));
+      written = this.shared.applyTracked(decode(result.update));
     } finally {
       this.shared.doc.off("update", noticed);
     }
+    // Once this document was checked whole, a synchronization checks only
+    // what it brought, as the worker does each save, and the board as a
+    // whole: on a large board in a busy room, checking every object each
+    // time cost about 15 ms per synchronization, even one bringing nothing.
+    const checked = this.checked === this.shared;
     try {
-      this.shared.validate(ACCEPTED);
+      this.shared.validate(
+        ACCEPTED,
+        checked ? { items: written.items, changes: written.changes } : {},
+      );
+      this.checked = this.shared;
       this.incompatible = false;
     } catch (error) {
       // An edit queued on this device may no longer fit what others saved
@@ -1295,6 +1305,7 @@ export class CollaborationSession {
         if (this.closed) return;
         try {
           this.shared.validate(ACCEPTED);
+          this.checked = this.shared;
           this.incompatible = false;
         } catch (again) {
           again.incompatible = true;

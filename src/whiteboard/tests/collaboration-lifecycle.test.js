@@ -1037,6 +1037,56 @@ test("a board holding what only a newer app writes asks for a reload instead of 
   }
 });
 
+test("what only a newer app writes is noticed when a later synchronization brings it", async () => {
+  const env = environment();
+  const b = board("Later");
+  b.items = [item("note", 0, 0, { text: "Hi" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const statuses = [];
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed() {},
+    activity() {},
+    status: (s) => statuses.push(s),
+  });
+  try {
+    await session.start();
+    await session.synchronize();
+    // The worker, newer than this app, saved a property it does not know.
+    const newer = new SharedDocument(session.shared.update()),
+      vector = newer.vector();
+    newer.doc.transact(() =>
+      newer.items.get(b.items[0].id).set("sparkle", true),
+    );
+    const update = encode(newer.update(vector));
+    newer.destroy();
+    const request = session.request.bind(session);
+    session.request = async (op, input) =>
+      op === "sync"
+        ? { ...(await request(op, input)), update }
+        : request(op, input);
+    await session.synchronize().catch((e) => session.failure(e));
+    assert.equal(
+      statuses.at(-1),
+      "This board needs a newer version of the app · reload",
+    );
+    assert.equal(session.readOnly, true);
+  } finally {
+    session.close();
+  }
+});
+
 test("a queued edit that no longer fits the board is uploaded and settled before the board is called too new", async () => {
   const env = environment();
   const b = board("Queued");
