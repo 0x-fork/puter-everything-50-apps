@@ -70,6 +70,7 @@ export const CATEGORIES = [
           check('hudSelectionOnly', 'Show the HUD only while part of the file is selected', { enabledIf: (p) => p.get('hud') }),
           check('syncFiles', 'Keep selection, zoom and playhead in step across open audio files', { help: 'Switching to another file shows the same range (as far as that file reaches).' }),
           select('historyLimit', 'Undo history steps', opts([[50, '50'], [100, '100'], [200, '200'], [500, '500']])),
+          { type: 'custom', label: 'Warning dialogs', keys: ['dismissedNotices'], keywords: "reset warnings don't show again alerts notices", render: resetNotices },
         ],
       },
       {
@@ -653,6 +654,22 @@ function timeSignature({ app, row }) {
   sync();
   row.refresh = sync;
   return h('div.prefs-inline', beats, h('span.muted', '/'), note);
+}
+
+function resetNotices({ app, row }) {
+  const b = h('button.btn', { type: 'button' }, 'Reset All Warning Dialogs');
+  const sync = () => {
+    const n = (app.prefs.get('dismissedNotices') || []).length;
+    b.disabled = !n;
+    b.title = n ? `Show ${n} hidden message${n === 1 ? '' : 's'} again` : 'No messages are hidden';
+  };
+  b.addEventListener('click', () => {
+    app.prefs.reset(['dismissedNotices']);
+    announce('Warning dialogs will show again');
+  });
+  sync();
+  row.refresh = sync;
+  return b;
 }
 
 function recoverButton({ app }) {

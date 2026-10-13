@@ -51,6 +51,7 @@ export const DEFAULTS = {
   hudSelectionOnly: false,
   syncFiles: false, // selection, zoom and playhead follow across open audio files
   zoomStep: 50, // percent of the view each Zoom In/Out (Time) step removes
+  dismissedNotices: [], // notice ids turned off with "Don't show this again"
   // Appearance
   accentColor: 'blue',
   waveColors: null, // { wave, selection, background } or null for the theme colors
