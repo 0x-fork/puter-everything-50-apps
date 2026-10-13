@@ -177,3 +177,94 @@ export function setLinked(def, values, id, v, groups = linkGroups(def)) {
   }
   return next;
 }
+
+/** Display text split into the number and its unit: ["-3.0", "dB"], ["4.0", ":1"], ["1.25", "kHz"]. */
+export function formatParts(p, v) {
+  const text = formatValue(p, v);
+  if (typeOf(p) !== 'number') return [text, ''];
+  const m = text.match(/^(-?inf|[-+]?[\d.]+(?:e[-+]?\d+)?)\s*(.*)$/i);
+  return m ? [m[1], m[2]] : [text, ''];
+}
+
+// ------------------------------------------------------------ slider scales
+
+const NICE = [1, 2, 2.5, 5, 10];
+
+function niceStep(span, count) {
+  const raw = span / Math.max(1, count);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const n of NICE) if (n * mag >= raw - 1e-9) return n * mag;
+  return 10 * mag;
+}
+
+// Steps tried in order of preference; the first that labels both ends wins.
+const PREFERRED = [1, 2, 5, 2.5, 3, 1.5, 4, 6, 1.2, 8];
+
+function linearStep(min, max, maxLabels) {
+  const k = Math.floor(Math.log10(max - min));
+  const isInt = (x) => Math.abs(x - Math.round(x)) < 1e-6;
+  for (const n of PREFERRED) {
+    for (const e of [k - 1, k]) {
+      const step = n * Math.pow(10, e);
+      const count = (max - min) / step + 1;
+      if (isInt(min / step) && isInt(count) && count >= 4 && count <= maxLabels) return step;
+    }
+  }
+  return niceStep(max - min, maxLabels - 1);
+}
+
+const tickLabel = (v, unit) => {
+  const a = Math.abs(v);
+  if (unit === 'Hz' && a >= 1000) return `${Number((v / 1000).toPrecision(3))}k`;
+  return String(Number(v.toPrecision(4)));
+};
+
+/**
+ * Tick marks for a number param's slider: { major: [{ v, x, label }], minor: [x] }
+ * with x the slider position in [0, 1]. Linear scales get 4 to 7 labelled
+ * steps on round values; log scales label 1-2-5 values per decade (thinned
+ * when crowded) with a minor tick at every other integer multiple.
+ */
+export function scaleTicks(p, { maxLabels = 7 } = {}) {
+  const min = p.min ?? 0;
+  const max = p.max ?? 1;
+  const major = [];
+  const minor = [];
+  if (!(max > min)) return { major, minor };
+  if (isLog(p)) {
+    const lo = Math.floor(Math.log10(min));
+    const hi = Math.ceil(Math.log10(max));
+    const all = [];
+    for (let d = lo; d <= hi; d++) {
+      const base = Math.pow(10, d);
+      for (let k = 1; k <= 9; k++) {
+        const v = Number((k * base).toPrecision(6));
+        if (v < min * (1 - 1e-9) || v > max * (1 + 1e-9)) continue;
+        all.push({ v, k });
+      }
+    }
+    for (const sets of [[1, 2, 5], [1, 2], [1]]) {
+      const picked = all.filter((t) => sets.includes(t.k));
+      if (picked.length <= maxLabels || sets.length === 1) {
+        for (const t of all) {
+          const x = toPosition(p, t.v);
+          if (sets.includes(t.k)) major.push({ v: t.v, x, label: tickLabel(t.v, p.unit) });
+          else minor.push(x);
+        }
+        break;
+      }
+    }
+    return { major, minor };
+  }
+  const step = linearStep(min, max, maxLabels);
+  const sub = step / 2;
+  const first = Math.ceil((min - 1e-9) / sub) * sub;
+  for (let v = first; v <= max + 1e-9; v += sub) {
+    const r = Number(v.toPrecision(10));
+    const x = toPosition(p, r);
+    const isMajor = Math.abs(r / step - Math.round(r / step)) < 1e-6;
+    if (isMajor) major.push({ v: r, x, label: tickLabel(r, p.unit) });
+    else minor.push(x);
+  }
+  return { major, minor };
+}

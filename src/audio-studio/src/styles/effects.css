@@ -8,8 +8,14 @@
 }
 
 .dialog.fx-dialog {
-  width: min(560px, 100%);
+  width: min(600px, 100%);
+  max-width: min(600px, 100%);
   border-color: var(--divider);
+}
+
+.dialog.fx-dialog.fx-wide {
+  width: min(940px, 100%);
+  max-width: min(940px, 100%);
 }
 
 .fx-dialog .dialog-body {
@@ -31,7 +37,29 @@
   min-width: 0;
 }
 
-.fx-namebar[hidden] {
+.fx-presetbar {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.fx-presetbar .spacer {
+  flex: 1;
+}
+
+.fx-bar-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--divider);
+}
+
+.fx-presetbar .icon-btn[aria-expanded='true'] {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.fx-namebar[hidden],
+.fx-popover[hidden] {
   display: none;
 }
 
@@ -57,47 +85,262 @@
   font-size: var(--fs-sm);
 }
 
+/* Channel map and info panels under the preset bar. */
+.fx-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-panel-alt);
+}
+
+.fx-popover p {
+  margin: 0;
+}
+
+.fx-tips {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+}
+
+.fx-chmap-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.fx-chmap-row > .fx-label {
+  min-width: 120px;
+}
+
+.fx-chmap-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Parameter frames. */
+.fx-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fx-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  gap: 10px;
+}
+
+.fx-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fx-group {
+  min-width: 0;
+  margin: 0;
+  padding: 4px 12px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+}
+
+.fx-group > legend,
+.fx-group > summary {
+  padding: 0 4px;
+  color: var(--text);
+}
+
+.fx-group.off > .fx-params,
+.fx-group.off > .fx-vsliders {
+  opacity: 0.55;
+}
+
+.fx-legend-check {
+  gap: 5px;
+}
+
+details.fx-group {
+  padding-top: 6px;
+}
+
+details.fx-group > summary {
+  margin-left: -4px;
+  cursor: pointer;
+}
+
+details.fx-group[open] > summary {
+  margin-bottom: 6px;
+}
+
 .fx-params {
   display: grid;
-  grid-template-columns: max-content minmax(80px, 1fr) minmax(76px, max-content);
-  align-items: center;
-  gap: 4px 10px;
+  grid-template-columns: max-content minmax(140px, 1fr) minmax(84px, max-content);
+  align-items: end;
+  gap: 8px 12px;
 }
 
 .fx-row {
   display: contents;
 }
 
-.fx-section {
+.fx-row > .fx-label {
+  justify-self: end;
+  margin: 0;
+  line-height: 18px;
+}
+
+.fx-row.bool > *,
+.fx-row.wide > * {
+  grid-column: 2 / -1;
+  padding: 3px 0;
+}
+
+.fx-row.wide > * {
   grid-column: 1 / -1;
-  margin-top: 6px;
-  padding-bottom: 2px;
-  border-bottom: 1px solid var(--border-soft);
-  color: var(--text-strong);
-  font-weight: 600;
+}
+
+/* Slider with a tick scale above it: the ruler spans the thumb's travel. */
+.fx-scale {
+  position: relative;
+  min-width: 0;
+  padding-top: 13px;
+}
+
+.fx-ruler {
+  position: absolute;
+  top: 0;
+  left: 7px;
+  right: 7px;
+  height: 22px;
+  pointer-events: none;
+}
+
+.fx-tick {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  height: 3px;
+  background: var(--text-faint);
+}
+
+.fx-tick.major {
+  height: 6px;
+  background: var(--text-dim);
+}
+
+.fx-tick-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .fx-slider {
+  position: relative;
+  display: block;
   width: 100%;
+}
+
+input[type='range'].fx-slider::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--text-faint);
+}
+
+input[type='range'].fx-slider::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -6px;
+  border: 2px solid var(--text-dim);
+  background: var(--bg-panel);
+}
+
+input[type='range'].fx-slider:focus-visible::-webkit-slider-thumb,
+input[type='range'].fx-slider:hover::-webkit-slider-thumb {
+  border-color: var(--text-strong);
+}
+
+input[type='range'].fx-slider::-moz-range-track {
+  height: 2px;
+  background: var(--text-faint);
+}
+
+input[type='range'].fx-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--text-dim);
+  background: var(--bg-panel);
+}
+
+input[type='range'].fx-slider:disabled {
+  opacity: 0.45;
+}
+
+.fx-ends {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 2px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
 }
 
 .fx-value {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
+  line-height: 18px;
 }
 
 .fx-value .hot {
-  justify-content: flex-end;
   min-width: 70px;
+}
+
+.hot-unit {
+  margin-left: 0.3em;
+  color: var(--text);
+}
+
+.hot:disabled .hot-unit {
+  color: inherit;
 }
 
 .fx-choice {
   grid-column: 2 / -1;
+  align-self: center;
+  padding: 2px 0;
 }
 
 .fx-choice .select {
   width: 100%;
   max-width: 280px;
+}
+
+.fx-radios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.fx-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.fx-radio input {
+  margin: 0;
+  accent-color: var(--text-dim);
 }
 
 .fx-bool {
@@ -111,7 +354,143 @@
   gap: 4px;
 }
 
-/* Footer tools: power, preview, loop, meters. */
+/* Vertical sliders (graphic EQ bands, echo equalizer). */
+.fx-vsliders {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+  padding-top: 4px;
+  overflow-x: auto;
+}
+
+.fx-vslider {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 28px;
+}
+
+.fx-vlabel {
+  color: var(--text);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+.fx-scale.v {
+  height: 170px;
+  width: 22px;
+  padding: 0;
+}
+
+.fx-ruler.v {
+  top: 7px;
+  bottom: 7px;
+  left: 0;
+  right: 0;
+  height: auto;
+}
+
+.fx-ruler.v .fx-tick {
+  left: 4px;
+  right: 4px;
+  width: auto;
+  height: 1px;
+}
+
+.fx-ruler.v .fx-tick.major {
+  left: 1px;
+  right: 1px;
+  height: 1px;
+}
+
+.fx-scale.v .fx-slider {
+  width: 22px;
+  height: 100%;
+  min-width: 0;
+  writing-mode: vertical-lr;
+  direction: rtl;
+}
+
+.fx-scale.v input[type='range'].fx-slider::-webkit-slider-runnable-track {
+  width: 2px;
+  height: 100%;
+}
+
+.fx-scale.v input[type='range'].fx-slider::-webkit-slider-thumb {
+  margin-top: 0;
+  margin-left: -6px;
+}
+
+.fx-vslider .fx-value {
+  justify-content: center;
+}
+
+.fx-vslider .fx-value .hot {
+  min-width: 0;
+  justify-content: center;
+}
+
+.fx-vslider .hot-unit {
+  display: none;
+}
+
+/* Tabs (Dynamics Processing). */
+.fx-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fx-tabbar {
+  display: flex;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.fx-tab {
+  padding: 4px 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.fx-tab[aria-selected='true'] {
+  border-bottom-color: var(--text-strong);
+  color: var(--text-strong);
+}
+
+.fx-tabpage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fx-tabpage[hidden] {
+  display: none;
+}
+
+/* Footer: channel routing summary over power, preview, loop and meters. */
+.fx-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fx-route-summary {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+.fx-dialog .dialog-foot {
+  align-items: flex-end;
+}
+
 .fx-footer-tools {
   display: flex;
   align-items: center;
@@ -120,8 +499,8 @@
 }
 
 .fx-power[aria-pressed='true'] {
-  color: var(--success);
-  background: transparent;
+  color: var(--accent-text);
+  background: var(--success);
 }
 
 .fx-power[aria-pressed='false'] {
@@ -859,7 +1238,7 @@
     gap: 0 8px;
   }
 
-  .fx-row > .fx-slider {
+  .fx-row > .fx-scale {
     grid-column: 1 / -1;
     grid-row: 2;
   }

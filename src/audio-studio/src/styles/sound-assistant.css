@@ -624,7 +624,7 @@
     gap: 0 8px;
   }
 
-  .diag-settings .fx-row > .fx-slider {
+  .diag-settings .fx-row > .fx-scale {
     grid-column: 1 / -1;
     grid-row: 2;
   }

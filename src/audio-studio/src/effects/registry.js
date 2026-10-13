@@ -81,10 +81,12 @@ export function paramArray(def, values) {
 
 /**
  * A slot spec for FxHost / the mix graph. Pass `doc` and `rate` for effects
- * with `data` (FFT Filter curve, convolution impulse, noise print).
+ * with `data` (FFT Filter curve, convolution impulse, noise print), and a
+ * channel `route` (routing.js) to feed and write chosen channels.
  */
-export function slotSpec(def, values, { key = def.id, enabled = true, mix = 1, doc = null, rate = doc?.sampleRate ?? 48000 } = {}) {
+export function slotSpec(def, values, { key = def.id, enabled = true, mix = 1, doc = null, rate = doc?.sampleRate ?? 48000, route = null } = {}) {
   const spec = { key, kind: def.kind, params: paramArray(def, values), enabled, mix };
+  if (route && !(route.in[0] === 0 && route.in[1] === 1 && route.out[0] === 0 && route.out[1] === 1)) spec.route = { in: [...route.in], out: [...route.out] };
   if (def.readout) spec.readout = true;
   if (def.data) spec.data = def.data({ ...defaults(def), ...values }, { doc, rate }) || [];
   return spec;

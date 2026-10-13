@@ -26,11 +26,15 @@ function roundTo(v, step) {
  * @param {string} o.label accessible name
  * @param {number} [o.pixelsPerStep] drag sensitivity
  */
-export function hotNumber({ value, min = -Infinity, max = Infinity, step = 1, format = (v) => String(v), parse = Number, onInput, onChange, label, pixelsPerStep = 2, defaultValue }) {
+export function hotNumber({ value, min = -Infinity, max = Infinity, step = 1, format = (v) => String(v), parts = null, editText = null, parse = Number, onInput, onChange, label, pixelsPerStep = 2, defaultValue }) {
   let current = value;
   const btn = h('button.hot', { type: 'button', role: 'spinbutton', 'aria-label': label });
+  // parts(v) => [number, unit] shows the unit in a quieter style after the number.
   const show = () => {
-    btn.textContent = format(current);
+    if (parts) {
+      const [num, unit] = parts(current);
+      btn.replaceChildren(h('span.hot-num', num), ...(unit ? [' ', h('span.hot-unit', unit)] : []));
+    } else btn.textContent = format(current);
     if (Number.isFinite(current)) btn.setAttribute('aria-valuenow', String(current));
     btn.setAttribute('aria-valuetext', format(current));
     if (Number.isFinite(min)) btn.setAttribute('aria-valuemin', String(min));
@@ -88,7 +92,7 @@ export function hotNumber({ value, min = -Infinity, max = Infinity, step = 1, fo
   });
 
   function edit() {
-    const input = h('input.hot-edit', { type: 'text', value: format(current).replace(/\s*(dB|%|Hz|ms|s)$/i, ''), 'aria-label': label });
+    const input = h('input.hot-edit', { type: 'text', value: editText ? editText(current) : format(current).replace(/\s*(dB|%|Hz|ms|s)$/i, ''), 'aria-label': label });
     btn.replaceWith(input);
     input.focus();
     input.select();
