@@ -1,5 +1,5 @@
 // Processing one Batch Process item: load the audio (an open document's
-// current state, a file from this device or a Puter file), apply the chosen
+// current state or a range of it, a file from this device or a Puter file), apply the chosen
 // Favorite to the whole file, encode it with the batch export options in the
 // export worker and hand the Blob to the output (a Puter folder or the ZIP
 // collector). Open documents are never modified.
@@ -61,6 +61,7 @@ export async function applyFavoriteToState(fav, state, { signal, onProgress, doc
 export async function loadItem(item) {
   const s = item.source;
   if (s.type === 'doc') return { state: s.doc.state, doc: s.doc };
+  if (s.type === 'range') return { state: E.cropRange(s.doc.state, s.start, s.end), doc: s.doc };
   let blob = s.file;
   if (s.type === 'puter') blob = typeof s.item?.read === 'function' ? await s.item.read() : await puter.readFile(s.path);
   const doc = await audioFileFromBlob(blob, item.name, s.type === 'puter' ? { type: 'puter', path: s.path } : { type: 'local' });

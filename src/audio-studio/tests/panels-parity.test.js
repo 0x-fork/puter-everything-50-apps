@@ -19,6 +19,8 @@ import { meterHorizontal } from '../src/panels/levels.js';
 import { visibleFiles } from '../src/panels/files.js';
 import { favoriteSettings } from '../src/effects/favorites.js';
 import '../src/effects/defs/amplitude.js';
+import { makeItem, sourceIdentity } from '../src/batch/queue.js';
+import { loadItem } from '../src/batch/process.js';
 import { parseWav } from '../src/audio/wav.js';
 import { META_TABS, normalizeMetaValue, metadataPanel } from '../src/panels/metadata.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
@@ -366,5 +368,30 @@ describe('Favorites details', () => {
     const rows = favoriteSettings(app, eff);
     expect(rows[0]).toEqual(['Maximum Amplitude', '-0.1 dB']);
     expect(rows.find((r) => r[0] === 'Link Channels')[1]).toBe('On');
+  });
+});
+
+describe('Markers to Batch Process', () => {
+  it('sends range markers as batch items that load only their range', async () => {
+    const app = makeApp();
+    const doc = audioDoc(4, 1);
+    doc.name = 'take.wav';
+    doc.apply('Markers', { ...doc.state, markers: [{ id: 'm1', start: 0, duration: 0, name: 'Cue', type: 'cue' }, { id: 'm2', start: 1000, duration: 500, name: 'Verse', type: 'cue' }] });
+    app.addDocument(doc);
+    const added = [];
+    app.registerPanel({ id: 'batch', title: 'Batch Process', create: () => ({ el: document.createElement('div') }) });
+    app.dock = { openPanel: () => {}, instances: new Map([['batch', { api: { add: (s) => added.push(...s) } }]]) };
+    const p = create(app, 'markers');
+    const btn = p.el.querySelector('[aria-label="Send Ranges to Batch Process"]');
+    expect(btn.disabled).toBe(false);
+    btn.click();
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({ type: 'range', start: 1000, end: 1500, name: 'take Verse' });
+    const item = makeItem(added[0]);
+    expect(item.name).toBe('take Verse');
+    expect(sourceIdentity(added[0])).toBe(`range:${doc.id}:1000:1500`);
+    const { state } = await loadItem(item);
+    expect(state.channels[0].length).toBe(500);
+    expect(doc.state.channels[0].length).toBe(4000);
   });
 });

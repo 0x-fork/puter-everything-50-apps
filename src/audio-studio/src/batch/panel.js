@@ -419,7 +419,7 @@ export function batchPanel(app) {
             onclick: (e) => select(i, e),
             onkeydown: (e) => rowKeys(e, i),
           },
-          h('td.batch-name', { title: item.source.type === 'puter' ? item.source.path : item.name }, h('span.name-cell', icon(item.source.type === 'doc' ? 'file-audio' : item.source.type === 'puter' ? 'cloud' : 'hard-drive', 14), h('span', item.name))),
+          h('td.batch-name', { title: item.source.type === 'puter' ? item.source.path : item.name }, h('span.name-cell', icon(item.source.type === 'doc' ? 'file-audio' : item.source.type === 'range' ? 'bookmark' : item.source.type === 'puter' ? 'cloud' : 'hard-drive', 14), h('span', item.name))),
           h('td.batch-type', sourceSampleType(item)),
           h('td.batch-out', { title: outputs[i] }, outputs[i]),
           statusCell(item),
