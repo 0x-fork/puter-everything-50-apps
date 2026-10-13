@@ -179,6 +179,31 @@ describe('mixer panel', () => {
     expect(doc.state.tracks[1].solo).toBe(true);
   });
 
+  it('has polarity, automation mode and collapsible sections', () => {
+    const { app, doc } = setup();
+    const panel = mixerPanel(app);
+    document.body.append(panel.el);
+    panel.show();
+    const strip = panel.el.querySelector('.mx-strip');
+    strip.querySelector('.mt-tb-invert').click();
+    expect(doc.state.tracks[0].invert).toBe(true);
+    expect(doc.history.undoLabel).toBe('Invert Polarity On');
+    expect(strip.querySelector('.mt-tb-invert').getAttribute('aria-pressed')).toBe('true');
+    const mode = strip.querySelector('.mx-mode');
+    mode.value = 'touch';
+    mode.dispatchEvent(new Event('change'));
+    expect(doc.state.tracks[0].mode).toBe('touch');
+    // The gutter collapses a section in every strip and remembers it.
+    const btn = panel.el.querySelector(".mx-gutter-btn[data-sec='sends']");
+    btn.click();
+    expect(app.prefs.get('mixerCollapsed')).toEqual(['sends']);
+    expect(panel.el.classList.contains('mx-hide-sends')).toBe(true);
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+    btn.click();
+    expect(panel.el.classList.contains('mx-hide-sends')).toBe(false);
+    panel.el.remove();
+  });
+
   it('fader keys reach silence and back', () => {
     const changes = [];
     const el = fader({ value: -59, label: 'Test', onChange: (v) => changes.push(v) });

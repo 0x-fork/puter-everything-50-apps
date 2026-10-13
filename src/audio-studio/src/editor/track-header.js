@@ -66,6 +66,7 @@ export class TrackHeader {
     this.volNum = hotNumber({ value: 0, min: SILENT_DB, max: MAX_DB, step: 0.1, defaultValue: 0, label: 'Volume (dB)', format: formatGainShort, parse: parseGain, onInput: (v) => volSet(v, 'input'), onChange: (v) => volSet(v, 'change') });
     this.panKnob = isMaster ? null : knob({ value: 0, min: -100, max: 100, step: 1, defaultValue: 0, bipolar: true, label: 'Pan', format: formatPan, size: 20, onInput: (v) => panSet(v, 'input'), onChange: (v) => panSet(v, 'change') });
     this.panNum = isMaster ? null : hotNumber({ value: 0, min: -100, max: 100, step: 1, defaultValue: 0, label: 'Pan', format: (v) => (Math.round(v) ? String(Math.round(v)) : '0'), parse: parsePan, onInput: (v) => panSet(v, 'input'), onChange: (v) => panSet(v, 'change') });
+    this.invert = h('button.mt-tb.mt-tb-invert', { type: 'button', 'aria-pressed': 'false', 'aria-label': 'Invert polarity', title: 'Invert Polarity', onclick: () => controls().toggle(this.id, 'invert') }, icon('polarity', 12));
     this.fxPower = h('button.mt-tb.mt-tb-fx', { type: 'button', 'aria-pressed': 'true', 'aria-label': 'Track effects power', title: 'Track Effects Power', onclick: () => controls().toggle(this.id, 'fxPower') }, icon('power', 12));
 
     this.inputSel = isMaster || isBus ? null : h('select.select.mt-th-select', { 'aria-label': 'Track input', title: 'Input' });
@@ -98,7 +99,12 @@ export class TrackHeader {
       h('div.spacer'),
       this.fxPower,
     );
-    this.rowIo = h('div.mt-th-row.mt-th-r3.mt-th-io', this.inputSel ? h('label.mt-th-io-row', h('span.mt-th-glyph', { title: 'Input' }, icon('log-in', 12)), this.inputSel) : null, h('label.mt-th-io-row', h('span.mt-th-glyph', { title: 'Output' }, icon('log-out', 12)), this.outputSel));
+    // Polarity sits on the input row (or the output row of buses and the master).
+    this.rowIo = h(
+      'div.mt-th-row.mt-th-r3.mt-th-io',
+      this.inputSel ? h('div.mt-th-io-row', h('span.mt-th-glyph', { title: 'Input' }, icon('log-in', 12)), this.inputSel, this.invert) : null,
+      h('div.mt-th-io-row', h('span.mt-th-glyph', { title: 'Output' }, icon('log-out', 12)), this.outputSel, this.inputSel ? null : this.invert),
+    );
     this.rowFx = h('div.mt-th-row.mt-th-r3.mt-th-fx', this.fxList, this.fxEdit);
     this.sendCtl = isMaster ? null : new SendControls(app, doc, track.id, { compact: true });
     this.eqCtl = new EqControls(app, doc, track.id, { compact: true });
@@ -185,7 +191,7 @@ export class TrackHeader {
     if (!prev || prev.color !== track.color) this.el.style.setProperty('--track-color', track.color);
     if (document.activeElement !== this.nameInput && this.nameInput.value !== track.name) this.nameInput.value = track.name;
     this.el.setAttribute('aria-label', `${track.type === 'master' ? 'Master track' : track.type === 'bus' ? 'Bus track' : 'Track'} ${track.name}`);
-    for (const [btn, key] of [[this.mute, 'mute'], [this.solo, 'solo'], [this.arm, 'arm'], [this.monitor, 'monitor']]) {
+    for (const [btn, key] of [[this.mute, 'mute'], [this.solo, 'solo'], [this.arm, 'arm'], [this.monitor, 'monitor'], [this.invert, 'invert']]) {
       if (btn) btn.setAttribute('aria-pressed', String(Boolean(track[key])));
     }
     this.fxPower.setAttribute('aria-pressed', String(track.fxPower));
@@ -193,7 +199,7 @@ export class TrackHeader {
     this.fxPower.hidden = !fx.length;
     this.updateValues();
     if (this.inputSel) {
-      const opts = [['none', 'None'], ['default', track.channels === 1 ? 'Default Input (Mono)' : 'Default Input (Stereo)']];
+      const opts = [['none', 'None'], ['default', track.channels === 1 ? 'Default Mono Input' : 'Default Stereo Input']];
       syncOptions(this.inputSel, opts, track.input);
     }
     const outs = [['master', track.type === 'master' ? 'Default Output' : 'Mix']];

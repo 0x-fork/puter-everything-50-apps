@@ -110,7 +110,8 @@ export function rackActive(rack) {
 
 const dbGain = (db) => Math.pow(10, (db || 0) / 20);
 
-function gainSpec(key, db) {
+/** An amplify spec for a rack's input or output gain (dB). */
+export function gainSpec(key, db) {
   const def = getEffect('amplify');
   return def ? slotSpec(def, { left: db, right: db, linked: true }, { key }) : null;
 }
