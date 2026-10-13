@@ -829,10 +829,14 @@ export function paint(canvas, items, view, options = {}) {
   // Zoomed far out, text a few pixels tall is left out, as Miro does: it
   // cannot be read, and a whole large board in view would set every line.
   const coarse = options.coarse && view.z < DETAIL_ZOOM;
-  const unreadable = (i) =>
+  const textSize = (i) =>
     (i.fontSize || (i.type === "text" ? 28 : i.type === "arrow" ? 16 : 19)) *
-      view.z <
-    4;
+    view.z;
+  const unreadable = (i) => textSize(i) < 4;
+  // Text less than a pixel tall shows no letters, only a faint tint. A
+  // library preview leaves it out: a large board's preview laid out every
+  // line of thousands of notes for it, more than once while fonts loaded.
+  const speck = (i) => options.tinyText === false && textSize(i) * dpr < 1;
   // Zoomed far out, an unrotated sticky note or plain rectangle a few
   // pixels across is a block of its colour: its corners, border and text
   // cannot be seen, and a large board seen whole has thousands of them.
@@ -904,6 +908,7 @@ export function paint(canvas, items, view, options = {}) {
       repaint,
       options.editingId === i.id ||
         (coarse && unreadable(i)) ||
+        speck(i) ||
         labelled.has(i.id),
       tags,
       options.shadows !== false,
@@ -1288,7 +1293,12 @@ function paintPreview(canvas, rect = canvas.getBoundingClientRect()) {
       y: height / 2 - (a.y + a.h / 2) * z,
       z,
     },
-    { comments: b.comments, tags: b.tags, textColor: canvas.dataset.ink },
+    {
+      comments: b.comments,
+      tags: b.tags,
+      textColor: canvas.dataset.ink,
+      tinyText: false,
+    },
   );
   canvas.dataset.painted = painted;
 }

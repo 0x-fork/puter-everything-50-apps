@@ -133,3 +133,28 @@ test("a list-view thumbnail shows the board at a readable size, not a speck", ()
   assert.equal(pixel(1, 19)[3], 0, "a margin stays clear");
   assert.equal(pixel(52, 19)[3], 0, "a margin stays clear");
 });
+
+test("a preview leaves out text under a pixel tall, and draws the rest", () => {
+  // A large board's preview laid out every line of its notes for text that
+  // showed as a faint tint; a small board's text is drawn as before.
+  const note = (x, extra) =>
+    item("note", x, 0, { text: "Plan launch", ...extra });
+  const [small, large] = painted([
+    { board: { id: "small", updated: 1, items: [note(0), note(230)] } },
+    {
+      board: {
+        id: "large",
+        updated: 1,
+        items: [
+          note(0),
+          note(20000),
+          note(10000, { text: "Go", fontSize: 100 }),
+        ],
+      },
+    },
+  ]);
+  assert.equal(small.textFills.length, 2, "both notes' text is drawn");
+  // 20,000 board units across 270 pixels: 19 pixel text is a quarter pixel
+  // tall, and only the note with 100 pixel text shows it.
+  assert.equal(large.textFills.length, 1);
+});
