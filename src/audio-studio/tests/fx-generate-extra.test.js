@@ -51,6 +51,25 @@ describe('tone generator: sweeps, partials and shapes', () => {
   });
 });
 
+describe('Generate Tones reach', () => {
+  it('modulates at audio rates and depths, and goes down to -120 dB', () => {
+    const r = (id) => {
+      const p = TONES_DEF.params.find((q) => q.id === id);
+      return [p.min, p.max];
+    };
+    expect(r('modulateBy')).toEqual([0, 20000]);
+    expect(r('modFreq')).toEqual([0.1, 20000]);
+    expect(r('volume')).toEqual([-120, 0]);
+    expect(r('base')[0]).toBe(1);
+    // FM at 1 kHz rate and 5 kHz depth on a 1 kHz carrier: finite, at the volume, with sidebands.
+    const x = generateTones({ rate: 48000, frames: 48000, base: 1000, modulateBy: 5000, modFreq: 1000, volumeDb: -6 });
+    expect(x.every(Number.isFinite)).toBe(true);
+    expect(Math.max(...x.map(Math.abs))).toBeCloseTo(dbToGain(-6), 2);
+    const quiet = generateTones({ rate: 48000, frames: 4800, base: 1000, volumeDb: -120 });
+    expect(Math.max(...quiet.map(Math.abs))).toBeCloseTo(1e-6, 7);
+  });
+});
+
 describe('Generate Tones settings', () => {
   it('maps enabled components with dB amplitudes and multipliers', () => {
     const v = normalizeValues(TONES_DEF, { on1: true, amp1: 0, on2: true, amp2: -6, mul2: 2.5, on3: false });
