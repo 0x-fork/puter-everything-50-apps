@@ -105,8 +105,8 @@ registerEffect({
     choice('mode', 'Mode', ['Tape', 'Tape and Tube', 'Analog'], 0),
     pct('dry', 'Dry Out', 80, { max: 200 }),
     pct('wet', 'Wet Out', 50, { max: 200 }),
-    ms('delay', 'Delay', 5, 4000, 350),
-    pct('feedback', 'Feedback', 45, { max: 120 }),
+    ms('delay', 'Delay', 10, 8000, 350),
+    pct('feedback', 'Feedback', 45, { max: 200 }),
     pct('trash', 'Trash', 0),
     pct('spread', 'Spread', 100, { max: 200 }),
     num('lowCut', 'Low Cut', 10, 2000, 80, 'Hz', { step: 1, scale: 'log' }),
@@ -122,7 +122,7 @@ registerEffect({
   ],
   tail: (v, rate) => {
     const spread = clamp(v.spread / 100, 0, 2);
-    const longest = clamp(v.delay, 5, 4000) * (1 + SPREAD_OFFSET * spread) * 1.003;
-    return feedbackTail((longest / 1000) * rate, clamp(v.feedback / 100, 0, 1.2), rate);
+    const longest = clamp(v.delay, 5, 8000) * (1 + SPREAD_OFFSET * spread) * 1.003;
+    return feedbackTail((longest / 1000) * rate, clamp(v.feedback / 100, 0, 2), rate);
   },
 });

@@ -75,7 +75,7 @@ impl Effect for Flanger {
             }
             2 => self.phasing = v.clamp(0.0, 360.0) / 360.0,
             3 => self.fb = (v * 0.01).clamp(0.0, 0.95),
-            4 => self.lfo_rate = v.clamp(0.0, 50.0),
+            4 => self.lfo_rate = v.clamp(0.0, 60.0),
             5 => self.inverted = v >= 0.5,
             6 => self.special = v >= 0.5,
             7 => self.sinusoidal = v >= 0.5,

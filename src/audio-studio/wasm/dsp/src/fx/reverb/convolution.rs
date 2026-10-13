@@ -317,7 +317,7 @@ impl Effect for ConvolutionReverb {
                 self.predelay_ms = v.clamp(0.0, MAX_PREDELAY_MS);
                 self.pre_frames = (self.predelay_ms * self.rate / 1000.0).round() as usize;
             }
-            6 => self.width.target = (v * 0.01).clamp(0.0, 2.0),
+            6 => self.width.target = (v * 0.01).clamp(0.0, 3.0),
             7 => self.gain.target = db_to_gain(v.clamp(-60.0, 24.0)),
             8 => self.centre_send.target = (v * 0.01).clamp(0.0, 1.0),
             9 => self.centre_wet.target = (v * 0.02).clamp(0.0, 2.0),

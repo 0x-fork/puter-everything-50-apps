@@ -13,7 +13,7 @@ use super::{feedback_tail, soft_limit, tanh_r};
 use crate::fx::util::{Biquad, Coefs, DelayLine, Rng, TAU};
 use crate::fx::{Effect, Smooth};
 
-pub const MAX_MS: f32 = 4000.0;
+pub const MAX_MS: f32 = 8000.0;
 /// Right channel delay is longer by up to this fraction at 200 % spread.
 const SPREAD_OFFSET: f32 = 0.08;
 /// Wow (slow) and flutter (fast) depth as a fraction of the delay time.
@@ -111,7 +111,7 @@ impl Effect for AnalogDelay {
             1 => self.dry.target = (v * 0.01).clamp(0.0, 2.0),
             2 => self.wet.target = (v * 0.01).clamp(0.0, 2.0),
             3 => self.ms = v.clamp(5.0, MAX_MS),
-            4 => self.fb = (v * 0.01).clamp(0.0, 1.2),
+            4 => self.fb = (v * 0.01).clamp(0.0, 2.0),
             5 => self.trash = (v * 0.01).clamp(0.0, 1.0),
             6 => self.spread = (v * 0.01).clamp(0.0, 2.0),
             7 => self.low_cut = v.clamp(10.0, 2000.0),
