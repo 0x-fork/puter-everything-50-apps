@@ -2563,7 +2563,11 @@ export class BoardService {
     let after;
     try {
       const raw = doc.snapshot("shared", false);
-      doc.validate(allowed, { board: raw, items: written.items });
+      doc.validate(allowed, {
+        board: raw,
+        items: written.items,
+        changes: written.changes,
+      });
       after = raw.comments
         ? {
             ...raw,

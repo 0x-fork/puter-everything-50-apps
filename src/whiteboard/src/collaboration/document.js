@@ -245,6 +245,34 @@ function hiddenContent(type) {
       if (value instanceof Y.AbstractType && hiddenContent(value)) return true;
   return false;
 }
+// Whether one update's changes, as a transaction lists them by type and key
+// (null for the sequence), put content where hiddenContent finds it. Types
+// the update created are not listed themselves but sit under a listed key,
+// so they are searched whole; content it did not touch was checked when it
+// arrived, so a large board costs no more to check than a small one.
+function hiddenChanges(changes) {
+  for (const [type, keys] of changes) {
+    if (type._item?.deleted) continue;
+    if (type instanceof Y.Map) {
+      if (keys.has(null))
+        for (let entry = type._start; entry; entry = entry.right)
+          if (!entry.deleted) return true;
+      for (const key of keys) {
+        const value = key === null ? undefined : type.get(key);
+        if (value instanceof Y.AbstractType && hiddenContent(value))
+          return true;
+      }
+      continue;
+    }
+    for (const key of keys)
+      if (key !== null && type._map.get(key)?.deleted === false) return true;
+    if (type instanceof Y.Array && keys.has(null))
+      for (const value of type.toArray())
+        if (value instanceof Y.AbstractType && hiddenContent(value))
+          return true;
+  }
+  return false;
+}
 // Undo steps a shared board keeps, as History does for a personal one.
 const UNDO_STEPS = 80;
 export class SharedDocument {
@@ -579,12 +607,17 @@ export class SharedDocument {
     if (this.read) return;
     this.read = new Map();
     this.doc.on("afterTransaction", (transaction) => {
+      // Objects added, removed or replaced, or given another layer rank,
+      // change the stacking order; see layered.
+      if (transaction.changed.has(this.items)) this.order = null;
       if (transaction.changed.has(this.tags)) return this.read.clear();
       for (const [type, keys] of transaction.changed) {
         if (type === this.items) {
           for (const key of keys) if (key !== null) this.read.delete(key);
           continue;
         }
+        if (type._item?.parent === this.items && keys.has("z"))
+          this.order = null;
         let entry = type;
         while (entry._item && entry._item.parent !== this.items)
           entry = entry._item.parent;
@@ -657,14 +690,23 @@ export class SharedDocument {
     }
     return this.deep ? sharedCopy(item) : { ...item };
   }
-  // Stored objects in stacking order: by layer rank, then ID.
+  // Stored objects in stacking order: by layer rank, then ID. Each rank is
+  // read once rather than at every comparison. A document projected after
+  // every change keeps the order until a change affects it (see
+  // cacheItems); callers must not change the list they are given.
   layered() {
-    return [...this.items]
-      .filter(([, entry]) => entry instanceof Y.Map)
-      .sort(
-        ([a, x], [b, y]) =>
-          (x.get("z") || 0) - (y.get("z") || 0) || byCode(a, b),
-      );
+    const busy = this.doc._transactionCleanups.length > 0;
+    if (this.read && this.order && !busy) return this.order;
+    const entries = [],
+      ranks = new Map();
+    for (const [id, entry] of this.items)
+      if (entry instanceof Y.Map) {
+        entries.push([id, entry]);
+        ranks.set(id, entry.get("z") || 0);
+      }
+    entries.sort(([a], [b]) => ranks.get(a) - ranks.get(b) || byCode(a, b));
+    if (this.read && !busy) this.order = entries;
+    return entries;
   }
   snapshot(id = "shared", normalizeComments = true) {
     const items = this.layered().map(([id, entry]) =>
@@ -814,7 +856,9 @@ export class SharedDocument {
   // has projected the board already passes it as `board`, which is left
   // unchanged. Given `items`, the IDs an update wrote, only those objects'
   // stored structure is checked: no other object's can have changed.
-  validate(allowed = {}, { board, items } = {}) {
+  // Given `changes`, the types and keys an update changed as applyTracked
+  // lists them, only those are searched for content nothing reads.
+  validate(allowed = {}, { board, items, changes } = {}) {
     for (const key of this.doc.share.keys())
       if (
         !["board", "items", "comments", "tags", "timer", "workshop"].includes(
@@ -825,9 +869,12 @@ export class SharedDocument {
     // Content the checks below never read, such as a sequence under a map
     // or keyed entries under a text, would be stored, counted by no limit,
     // and sent to everyone.
-    for (const root of this.doc.share.values())
-      if (hiddenContent(root))
-        throw Error("Invalid shared document structure.");
+    if (
+      changes
+        ? hiddenChanges(changes)
+        : [...this.doc.share.values()].some(hiddenContent)
+    )
+      throw Error("Invalid shared document structure.");
     // The board map holds only its title and planning settings, which
     // validateBoard checks; anything else would be stored unseen.
     for (const [key, value] of this.meta)
@@ -1040,6 +1087,8 @@ export class SharedDocument {
   // by thread).
   applyTracked(bytes, origin = "remote") {
     const roots = new Set(),
+      // Every type the update changed, with the keys it changed.
+      changes = new Map(),
       workshop = new Set(),
       items = new Set(),
       messages = new Map(),
@@ -1061,6 +1110,8 @@ export class SharedDocument {
     const names = new Map([...this.doc.share].map(([k, v]) => [v, k]));
     const track = (transaction) => {
       for (const [type, keys] of transaction.changed) {
+        if (!changes.has(type)) changes.set(type, new Set());
+        for (const key of keys) changes.get(type).add(key);
         let root = type;
         const path = [];
         while (root._item) {
@@ -1115,7 +1166,15 @@ export class SharedDocument {
     } finally {
       this.doc.off("afterTransaction", track);
     }
-    return { roots, workshop, items, messages, rewritten, rewrittenRoots };
+    return {
+      roots,
+      changes,
+      workshop,
+      items,
+      messages,
+      rewritten,
+      rewrittenRoots,
+    };
   }
   update(vector) {
     return Y.encodeStateAsUpdate(this.doc, vector);

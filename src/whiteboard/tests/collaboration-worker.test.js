@@ -302,6 +302,29 @@ test("content placed where the document never reads it is refused", async () => 
     }),
     { status: 422, message: "Invalid shared document structure." },
   );
+  // Content hidden inside an object the same change adds.
+  await assert.rejects(
+    attempt(owner, (doc) => {
+      doc.transact(() => {
+        const entry = new Y.Map();
+        doc.getMap("items").set("hidden-inside-new", entry);
+        entry.set("text", new Y.Text());
+        entry.set("z", 1);
+        entry.set("geometry", { type: "note", x: 0, y: 0, w: 10, h: 10 });
+        new Y.Item(
+          Y.createID(doc.clientID, Y.getState(doc.store, doc.clientID)),
+          null,
+          null,
+          null,
+          null,
+          entry,
+          null,
+          new Y.ContentString(big),
+        ).integrate(doc._transaction, 0);
+      });
+    }),
+    { status: 422, message: "Invalid shared document structure." },
+  );
   // The board is as it was, and an ordinary edit still saves.
   const { update: after } = await env.service.call(owner, {
     op: "sync",
