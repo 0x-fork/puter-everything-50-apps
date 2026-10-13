@@ -1005,6 +1005,23 @@ test("a board holding what only a newer app writes asks for a reload instead of 
     );
     assert.equal(session.readOnly, true);
     assert.equal(session.contentReadOnly, true);
+    // A check-in confirming the role does not make it editable again, so
+    // this older copy cannot save over what it cannot read.
+    await session.heartbeat();
+    assert.equal(session.readOnly, true);
+    assert.equal(session.contentReadOnly, true);
+    const next = session.shared.snapshot(b.id);
+    next.items[0].text = "Written by the older app";
+    await session.commit(next, session.shared.snapshot(b.id));
+    await session.flushed();
+    const { doc } = await env.service.load(b.id);
+    assert.equal(doc.snapshot().items[0].text, "Hi");
+    doc.destroy();
+    // Once it can read the board again, it edits again.
+    delete session.shared.validate;
+    await session.synchronize();
+    assert.equal(session.readOnly, false);
+    assert.equal(session.contentReadOnly, false);
   } finally {
     session.close();
   }

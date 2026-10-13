@@ -162,8 +162,11 @@ export class CollaborationSession {
     this.role = role;
     this.archived = archived;
     this.denied = false;
-    this.readOnly = archived || !canComment(role);
-    this.contentReadOnly = archived || !canEditContent(role);
+    // A board holding what only a newer app writes stays read-only here,
+    // whatever the role, until this copy can read it again.
+    this.readOnly = this.incompatible || archived || !canComment(role);
+    this.contentReadOnly =
+      this.incompatible || archived || !canEditContent(role);
     // Uploads stop while read-only; send what waited once access returns.
     if (wasReadOnly && !this.readOnly && this.poll && this.pending.size)
       this.scheduleFlush();
@@ -178,7 +181,7 @@ export class CollaborationSession {
   // changes. Unknown until a role is, and while access is refused, which
   // the status says instead.
   get access() {
-    if (!this.role || this.denied) return "";
+    if (!this.role || this.denied || this.incompatible) return "";
     return this.archived || !canComment(this.role)
       ? "view"
       : canEditContent(this.role)
@@ -1256,6 +1259,7 @@ export class CollaborationSession {
     }
     try {
       this.shared.validate(ACCEPTED);
+      this.incompatible = false;
     } catch (error) {
       // An edit queued on this device may no longer fit what others saved
       // meanwhile, as a change to the same object; the worker refuses such
@@ -1267,6 +1271,7 @@ export class CollaborationSession {
         if (this.closed) return;
         try {
           this.shared.validate(ACCEPTED);
+          this.incompatible = false;
         } catch (again) {
           again.incompatible = true;
           throw again;
@@ -2000,6 +2005,7 @@ export class CollaborationSession {
       return;
     }
     if (error.incompatible) {
+      this.incompatible = true;
       this.readOnly = true;
       this.contentReadOnly = true;
       this.status("This board needs a newer version of the app · reload");
