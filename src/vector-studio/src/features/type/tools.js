@@ -124,7 +124,7 @@ export class TypeTool extends Tool {
 
   newTextNode(x, y, extra = {}) {
     const d = typeDefaults(this.app);
-    return createText('', x, y, { char: { ...d.char }, para: { ...d.para }, fill: d.fill, stroke: d.stroke, strokeWidth: d.strokeWidth, vertical: this.constructor.vertical || undefined, ...extra });
+    return createText('', x, y, { char: { ...d.char }, para: { ...d.para }, fill: d.fill, stroke: d.stroke, strokeWidth: d.strokeWidth, vertical: this.constructor.vertical || undefined, antialias: d.antialias && d.antialias !== 'sharp' ? d.antialias : undefined, ...extra });
   }
 
   /** Insert a new type object, filled with placeholder text (selected) when the preference is on. */
@@ -138,7 +138,6 @@ export class TypeTool extends Tool {
     let text = '';
     if (placeholder) text = node.kind === 'point' ? 'Lorem ipsum' : fillPlaceholder(node);
     const n = { ...node, text };
-    const layer = editor.targetLayer();
     editor.doc.transact(node.kind === 'area' ? 'Area Type' : node.kind === 'path' ? 'Type on a Path' : 'Type', () => {
       const old = replaceId ? editor.doc.get(replaceId) : null;
       if (old) {
@@ -146,7 +145,7 @@ export class TypeTool extends Tool {
         const parent = editor.doc.get(old.parent);
         editor.doc.insert(n, parent.id, parent.children.indexOf(old.id) + 1);
         editor.doc.remove(old.id);
-      } else editor.doc.insert(n, layer.id);
+      } else editor.insertDrawn(n);
     });
     const s = this.editText(n.id, null);
     if (s) {
@@ -391,7 +390,7 @@ export class TypeTool extends Tool {
       align: (align) => applyParaStyle(app, { align }, { label: 'Paragraph Alignment' }),
       size: (dir, mult) => {
         const cur = currentCharStyle(app);
-        const size = Math.max(0.1, Math.min(1296, num(cur?.fontSize, 12) + dir * 2 * mult));
+        const size = Math.max(0.1, Math.min(1296, num(cur?.fontSize, 12) + dir * (app.prefs.get('typeSizeIncrement') || 2) * mult));
         applyCharStyle(app, { fontSize: size }, { label: 'Font Size', coalesce: 'type-size' });
       },
       clearTracking: () => applyCharStyle(app, { tracking: 0 }, { label: 'Tracking' }),
@@ -422,12 +421,12 @@ export class TypeTool extends Tool {
           const cur = styleAt(n, a);
           s.anchor = a;
           s.caret = a + 1;
-          applyCharStyle(app, { kerning: num(cur.kerning, 0) + dir * 20 * mult }, { label: 'Kerning', coalesce: `kern-${n.id}-${a}` });
+          applyCharStyle(app, { kerning: num(cur.kerning, 0) + dir * (app.prefs.get('typeTrackingIncrement') || 20) * mult }, { label: 'Kerning', coalesce: `kern-${n.id}-${a}` });
           s.anchor = s.caret = a;
           s.changed();
         } else {
           const cur = currentCharStyle(app);
-          applyCharStyle(app, { tracking: num(cur?.tracking, 0) + dir * 20 * mult }, { label: 'Tracking', coalesce: 'type-tracking' });
+          applyCharStyle(app, { tracking: num(cur?.tracking, 0) + dir * (app.prefs.get('typeTrackingIncrement') || 20) * mult }, { label: 'Tracking', coalesce: 'type-tracking' });
         }
       },
       leading: (dir, mult) => {
@@ -438,7 +437,7 @@ export class TypeTool extends Tool {
       },
       baseline: (dir, mult) => {
         const cur = currentCharStyle(app);
-        applyCharStyle(app, { baselineShift: num(cur?.baselineShift, 0) + dir * 2 * mult }, { label: 'Baseline Shift', coalesce: 'type-baseline' });
+        applyCharStyle(app, { baselineShift: num(cur?.baselineShift, 0) + dir * (app.prefs.get('typeBaselineIncrement') || 2) * mult }, { label: 'Baseline Shift', coalesce: 'type-baseline' });
       },
       exit: () => this.exitToSelection(),
     };

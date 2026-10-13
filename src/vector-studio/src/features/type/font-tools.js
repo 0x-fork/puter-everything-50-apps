@@ -1,5 +1,5 @@
 /**
- * Font management for a document: Type > Find Font (list the fonts the
+ * Font management for a document: Type > Find/Replace Font (list the fonts the
  * document uses, find them, change them, select the objects using them),
  * Type > Resolve Missing Fonts, Type > Recent Fonts and a notice when a
  * document uses fonts that are not available.
@@ -146,7 +146,7 @@ export function openFindFont(app) {
             h(
               'div.ff-item',
               { role: 'option', tabindex: '-1', 'aria-selected': String(f.key === sel), 'data-key': f.key, title: f.missing ? 'Not available: shown with a substitute font' : '' },
-              h('span.ff-name', fontLabel(f)),
+              h('span.ff-name', { style: f.missing ? null : { fontFamily: `"${f.family}", var(--font-ui)`, fontWeight: String(f.weight), fontStyle: f.style } }, fontLabel(f)),
               f.missing ? h('span.ff-missing', 'Missing') : null,
               h('span.ff-count', `${f.objects.size} ${f.objects.size === 1 ? 'object' : 'objects'}`),
             ),
@@ -154,6 +154,7 @@ export function openFindFont(app) {
         : [h('p.panel-empty', 'This document has no type.')]),
     );
     for (const b of [bFind, bChange, bChangeAll, bSelect]) b.disabled = !sel;
+    bSave.disabled = !fonts.length;
   };
 
   const renderFamilies = () => {
@@ -252,6 +253,14 @@ export function openFindFont(app) {
     status.textContent = `Selected ${ids.length} ${ids.length === 1 ? 'object' : 'objects'}.`;
   } }, 'Select Objects');
 
+  // The list as text: one font per line with its use.
+  const bSave = h('button.btn', { type: 'button', onclick: async () => {
+    const lines = fonts.map((f) => `${fontLabel(f)}\t${f.objects.size} ${f.objects.size === 1 ? 'object' : 'objects'}\t${f.chars} ${f.chars === 1 ? 'character' : 'characters'}${f.missing ? '\tmissing' : ''}`);
+    const { downloadBlob } = await import('../io/deliver.js');
+    const base = (ed.name || doc.root.name || 'Document').replace(/\.[^.]+$/, '');
+    downloadBlob(new Blob([`Fonts in ${base}\n\n${lines.join('\n')}\n`], { type: 'text/plain' }), `${base} fonts.txt`);
+    status.textContent = 'Saved the font list.';
+  } }, 'Save List');
   usedList.addEventListener('click', (e) => {
     const el = e.target.closest('[data-key]');
     if (!el) return;
@@ -275,7 +284,7 @@ export function openFindFont(app) {
 
   const body = h(
     'div.find-font',
-    h('div.ff-col', usedHead, usedList),
+    h('div.ff-col', usedHead, usedList, h('div.ff-actions', bSave)),
     h(
       'div.ff-col',
       h('h3.ff-head', 'Replace With'),
@@ -290,7 +299,7 @@ export function openFindFont(app) {
   renderUsed();
   renderFamilies();
   if (fonts.find((f) => f.key === sel)?.missing) famSel.value = suggestReplacement(fonts.find((f) => f.key === sel).family);
-  return app.dialogs.open({ title: 'Find Font', body, className: 'find-font-dialog wide', buttons: [{ label: 'Done', value: true, primary: true }] });
+  return app.dialogs.open({ title: 'Find/Replace Font', body, className: 'find-font-dialog wide', buttons: [{ label: 'Done', value: true, primary: true }] });
 }
 
 // ---- Resolve Missing Fonts ----
@@ -334,27 +343,31 @@ export async function openResolveFonts(app) {
 
 // ---- recent fonts ----
 
-const RECENT_MAX = 10;
+const RECENT_MAX = 30;
 
+/** Recently used fonts, as many as Preferences > Type > Number of Recent Fonts (10 by default). */
 export function recentFonts(app) {
   const r = app.prefs.get('recentFonts');
-  return Array.isArray(r) ? r.filter(isFontAvailable) : [];
+  const n = Number(app.prefs.get('recentFontsCount'));
+  return Array.isArray(r) ? r.filter(isFontAvailable).slice(0, Number.isFinite(n) && n >= 1 ? n : 10) : [];
 }
 
 export function addRecentFont(app, family) {
   if (!family) return;
-  const list = [family, ...recentFonts(app).filter((f) => f !== family)].slice(0, RECENT_MAX);
+  const r = app.prefs.get('recentFonts');
+  const list = [family, ...(Array.isArray(r) ? r : []).filter((f) => f !== family)].slice(0, RECENT_MAX);
   app.prefs.set('recentFonts', list);
 }
 
 export function installFontTools(app) {
   app.on('font-applied', (family) => addRecentFont(app, family));
   app.menuSources.set('recentFonts', (a) => {
+    if (a.prefs.get('showRecentFonts') === false) return [];
     const cur = currentCharStyle(a)?.fontFamily;
     return recentFonts(a).map((f) => ({ type: 'cmd', label: f, enabled: Boolean(a.editor), checked: cur === f, run: (x) => setFontFamily(x, f) }));
   });
   app.commands.register([
-    { id: 'type.findFont', label: 'Find Font...', enabled: (a) => Boolean(a.editor), run: openFindFont },
+    { id: 'type.findFont', label: 'Find/Replace Font...', enabled: (a) => Boolean(a.editor), run: openFindFont },
     { id: 'type.resolveFonts', label: 'Resolve Missing Fonts...', enabled: (a) => Boolean(a.editor) && missingFonts(a.editor.doc).length > 0, run: openResolveFonts },
   ]);
   // Say once per document when it uses fonts that are not available.

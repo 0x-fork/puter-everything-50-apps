@@ -59,10 +59,15 @@ export const DEFAULT_STYLE = Object.freeze({
 
 export const STYLE_KEYS = Object.keys(DEFAULT_STYLE);
 
-/** Copy just the style fields of a node (for the eyedropper, paste style, graphic styles). */
+/**
+ * Copy just the style fields of a node (for the eyedropper, paste style,
+ * graphic styles), with its appearance stack (model/appearance.js) when it
+ * has one.
+ */
 export function pickStyle(node) {
   const out = {};
   for (const k of STYLE_KEYS) if (node[k] !== undefined) out[k] = node[k];
+  if (node.appearance?.length) out.appearance = node.appearance;
   return out;
 }
 
@@ -124,8 +129,13 @@ export const DEFAULT_CHAR = Object.freeze({
   verticalScale: 100,
   underline: false,
   strike: false,
+  underlineStyle: null, // { weight, offset (below the baseline), color (paint), dash: [on, off] } (null fields: automatic)
+  strikeStyle: null, // the same for strikethrough (offset above the baseline)
   caps: 'normal', // normal | all | small
   kerning: 0, // manual kerning before this character, thousandths of an em
+  kernMode: 'metrics', // automatic kerning: metrics (the font's pairs) | optical (from the outlines) | none
+  fractionalWidths: true, // false rounds character advances to whole points
+  noBreak: false, // keep these characters on one line
   rotation: 0, // character rotation in degrees
   position: 'normal', // normal | super | sub
   // OpenType features (applied where the font has them, see features/type/shaping.js).
@@ -141,6 +151,12 @@ export const DEFAULT_CHAR = Object.freeze({
   figures: 'default', // default | tabular-lining | proportional-lining | proportional-oldstyle | tabular-oldstyle
   otPosition: 'default', // default | sups | subs | numr | dnom
   altGlyph: null, // a specific glyph (font glyph index) for these characters, from the Glyphs panel
+  language: 'en-US', // language for hyphenation and spelling (model/languages.js)
+  verticalRoman: false, // vertical type: half-width (Roman) characters turn sideways (standard vertical Roman alignment)
+  tcy: false, // vertical type: these characters sit side by side in one em, across the column (tate-chu-yoko)
+  tsume: 0, // % of the space beside each character's glyph taken away
+  akiBefore: 0, // extra space before each character (fraction of an em)
+  akiAfter: 0, // extra space after each character (fraction of an em)
   charStyle: null, // character style id (doc.root.charStyles) the attributes came from
 });
 
@@ -154,8 +170,23 @@ export const DEFAULT_PARA = Object.freeze({
   tabs: null, // [{ pos, align: 'left'|'center'|'right'|'decimal', leader, decimal }] from the frame's left edge
   list: null, // { kind: 'bullet'|'number', bullet, format: '1'|'a'|'A'|'i'|'I', suffix, start } bullets and numbering
   opticalMargin: false, // hang punctuation outside the margins
+  hangingPunctuation: false, // hang punctuation fully outside the margins (this paragraph)
+  hyphenate: false, // automatic hyphenation
+  hyphenation: null, // { minWord, minBefore, minAfter, limit, zone, capitalized } (see model/hyphenate.js)
+  justification: null, // { wordMin/Desired/Max, letterMin/Desired/Max, glyphMin/Desired/Max (%), autoLeading (%), singleWord }
+  composer: 'single', // single: fill line by line | every: choose the breaks of the whole paragraph together
+  kinsoku: 'none', // CJK line-break rules: none | soft | hard (characters that may not start or end a line)
+  mojikumi: 'none', // CJK spacing: none | basic (half-width punctuation pairs, space between CJK and Roman text)
+  burasagari: 'none', // CJK punctuation hanging past the right margin: none | standard | forced
   paraStyle: null, // paragraph style id (doc.root.paraStyles) the attributes came from
 });
+
+/**
+ * Paragraph settings of newly created text: the Every-line Composer.
+ * DEFAULT_PARA stays the fallback for stored paragraphs without a value, so
+ * older documents lay out as they did.
+ */
+export const NEW_PARA = Object.freeze({ ...DEFAULT_PARA, composer: 'every' });
 
 export function createText(text, x, y, extra = {}) {
   return {
@@ -170,7 +201,7 @@ export function createText(text, x, y, extra = {}) {
     height: 0,
     transform: [1, 0, 0, 1, 0, 0],
     char: { ...DEFAULT_CHAR },
-    para: { ...DEFAULT_PARA },
+    para: { ...NEW_PARA },
     hidden: false,
     locked: false,
     ...DEFAULT_STYLE,
@@ -214,7 +245,7 @@ export function defaultLabel(node) {
     case 'compound':
       return '<Compound Path>';
     case 'group':
-      return node.blend ? '<Blend>' : node.clip ? '<Clip Group>' : '<Group>';
+      return node.blend ? '<Blend>' : node.clip ? '<Clip Group>' : node.compoundShape ? '<Compound Shape>' : '<Group>';
     case 'text':
       return (node.text || '').split('\n')[0].slice(0, 40) || '<Text>';
     case 'image':

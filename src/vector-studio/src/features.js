@@ -32,16 +32,29 @@ import { install as installEnvelope } from './features/envelope/index.js';
 import { install as installMesh } from './features/mesh/index.js';
 import { install as installGraphs } from './features/graphs/index.js';
 import { install as installFlare } from './features/flare/index.js';
+import { install as installDimension } from './features/dimension/index.js';
 import { install as installCollab } from './features/collab/index.js';
 import { install as installCorners } from './features/corners/index.js';
+import { install as installLiveShapes } from './features/live-shapes/index.js';
+import { install as installToolStrips } from './features/tool-strips/index.js';
+import { install as installDrawModes } from './features/draw-modes/index.js';
+import { install as installToolProps } from './features/tool-props/index.js';
 import { install as installPatterns } from './features/patterns/index.js';
 import { install as installSlices } from './features/slices/index.js';
 import { install as installWorkspace } from './features/workspace/index.js';
+import { install as installLayers } from './features/layers/index.js';
+import { install as installPrepress } from './features/prepress/index.js';
+import { install as installIcc } from './features/icc/index.js';
+import { install as installGenerative } from './features/generative/index.js';
+import { install as installInterop } from './features/interop/index.js';
+import { install as installMockup } from './features/mockup/index.js';
 
 export function installFeatures(app) {
   installHome(app);
   installIO(app);
   installFiles(app);
+  // After files and io: adds PDF, EPS, DXF and raster import/export to their hooks.
+  installInterop(app);
   installGeometry(app);
   installPaint(app);
   installArtboards(app);
@@ -58,6 +71,10 @@ export function installFeatures(app) {
   installPatterns(app);
   installSlices(app);
   installWorkspace(app);
+  // After workspace: color-managed proofs extend its Proof Setup.
+  installPrepress(app);
+  // After prepress: ICC profiles, document profiles and the paste policy.
+  installIcc(app);
   installType(app);
   // After type: paint regions chain onto the paint hooks type sets.
   installRegions(app);
@@ -68,11 +85,19 @@ export function installFeatures(app) {
   installVariables(app);
   installSvgInteractivity(app);
   installPanels(app);
+  installLayers(app);
   // After Type: the mesh paint hook wraps the type one.
   installMesh(app);
   installGraphs(app);
   installFlare(app);
+  installDimension(app);
   installCorners(app);
+  installGenerative(app);
+  installMockup(app);
+  installLiveShapes(app);
+  installToolStrips(app);
+  installDrawModes(app);
+  installToolProps(app);
   // After the document features: sharing wraps Save and gates editing commands.
   installCollab(app);
   // Last: shortcut sets apply to every command and tool registered above.

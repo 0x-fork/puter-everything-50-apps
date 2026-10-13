@@ -5,9 +5,9 @@
  * autosave), Cancel discards them.
  */
 import { h } from '../../lib/dom.js';
-import { formatLength, parseLength, parseNumber } from '../../lib/units.js';
+import { formatLength, parseLength, parseNumber, unitOptions } from '../../lib/units.js';
 import { openDialog } from '../../ui/dialogs/dialog.js';
-import { applyTheme } from '../../theme.js';
+import { applyTheme, brightness, BRIGHTNESS_LEVELS } from '../../theme.js';
 import { UNIT_OPTIONS } from './presets.js';
 
 export const PREF_DEFAULTS = {
@@ -15,6 +15,7 @@ export const PREF_DEFAULTS = {
   cornerRadius: 12,
   doubleClickToIsolate: true,
   selectionTolerance: 3,
+  selectBehind: true,
   anchorSize: 6,
   strokeUnits: 'pt',
   typeUnits: 'pt',
@@ -35,6 +36,26 @@ export const PREF_DEFAULTS = {
   filesUseDocuments: true,
   filesOfferSignIn: true,
   recentFilesMax: 20,
+  transformPatterns: true,
+  showTooltips: true,
+  zoomWithWheel: false,
+  showStartScreen: true,
+  objectSelectionByPath: false,
+  zoomToSelection: true,
+  showMultiHandles: true,
+  showArtboardNames: true,
+  typeSizeIncrement: 2,
+  typeTrackingIncrement: 20,
+  typeBaselineIncrement: 2,
+  typePlaceholder: true,
+  showRecentFonts: true,
+  recentFontsCount: 10,
+  bareNumbersArePoints: false,
+  showSliceNumbers: true,
+  sliceLineColor: '#e8590c',
+  showPixelGrid: true,
+  canvasColor: 'match',
+  undoLevels: 200,
 };
 
 export const GUIDE_COLORS = [
@@ -64,13 +85,20 @@ export function applyPrefs(app) {
   setVar('--guide-style', p.get('guideStyle') === 'dots' ? 'dots' : null);
   setVar('--alignment-guide-color', p.get('alignmentGuideColor') === 'magenta' ? null : colorOf(p.get('alignmentGuideColor'), null));
   setVar('--grid-color', p.get('gridColor') === 'default' ? null : colorOf(p.get('gridColor'), null));
+  setVar('--pasteboard', p.get('canvasColor') === 'white' ? '#ffffff' : null);
+  // Tooltips read this switch when they are about to show.
+  if (p.get('showTooltips') === false) root.dataset.tooltips = 'off';
+  else delete root.dataset.tooltips;
+  unitOptions.bareUnit = p.get('bareNumbersArePoints') ? 'pt' : null;
   for (const ed of app.editors) applyEditorPrefs(app, ed);
-  for (const v of app.views.values()) v.invalidate();
+  for (const v of app.views.values()) (v.refreshColors ? v.refreshColors() : v.invalidate());
   app.rulers?.refresh?.();
 }
 
 /** Per-editor defaults taken from preferences (run when a document opens). */
 export function applyEditorPrefs(app, editor) {
+  const levels = Number(app.prefs.get('undoLevels'));
+  if (Number.isFinite(levels) && levels >= 1) editor.doc.historyLimit = Math.round(levels);
   const front = app.prefs.get('gridsInBack') === false;
   if (Boolean(editor.viewOptions.gridInFront) !== front) editor.viewOptions = { ...editor.viewOptions, gridInFront: front };
   if (!editor._prefsApplied) {
@@ -81,10 +109,28 @@ export function applyEditorPrefs(app, editor) {
 }
 
 /**
+ * Sections other features add: functions app -> section, with `after` (the
+ * id of the section it follows).
+ */
+export const extraPrefSections = [];
+
+/**
  * Section definitions. Field types: checkbox, select, length, number,
- * angle, color-select (named colors plus custom), button.
+ * angle, color-select (named colors plus custom), brightness (interface
+ * brightness swatches plus Use System Setting), button, custom
+ * (`build(value)` -> { el, value() } for a control of its own).
  */
 export function sections(app) {
+  const out = builtinSections(app);
+  for (const make of extraPrefSections) {
+    const s = make(app);
+    const at = out.findIndex((x) => x.id === s.after);
+    out.splice(at < 0 ? out.length : at + 1, 0, s);
+  }
+  return out;
+}
+
+function builtinSections(app) {
   const unitOpts = UNIT_OPTIONS;
   return [
     {
@@ -94,18 +140,30 @@ export function sections(app) {
         { key: 'keyboardIncrement', label: 'Keyboard Increment', type: 'length', min: 0.001, max: 1000 },
         { key: 'constrainAngle', label: 'Constrain Angle', type: 'angle', min: -360, max: 360 },
         { key: 'cornerRadius', label: 'Corner Radius', type: 'length', min: 0, max: 1000 },
-        { key: 'autoAddDelete', label: 'Disable Auto Add/Delete', type: 'checkbox', invert: true },
-        { key: 'previewBounds', label: 'Use Preview Bounds', type: 'checkbox' },
+        { type: 'heading', label: 'Editing' },
+        { key: 'autoAddDelete', label: 'Disable Auto Add/Delete', type: 'checkbox', invert: true, help: 'The Pen tool adds and deletes anchor points when it is over a selected path.' },
         { key: 'doubleClickToIsolate', label: 'Double Click To Isolate', type: 'checkbox' },
+        { key: 'previewBounds', label: 'Use Preview Bounds', type: 'checkbox', help: 'Sizes and alignment include stroke widths and effects.' },
+        { type: 'heading', label: 'Transforming' },
+        { key: 'transformPatterns', label: 'Transform Pattern Tiles', type: 'checkbox' },
         { key: 'scaleCorners', label: 'Scale Corners', type: 'checkbox' },
         { key: 'scaleStrokes', label: 'Scale Strokes & Effects', type: 'checkbox' },
+        { type: 'heading', label: 'Workspace' },
+        { key: 'showTooltips', label: 'Show Tool Tips', type: 'checkbox' },
+        { key: 'zoomWithWheel', label: 'Zoom with Mouse Wheel', type: 'checkbox', help: 'The wheel zooms; hold Alt (Option) to scroll instead.' },
+        { key: 'showStartScreen', label: 'Show the Home Screen When No Documents Are Open', type: 'checkbox' },
       ],
     },
     {
       id: 'selection',
       label: 'Selection & Anchor Display',
       fields: [
+        { type: 'heading', label: 'Selection' },
         { key: 'selectionTolerance', label: 'Tolerance (px)', type: 'number', min: 1, max: 8, step: 1, integer: true },
+        { key: 'selectBehind', label: 'Command-click to select objects behind', type: 'checkbox' },
+        { key: 'objectSelectionByPath', label: 'Object Selection by Path Only', type: 'checkbox', help: 'Clicking inside a filled shape does not select it; click its outline.' },
+        { key: 'zoomToSelection', label: 'Zoom to Selection', type: 'checkbox', help: 'Zoom In and Zoom Out keep the selection in the middle of the window.' },
+        { type: 'heading', label: 'Anchor Points and Handles' },
         {
           key: 'anchorSize',
           label: 'Anchor Point Size',
@@ -116,6 +174,24 @@ export function sections(app) {
             { value: 8, label: 'Large' },
           ],
         },
+        { key: 'showMultiHandles', label: 'Show Handles When Multiple Anchors Are Selected', type: 'checkbox' },
+        { type: 'heading', label: 'Artboards' },
+        { key: 'showArtboardNames', label: 'Show Artboard Names on Canvas', type: 'checkbox' },
+      ],
+    },
+    {
+      id: 'type',
+      label: 'Type',
+      fields: [
+        { type: 'heading', label: 'Keyboard Increments' },
+        { key: 'typeSizeIncrement', label: 'Size/Leading', type: 'length', min: 0.001, max: 72 },
+        { key: 'typeTrackingIncrement', label: 'Tracking (/1000 em)', type: 'number', min: 1, max: 1000, integer: true },
+        { key: 'typeBaselineIncrement', label: 'Baseline Shift', type: 'length', min: 0.001, max: 72 },
+        { type: 'heading', label: 'New Type' },
+        { key: 'typePlaceholder', label: 'Fill New Type Objects With Placeholder Text', type: 'checkbox' },
+        { type: 'heading', label: 'Fonts' },
+        { key: 'showRecentFonts', label: 'Show Recent Fonts', type: 'checkbox', help: 'Type > Recent Fonts lists the fonts you used last.' },
+        { key: 'recentFontsCount', label: 'Number of Recent Fonts', type: 'number', min: 1, max: 30, integer: true },
       ],
     },
     {
@@ -125,6 +201,7 @@ export function sections(app) {
         { key: 'units', label: 'General', type: 'select', options: unitOpts, help: 'Also changes the units of the active document.' },
         { key: 'strokeUnits', label: 'Stroke', type: 'select', options: unitOpts },
         { key: 'typeUnits', label: 'Type', type: 'select', options: unitOpts },
+        { key: 'bareNumbersArePoints', label: 'Numbers Without Units Are Points', type: 'checkbox', help: 'A value typed without a unit (like 12) is read as points instead of the field\'s unit.' },
       ],
     },
     {
@@ -136,9 +213,11 @@ export function sections(app) {
         { key: 'guideStyle', label: 'Style', type: 'select', options: [{ value: 'lines', label: 'Lines' }, { value: 'dots', label: 'Dots' }] },
         { type: 'heading', label: 'Grid' },
         { key: 'gridColor', label: 'Color', type: 'color-select', options: [{ value: 'default', label: 'Default', color: null }, ...GUIDE_COLORS] },
+        { key: 'gridStyle', label: 'Style', type: 'select', options: [{ value: 'lines', label: 'Lines' }, { value: 'dots', label: 'Dots' }] },
         { key: 'gridSpacing', label: 'Gridline every', type: 'length', min: 1, max: 10000 },
         { key: 'gridSubdivisions', label: 'Subdivisions', type: 'number', min: 1, max: 100, integer: true },
         { key: 'gridsInBack', label: 'Grids In Back', type: 'checkbox' },
+        { key: 'showPixelGrid', label: 'Show Pixel Grid (Above 600% Zoom)', type: 'checkbox', help: 'In Pixel Preview.' },
       ],
       note: 'Grid spacing applies to the active document and to new documents.',
     },
@@ -154,20 +233,33 @@ export function sections(app) {
       ],
     },
     {
+      id: 'slices',
+      label: 'Slices',
+      fields: [
+        { key: 'showSliceNumbers', label: 'Show Slice Numbers', type: 'checkbox' },
+        { key: 'sliceLineColor', label: 'Line Color', type: 'color-select', options: [{ value: '#e8590c', label: 'Orange', color: '#e8590c' }, ...GUIDE_COLORS.filter((c) => c.value !== 'orange').map((c) => ({ ...c, value: c.color }))] },
+      ],
+    },
+    {
       id: 'ui',
       label: 'User Interface',
       fields: [
+        { key: 'theme', label: 'Brightness', type: 'brightness' },
         {
-          key: 'theme',
-          label: 'Theme',
+          key: 'canvasColor',
+          label: 'Canvas Color',
           type: 'select',
           options: [
-            { value: 'system', label: 'Use System Setting' },
-            { value: 'light', label: 'Light' },
-            { value: 'dark', label: 'Dark' },
+            { value: 'match', label: 'Match User Interface Brightness' },
+            { value: 'white', label: 'White' },
           ],
         },
       ],
+    },
+    {
+      id: 'performance',
+      label: 'Performance',
+      fields: [{ key: 'undoLevels', label: 'History States', type: 'number', min: 5, max: 1000, integer: true, help: 'How many steps Undo can go back in each document. Fewer steps use less memory.' }],
     },
     {
       id: 'files',
@@ -232,11 +324,45 @@ export async function preferencesDialog(app, { section: startSection = null } = 
     if (f.type === 'heading') return h('h4.prefs-subhead', f.label);
     if (f.type === 'button') return h('div.form-row', h('span'), h('button.btn', { type: 'button', onclick: () => f.run() }, f.label));
     const value = initial(f.key);
+    if (f.type === 'custom') {
+      const c = f.build(value);
+      inputs.set(f.key, { f, el: c });
+      return c.el;
+    }
     let el;
     if (f.type === 'checkbox') {
       el = h('input', { type: 'checkbox', id, checked: f.invert ? !value : Boolean(value) });
       inputs.set(f.key, { f, el });
       return h('div.form-row.check', el, h('label', { for: id }, f.label), f.help ? h('p.form-help', f.help) : null);
+    }
+    if (f.type === 'brightness') {
+      // Four level swatches (a radio group) and Use System Setting; choices preview right away.
+      const sys = h('input', { type: 'checkbox', id: `${id}-sys`, checked: value === 'system' });
+      const shown = value === 'system' ? brightness() : value;
+      const radios = BRIGHTNESS_LEVELS.map((l) => h('input.brightness-radio', { type: 'radio', name: `${id}-level`, value: l.value, checked: l.value === shown, 'aria-label': l.label }));
+      const picked = () => (sys.checked ? 'system' : radios.find((r) => r.checked)?.value || 'system');
+      const preview = () => applyThemeLive(app, picked());
+      for (const r of radios)
+        r.addEventListener('change', () => {
+          sys.checked = false;
+          preview();
+        });
+      sys.addEventListener('change', () => {
+        if (!sys.checked) return preview();
+        preview();
+        const now = brightness();
+        for (const r of radios) r.checked = r.value === now;
+      });
+      inputs.set(f.key, { f, el: { picked, focus: () => radios.find((r) => r.checked)?.focus() } });
+      return h(
+        'div.prefs-brightness',
+        h(
+          'div.form-row',
+          h('span.form-label', { id: `${id}-label` }, f.label),
+          h('div.brightness-swatches', { role: 'radiogroup', 'aria-labelledby': `${id}-label` }, BRIGHTNESS_LEVELS.map((l, i) => h(`label.brightness-swatch.level-${l.value}`, { 'data-tip': l.label }, radios[i]))),
+        ),
+        h('div.form-row.check', sys, h('label', { for: sys.id }, 'Use System Setting')),
+      );
     }
     if (f.type === 'select' || f.type === 'color-select') {
       const opts = [...f.options];
@@ -273,6 +399,7 @@ export async function preferencesDialog(app, { section: startSection = null } = 
   const tabs = all.map((s, i) =>
     h('button.prefs-tab', { type: 'button', role: 'tab', id: `prefs-t-${s.id}`, 'aria-controls': `prefs-p-${s.id}`, 'aria-selected': 'false', tabindex: '-1', dataset: { i: String(i) } }, s.label),
   );
+  let current = 0;
   const show = (i, focus = false) => {
     tabs.forEach((t, j) => {
       t.setAttribute('aria-selected', String(i === j));
@@ -280,6 +407,7 @@ export async function preferencesDialog(app, { section: startSection = null } = 
     });
     panels.forEach((p, j) => (p.hidden = i !== j));
     prefs.set('prefsSection', all[i].id);
+    current = i;
     tabs[i].scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     if (focus) tabs[i].focus();
   };
@@ -297,10 +425,42 @@ export async function preferencesDialog(app, { section: startSection = null } = 
   const startIndex = Math.max(0, all.findIndex((s) => s.id === startId));
   show(startIndex);
 
+  // Search: typing filters every section down to the matching settings.
+  const search = h('input.prefs-search', { type: 'search', placeholder: 'Search preferences', 'aria-label': 'Search preferences', autocomplete: 'off', spellcheck: false });
+  const noMatch = h('p.form-help.prefs-nomatch', { hidden: true, role: 'status' }, 'No preferences match your search.');
+  const filter = () => {
+    const q = search.value.trim().toLowerCase();
+    if (!q) {
+      for (const p of panels) for (const r of p.querySelectorAll('.form > *, .prefs-title, :scope > .form-help')) r.hidden = false;
+      tabs.forEach((t) => (t.hidden = false));
+      noMatch.hidden = true;
+      show(current);
+      return;
+    }
+    let any = false;
+    panels.forEach((p, i) => {
+      const sectionHit = all[i].label.toLowerCase().includes(q);
+      let hits = 0;
+      for (const r of p.querySelectorAll('.form > *')) {
+        const on = !r.matches('.prefs-subhead') && (sectionHit || r.textContent.toLowerCase().includes(q));
+        r.hidden = !on;
+        if (on) hits++;
+      }
+      for (const r of p.querySelectorAll(':scope > .form-help')) r.hidden = true;
+      p.hidden = hits === 0;
+      tabs[i].hidden = hits === 0;
+      any ||= hits > 0;
+    });
+    noMatch.hidden = any;
+  };
+  search.addEventListener('input', filter);
+
   const read = () => {
     for (const [key, { f, el }] of inputs) {
       let v;
       if (f.type === 'checkbox') v = f.invert ? !el.checked : el.checked;
+      else if (f.type === 'brightness') v = el.picked();
+      else if (f.type === 'custom') v = el.value();
       else if (f.type === 'color-select') v = el.value === 'custom' ? el._swatch.value : el.value;
       else if (f.type === 'select') v = typeof f.options[0]?.value === 'number' ? Number(el.value) : el.value;
       else v = parseField(f, el.value, units);
@@ -317,7 +477,11 @@ export async function preferencesDialog(app, { section: startSection = null } = 
     return { ...draft };
   };
 
-  const body = h('div.prefs', h('div.prefs-tabs', { role: 'tablist', 'aria-orientation': 'vertical', 'aria-label': 'Preference sections' }, tabs), h('div.prefs-main', panels, error));
+  const body = h(
+    'div.prefs',
+    h('div.prefs-side', search, h('div.prefs-tabs', { role: 'tablist', 'aria-orientation': 'vertical', 'aria-label': 'Preference sections' }, tabs)),
+    h('div.prefs-main', noMatch, panels, error),
+  );
   let values = null;
   const result = await openDialog({
     title: 'Preferences',
@@ -340,6 +504,7 @@ export async function preferencesDialog(app, { section: startSection = null } = 
     ],
   });
   if (result === 'reset') {
+    applyThemeLive(app, prefs.get('theme'));
     const ok = await app.dialogs.confirm({ title: 'Reset Preferences', message: 'Restore all preferences on this page to their defaults?', okLabel: 'Reset', danger: true });
     if (!ok) return preferencesDialog(app);
     for (const s of all) for (const f of s.fields) if (f.key && PREF_DEFAULTS[f.key] !== undefined) prefs.set(f.key, PREF_DEFAULTS[f.key]);
@@ -347,9 +512,20 @@ export async function preferencesDialog(app, { section: startSection = null } = 
     applyAll(app, {});
     return true;
   }
-  if (!result) return false;
+  if (!result) {
+    // Cancel: undo the brightness preview.
+    applyThemeLive(app, prefs.get('theme'));
+    return false;
+  }
   applyAll(app, result);
   return true;
+}
+
+/** Apply a theme without saving it (live preview) and recolor canvases and rulers. */
+function applyThemeLive(app, theme) {
+  applyTheme(theme);
+  for (const v of app.views.values()) (v.refreshColors ? v.refreshColors() : v.invalidate());
+  app.rulers?.refresh?.();
 }
 
 /** Write staged values and apply the ones that touch the document or the UI. */

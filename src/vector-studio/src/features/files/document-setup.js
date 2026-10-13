@@ -8,8 +8,10 @@ import { h } from '../../lib/dom.js';
 import { formatLength, parseLength } from '../../lib/units.js';
 import { icon } from '../../ui/icons.js';
 import { openDialog } from '../../ui/dialogs/dialog.js';
+import { clearGeometryCache } from '../../model/geometry.js';
 import { UNIT_OPTIONS, LIMITS } from './presets.js';
 import { normalizeBleed } from './format.js';
+import { LANGUAGES, DOUBLE_QUOTES, SINGLE_QUOTES, SCRIPT_LIMITS, typeOptionsOf } from './type-setup.js';
 
 export const GRID_SIZES = [
   { value: 4, label: 'Small' },
@@ -44,6 +46,11 @@ export function documentSetupPatch(root, v) {
     }
   }
   if (Boolean(v.showImagesInOutline) !== Boolean(root.showImagesInOutline)) patch.showImagesInOutline = Boolean(v.showImagesInOutline);
+  if (v.typeOptions) {
+    const cur = typeOptionsOf(root);
+    const next = { ...cur, ...v.typeOptions };
+    if (Object.keys(next).some((k) => next[k] !== cur[k])) patch.typeOptions = next;
+  }
   if (v.transparencyGrid) {
     const next = { ...transparencyGridOf(root), ...v.transparencyGrid };
     const cur = transparencyGridOf(root);
@@ -111,6 +118,31 @@ export async function documentSetupDialog(app, editor = app.editor) {
   });
   for (const c of [c1, c2]) c.addEventListener('input', () => (colorSel.value = 'custom'));
   const paper = h('input', { type: 'checkbox', id: id('paper'), checked: Boolean(tg.simulatePaper) });
+  const to = typeOptionsOf(root);
+  const quoteOptions = (list, value) => (list.includes(value) ? list : [value, ...list]).map((q) => h('option', { value: q, selected: q === value }, `${q[0]}abc${q[1]}`));
+  const langSel = h('select.select', { id: id('lang') }, LANGUAGES.map((l) => h('option', { value: l.value, selected: l.value === to.language }, l.label)));
+  const doubleSel = h('select.select', { id: id('dq') }, quoteOptions(DOUBLE_QUOTES, to.double));
+  const singleSel = h('select.select', { id: id('sq') }, quoteOptions(SINGLE_QUOTES, to.single));
+  const smartQuotes = h('input', { type: 'checkbox', id: id('smartq'), checked: to.quotes });
+  // Superscript, subscript and small caps sizes and positions (% of the type size).
+  const pct = (key, label) => h('input.ds-pct', { type: 'text', id: id(key), value: `${to[key]}%`, inputmode: 'decimal', autocomplete: 'off', spellcheck: false, 'aria-label': label });
+  const script = {
+    superSize: pct('superSize', 'Superscript size'),
+    superPos: pct('superPos', 'Superscript position'),
+    subSize: pct('subSize', 'Subscript size'),
+    subPos: pct('subPos', 'Subscript position'),
+    smallCaps: pct('smallCaps', 'Small caps size'),
+  };
+  const scriptLabels = { superSize: 'Superscript size', superPos: 'Superscript position', subSize: 'Subscript size', subPos: 'Subscript position', smallCaps: 'Small caps size' };
+  const readPct = (el) => parseFloat(String(el.value).replace(/%/g, '').replace(',', '.'));
+  // A language brings its usual quote marks.
+  langSel.addEventListener('change', () => {
+    const l = LANGUAGES.find((x) => x.value === langSel.value);
+    if (l) {
+      doubleSel.value = l.double;
+      singleSel.value = l.single;
+    }
+  });
   const error = h('p.form-error', { role: 'alert' });
 
   const canEditArtboards = app.toolClasses.has('artboard');
@@ -137,6 +169,27 @@ export async function documentSetupDialog(app, editor = app.editor) {
     row('Grid Size', id('grid-size'), sizeSel),
     row('Grid Colors', id('grid-colors'), colorSel, c1, c2),
     h('div.form-row.check', paper, h('label', { for: id('paper') }, 'Simulate Colored Paper')),
+    h('h3.form-heading', 'Type'),
+    row('Language', id('lang'), langSel),
+    row('Double Quotes', id('dq'), doubleSel),
+    row('Single Quotes', id('sq'), singleSel),
+    h('div.form-row.check', smartQuotes, h('label', { for: id('smartq') }, "Use Typographer's Quotes")),
+    h(
+      'div.ds-script',
+      { role: 'group', 'aria-label': 'Superscript, subscript and small caps' },
+      h('span'),
+      h('span.ds-script-head', 'Size'),
+      h('span.ds-script-head', 'Position'),
+      h('span.ds-script-label', 'Superscript'),
+      script.superSize,
+      script.superPos,
+      h('span.ds-script-label', 'Subscript'),
+      script.subSize,
+      script.subPos,
+      h('span.ds-script-label', 'Small Caps'),
+      script.smallCaps,
+      h('span'),
+    ),
     error,
   );
 
@@ -151,6 +204,7 @@ export async function documentSetupDialog(app, editor = app.editor) {
       height: parseLength(hIn.value, units),
       showImagesInOutline: imagesOutline.checked,
       transparencyGrid: { size: Number(sizeSel.value), preset: colorSel.value, color1: c1.value, color2: c2.value, simulatePaper: paper.checked },
+      typeOptions: { language: langSel.value, double: doubleSel.value, single: singleSel.value, quotes: smartQuotes.checked, ...Object.fromEntries(Object.entries(script).map(([k, el]) => [k, readPct(el)])) },
     };
   };
   const validate = () => {
@@ -163,6 +217,10 @@ export async function documentSetupDialog(app, editor = app.editor) {
     for (const [s, el] of Object.entries(bleedIn)) if (!Number.isFinite(v.bleed[s]) || v.bleed[s] < 0 || v.bleed[s] > LIMITS.maxBleed) return bad(el, `Bleed must be between 0 and ${LIMITS.maxBleed} pt.`);
     if (!Number.isFinite(v.width) || v.width < LIMITS.minSize || v.width > LIMITS.maxSize) return bad(wIn, `Width must be between ${LIMITS.minSize} and ${LIMITS.maxSize} pt.`);
     if (!Number.isFinite(v.height) || v.height < LIMITS.minSize || v.height > LIMITS.maxSize) return bad(hIn, `Height must be between ${LIMITS.minSize} and ${LIMITS.maxSize} pt.`);
+    for (const [k, [lo, hi]] of Object.entries(SCRIPT_LIMITS)) {
+      const x = v.typeOptions[k];
+      if (!Number.isFinite(x) || x < lo || x > hi) return bad(script[k], `${scriptLabels[k]} must be between ${lo}% and ${hi}%.`);
+    }
     error.textContent = '';
     return true;
   };
@@ -183,6 +241,7 @@ export async function documentSetupDialog(app, editor = app.editor) {
   const patch = documentSetupPatch(doc.root, v);
   if (!Object.keys(patch).length) return true;
   doc.transact('Document Setup', () => doc.updateRoot(patch));
+  if (patch.typeOptions) clearGeometryCache();
   for (const view of app.views.values()) view.invalidate();
   return true;
 }

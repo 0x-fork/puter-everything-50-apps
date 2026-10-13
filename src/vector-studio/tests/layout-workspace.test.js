@@ -42,7 +42,7 @@ describe('view toggles', () => {
       expect(Boolean(ed.viewOptions[key]), id).toBe(!before);
     }
     expect(app.commands.label('view.template')).toBe('Show Template');
-    expect(app.commands.label('view.gradientAnnotator')).toBe('Show Gradient Annotator');
+    expect(app.commands.label('view.gradientAnnotator')).toBe('Show Gradient Controls');
     expect(app.commands.get('view.template').shortcut).toBe('Shift+Mod+W');
   });
 
@@ -339,7 +339,8 @@ describe('document windows', () => {
     expect(host.classList.contains('arrange-tile')).toBe(true);
     expect([...app.views.values()].every((v) => !v.host.hidden)).toBe(true);
     await app.commands.run('window.arrange.cascade');
-    expect(host.classList.contains('arrange-stack')).toBe(true);
+    expect([...app.views.values()].every((v) => v.host.classList.contains('floating'))).toBe(true);
+    await app.commands.run('window.arrange.tile');
     await app.commands.run('window.arrange.float');
     expect(app.views.get(ed2).host.classList.contains('floating')).toBe(true);
     expect(app.views.get(ed2).host.querySelector('.float-head')).toBeTruthy();

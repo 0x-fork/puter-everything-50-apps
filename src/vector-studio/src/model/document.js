@@ -142,6 +142,8 @@ export class VDocument extends Emitter {
       artboards: boards,
       guides: [],
       swatches: DEFAULT_SWATCHES.map((s) => ({ ...s })),
+      // New documents compose paragraphs with the Every-line Composer (older ones keep the single-line one).
+      paraStyles: [{ id: 'normal', name: 'Normal Paragraph Style', basedOn: null, attrs: { composer: 'every' } }],
       units,
       colorMode,
       bleed: bleeds,
@@ -409,7 +411,7 @@ export class VDocument extends Emitter {
       time: Date.now(),
     };
     this.undoStack.push(record);
-    if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
+    while (this.undoStack.length > (this.historyLimit || HISTORY_LIMIT)) this.undoStack.shift();
     this.redoStack.length = 0;
     this.revision++;
     this.emit('transaction', { label: tx.label, before: tx.before, after });

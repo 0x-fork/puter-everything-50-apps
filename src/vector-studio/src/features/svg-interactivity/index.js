@@ -9,7 +9,7 @@
  *   root.svgScript   'code'          a script embedded in the SVG
  */
 import { h } from '../../lib/dom.js';
-import { Panel, emptyState } from '../../ui/panels/panel.js';
+import { Panel, emptyState, setListItems } from '../../ui/panels/panel.js';
 import { iconButton } from '../../ui/widgets.js';
 import { registerIcons } from '../../ui/icons.js';
 import { openDialog } from '../../ui/dialogs/dialog.js';
@@ -46,6 +46,25 @@ export class SvgInteractivityPanel extends Panel {
   static title = 'SVG Interactivity';
   static icon = 'panel-svg-interactivity';
 
+  menu() {
+    const ed = this.app.editor;
+    const node = ed && ed.selection.size === 1 ? ed.selectedNodes()[0] : null;
+    const withEvents = [];
+    ed?.doc.walk((n) => {
+      if (n.svgEvents) withEvents.push(n.id);
+    });
+    const root = ed?.doc.root;
+    return [
+      { label: 'Remove Event', enabled: Boolean(node?.svgEvents?.[this.eventSel.value]), run: () => this.setEvent(this.eventSel.value, '') },
+      { label: 'Clear Events', enabled: Boolean(node?.svgEvents), run: () => ed.doc.transact('Clear Events', () => ed.doc.update(node.id, { svgEvents: undefined })) },
+      { label: 'Clear All Events in Document', enabled: withEvents.length > 0, run: () => ed.doc.transact('Clear All Events', () => withEvents.forEach((id) => ed.doc.update(id, { svgEvents: undefined }))) },
+      { label: 'Select Objects with Events', enabled: withEvents.length > 0, run: () => ed.select(withEvents) },
+      '-',
+      { label: 'Document Scripts...', enabled: Boolean(ed), run: () => this.editScripts() },
+      { label: 'Remove All Scripts', enabled: Boolean(root?.svgScripts?.length || root?.svgScript), run: () => ed.doc.transact('Remove Scripts', () => ed.doc.updateRoot({ svgScripts: undefined, svgScript: undefined })) },
+    ];
+  }
+
   build() {
     this.eventSel = h('select.svgi-event', { 'aria-label': 'Event' }, SVG_EVENTS.map((e) => h('option', { value: e }, e)));
     this.code = h('textarea.svgi-code', { rows: 3, placeholder: 'JavaScript, e.g. alert(evt.target.id)', 'aria-label': 'JavaScript for the event', spellcheck: false });
@@ -67,21 +86,21 @@ export class SvgInteractivityPanel extends Panel {
     this.addBtn.disabled = !node;
     this.code.disabled = !node;
     this.scriptsBtn.disabled = !ed;
-    if (!ed) return this.list.replaceChildren(emptyState('Open a document to add interactivity.'));
-    if (!node) return this.list.replaceChildren(emptyState('Select one object to give it event handlers for SVG export.'));
+    if (!ed) return setListItems(this.list, [], emptyState('Open a document to add interactivity.'));
+    if (!node) return setListItems(this.list, [], emptyState('Select one object to give it event handlers for SVG export.'));
     const entries = Object.entries(node.svgEvents || {}).filter(([, v]) => v);
-    this.list.replaceChildren(
-      ...(entries.length
-        ? entries.map(([name, code]) =>
-            h(
-              'div.svgi-item',
-              { role: 'listitem' },
-              h('button.svgi-name', { type: 'button', 'aria-label': `Edit ${name}`, onclick: () => ((this.eventSel.value = name), (this.code.value = code), this.code.focus()) }, name),
-              h('code.svgi-snippet', code),
-              iconButton('trash', `Remove ${name}`, () => this.setEvent(name, ''), { className: 'small' }),
-            ),
-          )
-        : [h('p.panel-empty', 'No events. Choose an event, type JavaScript and Set Event.')]),
+    setListItems(
+      this.list,
+      entries.map(([name, code]) =>
+        h(
+          'div.svgi-item',
+          { role: 'listitem' },
+          h('button.svgi-name', { type: 'button', 'aria-label': `Edit ${name}`, onclick: () => ((this.eventSel.value = name), (this.code.value = code), this.code.focus()) }, name),
+          h('code.svgi-snippet', code),
+          iconButton('trash', `Remove ${name}`, () => this.setEvent(name, ''), { className: 'small' }),
+        ),
+      ),
+      h('p.panel-empty', 'No events. Choose an event, type JavaScript and Set Event.'),
     );
   }
 

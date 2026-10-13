@@ -7,16 +7,27 @@ import { h } from '../../lib/dom.js';
 import { Panel, emptyState } from '../../ui/panels/panel.js';
 import { paintSwatch, updatePaintSwatch } from '../../ui/widgets.js';
 import { formatLength } from '../../lib/units.js';
-import { hexToRgb } from '../../lib/color.js';
+import { hexToRgb, cmykEngine } from '../../lib/color.js';
 import { commonStyle } from '../../ops/paint-ops.js';
 import { measureValues } from './measure-reshape.js';
 
-/** Text description of a paint for the Info panel. */
-export function paintInfo(p) {
+/**
+ * Text description of a paint for the Info panel (CMYK percentages in CMYK
+ * documents); a spot color shows its name and tint.
+ */
+export function paintInfo(p, mode = 'RGB', doc = null) {
   if (p === 'mixed') return 'Mixed';
   if (!p) return 'None';
+  const spot = p.swatchId && (doc?.root.swatches || []).find((sw) => sw.id === p.swatchId && sw.spot);
+  if (spot) return `${spot.name} ${Math.round((p.tint ?? 1) * 100)}%`;
   if (p.type === 'solid') {
     const c = hexToRgb(p.color);
+    if (mode === 'CMYK') {
+      // Converted colors keep their CMYK numbers; others go through the document's CMYK profile.
+      const k = p.cmyk || cmykEngine.toCmyk(c);
+      const r = (v) => Math.round(v);
+      return `C ${r(k.c)}%  M ${r(k.m)}%  Y ${r(k.y)}%  K ${r(k.k)}%`;
+    }
     return `R ${c.r}  G ${c.g}  B ${c.b}  ${p.color.toUpperCase()}`;
   }
   if (p.type === 'linear' || p.type === 'radial') return `${p.type === 'linear' ? 'Linear' : 'Radial'} gradient, ${p.stops.length} stops`;
@@ -29,6 +40,11 @@ export class InfoPanel extends Panel {
   static icon = 'info';
   static placement = 'strip';
   static shortcut = 'F8';
+
+  menu() {
+    const on = this.app.prefs.get('infoShowOptions') !== false;
+    return [{ label: on ? 'Hide Options' : 'Show Options', run: () => (this.app.prefs.set('infoShowOptions', !on), this.update()) }];
+  }
 
   build() {
     const cell = (label) => {
@@ -48,7 +64,8 @@ export class InfoPanel extends Panel {
     this.empty = emptyState('Open a document to see measurements.');
     this.grid = h('div.info-grid', this.x.el, this.w.el, this.y.el, this.hh.el, this.d.el, this.a.el);
     this.paints = h('div.info-paints', h('div.info-paint-row', this.fillSw, h('span.info-key', 'Fill'), this.fillTxt), h('div.info-paint-row', this.strokeSw, h('span.info-key', 'Stroke'), this.strokeTxt));
-    this.el.append(this.empty, h('section.panel-section', this.grid), h('section.panel-section', this.paints));
+    this.paintSection = h('section.panel-section', this.paints);
+    this.el.append(this.empty, h('section.panel-section', this.grid), this.paintSection);
     this.pointer = null;
     this.dragStart = null;
     this.frame = 0;
@@ -83,6 +100,8 @@ export class InfoPanel extends Panel {
     this.empty.hidden = Boolean(ed);
     for (const c of this.el.children) if (c !== this.empty) c.hidden = !ed;
     if (!ed) return;
+    // Hide Options hides the fill and stroke rows.
+    this.paintSection.hidden = this.app.prefs.get('infoShowOptions') === false;
     const unit = ed.doc.root.units || 'pt';
     const f = (v) => (v == null || !Number.isFinite(v) ? '' : formatLength(v, unit));
     const o = this.app.rulerOrigin?.(ed) || ed.artboard() || { x: 0, y: 0 };
@@ -116,8 +135,9 @@ export class InfoPanel extends Panel {
     const stroke = commonStyle(ed, 'stroke');
     updatePaintSwatch(this.fillSw, fill === 'mixed' ? null : fill, fill === 'mixed');
     updatePaintSwatch(this.strokeSw, stroke === 'mixed' ? null : stroke, stroke === 'mixed');
-    this.fillTxt.textContent = paintInfo(fill);
+    const mode = ed.doc.root.colorMode === 'CMYK' ? 'CMYK' : 'RGB';
+    this.fillTxt.textContent = paintInfo(fill, mode, ed.doc);
     const sw = commonStyle(ed, 'strokeWidth');
-    this.strokeTxt.textContent = paintInfo(stroke) + (stroke && stroke !== 'mixed' && sw !== 'mixed' && sw != null ? `, ${f(sw)}` : '');
+    this.strokeTxt.textContent = paintInfo(stroke, mode, ed.doc) + (stroke && stroke !== 'mixed' && sw !== 'mixed' && sw != null ? `, ${f(sw)}` : '');
   }
 }

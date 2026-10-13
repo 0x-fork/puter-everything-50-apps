@@ -6,7 +6,7 @@
  * the pointer; dragging a handle of a smooth anchor keeps the opposite
  * handle collinear (Alt breaks it into a corner).
  */
-import { Tool, tol, fmt } from './tool.js';
+import { Tool, tol, fmt, constrain45, constrainAngle } from './tool.js';
 import { hitTest, marqueeHits, pointInPolygon, nodeTouchesRect } from '../render/hit.js';
 import { TransformSession } from './transform-session.js';
 import { anchor, hasIn, hasOut, nearestOnPath, segmentPoints, segmentCount, pointAt } from '../model/bezier.js';
@@ -147,6 +147,11 @@ export class DirectSelectionTool extends Tool {
     for (const hook of directSelectionHooks) if (hook.doubleClick?.(this, e)) return;
   }
 
+  /** Double-clicking the tool opens the Move dialog for the selection. */
+  openOptions() {
+    if (this.editor?.selection.size) this.app.commands.run('object.transform.move');
+  }
+
   onHover(e) {
     const editor = this.editor;
     for (const hook of directSelectionHooks) {
@@ -161,7 +166,7 @@ export class DirectSelectionTool extends Tool {
       this.hookCursor = false;
       this.setCursor('var(--cursor-direct)');
     }
-    const hit = hitTest(editor.doc, e.x, e.y, tol(editor, 3), { outline: editor.viewOptions.mode === 'outline', intoCompound: true });
+    const hit = hitTest(editor.doc, e.x, e.y, tol(editor, 3), { outline: editor.viewOptions.mode === 'outline' || Boolean(editor.prefs?.get('objectSelectionByPath')), intoCompound: true });
     const id = hit?.id || null;
     if (editor.hover !== id) {
       editor.hover = id;
@@ -212,7 +217,7 @@ export class DirectSelectionTool extends Tool {
       this.startHandleDrag(e, ah);
       return;
     }
-    const hit = hitTest(doc, e.x, e.y, tol(editor, 3), { outline: editor.viewOptions.mode === 'outline', intoCompound: true });
+    const hit = hitTest(doc, e.x, e.y, tol(editor, 3), { outline: editor.viewOptions.mode === 'outline' || Boolean(editor.prefs?.get('objectSelectionByPath')), intoCompound: true });
     if (hit && !hit.children && !hit.anchors && directSelectHooks.instance?.(this, hit, e)) return;
     if (hit) {
       if (hit.type === 'path') {
@@ -337,9 +342,11 @@ export class DirectSelectionTool extends Tool {
       let tx = d.x0 + (e.x - d.px);
       let ty = d.y0 + (e.y - d.py);
       if (e.shift) {
+        // Along the nearest multiple of 45 degrees from the Constrain Angle, following the pointer.
         const dx = tx - d.x0;
         const dy = ty - d.y0;
-        const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+        const base = (-constrainAngle(this.app) * Math.PI) / 180;
+        const a = Math.round((Math.atan2(dy, dx) - base) / (Math.PI / 4)) * (Math.PI / 4) + base;
         const len = dx * Math.cos(a) + dy * Math.sin(a);
         tx = d.x0 + Math.cos(a) * len;
         ty = d.y0 + Math.sin(a) * len;
@@ -362,11 +369,7 @@ export class DirectSelectionTool extends Tool {
       const a = anchors[d.index];
       let hx = e.x;
       let hy = e.y;
-      if (e.shift) {
-        const c = constrainHandle(a.x, a.y, hx, hy);
-        hx = c.x;
-        hy = c.y;
-      }
+      if (e.shift) ({ x: hx, y: hy } = constrain45(a.x, a.y, hx, hy, constrainAngle(this.app)));
       const keepSmooth = d.smooth && !e.alt;
       if (d.part === 'in') {
         a.ix = hx;
@@ -570,15 +573,6 @@ export class DirectSelectionTool extends Tool {
   }
 }
 
-/** Constrain a handle to 45-degree angles around its anchor. */
-function constrainHandle(ax, ay, hx, hy) {
-  const dx = hx - ax;
-  const dy = hy - ay;
-  const len = Math.hypot(dx, dy);
-  const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
-  return { x: ax + Math.cos(a) * len, y: ay + Math.sin(a) * len };
-}
-
 /** Rotate the opposite handle to stay collinear, keeping its length. */
 export function mirrorAngle(a, moved) {
   const [mx, my] = moved === 'in' ? [a.ix, a.iy] : [a.ox, a.oy];
@@ -611,6 +605,10 @@ export class GroupSelectionTool extends Tool {
     this.selectionMode = 'object';
     this.drag = null;
     this.last = null;
+  }
+
+  openOptions() {
+    DirectSelectionTool.prototype.openOptions.call(this);
   }
 
   activate() {

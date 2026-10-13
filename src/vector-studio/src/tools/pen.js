@@ -5,9 +5,10 @@
  * Pen: click for a corner, drag for a smooth anchor (Alt while dragging
  * breaks the handles), click the first anchor to close, click the last
  * anchor to retract its outgoing handle (drag from it for a new one). Over a
- * selected path the Pen adds or deletes anchors; over an open endpoint it
- * continues that path, and while drawing it connects to another open path's
- * endpoint; with Alt it converts anchors like the Anchor Point tool. Enter,
+ * selected path the Pen adds or deletes anchors (not while Shift is held);
+ * over an open endpoint it continues that path, and while drawing it
+ * connects to another open path's endpoint; with Alt it converts anchors
+ * like the Anchor Point tool. Enter,
  * Escape, deselecting or a click with Command/Ctrl ends the path; undo
  * removes the last anchor and drawing goes on.
  */
@@ -20,9 +21,16 @@ import { drawAnchor, layerColor } from '../render/overlay.js';
 import { findAnchorOrHandle, isSmooth } from './direct-selection.js';
 import { removeEmptyContainers } from '../ops/object-ops.js';
 
-/** Style for new paths drawn with the current paint settings. */
+/**
+ * Style for new paths drawn with the current paint settings. With
+ * `editor.basicNewArt` (New Art Has Basic Appearance) they leave out the
+ * current effects and extra fills and strokes.
+ */
 export function newPathStyle(editor) {
-  return pickStyle(editor.style);
+  const style = pickStyle(editor.style);
+  if (editor.basicNewArt && style.effects?.length) style.effects = [];
+  if (editor.basicNewArt) delete style.appearance;
+  return style;
 }
 
 /** Selected, unlocked paths (for auto add/delete). */
@@ -115,8 +123,13 @@ export class PenTool extends Tool {
 
   onHover(e) {
     const editor = this.editor;
-    this.cursorPt = { x: e.x, y: e.y };
     const p = this.path;
+    this.cursorPt = { x: e.x, y: e.y };
+    // The rubber band previews where a Shift-click puts the next anchor.
+    if (p && e.shift) {
+      const last = p.anchors[p.anchors.length - 1];
+      this.cursorPt = constrain45(last.x, last.y, e.x, e.y, constrainAngle(this.app));
+    }
     let cursor = 'var(--cursor-pen)';
     if (p) {
       const first = p.anchors[0];
@@ -131,8 +144,8 @@ export class PenTool extends Tool {
       const ah = findAnchorOrHandle(editor, e.sx, e.sy, sel, { handles: false });
       const ep = endpointAt(editor, e.sx, e.sy);
       if (ep) cursor = 'var(--cursor-pen-continue)';
-      else if (ah && this.app.prefs.get('autoAddDelete')) cursor = 'var(--cursor-pen-minus)';
-      else if (sel.length && this.app.prefs.get('autoAddDelete')) {
+      else if (ah && this.app.prefs.get('autoAddDelete') && !e.shift) cursor = 'var(--cursor-pen-minus)';
+      else if (sel.length && this.app.prefs.get('autoAddDelete') && !e.shift) {
         for (const sp of sel) {
           const near = nearestOnPath(sp.anchors, sp.closed, e.x, e.y);
           if (near && near.d < tol(editor, 4)) cursor = 'var(--cursor-pen-plus)';
@@ -178,7 +191,8 @@ export class PenTool extends Tool {
         return;
       }
       const sel = selectedPaths(editor);
-      if (this.app.prefs.get('autoAddDelete')) {
+      // Shift turns automatic add and delete off for the click.
+      if (this.app.prefs.get('autoAddDelete') && !e.shift) {
         // Delete anchor on a selected path.
         const ah = findAnchorOrHandle(editor, e.sx, e.sy, sel, { handles: false });
         if (ah) {
@@ -202,7 +216,7 @@ export class PenTool extends Tool {
       y = snap.y;
       const tx = doc.begin('Pen');
       const node = createPath([anchor(x, y)], false, newPathStyle(editor));
-      doc.insert(node, editor.targetLayer().id);
+      editor.insertDrawn(node);
       this.pathId = node.id;
       editor.selectAnchors(node.id, [0]);
       this.drag = { tx, index: 0, x0: x, y0: y };
@@ -564,7 +578,7 @@ export class CurvatureTool extends Tool {
       if (!editor.canDrawInTarget()) return;
       const tx = doc.begin('Curvature');
       const node = createPath([anchor(e.x, e.y)], false, newPathStyle(editor));
-      doc.insert(node, editor.targetLayer().id);
+      editor.insertDrawn(node);
       this.pathId = node.id;
       this.corners = [e.alt];
       editor.selectAnchors(this.pathId, [0]);

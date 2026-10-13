@@ -1,13 +1,38 @@
 /**
  * Edit > Edit Colors commands: Invert Colors, Convert to Grayscale, Adjust
  * Color Balance, Blend Horizontally / Vertically / Front to Back, Saturate
- * and Recolor Artwork. Dialog commands preview live inside a transaction
+ * and Recolor. Dialog commands preview live inside a transaction
  * that Cancel rolls back.
  */
 import { h } from '../../lib/dom.js';
 import { openDialog } from '../../ui/dialogs/dialog.js';
 import { icon } from '../../ui/icons.js';
 import { colorTargets, colorPatches, collectColors, invertColor, grayscaleColor, adjustColor, saturateColor, blendFills, recolorFn } from './edit-colors.js';
+import { hexToRgb, rgbToHex, rgbToHsb, hsbToRgb } from '../../lib/color.js';
+import { reduceColorsMap, harmonyMap, paletteMap, HARMONY_RULES } from '../panels/color-harmony.js';
+import { swatchesOf, groupsOf, updateSwatch, addGroup, colorName } from './swatch-model.js';
+import { SWATCH_LIBRARIES } from './swatch-libraries.js';
+
+/** Colors kept as they are by the Preserve options. */
+export function preservedColor(hex, { white = false, black = false, grays = false } = {}) {
+  const { r, g, b } = hexToRgb(hex);
+  const gray = Math.abs(r - g) < 3 && Math.abs(g - b) < 3;
+  if (white && r > 251 && g > 251 && b > 251) return true;
+  if (black && r < 4 && g < 4 && b < 4) return true;
+  return grays && gray && !(r > 251 || r < 4);
+}
+
+/** A random saturation and brightness for a color (hue kept), for Recolor's randomize button. */
+export function randomSatBright(hex, rand = Math.random) {
+  const c = rgbToHsb(hexToRgb(hex));
+  return rgbToHex(hsbToRgb({ h: c.h, s: 15 + rand() * 85, v: 25 + rand() * 75 }));
+}
+
+/** Palettes to recolor with: the document swatches and the built-in libraries (solid colors). */
+function recolorPalettes(doc) {
+  const solids = (list) => list.filter((s) => s.paint?.type === 'solid').map((s) => s.paint.color.toLowerCase());
+  return [{ id: 'document', name: 'Document Swatches', colors: solids(swatchesOf(doc)) }, ...SWATCH_LIBRARIES.map((l) => ({ id: l.id, name: l.name, colors: solids(l.swatches) }))].filter((p) => p.colors.length);
+}
 
 function selectedColorNodes(editor) {
   return colorTargets(editor.doc, editor.topSelection());
@@ -98,23 +123,31 @@ function checkbox(label, checked = true) {
 }
 
 async function adjustBalance(app) {
-  const modeSel = h('select', { id: 'ec-mode' }, h('option', { value: 'rgb' }, 'RGB'), h('option', { value: 'cmyk' }, 'CMYK'));
+  const modeSel = h('select', { id: 'ec-mode' }, h('option', { value: 'rgb' }, 'RGB'), h('option', { value: 'cmyk' }, 'CMYK'), h('option', { value: 'grayscale' }, 'Grayscale'));
   const rgb = [slider('Red', -100, 100, 0), slider('Green', -100, 100, 0), slider('Blue', -100, 100, 0)];
   const cmyk = [slider('Cyan', -100, 100, 0), slider('Magenta', -100, 100, 0), slider('Yellow', -100, 100, 0), slider('Black', -100, 100, 0)];
   const rgbBox = h('div.ec-group', rgb.map((s) => s.el));
   const cmykBox = h('div.ec-group', { hidden: true }, cmyk.map((s) => s.el));
+  const gray = slider('Black', -100, 100, 0);
+  const grayBox = h('div.ec-group', { hidden: true }, gray.el);
+  // Grayscale adjusts gray colors only, unless Convert makes every color gray first.
+  const convert = checkbox('Convert', false);
+  convert.input.disabled = true;
   modeSel.addEventListener('change', () => {
     rgbBox.hidden = modeSel.value !== 'rgb';
     cmykBox.hidden = modeSel.value !== 'cmyk';
+    grayBox.hidden = modeSel.value !== 'grayscale';
+    convert.input.disabled = modeSel.value !== 'grayscale';
   });
   const fill = checkbox('Fill');
   const stroke = checkbox('Stroke');
   const prev = checkbox('Preview');
-  const body = h('div.form.ec', h('div.form-row', h('label', { for: 'ec-mode' }, 'Color Mode'), modeSel), rgbBox, cmykBox, h('div.ec-checks', h('span.form-label', 'Adjust Options'), fill.el, stroke.el), prev.el);
+  const body = h('div.form.ec', h('div.form-row', h('label', { for: 'ec-mode' }, 'Color Mode'), modeSel), convert.el, rgbBox, cmykBox, grayBox, h('div.ec-checks', h('span.form-label', 'Adjust Options'), fill.el, stroke.el), prev.el);
   const read = () => ({
     mode: modeSel.value,
     r: rgb[0].value, g: rgb[1].value, b: rgb[2].value,
     c: cmyk[0].value, m: cmyk[1].value, y: cmyk[2].value, k: cmyk[3].value,
+    gray: gray.value, convert: convert.input.checked,
     fill: fill.input.checked, stroke: stroke.input.checked,
   });
   return previewDialog(app, {
@@ -140,16 +173,101 @@ async function saturateDialog(app) {
   });
 }
 
+/** The solid colors of a color group's swatches: [{ color, count }] (count: swatches with that color). */
+export function groupColors(doc, groupId) {
+  const counts = new Map();
+  for (const s of swatchesOf(doc)) {
+    if (s.group !== groupId || s.paint?.type !== 'solid') continue;
+    const c = s.paint.color.toLowerCase();
+    counts.set(c, (counts.get(c) || 0) + 1);
+  }
+  return [...counts].map(([color, count]) => ({ color, count }));
+}
+
 /**
- * Recolor Artwork: the selection's colors with editable new colors and
+ * Recolor a color group with `fn` (inside a transaction): its swatches
+ * change color (objects linked to global ones follow), or with `asNew` a
+ * recolored copy of the group is added. Returns the group id written.
+ */
+export function recolorGroup(doc, groupId, fn, { asNew = false, name = null } = {}) {
+  const g = groupsOf(doc).find((x) => x.id === groupId);
+  if (!g) return null;
+  const members = swatchesOf(doc).filter((s) => s.group === groupId && s.paint?.type === 'solid');
+  if (asNew) {
+    return addGroup(doc, name || `${g.name} copy`, { paints: members.map((s) => {
+      const color = fn(s.paint.color);
+      return { name: color.toLowerCase() === s.paint.color.toLowerCase() ? s.name : colorName(color), paint: { type: 'solid', color } };
+    }) });
+  }
+  for (const s of members) {
+    const color = fn(s.paint.color);
+    if (color.toLowerCase() !== s.paint.color.toLowerCase()) updateSwatch(doc, s.id, { paint: { ...s.paint, color } });
+  }
+  return groupId;
+}
+
+/**
+ * Edit Color Group: Recolor's controls over a color group's colors. The
+ * changes update the group (or save a recolored copy), and with Recolor Art
+ * the selected artwork too, previewed live inside one transaction.
+ */
+async function groupPreviewDialog(app, { title, body, read, compute, previewBox, group, artBox, saveNew }) {
+  const ed = app.editor;
+  const doc = ed.doc;
+  const ids = ed.topSelection();
+  let tx = doc.begin(title);
+  const apply = (v) => {
+    const fn = compute(v);
+    if (!fn) return;
+    recolorGroup(doc, group.id, fn, { asNew: saveNew.checked });
+    if (artBox.checked) {
+      const nodes = colorTargets(doc, ids);
+      for (const [id, p] of colorPatches(nodes, fn)) doc.update(id, p);
+    }
+  };
+  const preview = () => {
+    // Start over from the document as it was, then show the current settings.
+    tx.cancel();
+    tx = doc.begin(title);
+    if (previewBox.checked) apply(read());
+  };
+  body.addEventListener('input', preview);
+  body.addEventListener('change', preview);
+  let ok = null;
+  try {
+    ok = await openDialog({
+      title,
+      body,
+      className: 'recolor-dialog',
+      onOpen: () => preview(),
+      buttons: [
+        { label: 'Cancel', value: null },
+        { label: 'OK', primary: true, value: () => read() },
+      ],
+    });
+  } catch (err) {
+    tx.cancel();
+    throw err;
+  }
+  tx.cancel();
+  if (!ok) return false;
+  doc.transact(title, () => apply(ok));
+  return true;
+}
+
+/**
+ * Recolor: the selection's colors with editable new colors and
  * global adjustments. `preset.map` ({ oldHex: newHex }) preassigns new
- * colors (Recolor with Preset); `preset.title` names the dialog.
+ * colors (Recolor with Preset); `preset.title` names the dialog;
+ * `preset.group` (a color group id) edits that group's colors instead
+ * (Edit Color Group).
  */
 export async function recolorDialog(app, preset = {}) {
   const ed = app.editor;
-  const colors = collectColors(selectedColorNodes(ed));
+  const group = preset.group ? groupsOf(ed.doc).find((g) => g.id === preset.group) : null;
+  const colors = group ? groupColors(ed.doc, group.id) : collectColors(selectedColorNodes(ed));
   if (!colors.length) {
-    app.notify('The selection has no colors to recolor.');
+    app.notify(group ? 'The color group has no colors to edit.' : 'The selection has no colors to recolor.');
     return false;
   }
   const map = {};
@@ -165,7 +283,7 @@ export async function recolorDialog(app, preset = {}) {
     return {
       color,
       input,
-      el: h('div.rc-row', h('span.rc-chip', { style: { background: color }, 'aria-hidden': 'true' }), h('span.rc-hex', color.toUpperCase()), h('span.rc-count.muted', `${count}`), h('span.rc-arrow', { 'aria-hidden': 'true' }, '→'), input, reset),
+      el: h('div.rc-row', { role: 'listitem' }, h('span.rc-chip', { style: { background: color }, 'aria-hidden': 'true' }), h('span.rc-hex', color.toUpperCase()), h('span.rc-count.muted', `${count}`), h('span.rc-arrow', { 'aria-hidden': 'true' }, '→'), input, reset),
     };
   });
   const hue = slider('Hue Shift', -180, 180, 0);
@@ -185,24 +303,99 @@ export async function recolorDialog(app, preset = {}) {
     });
     body.dispatchEvent(new Event('input'));
   } }, 'Randomly Change Color Order');
+  const randomize = h('button.btn.small', { type: 'button', onclick: () => {
+    // New saturation and brightness for every new color; hues stay.
+    rows.forEach((r) => {
+      if (preserve().some(Boolean) && preservedColor(r.color, preserveOpts())) return;
+      r.input.value = randomSatBright(r.input.value);
+      map[r.color] = r.input.value;
+    });
+    body.dispatchEvent(new Event('input'));
+  } }, 'Randomly Change Saturation and Brightness');
+  // Set the new colors from a rule: fewer colors, a harmony, or the nearest colors of a library.
+  const palettes = recolorPalettes(ed.doc);
+  const ruleSel = h(
+    'select.select',
+    { id: 'rc-rule', 'aria-label': 'Set new colors from' },
+    h('option', { value: '' }, 'Choose...'),
+    h('optgroup', { label: 'Number of colors' }, [1, 2, 3, 4, 5, 6, 8].filter((k) => k < colors.length).map((k) => h('option', { value: `reduce:${k}` }, `${k} color${k === 1 ? '' : 's'}`))),
+    h('optgroup', { label: 'Harmony' }, HARMONY_RULES.map((r) => h('option', { value: `harmony:${r.id}` }, r.label))),
+    h('optgroup', { label: 'Library' }, palettes.map((p) => h('option', { value: `library:${p.id}` }, p.name))),
+  );
+  ruleSel.addEventListener('change', () => {
+    const [kind, arg] = ruleSel.value.split(':');
+    if (!kind) return;
+    const m = kind === 'reduce' ? reduceColorsMap(colors, Number(arg)) : kind === 'harmony' ? harmonyMap(colors, arg) : paletteMap(colors, palettes.find((p) => p.id === arg)?.colors || []);
+    rows.forEach((r) => {
+      const next = m[r.color.toLowerCase()];
+      if (!next || preservedColor(r.color, preserveOpts())) return;
+      r.input.value = next;
+      map[r.color] = next;
+    });
+    ruleSel.value = '';
+    body.dispatchEvent(new Event('input'));
+  });
+  const keepWhite = checkbox('White', false);
+  const keepBlack = checkbox('Black', false);
+  const keepGrays = checkbox('Grays', false);
+  const preserve = () => [keepWhite.input.checked, keepBlack.input.checked, keepGrays.input.checked];
+  const preserveOpts = () => ({ white: keepWhite.input.checked, black: keepBlack.input.checked, grays: keepGrays.input.checked });
+  // Preserved colors go back to themselves.
+  const syncPreserved = () => {
+    for (const r of rows) {
+      const keep = preservedColor(r.color, preserveOpts());
+      r.input.disabled = keep;
+      if (keep) {
+        r.input.value = r.color;
+        delete map[r.color];
+      }
+    }
+  };
+  for (const c of [keepWhite, keepBlack, keepGrays]) c.input.addEventListener('change', syncPreserved);
   const prev = checkbox('Preview');
+  // Edit Color Group: where the changes go.
+  const artBox = checkbox('Recolor Art', false);
+  const saveNew = checkbox('Save as a New Color Group', false);
+  if (group) artBox.input.disabled = !collectColors(selectedColorNodes(ed)).length;
   const body = h(
     'div.form.ec.recolor',
+    group ? h('p.rc-group', h('span.form-label', 'Color Group'), h('strong', group.name)) : null,
     h('div.rc-head', h('span', 'Current Colors'), h('span', 'New')),
     h('div.rc-list', { role: 'list' }, rows.map((r) => r.el)),
+    h('div.form-row', h('label', { for: 'rc-rule' }, 'Set new colors from'), ruleSel),
+    h('div.rc-preserve', h('span.form-label', 'Preserve'), keepWhite.el, keepBlack.el, keepGrays.el),
     h('h3.form-heading', 'Adjust All'),
     hue.el,
     sat.el,
     bri.el,
-    h('div.rc-actions', shuffle),
+    h('div.rc-actions', shuffle, randomize),
+    group ? h('div.rc-group-options', artBox.el, saveNew.el) : null,
     prev.el,
   );
+  if (group) {
+    return groupPreviewDialog(app, {
+      title: preset.title || 'Edit Color Group',
+      body,
+      group,
+      artBox: artBox.input,
+      saveNew: saveNew.input,
+      read: () => ({ map: { ...map }, h: hue.value, s: sat.value, b: bri.value, preserve: preserveOpts() }),
+      previewBox: prev.input,
+      compute: (v) => {
+        const fn = recolorFn(v.map, { h: v.h, s: v.s, b: v.b });
+        return (hex) => (preservedColor(hex, v.preserve) ? hex : fn(hex));
+      },
+    });
+  }
   return previewDialog(app, {
-    title: preset.title || 'Recolor Artwork',
+    title: preset.title || 'Recolor',
     body,
-    read: () => ({ map: { ...map }, h: hue.value, s: sat.value, b: bri.value }),
+    read: () => ({ map: { ...map }, h: hue.value, s: sat.value, b: bri.value, preserve: preserveOpts() }),
     previewBox: prev.input,
-    compute: (v) => recolorFn(v.map, { h: v.h, s: v.s, b: v.b }),
+    compute: (v) => {
+      const fn = recolorFn(v.map, { h: v.h, s: v.s, b: v.b });
+      return (hex) => (preservedColor(hex, v.preserve) ? hex : fn(hex));
+    },
   });
 }
 
@@ -228,6 +421,6 @@ export function registerEditColorCommands(app) {
     { id: 'color.blendHorizontal', label: 'Blend Horizontally', enabled: has, run: blend('horizontal', 'Blend Horizontally') },
     { id: 'color.blendVertical', label: 'Blend Vertically', enabled: has, run: blend('vertical', 'Blend Vertically') },
     { id: 'color.saturate', label: 'Saturate...', enabled: has, run: (a) => saturateDialog(a) },
-    { id: 'color.recolor', label: 'Recolor Artwork...', enabled: has, run: (a) => recolorDialog(a) },
+    { id: 'color.recolor', label: 'Recolor...', enabled: has, run: (a) => recolorDialog(a) },
   ]);
 }

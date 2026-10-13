@@ -29,7 +29,7 @@ import { nudge } from './ops/object-ops.js';
 import { swapFillStroke, defaultFillStroke, setFocusedPaint } from './ops/paint-ops.js';
 import { closePopover } from './ui/popover.js';
 import { CORE_TOOLS } from './tools/index.js';
-import { applyTheme } from './theme.js';
+import { applyTheme, THEME_OPTIONS } from './theme.js';
 import { defaultLabel } from './model/nodes.js';
 import { formatLength } from './lib/units.js';
 
@@ -150,7 +150,7 @@ export class App extends Emitter {
     this.canvasWrap = h('div.canvas-wrap', this.canvasHost);
     this.rulers = createRulers(this, this.canvasWrap);
     this.isolationBar = h('div.isolation-bar', { hidden: true });
-    this.taskbar = h('div.taskbar', { role: 'toolbar', 'aria-label': 'Contextual task bar', hidden: true });
+    this.taskbar = h('div.taskbar', { role: 'toolbar', 'aria-label': 'Task bar', hidden: true });
     this.home = h('div.home-host', { hidden: true });
     this.statusbar = createStatusbar(this);
     this.docArea = h('main#main.doc-area', this.tabsEl, this.isolationBar, h('div.canvas-stack', this.canvasWrap, this.taskbar, this.home), this.statusbar.el, this.canvasDesc);
@@ -168,7 +168,7 @@ export class App extends Emitter {
 
   #themeButton() {
     const btn = iconButton('monitor', 'Theme', (e) => {
-      const items = resolveItems(this, ['theme.system', 'theme.light', 'theme.dark']);
+      const items = resolveItems(this, THEME_OPTIONS.map((t) => `theme.${t.value}`));
       const r = e.currentTarget.getBoundingClientRect();
       openMenu(this, items, { x: r.left - 120, y: r.bottom + 4, anchor: e.currentTarget, label: 'Theme' });
     });
@@ -270,7 +270,7 @@ export class App extends Emitter {
   #scheduleDescribe(editor) {
     clearTimeout(this.#describeTimer);
     this.#describeTimer = setTimeout(() => {
-      if (editor !== this.editor || !this.canvasDesc) return;
+      if (editor !== this.editor || !this.canvasDesc || !this.root.isConnected || !this.root.ownerDocument.defaultView) return;
       const text = this.describeSelection(editor);
       if (text === this.canvasDesc.textContent) return;
       this.canvasDesc.textContent = text;
@@ -336,7 +336,7 @@ export class App extends Emitter {
       view.invalidate();
       editor.tool = this.tool;
       this.home.hidden = true;
-    } else this.showHome();
+    } else if (this.prefs.get('showStartScreen') !== false) this.showHome();
     this.root.classList.toggle('no-doc', !editor);
     if (editor) this.#scheduleDescribe(editor);
     this.refreshChrome();
@@ -428,7 +428,7 @@ export class App extends Emitter {
     const g = ed.doc.get(ed.isolation);
     this.isolationBar.replaceChildren(
       h('button.icon-btn', { type: 'button', 'aria-label': 'Exit Isolation Mode', 'data-tip': 'Exit Isolation Mode (Esc)', onclick: () => this.commands.run('object.exitIsolation') }, icon('chevron-left', 14)),
-      h('span', `${ed.doc.layerOf(ed.isolation)?.name || 'Layer'} › ${g?.name || '<Group>'}`),
+      h('span', `${ed.doc.layerOf(ed.isolation)?.name || 'Layer'} › ${g ? defaultLabel(g) : '<Group>'}`),
     );
   }
 
@@ -442,6 +442,8 @@ export class App extends Emitter {
     this.#pending = true;
     const run = () => {
       this.#pending = false;
+      // The app may be gone by then (its page was replaced).
+      if (!this.root.isConnected || !this.root.ownerDocument.defaultView) return;
       this.refreshChrome();
     };
     if (editor.doc.tx) setTimeout(run, 120);
@@ -455,6 +457,8 @@ export class App extends Emitter {
     if (!this.tabTimer) {
       this.tabTimer = setTimeout(() => {
         this.tabTimer = 0;
+        // The app may be gone by then (its page was replaced).
+        if (!this.root.isConnected || !this.root.ownerDocument.defaultView) return;
         this.renderTabs();
       }, 200);
     }
@@ -534,8 +538,9 @@ export class App extends Emitter {
     // Command shortcuts.
     const cmd = this.commands.match(e);
     if (cmd) {
-      // Let the tool claim Enter/Escape/Delete first (e.g. finishing a pen path, removing a pin).
-      if (!(['Enter', 'Escape', 'Delete', 'Backspace'].includes(e.key) && this.tool?.onKeyDown?.(e))) {
+      // Let the tool claim Enter/Escape/Delete first (e.g. finishing a pen path, removing a pin),
+      // and any key it asks for (letters that change a shape while it is being drawn).
+      if (!((['Enter', 'Escape', 'Delete', 'Backspace'].includes(e.key) || this.tool?.claimsKey?.(e)) && this.tool?.onKeyDown?.(e))) {
         e.preventDefault();
         this.commands.run(cmd);
       } else e.preventDefault();
@@ -611,7 +616,8 @@ export class App extends Emitter {
       defaultFillStroke(ed);
       return;
     }
-    if ((k === ',' || k === '.' || k === '/') && !e.shiftKey && !e.altKey) {
+    // Comma and period work with or without Shift (the keys are labeled < and >).
+    if ((k === ',' || k === '.' || (k === '/' && !e.shiftKey)) && !e.altKey) {
       e.preventDefault();
       setFocusedPaint(ed, k === ',' ? 'color' : k === '.' ? 'gradient' : 'none');
       return;
@@ -666,7 +672,7 @@ export class App extends Emitter {
       { id: 'window.toggleDock', label: (a) => (a.dockOpen ? 'Hide Panels' : 'Show Panels'), run: (a) => a.setDockOpen(!a.dockOpen) },
       {
         id: 'window.resetWorkspace',
-        label: 'Reset Essentials',
+        label: 'Reset Standard',
         run: (a) => {
           a.setDockOpen(true);
           a.root.classList.remove('hide-panels', 'hide-dock');
@@ -683,9 +689,9 @@ export class App extends Emitter {
           else document.exitFullscreen?.();
         },
       },
-      ...['system', 'light', 'dark'].map((t) => ({
+      ...THEME_OPTIONS.map(({ value: t, label }) => ({
         id: `theme.${t}`,
-        label: { system: 'Use System Setting', light: 'Light', dark: 'Dark' }[t],
+        label,
         checked: (a) => a.prefs.get('theme') === t,
         run: (a) => {
           a.prefs.set('theme', t);

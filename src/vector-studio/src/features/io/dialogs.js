@@ -12,12 +12,13 @@
 import { UserError } from '../../lib/errors.js';
 import { h } from '../../lib/dom.js';
 import { icon } from '../../ui/icons.js';
-import { formatLength, parseLength } from '../../lib/units.js';
-import { FORMATS, parseRange, artworkBounds, renderFile, outlinesFor } from './jobs.js';
+import { FORMATS, allFormats, parseRange, artworkBounds, renderFile, outlinesFor } from './jobs.js';
+import { exportFormats } from './hooks.js';
 import { canSaveToPuter, deliverFiles, safeFileName } from './deliver.js';
 import { thumbnail } from './raster.js';
 import { placeFile } from './place.js';
-import { pickDeviceFiles } from './kinds.js';
+import { pickDeviceFiles, PLACE_ACCEPT } from './kinds.js';
+import { pdfOptionsDialog } from './pdf-dialog.js';
 
 let uidc = 0;
 const fid = (p) => `io-${p}-${++uidc}`;
@@ -81,18 +82,28 @@ const RESOLUTIONS = [
 
 /** Options dialog for a format. Resolves to an options object or null. */
 export async function formatOptionsDialog(app, format) {
-  const unit = app.editor?.doc.root.units || 'pt';
+  if (format === 'pdf') {
+    // Print production options in panes, with presets (pdf-dialog.js).
+    const res = await pdfOptionsDialog(app, { values: app.prefs?.get('io.opts.pdf') || {} });
+    if (res) setPref(app, 'opts.pdf', { ...res, openPassword: '', permissionsPassword: '' });
+    return res;
+  }
   const defaults = {
     svg: { precision: 3, minify: false, responsive: false, textMode: 'text', symbols: false },
-    pdf: { bleed: 0, useDocBleed: true, textOutlines: true },
     png: { ppi: 72, background: 'transparent', antialias: true },
     jpeg: { ppi: 72, quality: 0.8, antialias: true },
     webp: { ppi: 72, quality: 0.9, background: 'transparent', antialias: true },
   }[format];
-  const o = getPref(app, `opts.${format}`, defaults);
+  const custom = exportFormats.get(format);
+  const o = getPref(app, `opts.${format}`, custom ? custom.defaults || {} : defaults);
   const fields = [];
   const readers = [];
-  if (format === 'svg') {
+  if (custom) {
+    const spec = await custom.options?.(app, o, { row, select, checkbox, radios });
+    if (!spec) return o;
+    fields.push(...spec.fields);
+    readers.push(spec.read);
+  } else if (format === 'svg') {
     const prec = select([1, 2, 3, 4, 5, 6, 7].map((n) => ({ value: n, label: String(n) })), o.precision);
     const font = select([{ value: 'text', label: 'SVG text' }, { value: 'outlines', label: 'Convert to Outlines' }], o.textMode);
     if (!app.textOutlines) {
@@ -102,34 +113,11 @@ export async function formatOptionsDialog(app, format) {
     const minify = checkbox('Minify', o.minify);
     const responsive = checkbox('Responsive (no fixed width and height)', o.responsive);
     const symbols = checkbox('Write symbols as <symbol> and <use>', o.symbols);
+    const styling = select([{ value: 'attributes', label: 'Presentation Attributes' }, { value: 'inline', label: 'Inline Style' }, { value: 'css', label: 'Internal CSS' }], o.styling || 'attributes');
+    const ids = select([{ value: 'names', label: 'Layer and Object Names' }, { value: 'minimal', label: 'Minimal' }, { value: 'unique', label: 'Unique' }], o.objectIds || 'names');
+    fields.push(row('Styling', styling), row('Object IDs', ids));
     fields.push(row('Font', font, { help: app.textOutlines ? null : 'Converting text to outlines needs the type features.' }), h('div.form-row', h('span.form-label', 'Images'), h('span.io-static', 'Embed')), row('Decimal places', prec), minify.el, responsive.el, symbols.el);
-    readers.push(() => ({ precision: Number(prec.value), textMode: font.value, minify: minify.input.checked, responsive: responsive.input.checked, symbols: symbols.input.checked }));
-  } else if (format === 'pdf') {
-    const docBleed = app.editor?.doc.root.bleed;
-    const docSides = typeof docBleed === 'number' ? [docBleed] : ['top', 'bottom', 'left', 'right'].map((k) => docBleed?.[k] || 0);
-    const bleed = h('input', { type: 'text', inputmode: 'decimal', value: formatLength(o.bleed || 0, unit), autocomplete: 'off', spellcheck: false });
-    const useDoc = checkbox('Use Document Bleed Settings', o.useDocBleed !== false);
-    const docHelp = `Document bleed: ${[...new Set(docSides)].map((v) => formatLength(v, unit)).join(', ') || formatLength(0, unit)}.`;
-    const bleedRow = row('Bleed', bleed, { help: 'Added on every side of each page.' });
-    const docRow = h('p.form-help', docHelp);
-    const syncBleed = () => {
-      bleed.disabled = useDoc.input.checked;
-      docRow.hidden = !useDoc.input.checked;
-    };
-    useDoc.input.addEventListener('change', syncBleed);
-    syncBleed();
-    const outl = checkbox('Convert text to outlines', o.textOutlines !== false);
-    if (!app.textOutlines) {
-      outl.input.disabled = true;
-      outl.input.checked = false;
-    }
-    fields.push(useDoc.el, docRow, bleedRow, outl.el);
-    if (!app.textOutlines) fields.push(h('p.form-help', 'Text is written with a standard font.'));
-    readers.push(() => {
-      const b = parseLength(bleed.value, unit);
-      if (!useDoc.input.checked && (!Number.isFinite(b) || b < 0 || b > 1000)) throw Object.assign(new Error('Enter a valid bleed.'), { field: bleed });
-      return { bleed: Number.isFinite(b) ? b : 0, useDocBleed: useDoc.input.checked, textOutlines: outl.input.checked };
-    });
+    readers.push(() => ({ precision: Number(prec.value), textMode: font.value, minify: minify.input.checked, responsive: responsive.input.checked, symbols: symbols.input.checked, styling: styling.value, objectIds: ids.value }));
   } else {
     const preset = RESOLUTIONS.some((r) => r.value === String(o.ppi)) ? String(o.ppi) : 'other';
     const res = select(RESOLUTIONS, preset);
@@ -141,10 +129,17 @@ export async function formatOptionsDialog(app, format) {
       if (res.value !== 'other') ppi.value = res.value;
     });
     fields.push(row('Resolution', res), ppiRow);
+    const model = select([{ value: 'rgb', label: 'RGB' }, { value: 'grayscale', label: 'Grayscale' }], o.colorModel || 'rgb');
+    fields.push(row('Color Model', model));
     let bg = null;
+    let bgOther = null;
     if (format !== 'jpeg') {
-      bg = select([{ value: 'transparent', label: 'Transparent' }, { value: '#ffffff', label: 'White' }, { value: '#000000', label: 'Black' }], o.background);
-      fields.push(row('Background', bg));
+      const known = ['transparent', '#ffffff', '#000000'];
+      bg = select([{ value: 'transparent', label: 'Transparent' }, { value: '#ffffff', label: 'White' }, { value: '#000000', label: 'Black' }, { value: 'other', label: 'Other...' }], known.includes(o.background) ? o.background : 'other');
+      bgOther = h('input', { type: 'color', 'aria-label': 'Background color', value: known.includes(o.background) ? '#808080' : o.background || '#808080' });
+      bgOther.hidden = bg.value !== 'other';
+      bg.addEventListener('change', () => (bgOther.hidden = bg.value !== 'other'));
+      fields.push(row('Background', h('div.io-inline', bg, bgOther)));
     } else fields.push(h('div.form-row', h('span.form-label', 'Background'), h('span.io-static', 'White')));
     const aa = select([{ value: 'art', label: 'Art Optimized (Supersampling)' }, { value: 'none', label: 'None' }], o.antialias === false ? 'none' : 'art');
     fields.push(row('Anti-aliasing', aa));
@@ -159,12 +154,12 @@ export async function formatOptionsDialog(app, format) {
     readers.push(() => {
       const p = res.value === 'other' ? Number(ppi.value) : Number(res.value);
       if (!Number.isFinite(p) || p < 10 || p > 2400) throw Object.assign(new Error('Enter a resolution between 10 and 2400 ppi.'), { field: ppi });
-      return { ppi: p, scale: p / 72, background: bg ? bg.value : '#ffffff', antialias: aa.value !== 'none', quality: quality ? Math.max(0.05, Number(quality.value) / 10) : undefined };
+      return { ppi: p, scale: p / 72, background: bg ? (bg.value === 'other' ? bgOther.value : bg.value) : '#ffffff', antialias: aa.value !== 'none', quality: quality ? Math.max(0.05, Number(quality.value) / 10) : undefined, colorModel: model.value };
     });
   }
   const error = h('p.form-error', { role: 'alert' });
   const read = () => Object.assign({}, ...readers.map((r) => r()));
-  const title = { svg: 'SVG Options', pdf: 'PDF Options', png: 'PNG Options', jpeg: 'JPEG Options', webp: 'WebP Options' }[format];
+  const title = custom ? `${custom.title || custom.label} Options` : { svg: 'SVG Options', png: 'PNG Options', jpeg: 'JPEG Options', webp: 'WebP Options' }[format];
   const result = await app.dialogs.open({
     title,
     className: 'io-dialog',
@@ -210,7 +205,7 @@ export async function exportAsDialog(app) {
   const doc = editor.doc;
   const last = getPref(app, 'exportAs', { format: 'svg', useArtboards: true, range: 'all', dest: 'device' });
   const name = h('input', { type: 'text', value: docBaseName(editor), autocomplete: 'off', spellcheck: false });
-  const format = select(Object.entries(FORMATS).map(([value, f]) => ({ value, label: f.label })), last.format);
+  const format = select(Object.entries(allFormats()).map(([value, f]) => ({ value, label: f.label })), last.format);
   const use = checkbox('Use Artboards', last.useArtboards);
   const count = doc.artboards.length;
   const rangeGroup = radios(fid('range'), [{ value: 'all', label: 'All' }, { value: 'range', label: 'Range' }], last.range === 'range' ? 'range' : 'all', 'Export');
@@ -268,14 +263,16 @@ export async function exportAsDialog(app) {
   setPref(app, 'exportAs', { format: step1.format, useArtboards: step1.useArtboards, range: step1.range, dest: step1.dest });
   const options = await formatOptionsDialog(app, step1.format);
   if (!options) return;
-  const fmt = FORMATS[step1.format];
+  const fmt = allFormats()[step1.format];
   app.notify('Exporting...', { timeout: 2000 });
   const files = [];
   try {
     if (!step1.useArtboards) {
       const rect = artworkBounds(doc);
       if (!rect) throw new UserError('There is no artwork to export.');
-      files.push({ name: `${step1.name}.${fmt.ext}`, blob: await renderFile(app, editor, step1.format, { rect }, { ...options, title: step1.name }) });
+      const blob = await renderFile(app, editor, step1.format, { rect }, { ...options, title: step1.name });
+      // A format may deliver another container (DXF with images comes as a ZIP).
+      files.push({ name: `${step1.name}.${blob.fileExt || fmt.ext}`, blob });
     } else if (step1.format === 'pdf') {
       const rects = step1.indices.map((i) => doc.artboards[i]);
       files.push({ name: `${step1.name}.pdf`, blob: await renderFile(app, editor, 'pdf', { rects }, { ...options, title: step1.name }) });
@@ -283,7 +280,8 @@ export async function exportAsDialog(app) {
       for (const i of step1.indices) {
         const board = doc.artboards[i];
         const suffix = step1.indices.length > 1 ? `-${safeFileName(board.name || `Artboard ${i + 1}`)}` : '';
-        files.push({ name: `${step1.name}${suffix}.${fmt.ext}`, blob: await renderFile(app, editor, step1.format, { artboard: i }, { ...options, title: board.name }) });
+        const blob = await renderFile(app, editor, step1.format, { artboard: i }, { ...options, title: board.name });
+        files.push({ name: `${step1.name}${suffix}.${blob.fileExt || fmt.ext}`, blob });
       }
     }
   } catch (err) {
@@ -291,6 +289,12 @@ export async function exportAsDialog(app) {
     return;
   }
   await runExport(app, files, step1.dest, { zipName: `${step1.name}.zip` });
+  // View PDF after saving: open the file in a new tab.
+  if (step1.format === 'pdf' && options.viewAfter && files[0] && typeof URL.createObjectURL === 'function') {
+    const url = URL.createObjectURL(files[0].blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
 }
 
 // ---------------------------------------------------------------- export for screens
@@ -305,6 +309,21 @@ const SCREEN_FORMATS = [
   { value: 'pdf', label: 'PDF', format: 'pdf', opts: {} },
 ];
 const SCALES = [0.5, 0.75, 1, 1.5, 2, 3, 4];
+const SCALE_SETS = {
+  ios: [
+    { scale: 1, suffix: '', fmt: 'png' },
+    { scale: 2, suffix: '@2x', fmt: 'png' },
+    { scale: 3, suffix: '@3x', fmt: 'png' },
+  ],
+  android: [
+    { scale: 0.75, suffix: '-ldpi', fmt: 'png' },
+    { scale: 1, suffix: '-mdpi', fmt: 'png' },
+    { scale: 1.5, suffix: '-hdpi', fmt: 'png' },
+    { scale: 2, suffix: '-xhdpi', fmt: 'png' },
+    { scale: 3, suffix: '-xxhdpi', fmt: 'png' },
+    { scale: 4, suffix: '-xxxhdpi', fmt: 'png' },
+  ],
+};
 const scaleSuffix = (s) => (s === 1 ? '' : `@${s}x`);
 
 /**
@@ -314,7 +333,7 @@ export async function exportScreensDialog(app, mode = 'artboards') {
   const editor = app.editor;
   if (!editor) return;
   const doc = editor.doc;
-  const last = getPref(app, 'screens', { rows: [{ scale: 1, suffix: '', fmt: 'png' }], prefix: '', zip: true, dest: 'device' });
+  const last = getPref(app, 'screens', { rows: [{ scale: 1, suffix: '', fmt: 'png' }], prefix: '', zip: true, dest: 'device', bleed: false, fullDocument: false, subfolders: false });
   const assets = [];
   if (mode === 'selection') {
     const ids = editor.topSelection();
@@ -353,10 +372,33 @@ export async function exportScreensDialog(app, mode = 'artboards') {
     list.append(h('li.io-asset', h('div.io-thumb-wrap', thumb), h('div.io-asset-meta', mode === 'selection' ? null : cb, label, nameInput)));
   });
   const selectAll = (v) => checks.forEach((c) => (c.checked = v));
+  // A range ("1-3, 5") ticks exactly those artboards.
+  const rangeInput = h('input.io-range', { type: 'text', 'aria-label': 'Artboard range', placeholder: 'Range, e.g. 1-3', autocomplete: 'off', spellcheck: false });
+  rangeInput.addEventListener('input', () => {
+    const picked = parseRange(rangeInput.value, checks.length);
+    rangeInput.toggleAttribute('aria-invalid', Boolean(rangeInput.value.trim()) && !picked);
+    if (picked) checks.forEach((c, i) => (c.checked = picked.includes(i)));
+  });
+  const bleedBox = checkbox('Include Bleed', last.bleed);
+  const fullDoc = checkbox('Full Document (all artwork as one file)', last.fullDocument);
+  const syncFull = () => {
+    const on = fullDoc.input.checked;
+    list.classList.toggle('io-disabled', on);
+    for (const el of [...checks, rangeInput, bleedBox.input, ...list.querySelectorAll('input')]) el.disabled = on;
+  };
+  fullDoc.input.addEventListener('change', syncFull);
+  if (mode !== 'selection') syncFull();
   const leftTools =
     mode === 'selection'
       ? null
-      : h('div.io-select-row', h('span', 'Select:'), h('button.btn.small.ghost', { type: 'button', onclick: () => selectAll(true) }, 'All'), h('button.btn.small.ghost', { type: 'button', onclick: () => selectAll(false) }, 'None'));
+      : h(
+          'div.io-select-row',
+          h('span', 'Select:'),
+          h('button.btn.small.ghost', { type: 'button', onclick: () => selectAll(true) }, 'All'),
+          h('button.btn.small.ghost', { type: 'button', onclick: () => selectAll(false) }, 'None'),
+          rangeInput,
+        );
+  const leftOptions = mode === 'selection' ? null : h('div.form.io-screens-options', bleedBox.el, fullDoc.el);
 
   // Right: formats.
   const rowsHost = h('div.io-format-rows', { role: 'group', 'aria-label': 'Formats' });
@@ -403,12 +445,26 @@ export async function exportScreensDialog(app, mode = 'artboards') {
   );
   const prefix = h('input', { type: 'text', value: last.prefix, autocomplete: 'off', spellcheck: false, placeholder: 'none' });
   const zip = checkbox('Save as one ZIP file', last.zip);
+  const subfolders = checkbox('Create Sub-folders (by scale and format)', last.subfolders);
+  const syncZip = () => (subfolders.input.disabled = !zip.input.checked);
+  zip.input.addEventListener('change', syncZip);
+  syncZip();
+  // Common scale sets for app icons and assets.
+  const presetBtn = (label, key) =>
+    h('button.btn.small.ghost', {
+      type: 'button',
+      onclick: () => {
+        rows.splice(0, rows.length, ...SCALE_SETS[key].map((r) => ({ ...r })));
+        renderRows();
+      },
+    }, label);
+  const presets = h('div.io-format-presets', h('span', 'Presets:'), presetBtn('iOS', 'ios'), presetBtn('Android', 'android'));
   const dest = destinationField(app, last.dest);
   const error = h('p.form-error', { role: 'alert' });
   const body = h(
     'div.io-screens',
-    h('section.io-screens-left', h('h3.form-heading', mode === 'selection' ? 'Asset' : 'Artboards'), leftTools, list),
-    h('section.io-screens-right', h('h3.form-heading', 'Formats'), rowsHost, addBtn, h('div.form', row('Prefix', prefix), zip.el, dest?.el), error),
+    h('section.io-screens-left', h('h3.form-heading', mode === 'selection' ? 'Asset' : 'Artboards'), leftTools, list, leftOptions),
+    h('section.io-screens-right', h('h3.form-heading', 'Formats'), presets, rowsHost, addBtn, h('div.form', row('Prefix', prefix), zip.el, subfolders.el, dest?.el), error),
   );
   const ok = await app.dialogs.open({
     title: mode === 'selection' ? 'Export Selection' : 'Export for Screens',
@@ -420,6 +476,7 @@ export async function exportScreensDialog(app, mode = 'artboards') {
         label: mode === 'selection' ? 'Export Asset' : 'Export Artboard',
         primary: true,
         validate: () => {
+          if (mode !== 'selection' && fullDoc.input.checked) return true;
           if (!checks.some((c) => c.checked)) {
             error.textContent = 'Select at least one artboard.';
             return false;
@@ -431,20 +488,39 @@ export async function exportScreensDialog(app, mode = 'artboards') {
     ],
   });
   if (!ok) return;
-  setPref(app, 'screens', { rows, prefix: prefix.value, zip: zip.input.checked, dest: dest?.get() || 'device' });
+  const full = mode !== 'selection' && fullDoc.input.checked;
+  const withBleed = mode !== 'selection' && bleedBox.input.checked;
+  setPref(app, 'screens', { rows, prefix: prefix.value, zip: zip.input.checked, dest: dest?.get() || 'device', bleed: bleedBox?.input.checked ?? last.bleed, fullDocument: fullDoc?.input.checked ?? last.fullDocument, subfolders: subfolders.input.checked });
   app.notify('Exporting...', { timeout: 2000 });
   const files = [];
+  const folders = zip.input.checked && subfolders.input.checked;
+  const bleed = doc.root.bleed || {};
+  const regionOf = (i) => {
+    const r = assets[i].region;
+    if (!withBleed || r.artboard == null) return r;
+    const a = doc.artboards[r.artboard];
+    const t = bleed.top || 0;
+    const l = bleed.left || 0;
+    return { rect: { x: a.x - l, y: a.y - t, w: a.w + l + (bleed.right || 0), h: a.h + t + (bleed.bottom || 0) } };
+  };
+  const jobs = full
+    ? [{ name: docBaseName(editor), region: { rect: artworkBounds(doc) } }]
+    : assets.map((a, i) => (checks[i].checked ? { name: nameInputs[i].value || a.name, region: regionOf(i) } : null)).filter(Boolean);
+  if (full && !jobs[0].region.rect) {
+    app.notify('There is no artwork to export.');
+    return;
+  }
   try {
-    for (let i = 0; i < assets.length; i++) {
-      if (!checks[i].checked) continue;
-      const base = safeFileName(`${prefix.value}${nameInputs[i].value || assets[i].name}`);
+    for (const job of jobs) {
+      const base = safeFileName(`${prefix.value}${job.name}`);
       for (const r of rows) {
         const f = SCREEN_FORMATS.find((x) => x.value === r.fmt) || SCREEN_FORMATS[0];
         const fmt = FORMATS[f.format];
         const options = { ...f.opts, scale: r.scale, background: 'transparent' };
         if (f.format === 'svg' || f.format === 'pdf') options.scale = 1;
-        const blob = await renderFile(app, editor, f.format, assets[i].region, options);
-        files.push({ name: `${base}${safeFileName(r.suffix || '', '')}.${fmt.ext}`, blob });
+        const blob = await renderFile(app, editor, f.format, job.region, options);
+        const folder = !folders ? '' : f.format === 'svg' || f.format === 'pdf' ? `${fmt.ext.toUpperCase()}/` : `${r.scale}x/`;
+        files.push({ name: `${folder}${base}${safeFileName(r.suffix || '', '')}.${fmt.ext}`, blob });
       }
     }
   } catch (err) {
@@ -457,7 +533,7 @@ export async function exportScreensDialog(app, mode = 'artboards') {
 // ---------------------------------------------------------------- place
 
 async function pickPuterFiles(app) {
-  const p = app.puter.ui.showOpenFilePicker({ multiple: true, accept: ['.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif'] });
+  const p = app.puter.ui.showOpenFilePicker({ multiple: true, accept: PLACE_ACCEPT.split(',').filter((x) => x.startsWith('.')) });
   // Resolves undefined on cancel where the SDK supports it (the plain promise never settles then).
   const picked = await (p && p.undefinedOnCancel ? p.undefinedOnCancel : p);
   const items = Array.isArray(picked) ? picked : picked ? [picked] : [];
@@ -466,7 +542,7 @@ async function pickPuterFiles(app) {
     const blob = await it.read();
     const name = it.name || 'image';
     const ext = name.split('.').pop().toLowerCase();
-    const type = blob.type || (ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' ? 'image/jpeg' : `image/${ext}`);
+    const type = blob.type || (ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' ? 'image/jpeg' : ext === 'pdf' || ext === 'ai' ? 'application/pdf' : ext === 'eps' || ext === 'ps' ? 'application/postscript' : ext === 'dxf' ? 'application/dxf' : `image/${ext === 'tif' ? 'tiff' : ext}`);
     const file = new File([blob], name, { type });
     // Images placed from Puter stay linked to their file (Links panel: Update Link, Edit Original).
     if (it.path) file.puterPath = it.path;
@@ -483,7 +559,7 @@ export async function placeCommand(app) {
     source = await app.dialogs.open({
       title: 'Place',
       className: 'io-dialog',
-      body: h('div.io-place', h('p.dialog-message', 'Place SVG artwork or an image (PNG, JPEG, WebP, GIF) in the center of the view.'), h('div.io-place-buttons', h('button.btn.block', { type: 'button', 'data-src': 'device' }, icon('file-down', 16), 'From This Device...'), h('button.btn.block', { type: 'button', 'data-src': 'puter' }, icon('folder-open', 16), 'From Puter...'))),
+      body: h('div.io-place', h('p.dialog-message', 'Place artwork (SVG, PDF, EPS, DXF) or an image (PNG, JPEG, WebP, GIF, TIFF, BMP, PSD) in the center of the view.'), h('div.io-place-buttons', h('button.btn.block', { type: 'button', 'data-src': 'device' }, icon('file-down', 16), 'From This Device...'), h('button.btn.block', { type: 'button', 'data-src': 'puter' }, icon('folder-open', 16), 'From Puter...'))),
       buttons: [{ label: 'Cancel', value: null }],
       onOpen: ({ content, close }) => {
         for (const b of content.querySelectorAll('[data-src]')) b.addEventListener('click', () => close(b.dataset.src));

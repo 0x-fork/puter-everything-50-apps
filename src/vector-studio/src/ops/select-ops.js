@@ -9,6 +9,9 @@ export function selectableTargets(editor) {
   const { doc } = editor;
   const out = [];
   const root = editor.isolation ? [editor.isolation] : doc.root.children;
+  // An isolated single object (path, text...) is the only target.
+  const iso = editor.isolation && doc.get(editor.isolation);
+  if (iso && (!iso.children || iso.type === 'compound')) return iso.hidden || iso.locked ? [] : [iso.id];
   for (const lid of root) {
     const layer = doc.get(lid);
     if (!layer || layer.hidden || layer.locked) continue;
@@ -75,7 +78,7 @@ export function selectSame(editor, what) {
     opacity: (n) => String(n.opacity ?? 1),
     blendMode: (n) => n.blendMode || 'normal',
     // Brushes (with their per-stroke options) and width profiles are part of the appearance.
-    appearance: (n) => [paintKey(n.fill), paintKey(n.stroke), n.strokeWidth, n.opacity ?? 1, n.blendMode, JSON.stringify(n.effects || []), brushKey(n), JSON.stringify(n.widthProfile || null)].join('|'),
+    appearance: (n) => [paintKey(n.fill), paintKey(n.stroke), n.strokeWidth, n.opacity ?? 1, n.blendMode, JSON.stringify(n.effects || []), brushKey(n), JSON.stringify(n.widthProfile || null), JSON.stringify(n.appearance || null)].join('|'),
     shape: (n) => n.shape?.kind || n.type,
   }[what];
   const target = keyOf(ref);

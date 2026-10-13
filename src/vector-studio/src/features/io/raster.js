@@ -86,7 +86,7 @@ export function pixelSize(rect, scale) {
  *   ids         only these roots (selection export)
  *   onProgress  (done, total) per tile
  */
-export async function renderRegion(doc, rect, { scale = 1, background = null, antialias = true, ids = null, onProgress } = {}) {
+export async function renderRegion(doc, rect, { scale = 1, background = null, antialias = true, ids = null, onProgress, overprint = false, leafFilter = null } = {}) {
   const { w, h } = pixelSize(rect, scale);
   await preloadImages(doc, rect);
   const out = makeCanvas(w, h);
@@ -112,7 +112,7 @@ export async function renderRegion(doc, rect, { scale = 1, background = null, an
       }
       ctx.setTransform(scale, 0, 0, scale, -rect.x * scale - px, -rect.y * scale - py);
       const viewRect = inflate({ x: rect.x + px / scale, y: rect.y + py / scale, w: tw / scale, h: th / scale }, 2 / scale);
-      const opts = { viewRect, outline: false, hairline: 1 / scale, scale, layerPool: pool };
+      const opts = { viewRect, outline: false, hairline: 1 / scale, scale, layerPool: pool, overprint, leafFilter, textHints: true };
       if (ids) for (const id of ids) drawNode(ctx, doc, doc.get(id), opts);
       else drawArtwork(ctx, doc, { ...opts, layerFilter: (l) => !l.template });
       if (!antialias && !opaque) hardenAlpha(ctx, tw, th);
@@ -181,10 +181,24 @@ export async function rasterExport(editor, opts = {}) {
   if (background === 'white') background = '#ffffff';
   if (type === 'image/jpeg' && background === 'transparent') background = '#ffffff';
   const canvas = await renderRegion(editor.doc, rect, { scale, background, antialias: opts.antialias !== false, ids, onProgress: opts.onProgress });
+  if (opts.colorModel === 'grayscale') toGrayscale(canvas);
   let blob = await canvasToBlob(canvas, type, opts.quality ?? (type === 'image/png' ? undefined : 0.9));
   if (blob.type && blob.type !== type) throw new UserError(`This browser cannot create ${format.toUpperCase()} images. Choose another format.`);
   if (type === 'image/png' && Math.abs(scale * 72 - 72) > 0.5) blob = await setPngPpi(blob, scale * 72);
   return blob;
+}
+
+/** Convert a canvas to gray by luminance, in place. */
+function toGrayscale(canvas) {
+  try {
+    const ctx = canvas.getContext('2d');
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = Math.round(0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]);
+    ctx.putImageData(img, 0, 0);
+  } catch {
+    // Unreadable canvas: keep the colors.
+  }
 }
 
 /** Small preview canvas of a region (no image preloading; for thumbnails). */

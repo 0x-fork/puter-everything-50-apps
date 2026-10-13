@@ -16,7 +16,7 @@ const newDocument = () => import('./new-document.js');
 const templates = () => import('./templates.js');
 const documentSetup = () => import('./document-setup.js');
 const documentInfo = () => import('./document-info.js');
-import { preferencesDialog, ensurePrefDefaults, applyPrefs, applyEditorPrefs } from './preferences.js';
+import { preferencesDialog, ensurePrefDefaults, applyPrefs, applyEditorPrefs, sections } from './preferences.js';
 import { installHomeFiles } from './home-files.js';
 import { cancelOpenDialogs } from '../../ui/dialogs/dialog.js';
 import './styles.css';
@@ -79,7 +79,9 @@ function registerCommands(app, { service }) {
     { id: 'file.revert', label: 'Revert', shortcut: 'F12', enabled: (a, args) => service.canRevert(ed(a, args)), run: (a, args) => service.revert(ed(a, args)) },
     { id: 'file.documentSetup', label: 'Document Setup...', shortcut: 'Alt+Mod+P', enabled: (a) => Boolean(a.editor), run: async (a) => (await documentSetup()).documentSetupDialog(a) },
     { id: 'file.documentInfo', label: 'Document Info', enabled: (a) => Boolean(a.editor), run: async (a) => (await documentInfo()).documentInfoDialog(a) },
-    { id: 'edit.preferences', label: 'Preferences...', shortcut: 'Mod+K', run: (a) => preferencesDialog(a) },
+    { id: 'edit.preferences', label: 'Preferences...', shortcut: 'Mod+K', run: (a, args) => preferencesDialog(a, args?.section ? { section: args.section } : {}) },
+    // One entry per section (Edit > Preferences submenu).
+    ...sections(app).map((s) => ({ id: `edit.preferences.${s.id}`, label: `${s.label}...`, run: (a) => preferencesDialog(a, { section: s.id }) })),
   ]);
 }
 
@@ -101,7 +103,8 @@ function installDrop(app, service) {
   const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
   const ours = (name) => {
     const ext = extensionOf(name);
-    return ext === '.vstudio' || ((ext === '.svg' || ext === '.svgz') && (!app.editor || !app.home.hidden));
+    const other = ext === '.svg' || ext === '.svgz' || (app.importers?.openExtensions || []).includes(ext);
+    return ext === '.vstudio' || (other && (!app.editor || !app.home.hidden));
   };
   window.addEventListener('dragover', (e) => {
     if (e.defaultPrevented || !hasFiles(e)) return;

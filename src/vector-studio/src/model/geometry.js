@@ -9,7 +9,7 @@
 import { pathBounds, transformAnchors } from './bezier.js';
 import { apply, applyVector, multiply, decompose, isIdentity, invert, rotate } from '../lib/matrix.js';
 import { layoutText } from './text-layout.js';
-import { shapeAnchors } from './shapes.js';
+import { shapeAnchors, isPie } from './shapes.js';
 import { liveDef, liveArtwork } from './live.js';
 import { geomEffectsOf, effectiveSubpaths, subpathsBounds, geomEffectsOutset } from './geom-effects.js';
 
@@ -65,7 +65,10 @@ function textFramePatch(node, m) {
   }
   const p0 = apply(conj, node.x, node.y);
   const p1 = apply(conj, node.x + node.width, node.y + node.height);
-  return { x: Math.min(p0.x, p1.x), y: Math.min(p0.y, p1.y), width: Math.abs(p1.x - p0.x), height: Math.abs(p1.y - p0.y) };
+  const patch = { x: Math.min(p0.x, p1.x), y: Math.min(p0.y, p1.y), width: Math.abs(p1.x - p0.x), height: Math.abs(p1.y - p0.y) };
+  // Setting the height by hand turns Auto Size off.
+  if (node.areaOptions?.autoSize && Math.abs(conj[3] - 1) > 1e-9) patch.areaOptions = { ...node.areaOptions, autoSize: undefined };
+  return patch;
 }
 
 export function unionRect(a, b) {
@@ -383,7 +386,7 @@ export function selectionBounds(doc, ids, visual = false) {
  * plain move, so rotating, skewing, reflecting or scaling the object turns,
  * slants and stretches its gradient along with it.
  */
-function transformPaint(paint, m, bounds, opts = {}) {
+export function transformPaint(paint, m, bounds, opts = {}) {
   // Pattern paints carry their own pattern-to-document matrix; Transform Patterns off leaves it put.
   if (paint?.type === 'pattern') return opts.transformPatterns === false ? paint : { ...paint, transform: multiply(m, paint.transform || [1, 0, 0, 1, 0, 0]) };
   if (!paint || (paint.type !== 'linear' && paint.type !== 'radial')) return paint;
@@ -410,7 +413,7 @@ export function gradientEnds(paint, b) {
 
 /** Rotational symmetry of each live shape kind, in degrees. */
 const SHAPE_PERIOD = {
-  rect: (s) => (s.radii && new Set(s.radii).size > 1 ? 360 : 180),
+  rect: (s) => ((s.radii && new Set(s.radii).size > 1) || (s.cornerTypes && new Set(s.cornerTypes).size > 1) ? 360 : 180),
   ellipse: () => 180,
   polygon: (s) => 360 / Math.max(3, Math.round(s.sides || 3)),
   star: (s) => 360 / Math.max(3, Math.round(s.points || 3)),
@@ -423,6 +426,30 @@ const SHAPE_PERIOD = {
  * plain path (like expanding a live shape).
  */
 function transformShape(shape, m, opts) {
+  const out = transformShapeParams(shape, m, opts);
+  return out && isPie(shape) ? retargetPie(shape, out, m) : out;
+}
+
+/** Pie angles of a transformed live ellipse: its rim end points mapped into the new ellipse's frame. */
+function retargetPie(shape, out, m) {
+  const rim = (s, deg) => {
+    const t = (deg * Math.PI) / 180;
+    return apply(rotate(s.angle || 0, s.cx, s.cy), s.cx + (s.w / 2) * Math.cos(t), s.cy - (s.h / 2) * Math.sin(t));
+  };
+  const back = rotate(-(out.angle || 0), out.cx, out.cy);
+  const angleOf = (p) => {
+    const q = apply(back, p.x, p.y);
+    const deg = (Math.atan2(-(q.y - out.cy) / (out.h / 2 || 1), (q.x - out.cx) / (out.w / 2 || 1)) * 180) / Math.PI;
+    return Math.round(((deg % 360) + 360) % 360 * 1e6) / 1e6;
+  };
+  const a = angleOf(apply(m, rim(shape, shape.pieStart).x, rim(shape, shape.pieStart).y));
+  const b = angleOf(apply(m, rim(shape, shape.pieEnd).x, rim(shape, shape.pieEnd).y));
+  // A reflection reverses the arc's direction.
+  const flipped = m[0] * m[3] - m[1] * m[2] < 0;
+  return { ...out, pieStart: flipped ? b : a, pieEnd: flipped ? a : b };
+}
+
+function transformShapeParams(shape, m, opts) {
   if (!shape) return undefined;
   const d = decompose(m);
   const pureMove = Math.abs(m[0] - 1) < 1e-9 && Math.abs(m[3] - 1) < 1e-9 && Math.abs(m[1]) < 1e-9 && Math.abs(m[2]) < 1e-9;
@@ -453,8 +480,10 @@ function transformShape(shape, m, opts) {
       out.w = shape.w * k;
       out.h = shape.h * k;
       // Mirroring swaps the top and bottom corners (in the shape's own frame).
-      const radii = shape.radii && d.sy < 0 ? [shape.radii[3], shape.radii[2], shape.radii[1], shape.radii[0]] : shape.radii;
+      const flipTB = (c) => (c && d.sy < 0 ? [c[3], c[2], c[1], c[0]] : c);
+      const radii = flipTB(shape.radii);
       if (radii) out.radii = radii.map((r) => r * (opts.scaleCorners ? k : 1));
+      if (shape.cornerTypes) out.cornerTypes = flipTB(shape.cornerTypes);
     } else if (shape.kind === 'polygon') out.r = shape.r * k;
     else {
       out.r1 = shape.r1 * k;
@@ -471,12 +500,16 @@ function transformShape(shape, m, opts) {
     const sy = Math.abs(L[3]);
     if (shape.kind === 'rect' || shape.kind === 'ellipse') {
       const scaleR = opts.scaleCorners ? Math.min(sx, sy) : 1;
-      let radii = shape.radii;
-      // Mirroring along the shape's axes swaps its corners: radii are [tl, tr, br, bl].
-      if (radii && L[0] < 0) radii = [radii[1], radii[0], radii[3], radii[2]];
-      if (radii && L[3] < 0) radii = [radii[3], radii[2], radii[1], radii[0]];
+      // Mirroring along the shape's axes swaps its corners: radii (and corner types) are [tl, tr, br, bl].
+      const mirror = (c) => {
+        if (c && L[0] < 0) c = [c[1], c[0], c[3], c[2]];
+        if (c && L[3] < 0) c = [c[3], c[2], c[1], c[0]];
+        return c;
+      };
+      const radii = mirror(shape.radii);
       return {
         ...shape,
+        ...(shape.cornerTypes ? { cornerTypes: mirror(shape.cornerTypes) } : {}),
         cx: c.x,
         cy: c.y,
         w: shape.w * sx,
@@ -490,6 +523,21 @@ function transformShape(shape, m, opts) {
     }
   }
   return undefined;
+}
+
+/**
+ * Properties that feature modules keep in step with an object's transform
+ * (e.g. a linked opacity mask): fn(node, m, opts, doc) -> patch or null,
+ * merged into the node's patch whenever the node itself is transformed
+ * (`doc` resolves the node's children as they were before the transform).
+ */
+export const transformHooks = [];
+
+function hookPatches(node, m, opts, out, doc) {
+  for (const fn of transformHooks) {
+    const p = fn(node, m, opts, doc);
+    if (p) out.set(node.id, { ...out.get(node.id), ...p });
+  }
 }
 
 /**
@@ -567,6 +615,7 @@ export function transformPatches(doc, node, m, opts = {}, out = new Map()) {
       break;
     }
   }
+  if (transformHooks.length) hookPatches(node, m, opts, out, doc);
   return out;
 }
 
@@ -646,6 +695,7 @@ export function transformFromOriginals(doc, originals, m, opts = {}) {
       if ('frameAngle' in fp || lp) patches.set(n.id, { ...fp, ...lp });
     }
   }
+  if (transformHooks.length) for (const n of originals.values()) hookPatches(n, inner.get(n.id) || m, opts, patches, view);
   // A drag back to a plain move restores the original frame angle a previous step changed.
   for (const n of originals.values()) {
     const p = patches.get(n.id);

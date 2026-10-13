@@ -1,6 +1,7 @@
 /**
  * Symbols panel: the document's symbols as thumbnails, a small list or a
- * large list, with search, the panel menu, symbol libraries, and buttons
+ * large list, with search, the panel menu (including saving symbols as a
+ * user-defined library), symbol libraries, and buttons
  * for Place Symbol Instance, Break Link, Symbol Options, New Symbol and
  * Delete. Click selects (Shift for a range, Cmd/Ctrl to toggle),
  * double-click edits the symbol, Enter places it; drag a symbol onto the
@@ -8,7 +9,7 @@
  * panel to make a symbol.
  */
 import { h } from '../../lib/dom.js';
-import { Panel } from '../../ui/panels/panel.js';
+import { Panel, setListItems } from '../../ui/panels/panel.js';
 import { iconButton } from '../../ui/widgets.js';
 import { symbolDefs, instancesOf, onPage, getDef, editingStack, symbolStore } from './model.js';
 import { symbolThumb, pruneThumbs } from './thumbs.js';
@@ -17,6 +18,8 @@ import { selectedInstances, placeSymbol } from './commands.js';
 import { dragToCanvas } from './drag.js';
 import { SYMBOL_LIBRARIES } from './libraries.js';
 import { openSymbolLibrary } from './library-window.js';
+import { exportSymbolsFor, importSymbols } from './model.js';
+import { userLibraryMenu, saveLibraryDialog } from '../paint/user-libraries.js';
 
 const VIEWS = [
   { id: 'grid', label: 'Thumbnail View', icon: 'symbols-grid' },
@@ -43,8 +46,6 @@ export class SymbolsPanel extends Panel {
     });
     this.search.addEventListener('keydown', (e) => e.stopPropagation());
     this.viewBtns = VIEWS.map((v) => iconButton(v.icon, v.label, () => this.setView(v.id), { className: 'small', pressed: this.view === v.id }));
-    const menuBtn = iconButton('ellipsis', 'Symbols panel menu', (e) => this.openMenu(e.currentTarget), { className: 'small' });
-    menuBtn.setAttribute('aria-haspopup', 'menu');
     this.list = h('div.sym-list', { role: 'listbox', 'aria-label': 'Symbols', 'aria-multiselectable': 'true', tabindex: '-1' });
     this.list.addEventListener('keydown', (e) => this.onKey(e));
     this.list.addEventListener('click', (e) => {
@@ -65,7 +66,7 @@ export class SymbolsPanel extends Panel {
     };
     this.footer = h('div.sym-footer', libBtn, this.count, h('span.sym-spacer'), ...Object.values(this.btn));
     this.dropHint = h('div.sym-drop-hint', { 'aria-hidden': 'true' }, 'Drop to make a symbol');
-    this.el.append(h('div.sym-top', this.search, h('div.sym-views', { role: 'group', 'aria-label': 'View' }, ...this.viewBtns), menuBtn), h('div.sym-list-wrap', this.list, this.dropHint), this.footer);
+    this.el.append(h('div.sym-top', this.search, h('div.sym-views', { role: 'group', 'aria-label': 'View' }, ...this.viewBtns)), h('div.sym-list-wrap', this.list, this.dropHint), this.footer);
   }
 
   run(id, args) {
@@ -120,7 +121,7 @@ export class SymbolsPanel extends Panel {
     const ed = this.editor;
     this.list.className = `sym-list view-${this.view}`;
     if (!ed) {
-      this.list.replaceChildren(h('p.panel-empty', 'No document'));
+      setListItems(this.list, [], h('p.panel-empty', 'No document'));
       this.count.textContent = '';
       this.refreshButtons();
       return;
@@ -136,9 +137,11 @@ export class SymbolsPanel extends Panel {
     const counts = new Map();
     if (this.view === 'large') for (const n of instancesOf(doc)) if (onPage(doc, n.id)) counts.set(n.symbol, (counts.get(n.symbol) || 0) + 1);
     const items = shown.map((d) => this.item(d, st.selected.has(d.id), used.has(d.id), editing.has(d.id), counts.get(d.id) || 0));
-    this.list.replaceChildren(...items);
-    if (!defs.length) this.list.append(h('p.panel-empty.sym-empty', 'No symbols yet. Select artwork and choose New Symbol, drag artwork here, or place one from a library.'));
-    else if (!items.length) this.list.append(h('p.panel-empty', 'No symbols match.'));
+    setListItems(
+      this.list,
+      items,
+      !defs.length ? h('p.panel-empty.sym-empty', 'No symbols yet. Select artwork and choose New Symbol, drag artwork here, or place one from a library.') : h('p.panel-empty', 'No symbols match.'),
+    );
     const focusId = st.current && shown.some((d) => d.id === st.current) ? st.current : shown[0]?.id;
     const focusEl = focusId ? this.list.querySelector(`[data-id="${CSS.escape(focusId)}"]`) : null;
     if (focusEl) focusEl.tabIndex = 0;
@@ -239,8 +242,31 @@ export class SymbolsPanel extends Panel {
     e.preventDefault();
   }
 
-  openMenu(anchor) {
-    const spec = [
+  /** Save the selected symbols (or all) as a user-defined library. */
+  saveLibrary() {
+    const ed = this.editor;
+    if (!ed) return null;
+    const doc = ed.doc;
+    const st = symbolState(ed);
+    const defs = symbolDefs(doc);
+    const picked = defs.filter((d) => st.selected.has(d.id));
+    const items = exportSymbolsFor(doc, (picked.length ? picked : defs).map((d) => ({ type: 'instance', symbol: d.id })));
+    return saveLibraryDialog(this.app, 'symbols', { title: 'Save Symbol Library', items: structuredClone(items), defaultName: 'My Symbols' });
+  }
+
+  /** Add a saved library's symbols to the document. */
+  openUserLibrary(lib) {
+    const ed = this.editor;
+    if (!ed) return;
+    let map = null;
+    ed.doc.transact('Add Symbols', () => (map = importSymbols(ed.doc, structuredClone(lib.items))));
+    const ids = [...new Set(map.values())];
+    setSymbolSelection(ed, ids);
+    this.app.notify(`Added ${lib.name} (${ids.length} ${ids.length === 1 ? 'symbol' : 'symbols'}) to Symbols.`, { polite: true });
+  }
+
+  menu() {
+    return [
       'symbol.new',
       'symbol.redefine',
       'symbol.duplicate',
@@ -261,9 +287,16 @@ export class SymbolsPanel extends Panel {
       '-',
       'symbol.options',
       '-',
-      { label: 'Open Symbol Library', items: () => SYMBOL_LIBRARIES.map((lib) => ({ type: 'cmd', label: lib.name, enabled: true, run: () => openSymbolLibrary(this.app, lib.id) })) },
+      {
+        label: 'Open Symbol Library',
+        submenu: [
+          ...SYMBOL_LIBRARIES.map((lib) => ({ label: lib.name, run: () => openSymbolLibrary(this.app, lib.id) })),
+          '-',
+          { label: 'User Defined', submenu: userLibraryMenu(this.app, 'symbols', (l) => this.openUserLibrary(l)) },
+        ],
+      },
+      { label: 'Save Symbol Library...', enabled: Boolean(this.editor && symbolDefs(this.editor.doc).length), run: () => this.saveLibrary() },
     ];
-    this.app.showMenuAt(anchor, spec, 'Symbols panel menu');
   }
 
   openLibraries(anchor) {

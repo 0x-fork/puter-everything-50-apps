@@ -21,7 +21,7 @@ import { pathDataFromSubpaths, numberFormatter } from './svg-path.js';
 import { exportView } from './export-view.js';
 import { svgPaintHooks, svgExportHooks, svgNodeHooks, exportWriters } from './hooks.js';
 import { nodeArrowOutlines, strokedAnchors, effectiveDash, outlineSubpaths } from './outlines.js';
-import { textPieces, decoRects } from './text-segments.js';
+import { textPieces, decoRects, plainDecoration } from './text-segments.js';
 import { cssFeatureSettings } from '../type/feature-settings.js';
 import { expandStops, focalPoint } from '../../model/gradients.js';
 import { renderSubpaths, hasRoundCorners, isElliptical, radialFrame } from './geometry-helpers.js';
@@ -201,7 +201,7 @@ class SVGWriter {
     if (css) out += ` style="${css}"`;
     const fx = this.filterDef(node, filterUnits);
     if (fx) out += ` filter="url(#${fx})"`;
-    for (const hook of svgExportHooks.attrs) out += hook(node) || '';
+    for (const hook of svgExportHooks.attrs) out += hook(node, this) || '';
     return out;
   }
 
@@ -265,8 +265,22 @@ class SVGWriter {
       behind.push(r);
       reach = Math.max(reach, Math.hypot(dx, dy) + sd * 3);
     };
+    // A Darkness shadow: the artwork's own colors scaled toward black.
+    const darkShadow = (darkness, opacity, sd, dx, dy) => {
+      const d = res();
+      const o = res();
+      const r = res();
+      const k = this.n(1 - Math.max(0, Math.min(1, darkness)));
+      prims.push(`<feComponentTransfer in="${src}" result="${d}"><feFuncR type="linear" slope="${k}"/><feFuncG type="linear" slope="${k}"/><feFuncB type="linear" slope="${k}"/></feComponentTransfer>`);
+      prims.push(`<feGaussianBlur in="${d}" stdDeviation="${this.n(sd)}"/>`);
+      prims.push(dx || dy ? `<feOffset dx="${this.n(dx)}" dy="${this.n(dy)}" result="${o}"/>` : `<feOffset result="${o}"/>`);
+      prims.push(`<feComponentTransfer in="${o}" result="${r}"><feFuncA type="linear" slope="${this.n(opacity)}"/></feComponentTransfer>`);
+      behind.push(r);
+      reach = Math.max(reach, Math.hypot(dx, dy) + sd * 3);
+    };
     for (const e of effects) {
-      if (e.type === 'dropShadow') shadow(e.color || '#000000', e.opacity ?? 0.75, (e.blur || 0) / 2, e.x || 0, e.y || 0);
+      if (e.type === 'dropShadow' && e.shadowFrom === 'darkness') darkShadow(e.darkness ?? 1, e.opacity ?? 0.75, (e.blur || 0) / 2, e.x || 0, e.y || 0);
+      else if (e.type === 'dropShadow') shadow(e.color || '#000000', e.opacity ?? 0.75, (e.blur || 0) / 2, e.x || 0, e.y || 0);
       else if (e.type === 'outerGlow') {
         const b = e.blur ?? 5;
         // Two passes, like the canvas renderer, for a denser core.
@@ -378,6 +392,8 @@ class SVGWriter {
     if (s.kind === 'rect') {
       const r = s.radii || [0, 0, 0, 0];
       if (r.some((v) => Math.abs(v - r[0]) > 1e-9)) return null;
+      // Only round corners are an rx.
+      if (s.cornerTypes?.some((t, i) => t && t !== 'round' && r[i] > 0)) return null;
       const rr = Math.min(r[0] || 0, s.w / 2, s.h / 2);
       return `<rect x="${this.n(p.x)}" y="${this.n(p.y)}" width="${this.n(s.w)}" height="${this.n(s.h)}"${rr > 0 ? ` rx="${this.n(rr)}"` : ''}`;
     }
@@ -487,7 +503,15 @@ class SVGWriter {
     const tf = this.matrixAttr(node.transform);
     const kids = [];
     const d1 = this.nl(depth + 1);
-    const common = this.commonAttrs(node, { filterUnits: 'box' });
+    // The text's language (hyphenation and spelling language) as xml:lang: on the text, and on pieces in another language.
+    const langOf = (st) => (st.language && st.language !== 'none' ? st.language : null);
+    const baseLang = langOf(node.char || {}) ?? (node.char?.language === 'none' ? null : 'en-US');
+    const langAttr = (st) => {
+      const l = langOf(st);
+      return l && l !== baseLang ? ` xml:lang="${escapeXml(l)}"` : '';
+    };
+    const common = `${this.commonAttrs(node, { filterUnits: 'box' })}${baseLang ? ` xml:lang="${escapeXml(baseLang)}"` : ''}`;
+    const barRect = (x, y, w, h, paint, fill, space) => `${d1}<rect x="${this.n(x)}" y="${this.n(y)}" width="${this.n(w)}" height="${this.n(h)}"${this.fillAttrs(node, paint || fill, space)}/>`;
     if (mode === 'segments') {
       // Unscaled pieces share ONE <text> as <tspan>s positioned from the
       // layout (baseline shifts as dy from the line's baseline), so SVG
@@ -500,18 +524,23 @@ class SVGWriter {
         const fill = st.fill === undefined ? node.fill : st.fill;
         const scaled = it.hs !== 1 || it.vs !== 1;
         const ls = it.track ? ` letter-spacing="${this.n(scaled ? it.track / it.hs : it.track)}"` : '';
+        // Spacing the layout set (tracking, kerning pairs) is kept by giving the piece its laid-out length.
+        const tl = it.str && it.str.length > 1 && it.span > 0 && (it.track || it.kerned) ? ` textLength="${this.n(scaled ? it.span / it.hs : it.span)}"` : '';
+        const plain = plainDecoration(st);
         if (it.str && !scaled) {
           if (/^\s|\s$|\s{2}/.test(it.str)) preserve = true;
           const dy = Math.abs(it.y - it.base) > 1e-9 ? ` dy="${this.n(it.y - it.base)}"` : '';
-          const deco = [st.underline && 'underline', st.strike && 'line-through'].filter(Boolean).join(' ');
-          spans.push({ it, dy, attrs: `${this.fontAttrs(st, it.size)}${ls}${this.textPaintAttrs(node, st, null)}${deco ? ` text-decoration="${deco}"` : ''}`, deco, str: escapeXml(it.str) });
+          const deco = plain ? [st.underline && 'underline', st.strike && 'line-through'].filter(Boolean).join(' ') : '';
+          spans.push({ it, dy, attrs: `${this.fontAttrs(st, it.size)}${ls}${tl}${this.textPaintAttrs(node, st, null)}${deco ? ` text-decoration="${deco}"` : ''}${langAttr(st)}`, deco, str: escapeXml(it.str) });
+          // Bars with their own weight, offset, color or dashes are drawn as rectangles.
+          if (!plain) for (const [x, y, w, h, paint] of decoRects(st, it.size, it.deco)) kids.push(barRect(x, y, w, h, paint, fill, false));
           continue;
         }
         if (it.str) {
           const pre = /^\s|\s$|\s{2}/.test(it.str) ? ' xml:space="preserve"' : '';
-          kids.push(`${d1}<text transform="translate(${this.n(it.x)} ${this.n(it.y)}) scale(${this.n(it.hs)} ${this.n(it.vs)})"${this.fontAttrs(st, it.size)}${ls}${this.textPaintAttrs(node, st, [it.hs, 0, 0, it.vs, it.x, it.y])}${pre}>${escapeXml(it.str)}</text>`);
+          kids.push(`${d1}<text transform="translate(${this.n(it.x)} ${this.n(it.y)}) scale(${this.n(it.hs)} ${this.n(it.vs)})"${this.fontAttrs(st, it.size)}${ls}${tl}${this.textPaintAttrs(node, st, [it.hs, 0, 0, it.vs, it.x, it.y])}${langAttr(st)}${pre}>${escapeXml(it.str)}</text>`);
         }
-        for (const [x, y, w, h] of decoRects(st, it.size, it.deco)) kids.push(`${d1}<rect x="${this.n(x)}" y="${this.n(y)}" width="${this.n(w)}" height="${this.n(h)}"${this.fillAttrs(node, fill, false)}/>`);
+        for (const [x, y, w, h, paint] of decoRects(st, it.size, it.deco)) kids.push(barRect(x, y, w, h, paint, fill, false));
       }
       const pre = preserve ? ' xml:space="preserve"' : '';
       if (!spans.length && !kids.length) return '';
@@ -528,8 +557,8 @@ class SVGWriter {
     for (const it of items) {
       const st = it.style;
       const m = it.m.map((v, i) => (i < 4 ? numberFormatter(6, this.o.minify)(v) : this.n(v))).join(' ');
-      const deco = decoRects(st, it.size, it.deco).map(([x, y, w, h]) => `<rect x="${this.n(x)}" y="${this.n(y)}" width="${this.n(w)}" height="${this.n(h)}"${this.fillAttrs(node, st.fill === undefined ? node.fill : st.fill, it.m)}/>`).join('');
-      kids.push(`${d1}<g transform="matrix(${m})"><text${this.fontAttrs(st, it.size)}${this.textPaintAttrs(node, st, it.m)}>${escapeXml(it.str)}</text>${deco}</g>`);
+      const deco = decoRects(st, it.size, it.deco).map(([x, y, w, h, paint]) => `<rect x="${this.n(x)}" y="${this.n(y)}" width="${this.n(w)}" height="${this.n(h)}"${this.fillAttrs(node, paint || (st.fill === undefined ? node.fill : st.fill), it.m)}/>`).join('');
+      kids.push(`${d1}<g transform="matrix(${m})"><text${this.fontAttrs(st, it.size)}${this.textPaintAttrs(node, st, it.m)}${langAttr(st)}>${escapeXml(it.str)}</text>${deco}</g>`);
     }
     if (!kids.length) return '';
     return `${nl}<g${id}${tf}${common}>${kids.join('')}${nl}</g>`;

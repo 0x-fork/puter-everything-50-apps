@@ -15,6 +15,18 @@ const hasSel = (app) => Boolean(app.editor?.selection.size);
 const selCount = (n) => (app) => (app.editor?.topSelection().length || 0) >= n;
 const selHas = (pred) => (app) => Boolean(app.editor?.selectedNodes().some(pred));
 
+/** What Isolate acts on: a selected group, else a single selected object that is not already isolated. */
+function isolateTarget(app) {
+  const e = app.editor;
+  if (!e) return null;
+  const nodes = e.selectedNodes();
+  const g = nodes.find((n) => n.type === 'group');
+  if (g) return g;
+  const top = e.topSelection();
+  const n = top.length === 1 ? e.doc.get(top[0]) : null;
+  return n && n.type !== 'layer' && n.id !== e.isolation ? n : null;
+}
+
 function transformAgain(app) {
   const ed = app.editor;
   const last = ed.lastTransform;
@@ -46,7 +58,14 @@ function duplicate(editor, ids) {
 /** Apply a matrix to the selection (optionally to a copy) and remember it for Transform Again. */
 export function applyTransform(editor, label, m, { copy = false, opts } = {}) {
   const prefs = editor.prefs;
-  const o = opts || { scaleStrokes: prefs?.get('scaleStrokes'), scaleCorners: prefs?.get('scaleCorners'), transformPatterns: prefs?.get('transformPatterns') ?? true };
+  // Transform panel menu: Transform Object Only / Pattern Only / Both.
+  const mode = prefs?.get('transformMode') || 'both';
+  const o = opts || {
+    scaleStrokes: prefs?.get('scaleStrokes'),
+    scaleCorners: prefs?.get('scaleCorners'),
+    transformPatterns: mode === 'pattern' || (mode === 'both' && (prefs?.get('transformPatterns') ?? true)),
+    ...(mode === 'pattern' ? { transformObjects: false } : {}),
+  };
   editor.doc.transact(label, () => {
     let ids = editor.topSelection();
     if (copy) ids = duplicate(editor, ids);
@@ -55,16 +74,38 @@ export function applyTransform(editor, label, m, { copy = false, opts } = {}) {
   editor.lastTransform = { matrix: m, copy, opts: o };
 }
 
+/** A small seeded random generator (mulberry32), so a previewed random Transform Each matches what OK applies. */
+export function seededRandom(seed) {
+  let t = seed >>> 0;
+  return () => {
+    t = (t + 0x6d2b79f5) >>> 0;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
  * Transform Each: scale/rotate/move every object around its own reference
  * point. The reference point and the scale axes come from each object's
  * bounding box frame, so a turned object scales along its own axes.
+ *
+ * p: { scaleX, scaleY (percent), moveX, moveY, angle, reflectX, reflectY,
+ *      random, seed, refX, refY (0..1), absolute (scaleX/scaleY are target
+ *      width/height in points), scaleStrokes, scaleCorners, objects, patterns }
  */
 export function transformEach(editor, p, copy = false) {
   const doc = editor.doc;
   let ids = editor.topSelection();
   if (copy) ids = duplicate(editor, ids);
   const visual = editor.prefs?.get('previewBounds');
+  const rand = p.random ? (p.seed != null ? seededRandom(p.seed) : Math.random) : null;
+  const opts = {
+    scaleStrokes: p.scaleStrokes ?? editor.prefs?.get('scaleStrokes'),
+    scaleCorners: p.scaleCorners ?? editor.prefs?.get('scaleCorners'),
+    transformPatterns: p.patterns ?? editor.prefs?.get('transformPatterns') ?? true,
+    ...(p.objects === false ? { transformObjects: false } : {}),
+  };
   for (const id of ids) {
     const f = selectionFrame(doc, [id], visual);
     if (!f) continue;
@@ -74,17 +115,38 @@ export function transformEach(editor, p, copy = false) {
     let dx = p.moveX || 0;
     let dy = p.moveY || 0;
     let ang = p.angle || 0;
-    if (p.random) {
-      dx *= Math.random() * 2 - 1;
-      dy *= Math.random() * 2 - 1;
-      ang *= Math.random() * 2 - 1;
+    let sx = (p.scaleX ?? 100) / 100;
+    let sy = (p.scaleY ?? 100) / 100;
+    if (p.absolute) {
+      sx = f.w > 1e-9 ? (p.scaleX ?? f.w) / f.w : 1;
+      sy = f.h > 1e-9 ? (p.scaleY ?? f.h) / f.h : 1;
     }
-    let m = frameMatrix(f, scale((p.scaleX ?? 100) / 100 * (p.reflectX ? -1 : 1), (p.scaleY ?? 100) / 100 * (p.reflectY ? -1 : 1), lx, ly));
+    if (rand) {
+      // Random picks each value between none and the amount entered.
+      dx *= rand() * 2 - 1;
+      dy *= rand() * 2 - 1;
+      ang *= rand() * 2 - 1;
+      sx = 1 + (sx - 1) * rand();
+      sy = 1 + (sy - 1) * rand();
+    }
+    let m = frameMatrix(f, scale(sx * (p.reflectX ? -1 : 1), sy * (p.reflectY ? -1 : 1), lx, ly));
     m = multiply(rotate(-ang, rx, ry), m);
     m = multiply(translate(dx, dy), m);
-    const patches = transformPatches(doc, doc.get(id), m, { scaleStrokes: editor.prefs?.get('scaleStrokes') });
+    const patches = transformPatches(doc, doc.get(id), m, opts);
     for (const [pid, patch] of patches) doc.update(pid, patch);
   }
+}
+
+/** Zoom In/Out; with Zoom to Selection on (the default), the selection ends up in the middle of the window. */
+function stepZoom(editor, dir) {
+  const v = editor.view;
+  v.stepZoom(dir);
+  const b = editor.prefs?.get('zoomToSelection') !== false && editor.selection.size ? editor.selectionBounds(false) : null;
+  if (b) {
+    const s = v.toScreen(b.x + b.w / 2, b.y + b.h / 2);
+    v.set({ panX: v.panX + v.width / 2 - s.x, panY: v.panY + v.height / 2 - s.y });
+  }
+  editor.viewChanged();
 }
 
 export function registerCoreCommands(app) {
@@ -142,11 +204,14 @@ export function registerCoreCommands(app) {
     { id: 'path.reverse', label: 'Reverse Path Direction', enabled: selHas((n) => n.type === 'path' || n.type === 'compound'), run: () => O.reversePaths(ed()) },
     {
       id: 'object.isolate',
-      label: 'Isolate Selected Group',
-      enabled: (a, args) => Boolean(args?.id) || selHas((n) => n.type === 'group')(a),
+      // A group, or a single object (path, compound path, text...) on its own.
+      label: (a) => (isolateTarget(a)?.type === 'group' || !isolateTarget(a) ? 'Isolate Selected Group' : 'Isolate Selected Object'),
+      enabled: (a, args) => Boolean(args?.id) || Boolean(isolateTarget(a)),
       run: (a, args) => {
-        const id = args?.id || ed().selectedNodes().find((n) => n.type === 'group')?.id;
+        const id = args?.id || isolateTarget(a)?.id;
+        if (!id) return;
         ed().isolation = id;
+        ed().isolationLeaf = null;
         ed().clearSelection();
         ed().emit('isolation');
         ed().invalidate();
@@ -159,6 +224,7 @@ export function registerCoreCommands(app) {
       run: () => {
         const id = ed().isolation;
         ed().isolation = null;
+        ed().isolationLeaf = null;
         ed().select(ed().doc.has(id) ? [id] : []);
         ed().emit('isolation');
         ed().invalidate();
@@ -204,8 +270,8 @@ export function registerCoreCommands(app) {
       run: () => ed().setViewOption('mode', ed().viewOptions.mode === 'outline' ? 'preview' : 'outline'),
     },
     viewToggle('view.pixelPreview', 'Pixel Preview', 'pixelPreview', 'Alt+Mod+Y'),
-    { id: 'view.zoomIn', label: 'Zoom In', shortcut: 'Mod+=', altShortcuts: ['Mod++', 'Shift+Mod+='], enabled: hasDoc, run: () => (ed().view.stepZoom(1), ed().viewChanged()) },
-    { id: 'view.zoomOut', label: 'Zoom Out', shortcut: 'Mod+-', enabled: hasDoc, run: () => (ed().view.stepZoom(-1), ed().viewChanged()) },
+    { id: 'view.zoomIn', label: 'Zoom In', shortcut: 'Mod+=', altShortcuts: ['Mod++', 'Shift+Mod+='], enabled: hasDoc, run: () => stepZoom(ed(), 1) },
+    { id: 'view.zoomOut', label: 'Zoom Out', shortcut: 'Mod+-', enabled: hasDoc, run: () => stepZoom(ed(), -1) },
     { id: 'view.fitArtboard', label: 'Fit Artboard in Window', shortcut: 'Mod+0', enabled: hasDoc, run: () => ed().fitArtboard() },
     { id: 'view.fitAll', label: 'Fit All in Window', shortcut: 'Alt+Mod+0', enabled: hasDoc, run: () => ed().fitAll() },
     { id: 'view.actualSize', label: 'Actual Size', shortcut: 'Mod+1', enabled: hasDoc, run: () => ed().actualSize() },

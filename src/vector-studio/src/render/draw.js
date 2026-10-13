@@ -14,12 +14,13 @@
  */
 import { segmentCount, segmentPoints, isLine } from '../model/bezier.js';
 import { gradientGeometry, localGradientGeometry, nodeBounds, visualBounds, rectsIntersect } from '../model/geometry.js';
-import { layoutText, cssFont, glyphPlacements, extraPlacements, drawsAsSegments, riseOf, textHooks } from '../model/text-layout.js';
+import { layoutText, cssFont, glyphPlacements, extraPlacements, drawsAsSegments, riseOf, textHooks, decorationRects } from '../model/text-layout.js';
 import { expandStops, focalPoint } from '../model/gradients.js';
 import { multiply } from '../lib/matrix.js';
 import { geomEffectsOf, effectiveSubpaths, paintParts } from '../model/geom-effects.js';
 import { liveDef, liveArtwork } from '../model/live.js';
 import '../model/live-effects.js';
+import { hasAppearanceStack, layerAppearanceArtwork } from '../model/appearance.js';
 import { rasterEffects, compositeWithEffects, regionPool, deviceRegion, effectsMargin } from './effects.js';
 
 const pathCache = new WeakMap();
@@ -204,11 +205,15 @@ function arrowPaths(node) {
  *   dashPattern(node, scale)  -> { dash, offset } replacing node.dash (e.g. aligned to corners)
  *   paintStyle(ctx, doc, node, paint, seg) -> canvas style for paint types beyond solid
  *                             and gradients (pattern swatches); `seg` as in paintStyle()
+ *   opacityMask(layer, region, m, doc, node, opts)
+ *                             apply node.opacityMask to the object's artwork, drawn in
+ *                             `layer` ({ canvas, ctx }) covering device `region` under
+ *                             view transform `m`
  *
  * Live artwork (blends, repeats, symbol instances, ...) draws through
  * model/live.js and geometry effects through model/geom-effects.js.
  */
-export const drawHooks = { arrowheads: null, strokePath: null, dashPattern: null, paintStyle: null };
+export const drawHooks = { arrowheads: null, strokePath: null, dashPattern: null, paintStyle: null, opacityMask: null };
 
 const effectPathCache = new WeakMap();
 
@@ -316,10 +321,48 @@ function textPaint(ctx, doc, node, paint, cache, seg = null) {
   return v;
 }
 
-function decorate(ctx, st, size, x0, x1, base) {
-  const t = Math.max(st.fontSize / 18, 0.25);
-  if (st.underline) ctx.fillRect(x0, base + st.fontSize * 0.12, x1 - x0, t);
-  if (st.strike) ctx.fillRect(x0, base - size * 0.3, x1 - x0, t);
+/** Underline and strikethrough bars; `paintOf(paint)` gives the canvas style of a bar with its own color. */
+function decorate(ctx, st, size, x0, x1, base, fill, paintOf) {
+  for (const r of decorationRects(st, size, x0, x1, base)) {
+    const f = r.paint ? paintOf(r.paint) : fill;
+    if (!f) continue;
+    ctx.fillStyle = f;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+  }
+}
+
+/** Text anti-aliasing in raster export (opts.textHints): extra weight of the strokes, in ems. */
+const TEXT_WEIGHT = { crisp: 0.012, strong: 0.028 };
+
+/**
+ * Draw a text node. In raster export (opts.textHints) the object's
+ * anti-aliasing applies: None draws hard-edged pixels, Crisp and Strong
+ * draw heavier strokes, Sharp (the default) draws as on screen.
+ */
+function drawText(ctx, doc, node, opts) {
+  const aa = opts.textHints && !opts.outline ? node.antialias : null;
+  if (aa !== 'none' || !ctx.canvas || typeof ctx.getTransform !== 'function') {
+    drawTextLayout(ctx, doc, node, opts, aa ? TEXT_WEIGHT[aa] || 0 : 0);
+    return;
+  }
+  // Hard edges: draw on a layer of the same size, snap its alpha, then composite it.
+  const { width, height } = ctx.canvas;
+  const layer = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(width, height) : Object.assign(document.createElement('canvas'), { width, height });
+  const lctx = layer.getContext('2d');
+  lctx.setTransform(ctx.getTransform());
+  drawTextLayout(lctx, doc, node, opts, 0);
+  try {
+    const img = lctx.getImageData(0, 0, width, height);
+    const d = img.data;
+    for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 128 ? 255 : 0;
+    lctx.putImageData(img, 0, 0);
+  } catch {
+    /* unreadable layer: keep the smooth edges */
+  }
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(layer, 0, 0);
+  ctx.restore();
 }
 
 /**
@@ -327,8 +370,9 @@ function decorate(ctx, st, size, x0, x1, base) {
  * same-styled characters with one fillText each (keeping the browser's
  * kerning and ligatures, positioned from the layout); vertical type, type on
  * a path and rotated characters draw glyph by glyph from glyphPlacements().
+ * `weight` (ems) thickens the letters with a stroke of their fill.
  */
-function drawText(ctx, doc, node, opts) {
+function drawTextLayout(ctx, doc, node, opts, weight = 0) {
   const lay = layoutText(node);
   ctx.save();
   const m = node.transform;
@@ -340,11 +384,21 @@ function drawText(ctx, doc, node, opts) {
   const outline = opts.outline;
   const fillOf = (st, seg) => (outline ? opts.outlineColor || '#000' : textPaint(ctx, doc, node, st.fill, cache, seg));
   const strokeOf = (st, seg) => (outline || !(st.strokeWidth > 0) ? null : textPaint(ctx, doc, node, st.stroke, cache, seg));
+  const embolden = (f, size) => {
+    ctx.strokeStyle = f;
+    ctx.lineWidth = weight * size;
+    ctx.lineJoin = 'round';
+    ctx.setLineDash([]);
+  };
   const paintText = (st, str, x, y, seg) => {
     const f = fillOf(st, seg);
     if (f) {
       ctx.fillStyle = f;
       ctx.fillText(str, x, y);
+      if (weight > 0) {
+        embolden(f, st.fontSize);
+        ctx.strokeText(str, x, y);
+      }
     }
     const s = strokeOf(st, seg);
     if (s) {
@@ -359,6 +413,10 @@ function drawText(ctx, doc, node, opts) {
     if (f) {
       ctx.fillStyle = f;
       ctx.fill(path);
+      if (weight > 0) {
+        embolden(f, st.fontSize);
+        ctx.stroke(path);
+      }
     }
     const s = strokeOf(st, seg);
     if (s) {
@@ -393,7 +451,7 @@ function drawText(ctx, doc, node, opts) {
           const vs = (st.verticalScale ?? 100) / 100;
           const track = ((st.tracking || 0) / 1000) * st.fontSize;
           const x = line.xs[i - line.start];
-          const y = line.y - riseOf(st);
+          const y = line.y - riseOf(st, lay.chars.tm);
           ctx.save();
           ctx.translate(x, y);
           if (hs !== 1 || vs !== 1) ctx.scale(hs, vs);
@@ -403,12 +461,8 @@ function drawText(ctx, doc, node, opts) {
           ctx.restore();
         }
         if ((st.underline || st.strike) && !outline) {
-          const f = fillOf(st);
-          if (f) {
-            ctx.fillStyle = f;
-            const x1 = j >= end ? line.xs[end - line.start] - ((st.tracking || 0) / 1000) * st.fontSize : line.xs[j - line.start];
-            decorate(ctx, st, size, line.xs[i - line.start], x1, line.y - riseOf(st));
-          }
+          const x1 = j >= end ? line.xs[end - line.start] - ((st.tracking || 0) / 1000) * st.fontSize : line.xs[j - line.start];
+          decorate(ctx, st, size, line.xs[i - line.start], x1, line.y - riseOf(st, lay.chars.tm), fillOf(st), (p) => textPaint(ctx, doc, node, p, cache));
         }
         i = j;
       }
@@ -436,13 +490,7 @@ function drawText(ctx, doc, node, opts) {
       const gp = g.glyph != null ? textHooks.glyphPath?.(g.style, g.glyph, g.size) : null;
       if (gp) paintGlyph(g.style, gp, gm);
       else paintText(g.style, g.ch, 0, 0, gm);
-      if ((g.style.underline || g.style.strike) && !outline && !lay.vertical) {
-        const f = fillOf(g.style, gm);
-        if (f) {
-          ctx.fillStyle = f;
-          decorate(ctx, g.style, g.size, 0, g.w, 0);
-        }
-      }
+      if ((g.style.underline || g.style.strike) && !outline && !lay.vertical) decorate(ctx, g.style, g.size, 0, g.w, 0, fillOf(g.style, gm), (p) => textPaint(ctx, doc, node, p, cache, gm));
       ctx.restore();
     }
   }
@@ -488,6 +536,7 @@ function drawImage(ctx, doc, node, opts) {
   } else {
     const img = imageFor(doc, node.asset);
     if (img) {
+      if (opts.dimImages > 0) ctx.globalAlpha *= 1 - Math.min(100, opts.dimImages) / 100;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(img, 0, 0, node.width, node.height);
     }
@@ -522,7 +571,9 @@ export function drawNode(ctx, doc, node, opts) {
   const container = node.type === 'group' || node.type === 'layer';
   // Leaf live objects (symbol instances, brush strokes, effected type) are several shapes too: they isolate like groups.
   const grouped = container || (node.type !== 'image' && Boolean(liveDef(node)));
-  const isolated = !opts.outline && grouped && (opacity < 1 || blend !== 'source-over' || fx || node.isolate || node.knockout);
+  // An opacity mask (drawHooks.opacityMask) needs the object's finished artwork in a layer.
+  const om = !opts.outline && node.opacityMask && !node.opacityMask.disabled && drawHooks.opacityMask ? node.opacityMask : null;
+  const isolated = !opts.outline && ((grouped && (opacity < 1 || blend !== 'source-over' || fx || node.isolate || node.knockout)) || Boolean(om));
 
   if (fx || isolated) {
     // Groups with opacity, blending, isolation or effects, and any object
@@ -536,9 +587,11 @@ export function drawNode(ctx, doc, node, opts) {
     const m = ctx.getTransform();
     lctx.setTransform(m.a, m.b, m.c, m.d, m.e - region.x, m.f - region.y);
     if (container) {
-      if (node.knockout && !opts.outline) drawKnockout(lctx, doc, node, opts, pool);
-      else drawChildren(lctx, doc, node, opts);
+      // A knockout group with its own fills and strokes knocks out within its contents item (model/appearance.js).
+      if (node.knockout && !opts.outline && !hasAppearanceStack(node)) drawKnockout(lctx, doc, node, opts, pool);
+      else drawContent(lctx, doc, node, opts);
     } else drawContent(lctx, doc, node, opts);
+    if (om) drawHooks.opacityMask(layer, region, m, doc, node, opts);
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha *= opacity;
@@ -575,8 +628,14 @@ function drawContent(ctx, doc, node, opts) {
       drawImage(ctx, doc, node, opts);
       break;
     case 'group':
-    case 'layer':
       drawChildren(ctx, doc, node, opts);
+      break;
+    case 'layer':
+      // A layer's own fills and strokes (layers are not live artwork) draw around its contents.
+      if (!opts.outline && hasAppearanceStack(node)) {
+        const { items, vdoc } = layerAppearanceArtwork(doc, node);
+        for (const n of items) drawNode(ctx, vdoc, n, opts);
+      } else drawChildren(ctx, doc, node, opts);
       break;
     default:
       // A leaf live object passed the leaf filter as a whole; its generated parts are not filtered again.
@@ -585,7 +644,11 @@ function drawContent(ctx, doc, node, opts) {
   }
 }
 
-/** Knockout group: each child replaces what earlier children drew instead of compositing over it. */
+/**
+ * Knockout group: each child replaces what earlier children drew instead
+ * of compositing over it. The child's whole shape knocks out; with
+ * `knockoutShape` its opacity and opacity mask set how much.
+ */
 function drawKnockout(ctx, doc, node, opts, pool) {
   const m = ctx.getTransform();
   for (const c of node.children) {
@@ -594,13 +657,20 @@ function drawKnockout(ctx, doc, node, opts, pool) {
     const tmp = pool.acquire(ctx.canvas.width, ctx.canvas.height);
     tmp.ctx.setTransform(m);
     drawNode(tmp.ctx, doc, child, opts);
+    const partial = !child.knockoutShape && ((child.opacity ?? 1) < 1 || (child.opacityMask && !child.opacityMask.disabled));
+    const cut = partial ? pool.acquire(ctx.canvas.width, ctx.canvas.height) : tmp;
+    if (partial) {
+      cut.ctx.setTransform(m);
+      drawNode(cut.ctx, doc, { ...child, opacity: 1, opacityMask: undefined }, opts);
+    }
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'destination-out';
-    ctx.drawImage(tmp.canvas, 0, 0);
+    ctx.drawImage(cut.canvas, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
     ctx.drawImage(tmp.canvas, 0, 0);
     ctx.restore();
+    if (partial) pool.release(cut);
     pool.release(tmp);
   }
 }
@@ -701,7 +771,9 @@ export function drawArtwork(ctx, doc, opts) {
     if (!layer || layer.hidden) continue;
     if (opts.layerFilter && !opts.layerFilter(layer)) continue;
     const layerOpts = layer.outline && !opts.outline ? { ...opts, outline: true } : opts;
-    drawNode(ctx, doc, layer, layer.template ? { ...layerOpts, templateDim: true } : layerOpts);
+    // Layer Options > Dim Images (on by default for template layers): on screen (opts.dimLayers), images draw faded.
+    const dim = opts.dimLayers ? (layer.dimImages ?? (layer.template ? 50 : 0)) : 0;
+    drawNode(ctx, doc, layer, dim > 0 ? { ...layerOpts, dimImages: dim } : layerOpts);
   }
 }
 

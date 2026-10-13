@@ -6,6 +6,7 @@
  * side, stacked, floating) and the screen modes.
  */
 import { h } from '../../lib/dom.js';
+import { setListItems } from '../../ui/panels/panel.js';
 import { icon } from '../../ui/icons.js';
 import { openDialog } from '../../ui/dialogs/dialog.js';
 import { openPopover, closePopover } from '../../ui/popover.js';
@@ -23,7 +24,7 @@ export const BASIC_TOOLS = [
   'type', 'area-type', 'type-on-path',
   'rotate', 'reflect', 'scale', 'width', 'free-transform', 'shape-builder',
   'gradient', 'eyedropper', 'blend',
-  'artboard', 'hand', 'zoom',
+  'artboard', 'hand', 'rotate-view', 'zoom',
 ];
 
 export function toolSet(app) {
@@ -59,6 +60,63 @@ export function setToolShown(app, id, shown) {
   else visible.delete(id);
   app.prefs.set('toolbarHidden', [...app.toolClasses.keys()].filter((t) => !visible.has(t)));
   setToolSet(app, 'custom');
+}
+
+/**
+ * A list of named items to rename, duplicate and delete (Manage
+ * Workspaces). Resolves to the edited list, each item
+ * with `orig` (its name before), or null when cancelled.
+ */
+async function manageNamedDialog(app, { title, items, label, empty, fallback }) {
+  let list = items.map((w) => ({ ...w, orig: w.name }));
+  const ul = h('ul.ev-list', { role: 'listbox', 'aria-label': label });
+  const name = h('input#mw-name', { type: 'text', autocomplete: 'off', spellcheck: false });
+  let sel = list[0]?.orig || null;
+  const render = () => {
+    setListItems(
+      ul,
+      list.map((w) => h('li.ev-item', { role: 'option', tabindex: w.orig === sel ? '0' : '-1', 'aria-selected': String(w.orig === sel), onclick: () => ((sel = w.orig), render()) }, h('span.ev-name', w.name))),
+      h('li.panel-empty', empty),
+    );
+    const cur = list.find((w) => w.orig === sel);
+    name.value = cur?.name || '';
+    name.disabled = del.disabled = dup.disabled = !cur;
+  };
+  name.addEventListener('input', () => {
+    const cur = list.find((w) => w.orig === sel);
+    if (cur) cur.name = name.value;
+    const el = ul.querySelector('[aria-selected="true"] .ev-name');
+    if (el) el.textContent = name.value;
+  });
+  const del = h('button.btn.small', { type: 'button', onclick: () => ((list = list.filter((w) => w.orig !== sel)), (sel = list[0]?.orig || null), render()) }, 'Delete');
+  const dup = h('button.btn.small', {
+    type: 'button',
+    onclick: () => {
+      const cur = list.find((w) => w.orig === sel);
+      if (!cur) return;
+      const copy = { ...cur, name: `${cur.name} copy`, orig: `${cur.orig}\u0000${Date.now()}` };
+      list.push(copy);
+      sel = copy.orig;
+      render();
+    },
+  }, 'Duplicate');
+  render();
+  const ok = await openDialog({
+    title,
+    body: h('div.form.edit-views', ul, h('div.form-row', h('label', { for: 'mw-name' }, 'Name'), name), h('div.ev-actions', dup, del)),
+    buttons: [
+      { label: 'Cancel', value: false },
+      { label: 'OK', value: true, primary: true },
+    ],
+  });
+  if (!ok) return null;
+  const seen = new Set();
+  return list.map((w) => {
+    let n = w.name.trim() || fallback;
+    while (seen.has(n)) n = `${n} 2`;
+    seen.add(n);
+    return { ...w, name: n };
+  });
 }
 
 /**
@@ -159,10 +217,13 @@ function wireToolbarDrag(app) {
 
 /** Built-in workspaces: panel arrangement, tool set and bars. */
 export const WORKSPACES = {
-  essentials: { name: 'Essentials', dock: ['properties', 'layers'], strip: ['color', 'swatches', 'stroke', 'gradient', 'transparency', 'appearance', 'align', 'pathfinder', 'character', 'paragraph'], active: 'properties', toolbar: 'advanced', controlBar: false },
-  classic: { name: 'Essentials Classic', dock: ['properties', 'layers', 'swatches'], strip: ['color', 'stroke', 'gradient', 'transparency', 'appearance', 'graphicStyles', 'align', 'transform', 'pathfinder', 'character', 'paragraph', 'navigator', 'info', 'artboards'], active: 'properties', toolbar: 'advanced', controlBar: true },
+  automation: { name: 'Automation', dock: ['properties', 'actions', 'layers'], strip: ['variables', 'history', 'links', 'documentInfo', 'swatches', 'color'], active: 'actions', toolbar: 'advanced', controlBar: false },
+  essentials: { name: 'Standard', dock: ['properties', 'layers'], strip: ['color', 'swatches', 'stroke', 'gradient', 'transparency', 'appearance', 'align', 'pathfinder', 'character', 'paragraph'], active: 'properties', toolbar: 'advanced', controlBar: false },
+  classic: { name: 'Classic', dock: ['properties', 'layers', 'swatches'], strip: ['color', 'stroke', 'gradient', 'transparency', 'appearance', 'graphicStyles', 'align', 'transform', 'pathfinder', 'character', 'paragraph', 'navigator', 'info', 'artboards'], active: 'properties', toolbar: 'advanced', controlBar: true },
+  gettingStarted: { name: 'Getting Started', dock: ['properties', 'layers'], strip: ['swatches', 'color', 'libraries'], active: 'properties', toolbar: 'basic', controlBar: false },
   layout: { name: 'Layout', dock: ['properties', 'layers', 'artboards'], strip: ['align', 'transform', 'character', 'paragraph', 'characterStyles', 'paragraphStyles', 'swatches', 'color', 'stroke', 'info', 'navigator'], active: 'artboards', toolbar: 'advanced', controlBar: true },
   painting: { name: 'Painting', dock: ['properties', 'swatches', 'color'], strip: ['brushes', 'gradient', 'transparency', 'appearance', 'graphicStyles', 'stroke', 'layers', 'navigator'], active: 'color', toolbar: 'basic', controlBar: false },
+  printing: { name: 'Printing and Proofing', dock: ['properties', 'layers', 'separations'], strip: ['attributes', 'flattenerPreview', 'documentInfo', 'links', 'swatches', 'color', 'artboards'], active: 'properties', toolbar: 'advanced', controlBar: true },
   tracing: { name: 'Tracing', dock: ['properties', 'traceImage', 'layers'], strip: ['navigator', 'color', 'swatches', 'stroke', 'transparency', 'pathfinder'], active: 'traceImage', toolbar: 'advanced', controlBar: false },
   typography: { name: 'Typography', dock: ['properties', 'character', 'paragraph'], strip: ['characterStyles', 'paragraphStyles', 'glyphs', 'openType', 'tabs', 'layers', 'swatches', 'color', 'align'], active: 'character', toolbar: 'advanced', controlBar: true },
   web: { name: 'Web', dock: ['properties', 'layers', 'assetExport'], strip: ['swatches', 'color', 'align', 'transform', 'info', 'artboards', 'symbols', 'svgInteractivity', 'navigator'], active: 'properties', toolbar: 'advanced', controlBar: true },
@@ -223,55 +284,10 @@ async function newWorkspaceDialog(app) {
 }
 
 async function manageWorkspacesDialog(app) {
-  let list = savedWorkspaces(app).map((w) => ({ ...w, orig: w.name }));
-  const ul = h('ul.ev-list', { role: 'listbox', 'aria-label': 'Saved workspaces' });
-  const name = h('input#mw-name', { type: 'text', autocomplete: 'off', spellcheck: false });
-  let sel = list[0]?.orig || null;
-  const render = () => {
-    ul.replaceChildren(...list.map((w) => h('li.ev-item', { role: 'option', tabindex: w.orig === sel ? '0' : '-1', 'aria-selected': String(w.orig === sel), onclick: () => ((sel = w.orig), render()) }, h('span.ev-name', w.name))));
-    if (!list.length) ul.append(h('li.panel-empty', 'No saved workspaces. Use New Workspace to save one.'));
-    const cur = list.find((w) => w.orig === sel);
-    name.value = cur?.name || '';
-    name.disabled = del.disabled = dup.disabled = !cur;
-  };
-  name.addEventListener('input', () => {
-    const cur = list.find((w) => w.orig === sel);
-    if (cur) cur.name = name.value;
-    ul.querySelector('[aria-selected="true"] .ev-name') && (ul.querySelector('[aria-selected="true"] .ev-name').textContent = name.value);
-  });
-  const del = h('button.btn.small', { type: 'button', onclick: () => ((list = list.filter((w) => w.orig !== sel)), (sel = list[0]?.orig || null), render()) }, 'Delete');
-  const dup = h('button.btn.small', {
-    type: 'button',
-    onclick: () => {
-      const cur = list.find((w) => w.orig === sel);
-      if (!cur) return;
-      const copy = { ...cur, name: `${cur.name} copy`, orig: `${cur.orig}\u0000${Date.now()}` };
-      list.push(copy);
-      sel = copy.orig;
-      render();
-    },
-  }, 'Duplicate');
-  render();
-  const ok = await openDialog({
-    title: 'Manage Workspaces',
-    body: h('div.form.edit-views', ul, h('div.form-row', h('label', { for: 'mw-name' }, 'Name'), name), h('div.ev-actions', dup, del)),
-    buttons: [
-      { label: 'Cancel', value: false },
-      { label: 'OK', value: true, primary: true },
-    ],
-  });
-  if (!ok) return;
-  const seen = new Set();
-  const out = [];
-  for (const w of list) {
-    let n = w.name.trim() || 'Workspace';
-    while (seen.has(n)) n = `${n} 2`;
-    seen.add(n);
-    const { orig, ...rest } = w;
-    out.push({ ...rest, name: n });
-    if (currentKey(app) === `saved:${orig}`) app.prefs.set('workspace', `saved:${n}`);
-  }
-  app.prefs.set('workspaces', out);
+  const out = await manageNamedDialog(app, { title: 'Manage Workspaces', items: savedWorkspaces(app), label: 'Saved workspaces', empty: 'No saved workspaces. Use New Workspace to save one.', fallback: 'Workspace' });
+  if (!out) return;
+  for (const w of out) if (currentKey(app) === `saved:${w.orig}`) app.prefs.set('workspace', `saved:${w.name}`);
+  app.prefs.set('workspaces', out.map(({ orig, ...rest }) => rest));
 }
 
 // ---- bars ----
@@ -352,6 +368,8 @@ export function layoutViews(app) {
     view.host.classList.toggle('floating', isFloat);
     view.host.classList.toggle('active-pane', ed === app.editor && (tiled || floating.size > 0));
     view.host.style.order = tiled && !isFloat ? String(docked.indexOf(ed)) : '';
+    // The active floating window sits above the others.
+    view.host.style.zIndex = isFloat && ed === app.editor ? '4' : '';
     if (isFloat) ensureFloatChrome(app, ed, view);
     else view.host.querySelector(':scope > .float-head')?.remove();
     if (visible) view.resize();
@@ -408,10 +426,27 @@ export function setArrangement(app, mode, { float = false } = {}) {
   app.floating ||= new Set();
   if (float && app.editor) {
     app.floating.add(app.editor);
-  } else if (mode === 'tabs') {
+  } else if (mode === 'tabs' || mode === 'tile') {
+    // Tiling and consolidating dock every floating window first.
     for (const ed of [...app.floating]) unfloat(app, ed);
   }
   if (mode) app.arrangement = mode;
+  layoutViews(app);
+}
+
+/** Float All in Windows: every document in its own window; windows already floating keep their place. */
+export function floatAll(app) {
+  app.floating ||= new Set();
+  for (const ed of app.editors) app.floating.add(ed);
+  layoutViews(app);
+}
+
+/** Cascade: every document in a floating window, stacked diagonally from the top left with the active one in front. */
+export function cascadeWindows(app) {
+  app.floating ||= new Set();
+  for (const ed of [...app.floating]) unfloat(app, ed);
+  const order = [...app.editors.filter((e) => e !== app.editor), ...(app.editor ? [app.editor] : [])];
+  for (const ed of order) app.floating.add(ed);
   layoutViews(app);
 }
 
@@ -448,7 +483,7 @@ export function installWindow(app) {
     { id: 'window.workspace.manage', label: 'Manage Workspaces...', run: (a) => manageWorkspacesDialog(a) },
     {
       id: 'window.resetWorkspace',
-      label: (a) => `Reset ${workspaceByKey(a, currentKey(a))?.name || 'Essentials'}`,
+      label: (a) => `Reset ${workspaceByKey(a, currentKey(a))?.name || 'Standard'}`,
       run: (a) => {
         const key = currentKey(a);
         applyWorkspace(a, workspaceByKey(a, key) || WORKSPACES.essentials, workspaceByKey(a, key) ? key : 'essentials');
@@ -461,10 +496,11 @@ export function installWindow(app) {
     { id: 'window.toolbar', label: 'Tools', checked: (a) => a.prefs.get('toolbarVisible') !== false, run: (a) => setToolbarVisible(a, a.prefs.get('toolbarVisible') === false) },
     { id: 'window.controlBar', label: 'Control', checked: (a) => Boolean(a.prefs.get('controlBar')), run: (a) => setControlBar(a, !a.prefs.get('controlBar')) },
     { id: 'window.newWindow', label: 'New Window', enabled: hasDoc, run: (a) => newWindow(a) },
-    { id: 'window.arrange.cascade', label: 'Stack Documents', enabled: (a) => a.editors.length > 1, checked: (a) => a.arrangement === 'stack', run: (a) => setArrangement(a, 'stack') },
-    { id: 'window.arrange.tile', label: 'Tile Side by Side', enabled: (a) => a.editors.length > 1, checked: (a) => a.arrangement === 'tile', run: (a) => setArrangement(a, 'tile') },
-    { id: 'window.arrange.float', label: 'Float in Window', enabled: (a) => Boolean(a.editor) && a.editors.length > 1 && !a.floating?.has(a.editor), run: (a) => setArrangement(a, null, { float: true }) },
-    { id: 'window.arrange.consolidate', label: 'Consolidate All into Tabs', enabled: (a) => (a.arrangement && a.arrangement !== 'tabs') || a.floating?.size > 0, run: (a) => setArrangement(a, 'tabs') },
+    { id: 'window.arrange.cascade', label: 'Cascade', enabled: (a) => a.editors.length > 0, run: (a) => cascadeWindows(a) },
+    { id: 'window.arrange.tile', label: 'Tile', enabled: (a) => a.editors.length > 1, checked: (a) => a.arrangement === 'tile' && !a.floating?.size, run: (a) => setArrangement(a, 'tile') },
+    { id: 'window.arrange.float', label: 'Float in Window', enabled: (a) => Boolean(a.editor) && !a.floating?.has(a.editor), run: (a) => setArrangement(a, null, { float: true }) },
+    { id: 'window.arrange.floatAll', label: 'Float All in Windows', enabled: (a) => a.editors.some((e) => !a.floating?.has(e)), run: (a) => floatAll(a) },
+    { id: 'window.arrange.consolidate', label: 'Consolidate All Windows', enabled: (a) => (a.arrangement && a.arrangement !== 'tabs') || a.floating?.size > 0, run: (a) => setArrangement(a, 'tabs') },
     ...SCREEN_MODES.map((m) => ({
       id: `window.screenMode.${m}`,
       label: { normal: 'Normal Screen Mode', menu: 'Full Screen with Menu Bar', full: 'Full Screen Mode' }[m],

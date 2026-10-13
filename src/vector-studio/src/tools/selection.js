@@ -1,7 +1,7 @@
 /**
  * Selection tool (V): select, move, duplicate (Alt-drag), scale through the
  * bounding box handles and rotate just outside its corners; marquee select;
- * double-click a group to isolate it.
+ * double-click a group or a single object to isolate it.
  */
 import { Tool, tol, fmt, constrainAngle } from './tool.js';
 import { hitTest, marqueeHits } from '../render/hit.js';
@@ -71,10 +71,31 @@ export class SelectionTool extends Tool {
 
   hitAt(e) {
     const editor = this.editor;
-    const iso = editor.isolation;
-    // In isolation mode only the isolated group's contents are selectable.
-    const filter = iso ? (n) => editor.doc.isAncestor(iso, n.id) : null;
-    return hitTest(editor.doc, e.x, e.y, tol(editor, 3), { outline: editor.viewOptions.mode === 'outline', filter });
+    // In isolation mode only the isolated object (or the group's contents) is selectable.
+    const filter = editor.isolation ? (n) => editor.inIsolation(n.id) : null;
+    return hitTest(editor.doc, e.x, e.y, tol(editor, 3), { outline: editor.viewOptions.mode === 'outline' || Boolean(editor.prefs?.get('objectSelectionByPath')), filter });
+  }
+
+  /**
+   * The object below the selected one under the pointer (cycling back to the
+   * top), as a hit; null when nothing is stacked there.
+   */
+  behindAt(e) {
+    const editor = this.editor;
+    const filter = editor.isolation ? (n) => editor.inIsolation(n.id) : null;
+    const skip = new Set();
+    const stack = [];
+    for (let i = 0; i < 64; i++) {
+      const h = hitTest(editor.doc, e.x, e.y, tol(editor, 3), { outline: editor.viewOptions.mode === 'outline', filter, skip });
+      if (!h) break;
+      const t = editor.selectionTarget(h.id);
+      // Skipping the target passes over everything in it (a whole group counts once).
+      skip.add(h.id).add(t.id);
+      if (!stack.some((x) => x.target === t.id)) stack.push({ hit: h, target: t.id });
+    }
+    if (stack.length < 2) return null;
+    const at = stack.findIndex((x) => editor.selection.has(x.target));
+    return stack[(at + 1) % stack.length].hit;
   }
 
   /** Resize cursor for a handle, following the box's angle on screen. */
@@ -139,7 +160,9 @@ export class SelectionTool extends Tool {
       else this.startScale(e, b, part);
       return;
     }
-    const hit = this.hitAt(e);
+    let hit = this.hitAt(e);
+    // Command-click selects the next object behind the selected one under the pointer.
+    if (hit && e.mod && !e.alt && this.app.prefs.get('selectBehind') !== false) hit = this.behindAt(e) || hit;
     if (hit) {
       const target = editor.selectionTarget(hit.id);
       if (e.shift) {
@@ -289,8 +312,7 @@ export class SelectionTool extends Tool {
     if (d.kind === 'marquee') {
       const r = rectFrom(d);
       if (r.w * editor.view.zoom > 2 || r.h * editor.view.zoom > 2) {
-        const iso = editor.isolation;
-        const hits = marqueeHits(editor.doc, r).filter((n) => !iso || editor.doc.isAncestor(iso, n.id));
+        const hits = marqueeHits(editor.doc, r).filter((n) => editor.inIsolation(n.id));
         const targets = [...new Set(hits.map((n) => editor.selectionTarget(n.id).id))];
         // Shift-marquee toggles: unselected objects join the selection, selected ones leave it.
         editor.select(targets, d.add ? { toggle: true } : {});
@@ -325,7 +347,8 @@ export class SelectionTool extends Tool {
       return;
     }
     if (target && selectionDoubleClickHooks.some((fn) => fn(this, target, hit))) return;
-    if (target && target.type === 'group' && this.app.prefs.get('doubleClickToIsolate') !== false) {
+    // A group, or a single path, compound path or other object, opens in isolation mode.
+    if (target && target.id !== editor.isolation && target.type !== 'layer' && this.app.prefs.get('doubleClickToIsolate') !== false && !editor.doc.isLocked(target.id)) {
       this.app.commands.run('object.isolate', { id: target.id });
       return;
     }

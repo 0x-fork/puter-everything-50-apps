@@ -27,8 +27,10 @@ const SETTLE_MS = 140;
  *   afterArt     [(ctx, editor, view, opts)] draw above the artwork in document space on full renders
  *                                           (previews such as pattern tile copies)
  *   dimIsolation [(editor) -> bool]         false skips fading the artwork outside isolation mode
+ *   postArt      [(ctx, editor, view) -> void] rework the finished art canvas in device pixels
+ *                                           (separation and proof previews)
  */
-export const viewHooks = { artOptions: [], clipArt: [], afterArt: [], dimIsolation: [] };
+export const viewHooks = { artOptions: [], clipArt: [], afterArt: [], dimIsolation: [], postArt: [] };
 
 /** The bleed area around an artboard (bleed: number or { top, bottom, left, right }), or null without bleed. */
 export function bleedRect(a, bleed) {
@@ -186,21 +188,32 @@ export class CanvasView {
     // unchanged artwork below and above them as bitmaps and redraw only the
     // objects in between: dragging stays cheap in very large documents.
     if (editor.dragPreview && !opts.pixelPreview && this.#drawDragPreview(editor.dragPreview)) {
+      this.#postArt();
       this.lastRenderMs = performance.now() - t0;
       return;
     }
     this.previewCache = null;
     if (doc.tx && this.slowScene && !opts.pixelPreview && this.#drawInteraction(doc.tx)) {
+      this.#postArt();
       this.lastRenderMs = performance.now() - t0;
       return;
     }
     this.interaction = null;
     this.#paint(this.actx, { background: true, borders: true });
     if (editor.isolation && doc.has(editor.isolation) && viewHooks.dimIsolation.every((f) => f(editor) !== false)) this.#dimOutsideIsolation();
-    if (opts.pixelPreview) drawPixelPreview(this.actx, this.art, view);
+    if (opts.pixelPreview) drawPixelPreview(this.actx, this.art, view, editor.prefs?.get('showPixelGrid') !== false);
+    this.#postArt();
     this.lastRenderMs = performance.now() - t0;
     this.slowScene = this.lastRenderMs > 8;
     this.#captureSnapshot();
+  }
+
+  #postArt() {
+    for (const f of viewHooks.postArt) {
+      this.actx.save();
+      f(this.actx, this.editor, this.editor.view);
+      this.actx.restore();
+    }
   }
 
   /** Isolation mode: fade everything, then redraw the isolated group at full strength. */
@@ -369,8 +382,9 @@ export class CanvasView {
         const parent = n.parent ? doc.get(n.parent) : null;
         if (parent?.type === 'compound') n = parent;
         // Isolated ancestors (opacity, blending, effects, clipping) composite as a unit: no split.
+        // Opacity mask art edited in place masks an object below it: redraw everything.
         for (const a of doc.ancestors(n.id)) {
-          if ((a.opacity ?? 1) < 1 || (a.blendMode && a.blendMode !== 'normal') || a.effects?.length || a.clip) return false;
+          if ((a.opacity ?? 1) < 1 || (a.blendMode && a.blendMode !== 'normal') || a.effects?.length || a.clip || a.maskEdit) return false;
           // Live artwork made from a changing object redraws with it.
           if (liveDef(a) && order.has(a.id)) lo = Math.min(lo, order.get(a.id));
         }
@@ -467,6 +481,21 @@ function drawGrid(ctx, editor, colors) {
   ctx.lineWidth = 1 / view.zoom;
   const x0 = Math.floor(r.x / step) * step;
   const y0 = Math.floor(r.y / step) * step;
+  if (editor.prefs?.get('gridStyle') === 'dots') {
+    // Dots at the gridline crossings (larger on major lines).
+    const px = 1 / view.zoom;
+    ctx.fillStyle = colors.grid;
+    for (let x = x0; x <= r.x + r.w; x += step) {
+      const mx = Math.abs(x / major - Math.round(x / major)) < 1e-6;
+      for (let y = y0; y <= r.y + r.h; y += step) {
+        const big = mx && Math.abs(y / major - Math.round(y / major)) < 1e-6;
+        const d = (big ? 3 : 1.5) * px;
+        ctx.fillRect(x - d / 2, y - d / 2, d, d);
+      }
+    }
+    ctx.restore();
+    return;
+  }
   for (const pass of ['minor', 'major']) {
     ctx.beginPath();
     for (let x = x0; x <= r.x + r.w; x += step) {
@@ -489,7 +518,7 @@ function drawGrid(ctx, editor, colors) {
 }
 
 /** Pixel Preview: re-render the canvas through a 72-ppi pixel grid at the current zoom. */
-function drawPixelPreview(ctx, canvas, view) {
+function drawPixelPreview(ctx, canvas, view, grid = true) {
   if (view.zoom <= 1) return;
   const w = Math.ceil(canvas.width / (view.zoom * view.dpr));
   const h = Math.ceil(canvas.height / (view.zoom * view.dpr));
@@ -501,6 +530,22 @@ function drawPixelPreview(ctx, canvas, view) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(tmp, 0, 0, w, h, 0, 0, w * view.zoom * view.dpr, h * view.zoom * view.dpr);
+  // The pixel grid shows above 600% zoom.
+  if (grid && view.zoom >= 6) {
+    const s = view.zoom * view.dpr;
+    ctx.beginPath();
+    for (let i = 1; i < w; i++) {
+      ctx.moveTo(Math.round(i * s) + 0.5, 0);
+      ctx.lineTo(Math.round(i * s) + 0.5, canvas.height);
+    }
+    for (let j = 1; j < h; j++) {
+      ctx.moveTo(0, Math.round(j * s) + 0.5);
+      ctx.lineTo(canvas.width, Math.round(j * s) + 0.5);
+    }
+    ctx.strokeStyle = 'rgba(128, 128, 128, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
   ctx.restore();
 }
 

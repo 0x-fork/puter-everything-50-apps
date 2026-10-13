@@ -12,7 +12,7 @@ import { numberField, paintSwatch, updatePaintSwatch, iconButton, selectField } 
 import { icon } from '../icons.js';
 import { commonStyle, applyStyle } from '../../ops/paint-ops.js';
 import { openPaintPopover } from '../popover.js';
-import { shapeAnchors } from '../../model/shapes.js';
+import { createShapeSection } from './shape-section.js';
 import { defaultLabel } from '../../model/nodes.js';
 import { UNITS } from '../../lib/units.js';
 import { BLEND_MODES } from '../../render/draw.js';
@@ -66,13 +66,17 @@ export class PropertiesPanel extends Panel {
   static placement = 'dock';
   /**
    * Extra sections: [{ id, title, when(editor) => bool, build(app) => { el, refresh() }, noSelection }]
-   * `noSelection: true` lets a section show without a selection (e.g. tool controls).
+   * `noSelection: true` lets a section show without a selection (e.g. tool controls);
+   * `toolSection: true` marks drawing-tool settings: while one shows, the panel
+   * shows the appearance new artwork gets and a Tool Options button instead
+   * of the document settings.
    */
   static extraSections = [];
 
   build() {
     const app = this.app;
     this.header = h('p.props-kind');
+    this.toolOptions = h('button.btn.small.props-tool-options', { type: 'button', hidden: true, onclick: () => app.tool?.openOptions?.() }, 'Tool Options');
     this.transform = createTransformSection(app);
     this.sections = {};
 
@@ -116,7 +120,7 @@ export class PropertiesPanel extends Panel {
       section('Document', row('Units', unitSel.el), row('Artboard', boardSel), h('button.btn.block', { type: 'button', onclick: () => app.setTool('artboard') }, 'Edit Artboards')),
       section('Rulers & Grids', this.docToggles[0]),
       section('Guides', this.docToggles[1]),
-      section('Snap Options', this.docToggles[2]),
+      section('Snap Options', this.docToggles[2], h('button.btn.block', { type: 'button', onclick: () => app.commands.run('edit.preferences', { section: 'alignment' }) }, 'Snapping Preferences...')),
       section('Preferences', h('div.pref-incr', h('span', 'Keyboard Increment'), incr.el), check('previewBounds', 'Use Preview Bounds'), check('scaleCorners', 'Scale Corners'), check('scaleStrokes', 'Scale Strokes & Effects')),
       section(
         'Quick Actions',
@@ -129,17 +133,17 @@ export class PropertiesPanel extends Panel {
     );
 
     // ---- Shape properties ----
-    this.shapeBody = h('div.shape-props');
-    this.shapeSection = section('Shape', this.shapeBody);
+    this.shapes = createShapeSection(app);
+    this.shapeSection = section('Shape', this.shapes.el);
 
     // ---- Appearance ----
     this.fillSw = paintSwatch(null);
     this.strokeSw = paintSwatch(null, { className: 'stroke-swatch' });
     const fillBtn = h('button.swatch-btn', { type: 'button', 'aria-label': 'Fill color', 'aria-haspopup': 'dialog', onclick: (e) => openPaintPopover(app, e.currentTarget, 'fill') }, this.fillSw);
     const strokeBtn = h('button.swatch-btn', { type: 'button', 'aria-label': 'Stroke color', 'aria-haspopup': 'dialog', onclick: (e) => openPaintPopover(app, e.currentTarget, 'stroke') }, this.strokeSw);
-    this.strokeW = numberField({ label: 'Stroke weight', ariaLabel: 'Stroke weight', value: 1, unit: 'pt', min: 0, width: '72px', onCommit: (v, o) => applyStyle(app.editor, { strokeWidth: v }, 'Stroke Weight', o?.live ? 'stroke-weight' : null) });
+    this.strokeW = numberField({ label: 'Stroke weight', ariaLabel: 'Stroke weight', value: 1, unit: 'pt', min: 0, onCommit: (v, o) => applyStyle(app.editor, { strokeWidth: v }, 'Stroke Weight', o?.live ? 'stroke-weight' : null) });
     this.strokeW.el.querySelector('label').textContent = '';
-    this.opacity = numberField({ label: 'Opacity', kind: 'percent', value: 100, min: 0, max: 100, width: '64px', onCommit: (v, o) => applyStyle(app.editor, { opacity: v / 100 }, 'Opacity', o?.live ? 'opacity' : null) });
+    this.opacity = numberField({ label: 'Opacity', kind: 'percent', value: 100, min: 0, max: 100, onCommit: (v, o) => applyStyle(app.editor, { opacity: v / 100 }, 'Opacity', o?.live ? 'opacity' : null) });
     this.opacity.el.querySelector('label').textContent = '';
     this.blend = selectField('Blending mode', BLEND_MODES.map((m) => ({ value: m, label: BLEND_LABELS[m] || m })), 'normal', (v) => applyStyle(app.editor, { blendMode: v }, 'Blending Mode'));
     this.appearance = section(
@@ -190,7 +194,7 @@ export class PropertiesPanel extends Panel {
     this.quickSection = section('Quick Actions', this.quick);
 
     this.empty = h('p.panel-empty', 'Open or create a document to see its properties.');
-    this.el.append(this.empty, this.header, this.docSection, section('Transform', this.transform.el), this.shapeSection, this.appearance, ...this.extra.map((e) => e.sec), this.alignSection, this.quickSection);
+    this.el.append(this.empty, h('div.props-head', this.header, this.toolOptions), this.docSection, section('Transform', this.transform.el), this.shapeSection, this.appearance, ...this.extra.map((e) => e.sec), this.alignSection, this.quickSection);
     this.transformSection = this.transform.el.parentElement;
   }
 
@@ -202,12 +206,15 @@ export class PropertiesPanel extends Panel {
     if (!ed) return;
     const hasSel = ed.selection.size > 0;
     this.header.textContent = selectionKind(ed);
-    this.docSection.hidden = hasSel;
+    // A drawing tool with settings here: show what new artwork looks like instead of the document.
+    const toolMode = !hasSel && this.extra.some((e) => e.def.toolSection && e.def.when(ed));
+    this.toolOptions.hidden = !toolMode;
+    this.docSection.hidden = hasSel || toolMode;
     this.transformSection.hidden = !hasSel;
     this.alignSection.hidden = !hasSel;
     this.quickSection.hidden = !hasSel;
-    this.appearance.hidden = !hasSel;
-    if (!hasSel) {
+    this.appearance.hidden = !hasSel && !toolMode;
+    if (!hasSel && !toolMode) {
       this.unitSel.set(ed.doc.root.units);
       const boards = ed.doc.artboards;
       this.boardSel.replaceChildren(...boards.map((a, i) => h('option', { value: i, selected: i === ed.activeArtboard }, `${i + 1} ${a.name}`)));
@@ -240,76 +247,46 @@ export class PropertiesPanel extends Panel {
   }
 
   #updateShape(ed) {
-    const nodes = ed.selectedNodes();
-    const n = nodes.length === 1 ? nodes[0] : null;
-    const shape = n?.type === 'path' ? n.shape : null;
-    this.shapeSection.hidden = !shape || shape.kind === 'line';
-    if (this.shapeSection.hidden) return;
-    const key = `${n.id}:${shape.kind}`;
-    const setShape = (patch, live) => {
-      const cur = ed.doc.get(n.id);
-      if (!cur?.shape) return;
-      const next = { ...cur.shape, ...patch };
-      const anchors = shapeAnchors(next);
-      if (!anchors) return;
-      ed.doc.transact('Change Shape', () => ed.doc.update(n.id, { shape: next, anchors }), { coalesce: live ? `shape-${n.id}` : null });
-    };
-    if (this.shapeKey !== key) {
-      this.shapeKey = key;
-      const unit = ed.doc.root.units;
-      const fields = [];
-      if (shape.kind === 'rect') {
-        fields.push(numberField({ label: 'Corner radius', icon: 'square-dashed', value: shape.radii?.[0] || 0, unit, min: 0, onCommit: (v, o) => setShape({ radii: [v, v, v, v] }, o?.live) }));
-      } else if (shape.kind === 'polygon') {
-        fields.push(numberField({ label: 'Sides', kind: 'number', value: shape.sides, min: 3, max: 1000, onCommit: (v, o) => setShape({ sides: Math.round(v) }, o?.live) }));
-        fields.push(numberField({ label: 'Radius', value: shape.r, unit, min: 0, onCommit: (v, o) => setShape({ r: v }, o?.live) }));
-      } else if (shape.kind === 'star') {
-        fields.push(numberField({ label: 'Points', kind: 'number', value: shape.points, min: 3, max: 1000, onCommit: (v, o) => setShape({ points: Math.round(v) }, o?.live) }));
-        fields.push(numberField({ label: 'Radius 1', value: shape.r1, unit, min: 0, onCommit: (v, o) => setShape({ r1: v }, o?.live) }));
-        fields.push(numberField({ label: 'Radius 2', value: shape.r2, unit, min: 0, onCommit: (v, o) => setShape({ r2: v }, o?.live) }));
-      } else if (shape.kind === 'ellipse') {
-        fields.push(numberField({ label: 'Width', value: shape.w, unit, min: 0, onCommit: (v, o) => setShape({ w: v }, o?.live) }));
-        fields.push(numberField({ label: 'Height', value: shape.h, unit, min: 0, onCommit: (v, o) => setShape({ h: v }, o?.live) }));
-      }
-      this.shapeFields = { kind: shape.kind, fields };
-      this.shapeBody.replaceChildren(...fields.map((f) => f.el), h('button.btn.small', { type: 'button', onclick: () => ed.doc.transact('Expand Shape', () => ed.doc.update(n.id, { shape: undefined })) }, 'Expand Shape'));
-    } else {
-      const f = this.shapeFields.fields;
-      if (shape.kind === 'rect') f[0].set(shape.radii?.[0] || 0);
-      if (shape.kind === 'polygon') {
-        f[0].set(shape.sides);
-        f[1].set(shape.r);
-      }
-      if (shape.kind === 'star') {
-        f[0].set(shape.points);
-        f[1].set(shape.r1);
-        f[2].set(shape.r2);
-      }
-      if (shape.kind === 'ellipse') {
-        f[0].set(shape.w);
-        f[1].set(shape.h);
-      }
-    }
+    const shown = this.shapes.update(ed);
+    this.shapeSection.hidden = !shown;
+    if (shown) this.shapeSection.querySelector('.section-title').textContent = this.shapes.title;
   }
 
   #updateQuick(ed) {
     const app = this.app;
     const nodes = ed.selectedNodes();
+    const top = ed.topSelection();
     const actions = [];
-    const add = (cmd, label) => {
-      if (app.commands.get(cmd) && app.commands.isEnabled(cmd)) actions.push(h('button.btn', { type: 'button', onclick: () => app.commands.run(cmd) }, label || app.commands.label(cmd)));
+    const add = (cmd, label, args) => {
+      if (app.commands.get(cmd) && app.commands.isEnabled(cmd, args)) actions.push(h('button.btn', { type: 'button', 'data-cmd': cmd, onclick: () => app.commands.run(cmd, args) }, label || app.commands.label(cmd)));
     };
-    if (nodes.some((n) => n.type === 'group')) add('object.ungroup', 'Ungroup');
-    if (ed.topSelection().length > 1) add('object.group', 'Group');
-    if (nodes.some((n) => n.type === 'group')) add('object.isolate', 'Isolate Group');
-    if (nodes.some((n) => n.type === 'text')) add('type.createOutlines', 'Create Outlines');
-    if (nodes.some((n) => n.type === 'path' || n.type === 'compound')) add('path.offset', 'Offset Path');
-    if (ed.topSelection().length > 1) add('object.clipMake', 'Make Clipping Mask');
+    const only = (type) => nodes.length > 0 && nodes.every((n) => n.type === type);
+    if (top.length > 1) {
+      add('object.group', 'Group');
+      add('object.clipMake', 'Make Clipping Mask');
+    }
+    if (nodes.some((n) => n.type === 'group' && !n.clip && !n.live && !n.blend)) {
+      add('object.ungroup', 'Ungroup');
+      add('object.isolate', 'Isolate Group');
+    }
     if (nodes.some((n) => n.type === 'group' && n.clip)) add('object.clipRelease', 'Release Clipping Mask');
-    add('color.recolor', 'Recolor');
+    if (only('text')) add('type.createOutlines', 'Create Outlines');
+    if (only('image')) {
+      add('object.cropImage', 'Crop Image');
+      add('trace.make', 'Trace Image');
+      add('image.embed', 'Embed');
+    }
+    if (only('instance')) {
+      add('symbol.edit', 'Edit Symbol');
+      add('symbol.breakLink', 'Break Link');
+    }
+    if (nodes.some((n) => n.type === 'path' || n.type === 'compound')) add('path.offset', 'Offset Path');
+    if (nodes.length === 1 && nodes[0].type === 'path' && nodes[0].shape) add('shape.expand', 'Expand Shape');
+    if (!only('image')) add('color.recolor', 'Recolor');
     add('object.lock', 'Lock');
     const arrange = h('button.btn', { type: 'button', 'aria-haspopup': 'menu', onclick: (e) => app.showMenuAt(e.currentTarget, ['object.bringToFront', 'object.bringForward', 'object.sendBackward', 'object.sendToBack', '-', 'object.sendToLayer'], 'Arrange') }, 'Arrange');
     actions.push(arrange);
+    if (top.length === 1 && (only('path') || only('compound') || only('text'))) add('select.globalEdit');
     this.quick.replaceChildren(...actions);
   }
 }

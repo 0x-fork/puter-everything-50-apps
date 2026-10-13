@@ -181,8 +181,60 @@
   gap: 8px;
 }
 
-.toolbar.two-col .toolbar-misc {
+.toolbar.two-col .toolbar-misc,
+.toolbar.three-col .toolbar-misc {
   flex-direction: row;
+}
+
+.toolbar.two-col .toolbar-misc .tool-btn {
+  width: 26px;
+}
+
+/* Three columns for short windows. */
+.tools-three-col {
+  --toolbar-w: 108px;
+}
+
+.toolbar.three-col .tool-section {
+  display: grid;
+  grid-template-columns: repeat(3, 32px);
+  justify-content: center;
+  column-gap: 2px;
+}
+
+.toolbar.three-col .tool-btn {
+  width: 32px;
+}
+
+.toolbar.three-col .toolbar-bottom {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* Compact: no section labels; a hairline separates the sections instead. */
+.toolbar.compact .tool-section-label {
+  display: none;
+}
+
+.toolbar.compact .tool-section {
+  padding: 3px 0;
+}
+
+.toolbar.compact .tool-section + .tool-section {
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+
+.toolbar.compact .tool-btn {
+  height: 30px;
+}
+
+/* Still too short: the tools scroll, with a fade showing there is more. */
+.toolbar.overflowing .toolbar-scroll {
+  scrollbar-width: thin;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent);
 }
 
 .toolbar-scroll {
@@ -202,7 +254,7 @@
 }
 
 .tool-section-label {
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--text-3);
   margin-bottom: 1px;
   max-width: 48px;
@@ -391,6 +443,88 @@
 .flyout-shortcut {
   color: var(--text-3);
   font-size: var(--fs-sm);
+}
+
+.flyout-tearoff {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+/* Floating tool strip torn off a flyout. */
+.tool-tearoff {
+  position: fixed;
+  z-index: 850;
+  display: flex;
+  align-items: stretch;
+  padding: 2px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-float);
+}
+
+.tool-tearoff.vertical {
+  flex-direction: column;
+}
+
+.tearoff-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  cursor: move;
+  color: var(--text-3);
+  touch-action: none;
+}
+
+.tearoff-ctrls {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.tool-tearoff.vertical .tearoff-ctrls {
+  flex-direction: row;
+}
+
+.tearoff-mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-2);
+}
+
+.tearoff-mini:hover {
+  background: var(--bg-hover);
+}
+
+.tearoff-tools {
+  display: flex;
+  gap: 1px;
+}
+
+.tool-tearoff.vertical .tearoff-tools {
+  flex-direction: column;
+}
+
+/* Floating strips belong to the editing view: none on the start screen or with panels hidden. */
+body:has(.app.no-doc) .tool-tearoff,
+body:has(.app.hide-panels) .tool-tearoff {
+  display: none;
+}
+
+.tool-tearoff .tool-btn[aria-pressed='true'] {
+  background: var(--bg-active);
+  color: var(--text);
 }
 
 /* ---- Document area ---- */

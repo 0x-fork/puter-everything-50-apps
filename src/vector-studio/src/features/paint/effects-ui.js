@@ -9,6 +9,9 @@
 import { EFFECTS, createEffect, normalizeEffect, effectLabel } from './effects-model.js';
 import { BLEND_MODES } from '../../render/draw.js';
 import { BLEND_LABELS } from '../../ui/panels/properties.js';
+import { effectItemIndex, effectsOf, effectsPatch } from './appearance-ops.js';
+
+export { effectsOf, effectsPatch };
 
 /** Objects effects apply to: the top-level selection (not layers). */
 export function effectTargets(editor) {
@@ -27,7 +30,18 @@ export function effectFields(type, p) {
         { key: 'x', label: 'X Offset', type: 'length', value: p.x },
         { key: 'y', label: 'Y Offset', type: 'length', value: p.y },
         { key: 'blur', label: 'Blur', type: 'length', value: p.blur, min: 0 },
-        { key: 'color', label: 'Color', type: 'color', value: p.color },
+        {
+          key: 'shadowFrom',
+          label: 'Shadow',
+          type: 'radio',
+          value: p.shadowFrom || 'color',
+          options: [
+            { value: 'color', label: 'Color' },
+            { value: 'darkness', label: 'Darkness' },
+          ],
+        },
+        { key: 'color', label: 'Color', type: 'color', value: p.color, disabled: (v) => v.shadowFrom === 'darkness' },
+        { key: 'darkness', label: 'Darkness', type: 'percent', value: (p.darkness ?? 1) * 100, min: 0, max: 100, disabled: (v) => v.shadowFrom !== 'darkness' },
       ];
     case 'innerGlow':
       return [
@@ -60,7 +74,7 @@ export function effectFromValues(type, v) {
   const out = { type };
   for (const [k, val] of Object.entries(v)) {
     if (k === 'preview' || k === '__action') continue;
-    out[k] = k === 'opacity' ? val / 100 : val;
+    out[k] = k === 'opacity' || k === 'darkness' ? val / 100 : val;
   }
   return normalizeEffect(out);
 }
@@ -72,8 +86,10 @@ export function rememberEffect(app, effect) {
 }
 
 /**
- * Open an effect dialog. With `edit` ({ id, index }) it edits an existing
- * effect on one object; otherwise it adds a new effect to the selection.
+ * Open an effect dialog. With `edit` ({ id, index, item? }) it edits an
+ * existing effect on one object (on one of its appearance items with
+ * `item`); otherwise it adds a new effect to the selection, or to the fill
+ * or stroke picked in the Appearance panel.
  */
 export async function effectDialog(app, type, { params = null, edit = null } = {}) {
   const ed = app.editor;
@@ -86,8 +102,9 @@ export async function effectDialog(app, type, { params = null, edit = null } = {
     app.notify('Select an object to apply the effect to.');
     return false;
   }
-  const start = normalizeEffect({ type, ...(params || (edit ? targets[0].effects[edit.index] : null) || app.lastEffects?.[type] || EFFECTS[type].defaults) });
-  const originals = new Map(targets.map((n) => [n.id, n.effects || []]));
+  const slot = edit ? edit.item ?? null : effectItemIndex(ed);
+  const start = normalizeEffect({ type, ...(params || (edit ? effectsOf(targets[0], slot)[edit.index] : null) || app.lastEffects?.[type] || EFFECTS[type].defaults) });
+  const originals = new Map(targets.map((n) => [n.id, effectsOf(n, slot)]));
   const label = EFFECTS[type].label;
   const tx = doc.begin(label);
   const apply = (fx) => {
@@ -97,7 +114,7 @@ export async function effectDialog(app, type, { params = null, edit = null } = {
         list = orig.slice();
         list[edit.index] = fx ? { ...fx, ...(orig[edit.index]?.hidden ? { hidden: true } : {}) } : orig[edit.index];
       } else list = fx ? [...orig, fx] : orig;
-      doc.update(id, { effects: list });
+      doc.update(id, effectsPatch(doc.get(id), slot, list));
     }
   };
   let res = null;
@@ -132,8 +149,9 @@ export function applyEffect(app, fx) {
   if (!targets.length) return;
   const e = normalizeEffect(fx);
   if (!e) return;
+  const slot = effectItemIndex(ed);
   ed.doc.transact(`Apply ${effectLabel(e)}`, () => {
-    for (const n of targets) ed.doc.update(n.id, { effects: [...(n.effects || []), { ...e }] });
+    for (const n of targets) ed.doc.update(n.id, effectsPatch(n, slot, [...effectsOf(n, slot), { ...e }]));
   });
   rememberEffect(app, e);
 }

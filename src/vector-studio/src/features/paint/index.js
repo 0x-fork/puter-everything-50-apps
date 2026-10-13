@@ -19,14 +19,20 @@ import { ColorPanel } from './color-panel.js';
 import { SwatchesPanel } from './swatches-panel.js';
 import { GradientPanel } from './gradient-panel.js';
 import { StrokePanel } from './stroke-panel.js';
-import { TransparencyPanel } from './transparency-panel.js';
-import { AppearancePanel, GraphicStylesPanel } from './appearance-panel.js';
+import { TransparencyPanel, registerTransparencyCommands } from './transparency-panel.js';
+import { installOpacityMasks } from './opacity-mask.js';
+import { installFreeform } from './freeform.js';
+import { installStrokeGradients } from './stroke-gradient.js';
+import { AppearancePanel, GraphicStylesPanel, graphicStyleLibraryMenu } from './appearance-panel.js';
 import { GradientTool } from './gradient-tool.js';
 import { registerEffectCommands } from './effects-ui.js';
 import { registerEditColorCommands } from './edit-colors-ui.js';
 import { nodeArrowheads, arrowTrim, trimAnchors, alignedDash } from './stroke-geometry.js';
 import { setFocusedColor, displayColor } from './ui-common.js';
 import { isGradient } from '../../model/gradients.js';
+import { installRecentColors } from './recent-colors.js';
+import { installAppearanceHooks } from './appearance-ops.js';
+import { swatchLibraryMenu } from './swatch-libraries.js';
 
 const arrowCache = new WeakMap();
 const trimCache = new WeakMap();
@@ -83,6 +89,35 @@ export function install(app) {
   app.registerTool(GradientTool);
   registerEffectCommands(app);
   registerEditColorCommands(app);
+  installRecentColors(app);
+  installAppearanceHooks();
+  installOpacityMasks();
+  installFreeform();
+  installStrokeGradients();
+  registerTransparencyCommands(app);
+
+  // New Art Has Basic Appearance (on by default): new paths leave out the current effects.
+  const syncBasic = () => {
+    for (const ed of app.editors?.values?.() || [app.editor]) if (ed) ed.basicNewArt = app.prefs.get('newArtBasic') !== false;
+  };
+  app.on('active-editor', syncBasic);
+  app.prefs.on('change', ({ key }) => key === 'newArtBasic' && syncBasic());
+
+  // Window > Graphic Style Libraries: open a library in the Graphic Styles panel.
+  app.menuSources.set('graphicStyleLibraries', (a) =>
+    graphicStyleLibraryMenu(a, (lib) => {
+      a.openPanel('graphicStyles');
+      a.dock.panels.get('graphicStyles')?.openLibrary(lib);
+    }),
+  );
+
+  // Window > Swatch Libraries: open a library in the Swatches panel.
+  app.menuSources.set('swatchLibraries', (a) =>
+    swatchLibraryMenu(a, (lib) => {
+      a.openPanel('swatches');
+      a.dock.panels.get('swatches')?.openLibraryFromMenu(lib);
+    }),
+  );
 
   app.openColorPicker = async (which = 'fill') => {
     const ed = app.editor;

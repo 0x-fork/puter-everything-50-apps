@@ -1,7 +1,8 @@
 /**
- * Select menu commands: Same > Appearance Attribute and Graphic Style,
- * Object > Direction Handles, Start/Stop Global Edit, and named selections
- * (Save Selection, Edit Selection, Select > Saved Selections). Saved
+ * Select menu commands: Same > Shapes & Text, Appearance Attribute and
+ * Graphic Style, Object > Direction Handles, Start/Stop Global Edit, and
+ * named selections (Save Selection, Edit Selection, Update Selection,
+ * Select > Saved Selections). Saved
  * selections live in the document (doc.root.savedSelections), so they are
  * saved with the file and changes to them undo.
  */
@@ -37,11 +38,40 @@ function referenceNode(editor) {
   return null;
 }
 
+// ---- Same Shapes & Text ----
+
+/**
+ * Objects matching any selected object's content: paths and compound paths
+ * with the same outline (up to position, whatever their paint), text
+ * objects with the same characters (whatever their style).
+ */
+export function selectSameShapesText(editor) {
+  const doc = editor.doc;
+  const shapes = new Set();
+  const texts = new Set();
+  for (const n of editor.selectedNodes()) {
+    const ref = n.type === 'path' && doc.get(n.parent)?.type === 'compound' ? doc.get(n.parent) : n;
+    if (ref.type === 'text') texts.add(ref.text || '');
+    else if (ref.type === 'path' || ref.type === 'compound') {
+      const k = shapeKey(doc, ref);
+      if (k != null) shapes.add(`${ref.type}:${k}`);
+    }
+  }
+  if (!shapes.size && !texts.size) throw new UserError('Select a path or a type object to match.');
+  const ids = candidates(doc)
+    .filter((n) => (n.type === 'text' ? texts.has(n.text || '') : n.type !== 'image' && shapes.has(`${n.type}:${shapeKey(doc, n)}`)))
+    .map((n) => n.id);
+  editor.select(ids);
+  return ids;
+}
+
 // ---- Same Appearance Attribute ----
 
-/** The appearance attributes of an object: its visible effects, by kind. */
+/** The appearance attributes of an object: its visible effects (its own and its fills' and strokes'), by kind. */
 export function appearanceAttributes(node) {
-  return (node.effects || []).filter((e) => e && !e.hidden).map((e) => e.type);
+  const out = (node.effects || []).filter((e) => e && !e.hidden).map((e) => e.type);
+  for (const it of node.appearance || []) if (it && !it.hidden) for (const e of it.effects || []) if (e && !e.hidden) out.push(e.type);
+  return out;
 }
 
 /** Objects sharing at least one appearance attribute (effect kind) with the reference. */
@@ -82,7 +112,7 @@ function normPaint(p) {
 export function matchesStyle(doc, node, style) {
   const s = styleOfNode(doc, node);
   for (const [k, v] of Object.entries(style)) {
-    if (v === undefined) continue;
+    if (v === undefined || k === 'appearance' || k === 'groupAppearance') continue;
     let a = s[k] ?? DEFAULTS[k] ?? null;
     let b = v;
     if (k === 'effects') {
@@ -95,7 +125,20 @@ export function matchesStyle(doc, node, style) {
     if (k === 'strokeWidth' && !s.stroke && !style.stroke) continue;
     if (JSON.stringify(a) !== JSON.stringify(b)) return false;
   }
+  // Extra fills and strokes must match too (a style without them matches only objects without them).
+  for (const k of ['appearance', 'groupAppearance']) if (JSON.stringify(normStack(s[k])) !== JSON.stringify(normStack(style[k]))) return false;
   return true;
+}
+
+function normStack(items) {
+  if (!items?.length) return null;
+  return items.map((it) => {
+    const out = { ...it };
+    if (out.effects) out.effects = stripIds(out.effects);
+    if (out.fill) out.fill = normPaint(out.fill);
+    if (out.stroke) out.stroke = normPaint(out.stroke);
+    return out;
+  });
 }
 
 /** Objects with the same graphic style as the reference (the first style its appearance matches). */
@@ -307,7 +350,25 @@ export function applySavedSelection(editor, id) {
   if (!s) return 0;
   const ids = s.ids.filter((nid) => editor.doc.has(nid));
   editor.select(ids);
+  editor.activeSavedSelection = s.id;
   return ids.length;
+}
+
+/** The saved selection last saved or chosen in this window (Update Selection's target), if it still exists. */
+export function activeSavedSelection(editor) {
+  const id = editor?.activeSavedSelection;
+  return (id && savedSelectionsOf(editor.doc).find((s) => s.id === id)) || null;
+}
+
+/** Update Selection: the active saved selection now holds the current selection. */
+export function updateSavedSelection(editor) {
+  const s = activeSavedSelection(editor);
+  if (!s) throw new UserError('Save or choose a saved selection first.');
+  const ids = editor.topSelection();
+  editor.doc.transact('Update Selection', () =>
+    editor.doc.updateRoot({ savedSelections: savedSelectionsOf(editor.doc).map((x) => (x.id === s.id ? { ...x, ids: [...ids] } : x)) }),
+  );
+  return s;
 }
 
 async function saveSelectionDialog(app) {
@@ -319,6 +380,7 @@ async function saveSelectionDialog(app) {
   const exists = savedSelectionsOf(ed.doc).some((s) => s.name === name);
   if (exists && !(await app.dialogs.confirm({ title: 'Save Selection', message: `Replace the saved selection "${name}"?`, okLabel: 'Replace' }))) return;
   ed.doc.transact('Save Selection', () => saveSelection(ed.doc, name, ed.topSelection()));
+  ed.activeSavedSelection = savedSelectionsOf(ed.doc).find((s) => s.name === name)?.id || null;
 }
 
 async function editSelectionsDialog(app) {
@@ -370,6 +432,7 @@ export function registerSelectCommands(app) {
     if (app.globalEdit?.editor === ed) app.stopGlobalEdit();
   });
   app.commands.register([
+    { id: 'select.same.shapesText', label: 'Shapes & Text', enabled: hasSel, run: (a) => selectSameShapesText(a.editor) },
     { id: 'select.same.appearanceAttribute', label: 'Appearance Attribute', enabled: hasSel, run: (a) => selectSameAppearanceAttribute(a.editor) },
     { id: 'select.same.graphicStyle', label: 'Graphic Style', enabled: hasSel, run: (a) => selectSameGraphicStyle(a.editor) },
     {
@@ -386,10 +449,19 @@ export function registerSelectCommands(app) {
     },
     { id: 'select.save', label: 'Save Selection...', enabled: hasSel, run: (a) => saveSelectionDialog(a) },
     { id: 'select.edit', label: 'Edit Selection...', enabled: (a) => Boolean(a.editor && savedSelectionsOf(a.editor.doc).length), run: (a) => editSelectionsDialog(a) },
+    {
+      id: 'select.update',
+      label: (a) => (activeSavedSelection(a.editor) ? `Update Selection "${activeSavedSelection(a.editor).name}"` : 'Update Selection'),
+      enabled: (a) => Boolean(hasSel(a) && activeSavedSelection(a.editor)),
+      run: (a) => {
+        const s = updateSavedSelection(a.editor);
+        a.notify(`Updated the saved selection "${s.name}".`, { polite: true });
+      },
+    },
   ]);
   app.menuSources.set('savedSelections', (a) =>
     a.editor
-      ? savedSelectionsOf(a.editor.doc).map((s) => ({ type: 'cmd', label: s.name, enabled: true, run: () => applySavedSelection(a.editor, s.id) }))
+      ? savedSelectionsOf(a.editor.doc).map((s) => ({ type: 'cmd', label: s.name, enabled: true, checked: a.editor.activeSavedSelection === s.id, run: () => applySavedSelection(a.editor, s.id) }))
       : [],
   );
 }

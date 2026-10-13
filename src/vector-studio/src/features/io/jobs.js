@@ -8,6 +8,15 @@ import { writePDF } from './pdf.js';
 import { rasterExport, exportRegion } from './raster.js';
 import { collectTextOutlines } from './outlines.js';
 import { selectionBounds } from '../../model/geometry.js';
+import { applySvgOptions } from './svg-styling.js';
+import { normalizePdf, pdfVersion, pdfEncrypted, isPdfx } from './pdf-settings.js';
+import { docRgbProfile, docCmykProfile, usableProfile, conversionOptions, profileDisplayName } from '../icc/cms.js';
+import { transformBetween, profileBytes } from '../icc/profiles.js';
+import { checkPdfx } from '../icc/pdfx.js';
+import { spotInks, spotEquivalents } from '../prepress/separations.js';
+import { getPreset } from '../prepress/presets.js';
+import { normalizeFlattener } from '../prepress/flattener-presets.js';
+import { exportFormats } from './hooks.js';
 
 export const FORMATS = {
   svg: { label: 'SVG (svg)', ext: 'svg', mime: 'image/svg+xml' },
@@ -16,6 +25,13 @@ export const FORMATS = {
   jpeg: { label: 'JPEG (jpg)', ext: 'jpg', mime: 'image/jpeg' },
   webp: { label: 'WebP (webp)', ext: 'webp', mime: 'image/webp' },
 };
+
+/** Built-in and registered export formats: key -> { label, ext, mime }. */
+export function allFormats() {
+  const out = { ...FORMATS };
+  for (const [key, f] of exportFormats) out[key] = f;
+  return out;
+}
 
 /** Parse "1-3, 5" into zero-based indices (validated against count). Returns null when invalid. */
 export function parseRange(text, count) {
@@ -57,6 +73,96 @@ export function pdfBleed(doc, options = {}) {
   return options.bleed || 0;
 }
 
+/** A password nobody knows, so restrictions cannot be lifted without one. */
+const randomPassword = () => Array.from(globalThis.crypto?.getRandomValues?.(new Uint8Array(16)) || Array.from({ length: 16 }, () => Math.random() * 256), (b) => (b & 63).toString(36)).join('');
+
+/** PDF writer options from PDF export settings (see pdf-settings.js). */
+export function pdfWriterOptions(app, doc, raw = {}) {
+  const o = normalizePdf(raw);
+  const date = new Date().toLocaleString();
+  const out = {
+    version: pdfVersion(o),
+    compress: o.compressArt,
+    layers: o.layers && Number(o.compat) >= 1.5,
+    thumbnails: o.thumbnails,
+    images: { downsample: o.downsample, ppi: o.downsamplePpi, above: o.downsampleAbove, compression: o.imageCompression, quality: o.jpegQuality },
+    marks: o.marks,
+    markType: o.markType,
+    markWeight: o.markWeight,
+    markOffset: o.markOffset,
+    pageInfo: () => `${raw.title || doc.name || ''}  ${date}`,
+    overprint: o.overprint,
+  };
+  Object.assign(out, pdfColorOptions(app, doc, o));
+  if (!o.spotsToProcess) out.spots = new Map(spotInks(doc).map((s) => [s.id, s]));
+  // Spot inks printed as process use their CMYK equivalents when the document says so.
+  out.spotEquivalents = spotEquivalents(doc);
+  if (o.flatten) {
+    const p = getPreset(app, 'flattener', o.flattener)?.values || normalizeFlattener({});
+    out.flatten = { balance: p.balance, ppi: p.lineArtPpi };
+  }
+  if (pdfEncrypted(o)) {
+    out.security = {
+      userPassword: o.requireOpen ? o.openPassword : '',
+      ownerPassword: (o.restrict && o.permissionsPassword) || randomPassword(),
+      permissions: o.restrict ? { printing: o.printing, changes: o.changes, copy: o.copy, accessibility: o.accessibility } : {},
+    };
+  }
+  return out;
+}
+
+/** The output profile of PDF settings: { kind: 'rgb' | 'cmyk', id }. CMYK documents keep CMYK without conversion. */
+export function pdfOutputProfile(app, doc, o) {
+  const docCmyk = docCmykProfile(app, doc);
+  if (o.colorConversion === 'convert') {
+    const i = o.destination.indexOf(':');
+    const kind = o.destination.slice(0, i);
+    const id = o.destination.slice(i + 1);
+    if (kind === 'cmyk') return { kind, id: id === 'document' ? docCmyk : usableProfile(id, 'CMYK') };
+    return { kind: 'rgb', id: id === 'document' ? docRgbProfile(app, doc) : usableProfile(id, 'RGB') };
+  }
+  if (doc.root.colorMode === 'CMYK') return { kind: 'cmyk', id: docCmyk };
+  return { kind: 'rgb', id: docRgbProfile(app, doc) };
+}
+
+/** The output intent's profile id of PDF settings (null without a standard). */
+export function pdfIntentProfile(app, doc, o) {
+  if (o.standard === 'none') return null;
+  if (o.outputIntent !== 'document') return usableProfile(o.outputIntent, 'CMYK');
+  const out = pdfOutputProfile(app, doc, o);
+  return out.kind === 'cmyk' ? out.id : docCmykProfile(app, doc);
+}
+
+/**
+ * Color options of the PDF writer: ICC transforms from the document's
+ * profiles to the output profile, the profiles that tag output colors,
+ * the output intent with its profile, and the PDF/X standard.
+ */
+export function pdfColorOptions(app, doc, o) {
+  const out = {};
+  const conv = conversionOptions(app);
+  const docRgb = docRgbProfile(app, doc);
+  const docCmyk = docCmykProfile(app, doc);
+  const dest = pdfOutputProfile(app, doc, o);
+  const tag = o.profileInclusion === 'include' && o.standard !== 'x1a';
+  if (dest.kind === 'cmyk') {
+    out.colorSpace = 'cmyk';
+    out.profile = dest.id;
+    out.cmykTransform = transformBetween(docRgb, dest.id, conv);
+    // CMYK numbers stay unless they belong to another CMYK profile.
+    if (docCmyk !== dest.id) out.cmykNumbers = transformBetween(docCmyk, dest.id, conv);
+  } else if (dest.id !== docRgb) out.rgbTransform = transformBetween(docRgb, dest.id, conv);
+  const intent = pdfIntentProfile(app, doc, o);
+  if (intent) out.outputIntent = { name: profileDisplayName(intent), bytes: profileBytes(intent), n: 4 };
+  if (tag) {
+    out.iccRGB = { bytes: profileBytes(dest.kind === 'rgb' ? dest.id : docRgb) };
+    // An output intent already describes DeviceCMYK.
+    if (dest.kind === 'cmyk' && !intent) out.iccCMYK = { bytes: profileBytes(dest.id) };
+  }
+  if (isPdfx(o)) out.pdfx = o.standard;
+  return out;
+}
+
 /**
  * Render one file.
  *   format   key of FORMATS
@@ -68,19 +174,24 @@ export async function renderFile(app, editor, format, region, options = {}) {
   if (format === 'svg') {
     const { rect, ids } = exportRegion(editor, region);
     const outlines = await outlinesFor(app, editor, ids, options.textMode === 'outlines');
-    const text = editorSVG(editor, { rect, ids, precision: options.precision ?? 3, minify: options.minify, responsive: options.responsive, symbols: options.symbols, textMode: outlines ? 'outlines' : 'text', outlines, title: options.title });
+    const raw = editorSVG(editor, { rect, ids, precision: options.precision ?? 3, minify: options.minify, responsive: options.responsive, symbols: options.symbols, textMode: outlines ? 'outlines' : 'text', outlines, title: options.title, writeIds: options.objectIds !== 'minimal' });
+    const text = applySvgOptions(raw, { styling: options.styling, objectIds: options.objectIds, minify: options.minify });
     return new Blob([text], { type: 'image/svg+xml' });
   }
   if (format === 'pdf') {
     const rects = region.rects || [exportRegion(editor, region).rect];
     const ids = region.ids || (region.selection ? exportRegion(editor, region).ids : null);
     const outlines = await outlinesFor(app, editor, ids, options.textOutlines !== false);
-    const { bytes, warnings } = await writePDF(doc, rects, { bleed: pdfBleed(doc, options), ids, outlines, outlinesWanted: options.textOutlines !== false && Boolean(app.textOutlines), title: options.title || doc.name });
+    const wo = pdfWriterOptions(app, doc, options);
+    const { bytes, warnings } = await writePDF(doc, rects, { ...wo, bleed: pdfBleed(doc, options), ids, outlines, outlinesWanted: options.textOutlines !== false && Boolean(app.textOutlines), title: options.title || doc.name });
+    // PDF/X files are checked after writing; problems are reported with the other warnings.
+    if (wo.pdfx) for (const p of await checkPdfx(bytes, wo.pdfx)) warnings.push(`Not ${wo.pdfx === 'x1a' ? 'PDF/X-1a' : 'PDF/X-4'} compliant: ${p}`);
     if (warnings.length) app.notify?.(warnings.join(' '), { timeout: 6000 });
     return new Blob([bytes], { type: 'application/pdf' });
   }
+  if (exportFormats.has(format)) return exportFormats.get(format).render(app, editor, region, options);
   if (FORMATS[format]) {
-    return rasterExport(editor, { ...region, format, scale: options.scale || (options.ppi ? options.ppi / 72 : 1), background: options.background, antialias: options.antialias !== false, quality: options.quality });
+    return rasterExport(editor, { ...region, format, scale: options.scale || (options.ppi ? options.ppi / 72 : 1), background: options.background, antialias: options.antialias !== false, quality: options.quality, colorModel: options.colorModel });
   }
   throw new Error(`Unknown format ${format}`);
 }

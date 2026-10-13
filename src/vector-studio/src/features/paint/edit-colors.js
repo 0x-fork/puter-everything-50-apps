@@ -5,7 +5,8 @@
  * Paints that change lose their global swatch link (their color no longer
  * matches the swatch).
  */
-import { hexToRgb, rgbToHex, rgbToHsb, hsbToRgb, rgbToCmyk, cmykToRgb, invert as invertHex, clamp } from '../../lib/color.js';
+import { stackPaints, mapStackPaints } from '../../model/appearance.js';
+import { hexToRgb, rgbToHex, rgbToHsb, hsbToRgb, cmykEngine, invert as invertHex, clamp } from '../../lib/color.js';
 import { nodeBounds } from '../../model/geometry.js';
 import { styledRuns } from '../../model/text-runs.js';
 
@@ -42,8 +43,11 @@ export function colorTargets(doc, ids) {
   const out = new Map();
   const visit = (n) => {
     if (!n || out.has(n.id)) return;
-    if (n.type === 'group' || n.type === 'layer') for (const c of n.children) visit(doc.get(c));
-    else if (n.type === 'path' || n.type === 'compound' || n.type === 'text') out.set(n.id, n);
+    if (n.type === 'group' || n.type === 'layer') {
+      // A group's own fills and strokes recolor with its contents.
+      if (stackPaints(n).length) out.set(n.id, n);
+      for (const c of n.children) visit(doc.get(c));
+    } else if (n.type === 'path' || n.type === 'compound' || n.type === 'text') out.set(n.id, n);
   };
   for (const id of ids) {
     const n = doc.get(id);
@@ -61,6 +65,9 @@ export function colorPatches(nodes, fn, { fill = true, stroke = true } = {}) {
   const patches = new Map();
   for (const n of nodes) {
     const patch = {};
+    // Extra fills and strokes of an appearance stack.
+    const stack = mapStackPaints(n, (p, key) => ((key === 'fill' ? fill : stroke) ? mapPaint(p, fn, { node: n, key }) : p));
+    if (stack) patch.appearance = stack;
     if (fill && n.fill) {
       const p = mapPaint(n.fill, fn, { node: n, key: 'fill' });
       if (p !== n.fill) patch.fill = p;
@@ -101,7 +108,8 @@ export function collectColors(nodes, { fill = true, stroke = true } = {}) {
   };
   for (const n of nodes) {
     // Type counts the paints its characters actually use.
-    const sources = n.type === 'text' && n.runs ? styledRuns(n).filter((r) => r.end > r.start).map((r) => r.style) : [n];
+    const sources = n.type === 'text' && n.runs ? styledRuns(n).filter((r) => r.end > r.start).map((r) => r.style) : n.type === 'group' || n.type === 'layer' ? [] : [n];
+    for (const it of n.appearance || []) if (it && !it.base && (it.type === 'fill' || it.type === 'stroke') && it[it.type]) sources.push({ [it.type]: it[it.type] });
     for (const src of sources) {
       for (const [key, on] of [['fill', fill], ['stroke', stroke]]) {
         const p = src[key];
@@ -129,12 +137,21 @@ export function grayscaleColor(hex) {
  * Adjust Color Balance: deltas in percent (-100..100) per channel.
  * mode 'rgb': { r, g, b } shift each channel by delta% of 255.
  * mode 'cmyk': { c, m, y, k } shift each ink by delta percentage points.
+ * mode 'grayscale': { gray } shifts the black of gray colors; with
+ * `convert` every color is made gray first.
  */
 export function adjustColor(hex, mode, d) {
+  if (mode === 'grayscale') {
+    const { r, g, b } = hexToRgb(hex);
+    if (!d.convert && (Math.abs(r - g) > 1 || Math.abs(g - b) > 1)) return hex;
+    const k = clamp(100 - ((0.299 * r + 0.587 * g + 0.114 * b) / 255) * 100 + (d.gray || 0), 0, 100);
+    const v = 255 * (1 - k / 100);
+    return rgbToHex({ r: v, g: v, b: v });
+  }
   if (mode === 'cmyk') {
-    const c = rgbToCmyk(hexToRgb(hex));
+    const c = cmykEngine.toCmyk(hexToRgb(hex));
     return rgbToHex(
-      cmykToRgb({
+      cmykEngine.toRgb({
         c: clamp(c.c + (d.c || 0), 0, 100),
         m: clamp(c.m + (d.m || 0), 0, 100),
         y: clamp(c.y + (d.y || 0), 0, 100),
@@ -157,7 +174,7 @@ export function saturateColor(hex, amount) {
   return rgbToHex({ r: clamp(gray + (r - gray) * f, 0, 255), g: clamp(gray + (g - gray) * f, 0, 255), b: clamp(gray + (b - gray) * f, 0, 255) });
 }
 
-/** Shift hue/saturation/brightness (used by Recolor Artwork's global adjustments). */
+/** Shift hue/saturation/brightness (used by Recolor's global adjustments). */
 export function shiftHsb(hex, { h = 0, s = 0, b = 0 } = {}) {
   const c = rgbToHsb(hexToRgb(hex));
   return rgbToHex(hsbToRgb({ h: (((c.h + h) % 360) + 360) % 360, s: clamp(c.s + s, 0, 100), v: clamp(c.v + b, 0, 100) }));

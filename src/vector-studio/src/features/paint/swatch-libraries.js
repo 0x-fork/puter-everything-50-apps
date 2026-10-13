@@ -1,7 +1,22 @@
 /**
  * Built-in swatch libraries (original palettes) that the Swatches panel's
- * library menu opens. Each entry: { id, name, swatches: [{ name, paint }] }.
+ * library menu opens, plus the user's saved libraries and library files.
+ * Each entry: { id, name, swatches: [{ name, paint }] }.
+ *
+ * Library files are JSON ({ format: 'vector-studio-swatches', name,
+ * swatches }), the binary swatch exchange format (swatch-exchange.js:
+ * colors, color groups and gradients), or plain-text palettes (a header
+ * line, an optional "Name:" line, then "R G B name" rows); swatches also
+ * export as CSS custom properties.
  */
+import { isHex, normalizeHex } from '../../lib/color.js';
+import { colorName } from './swatch-model.js';
+import { userLibraries, userLibraryMenu, saveLibraryDialog, exportLibraryFile } from './user-libraries.js';
+import { downloadBlob, safeFileName } from '../io/deliver.js';
+import { h } from '../../lib/dom.js';
+import { encodeSwatchExchange, decodeSwatchExchange, isSwatchExchange, swatchesCss } from './swatch-exchange.js';
+
+export const SWATCH_FORMAT = 'vector-studio-swatches';
 const solid = (name, color) => ({ name, paint: { type: 'solid', color } });
 const lin = (name, angle, ...stops) => ({
   name,
@@ -71,3 +86,157 @@ export const SWATCH_LIBRARIES = [
     ],
   },
 ];
+
+const fromUser = (l) => ({ id: l.id, name: l.name, swatches: l.items, user: true });
+
+/**
+ * Menu spec for opening a library: built-in libraries, those other modules
+ * add (app.extraSwatchLibraries), the user's saved ones, and a library file.
+ */
+export function swatchLibraryMenu(app, open) {
+  return [
+    ...[...SWATCH_LIBRARIES, ...(app.extraSwatchLibraries?.() || [])].map((lib) => ({ label: lib.name, run: () => open(lib) })),
+    '-',
+    { label: 'User Defined', submenu: userLibraryMenu(app, 'swatches', (l) => open(fromUser(l))) },
+    { label: 'Other Library...', run: () => importSwatchLibrary(app).then((lib) => lib && open(lib)) },
+  ];
+}
+
+export function userSwatchLibraries(app) {
+  return userLibraries(app, 'swatches').map(fromUser);
+}
+
+export function saveSwatchLibrary(app, swatches) {
+  return saveLibraryDialog(app, 'swatches', { title: 'Save Swatch Library', items: swatches, defaultName: app.editor?.title ? `${app.editor.title} Swatches` : 'My Swatches' });
+}
+
+export const SWATCH_EXPORT_FORMATS = [
+  { value: 'json', label: 'Swatch library (.json): colors, gradients and patterns' },
+  { value: 'vswx', label: 'Swatch exchange (.vswx): colors with their types, color groups and gradients' },
+  { value: 'css', label: 'CSS custom properties (.css): colors and gradients' },
+  { value: 'gpl', label: 'Text palette (.gpl): colors only' },
+];
+
+/** Download swatches as a library file in a chosen format. */
+export async function exportSwatchLibrary(app, swatches, { format = null } = {}) {
+  const res = await app.dialogs.form({
+    title: 'Export Swatch Library',
+    fields: [
+      { key: 'name', label: 'Library Name', type: 'text', value: 'Swatches' },
+      { key: 'format', label: 'Format', type: 'radio', value: format || 'json', options: SWATCH_EXPORT_FORMATS },
+    ],
+  });
+  if (!res) return;
+  const name = res.name.trim() || 'Swatches';
+  const file = safeFileName(name, 'Swatches');
+  if (res.format === 'gpl') downloadBlob(new Blob([paletteText(name, swatches)], { type: 'text/plain' }), `${file}.gpl`);
+  else if (res.format === 'css') downloadBlob(new Blob([swatchesCss(name, swatches)], { type: 'text/css' }), `${file}.css`);
+  else if (res.format === 'vswx') downloadBlob(new Blob([encodeSwatchExchange(swatches)], { type: 'application/octet-stream' }), `${file}.vswx`);
+  else exportLibraryFile(SWATCH_FORMAT, name, swatches, 'swatches');
+}
+
+export function paletteText(name, swatches) {
+  const rows = swatches
+    .filter((s) => s.paint?.type === 'solid')
+    .map((s) => {
+      const n = parseInt(s.paint.color.slice(1), 16);
+      return `${String((n >> 16) & 255).padStart(3)} ${String((n >> 8) & 255).padStart(3)} ${String(n & 255).padStart(3)}\t${s.name}`;
+    });
+  return ['GIMP Palette', `Name: ${name}`, '#', ...rows, ''].join('\n');
+}
+
+/** Parse a library file's text into { name, swatches } or null. */
+export function parseSwatchLibrary(text, fileName = 'Library') {
+  const base = fileName.replace(/\.[^.]+$/, '');
+  const t = String(text || '').trim();
+  if (t.startsWith('{')) {
+    try {
+      const data = JSON.parse(t);
+      const list = Array.isArray(data.swatches) ? data.swatches : Array.isArray(data.items) ? data.items : null;
+      if (!list) return null;
+      const swatches = list
+        .filter((s) => s && s.paint && typeof s.paint.type === 'string')
+        .map((s) => ({
+          name: String(s.name || 'Swatch'),
+          paint: s.paint,
+          ...(s.global ? { global: true } : {}),
+          ...(s.spot ? { spot: true } : {}),
+          ...(typeof s.group === 'string' && s.group ? { group: s.group } : {}),
+          ...(typeof s.mode === 'string' ? { mode: s.mode } : {}),
+          ...(s.spotCmyk && typeof s.spotCmyk === 'object' ? { spotCmyk: s.spotCmyk } : {}),
+          ...(s.pattern ? { pattern: s.pattern } : {}),
+        }));
+      return swatches.length ? { name: String(data.name || base), swatches } : null;
+    } catch {
+      return null;
+    }
+  }
+  let name = base;
+  const swatches = [];
+  for (const line of t.split(/\r?\n/)) {
+    const l = line.trim();
+    if (!l || (l.startsWith('#') && !isHex(l.split(/\s+/)[0])) || /^GIMP Palette/i.test(l) || /^Columns:/i.test(l)) continue;
+    const nm = /^Name:\s*(.+)$/i.exec(l);
+    if (nm) {
+      name = nm[1].trim();
+      continue;
+    }
+    const m = /^(\d{1,3})\s+(\d{1,3})\s+(\d{1,3})\s*(.*)$/.exec(l);
+    const hex = m ? `#${[m[1], m[2], m[3]].map((v) => Math.min(255, Number(v)).toString(16).padStart(2, '0')).join('')}` : isHex(l.split(/\s+/)[0]) ? normalizeHex(l.split(/\s+/)[0]) : null;
+    if (!hex) continue;
+    const label = m ? m[4].trim() : l.split(/\s+/).slice(1).join(' ');
+    swatches.push({ name: label && label !== 'Untitled' ? label : colorName(hex), paint: { type: 'solid', color: hex } });
+  }
+  return swatches.length ? { name, swatches } : null;
+}
+
+/** Parse a library file's bytes (any supported format) into { name, swatches } or null. */
+export function parseSwatchFile(bytes, fileName = 'Library') {
+  if (isSwatchExchange(bytes)) {
+    try {
+      const { swatches } = decodeSwatchExchange(bytes);
+      return swatches.length ? { name: fileName.replace(/\.[^.]+$/, ''), swatches } : null;
+    } catch {
+      return null;
+    }
+  }
+  return parseSwatchLibrary(new TextDecoder().decode(bytes), fileName);
+}
+
+/** Let the user pick a file; resolves to { name, bytes } or null. */
+function pickBinaryFile(accept) {
+  return new Promise((resolve) => {
+    const input = h('input', { type: 'file', accept, hidden: true });
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      input.remove();
+      resolve(v);
+    };
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return finish(null);
+      try {
+        finish({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
+      } catch {
+        finish(null);
+      }
+    });
+    input.addEventListener('cancel', () => finish(null));
+    document.body.append(input);
+    input.click();
+  });
+}
+
+/** Pick a library file; resolves to a library { id, name, swatches } or null. */
+export async function importSwatchLibrary(app) {
+  const file = await pickBinaryFile('.json,.vswx,.gpl,.txt,application/json,text/plain');
+  if (!file) return null;
+  const lib = parseSwatchFile(file.bytes, file.name);
+  if (!lib) {
+    app.notify('That file has no swatches this app can read.');
+    return null;
+  }
+  return { id: `file-${lib.name}`, ...lib };
+}
