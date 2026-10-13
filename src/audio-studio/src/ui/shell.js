@@ -12,6 +12,9 @@ import { statusParts } from './status-fields.js';
 import { tabNames } from './workspace-manager.js';
 import { TOOLS } from './tools.js';
 
+/** Actions offered by the menu beside the current workspace tab. */
+const WORKSPACE_ACTIONS = ['workspace.reset', 'workspace.saveChanges', 'workspace.saveAs', '-', 'workspace.edit'];
+
 export function createShell(app, root) {
   const menubar = createMenubar(app, MENUS);
   const appMenuBtn = h(
@@ -85,9 +88,17 @@ export function createShell(app, root) {
     const current = app.prefs.get('workspace');
     if (!names.includes(current)) names.push(current);
     workspaceTabs.replaceChildren(
-      ...names.map((n) =>
-        h('button.workspace-tab', { type: 'button', role: 'tab', 'aria-selected': String(n === current), onclick: () => app.setWorkspace(n) }, n),
-      ),
+      ...names.flatMap((n) => {
+        const tab = h('button.workspace-tab', { type: 'button', role: 'tab', 'aria-selected': String(n === current), onclick: () => app.setWorkspace(n) }, n);
+        if (n !== current) return [tab];
+        // The current workspace carries a menu to reset, save or edit workspaces.
+        const menuBtn = h('button.icon-btn.workspace-menu-btn', { type: 'button', 'aria-label': `${n} workspace menu`, title: 'Workspace menu', 'aria-haspopup': 'menu' }, icon('menu', 14));
+        menuBtn.addEventListener('click', () => {
+          const r = menuBtn.getBoundingClientRect();
+          openMenu(app, resolveItems(app, WORKSPACE_ACTIONS), { x: r.left, y: r.bottom + 2, anchor: menuBtn, label: `${n} workspace` });
+        });
+        return [tab, menuBtn];
+      }),
     );
     workspaceTabs.hidden = app.layoutMode !== 'desktop';
     workspaceMore.hidden = app.layoutMode !== 'desktop';

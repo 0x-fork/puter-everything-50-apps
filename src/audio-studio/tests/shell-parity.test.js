@@ -149,3 +149,26 @@ describe('View menu', () => {
     expect(document.documentElement.dataset.editorControls).toBe('off');
   });
 });
+
+describe('toolbar workspace tabs', () => {
+  it('puts a workspace menu beside the current workspace tab', async () => {
+    const app = await makeApp();
+    const { createShell } = await import('../src/ui/shell.js');
+    let menu = null;
+    app.openMenu = (items) => (menu = items);
+    const root = document.createElement('div');
+    document.body.replaceChildren(root);
+    Object.defineProperty(window, 'innerWidth', { value: 1600, configurable: true });
+    createShell(app, root);
+    await new Promise((r) => requestAnimationFrame(r));
+    const tabs = [...root.querySelectorAll('.workspace-tab')].map((b) => b.textContent);
+    expect(tabs).toEqual(DEFAULT_TABS);
+    const btn = root.querySelector('.workspace-menu-btn');
+    expect(btn.previousElementSibling.getAttribute('aria-selected')).toBe('true');
+    btn.click();
+    const items = [...document.querySelectorAll('[role=menu] [role^=menuitem]')].map((e) => e.textContent);
+    expect(items.some((t) => t.includes('Save as New Workspace'))).toBe(true);
+    expect(items.some((t) => t.includes('Edit Workspaces'))).toBe(true);
+    expect(menu).toBe(null);
+  });
+});
