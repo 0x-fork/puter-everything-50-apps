@@ -1948,3 +1948,29 @@ input[type='range'].fx-slider:disabled {
   align-items: baseline;
   gap: 8px;
 }
+
+/* ------------------------------------------------------------ graphic eq */
+
+.geq-settings {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 24px;
+}
+
+.geq-gain {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.geq-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 560px) {
+  .geq-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

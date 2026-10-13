@@ -9,3 +9,4 @@ import './stereo.js';
 import './time-pitch.js';
 import './reverb.js';
 import './delay.js';
+import './eq.js';

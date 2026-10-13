@@ -106,6 +106,8 @@ function graphicDef(id, name, kind, centres, octaves) {
     db('gain', 'Master Gain', -24, 24, 0),
     choice('accuracy', 'Accuracy', ['Standard', 'High'], 1),
     ...centres.map((f, i) => db(`band${i + 1}`, freqLabel(f), -24, 24, 0, { section: 'Bands', short: shortLabel(f, i, centres.length) })),
+    // The span of the band sliders (a dialog setting the processor ignores): 48 dB is +/-24 dB.
+    num('range', 'Range', 6, 48, 48, 'dB', { step: 1 }),
   ];
   const shape = (fn) => Object.fromEntries(centres.map((f, i) => [`band${i + 1}`, Math.round(fn(f) * 10) / 10]));
   const lg = (f) => Math.log2(f / 1000);
@@ -116,7 +118,7 @@ function graphicDef(id, name, kind, centres, octaves) {
     kind,
     params,
     bands: centres,
-    about: `Boosts or cuts ${centres.length} fixed frequency bands. High accuracy corrects for the overlap between neighbouring bands so the curve follows the sliders.`,
+    about: `Boosts or cuts ${centres.length} fixed frequency bands. High accuracy corrects for the overlap between neighbouring bands so the curve follows the sliders; Range sets how far the sliders reach.`,
     layout: { vertical: ['Bands'], order: ['Bands', null], wide: centres.length > 10 },
     response: (v, freqs, rate) => {
       const want = centres.map((_, i) => v[`band${i + 1}`] ?? 0);

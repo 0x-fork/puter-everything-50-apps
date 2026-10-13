@@ -8,6 +8,7 @@ import { fftCurve } from '../src/effects/defs/filter.js';
 import { butterworth, cascadePhase, cascadeGroupDelay } from '../src/effects/defs/filter-math.js';
 import { responseView } from '../src/effects/filter-editors.js';
 import { fakeApp, filled } from './fx-helpers.js';
+import '../src/effects/views/index.js';
 
 const RATE = 48000;
 
@@ -56,6 +57,25 @@ describe('Filter and EQ dialogs', () => {
       expect(dlg.querySelector('.fx-controls').firstElementChild.dataset.section).toBe('Bands');
       await close();
     }
+  });
+
+  it('Graphic Equalizer sliders span the Range, and shrinking it pulls bands in', async () => {
+    const { dlg, close } = open('graphicEq10', { ...defaults(getEffect('graphicEq10')), band3: 10, band5: -3 });
+    const slider = (i) => dlg.querySelectorAll('.fx-vslider input[type="range"]')[i];
+    expect([slider(0).min, slider(0).max]).toEqual(['-24', '24']);
+    const range = [...dlg.querySelectorAll('.geq-range .hot')][0];
+    expect(range.textContent).toMatch(/48/);
+    range.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const input = dlg.querySelector('.geq-range input');
+    input.value = '12';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect([slider(0).min, slider(0).max]).toEqual(['-6', '6']);
+    // +10 dB no longer fits: it sits at the +6 dB edge; -3 dB is kept.
+    expect(slider(2).value).toBe('6');
+    expect(slider(4).value).toBe('-3');
+    expect(dlg.querySelector('.geq-gain .fx-label').textContent).toBe('Gain:');
+    expect(dlg.querySelector('.geq-accuracy select, .geq-accuracy .fx-radios')).toBeTruthy();
+    await close();
   });
 
   it('Notch Filter tabulates its notches and greys out gains fixed to the first', async () => {

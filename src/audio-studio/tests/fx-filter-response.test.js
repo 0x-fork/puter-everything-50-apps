@@ -69,7 +69,7 @@ describe('filter definitions', () => {
     expect(getEffect('graphicEq10').bands).toEqual([31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]);
     expect(getEffect('graphicEq20').bands.length).toBe(20);
     expect(getEffect('graphicEq30').bands.length).toBe(30);
-    expect(getEffect('graphicEq30').params.length).toBe(32);
+    expect(getEffect('graphicEq30').params.length).toBe(33);
   });
 
   it('send curves to WASM as data and report STFT latency', () => {
