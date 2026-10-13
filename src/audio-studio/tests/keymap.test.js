@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { CommandRegistry, normalizeShortcut, browserReserved, formatShortcut } from '../src/commands/registry.js';
 import { installKeymap, DEFAULT_KEYS } from '../src/commands/keymap.js';
+import { TIME_FORMATS } from '../src/lib/time.js';
 import { moveEdge, stepFrames, cycleDocument, nextFftSize, latestRecent } from '../src/commands/keymap-commands.js';
 
 function fakeApp() {
@@ -246,7 +247,7 @@ describe('keyboard commands', () => {
     expect(app.prefs.get('timeFormat')).toBe('compact');
     await app.commands.run('view.previousTimeFormat');
     await app.commands.run('view.previousTimeFormat');
-    expect(app.prefs.get('timeFormat')).toBe('bars');
+    expect(app.prefs.get('timeFormat')).toBe(TIME_FORMATS[TIME_FORMATS.length - 1].id);
   });
 
   it('repeats the last command with or without its dialog', async () => {
