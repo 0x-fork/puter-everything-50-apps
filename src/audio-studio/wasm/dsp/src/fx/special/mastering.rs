@@ -8,7 +8,7 @@
 //! 4 peak Hz, 5 peak dB, 6 peak Q, 7 high shelf on, 8 high shelf Hz,
 //! 9 high shelf dB, 10 reverb %, 11 exciter mode (0 retro, 1 tape, 2 tube),
 //! 12 exciter %, 13 width (-100 narrow .. 100 wide), 14 loudness %,
-//! 15 output dB.
+//! 15 output dB, 16 low shelf Q, 17 high shelf Q.
 //! Latency: exciter oversampler + limiter lookahead (see `latency_frames`).
 //! Tail: 2 s while the reverb is in use.
 
@@ -65,9 +65,9 @@ impl Band {
         let f = self.freq.next().exp();
         let g = self.gain.next();
         let c = match self.kind {
-            Kind::LowShelf => Coefs::low_shelf(rate, f, 0.707, g),
+            Kind::LowShelf => Coefs::low_shelf(rate, f, self.q, g),
             Kind::Peak => Coefs::peaking(rate, f, self.q, g),
-            Kind::HighShelf => Coefs::high_shelf(rate, f, 0.707, g),
+            Kind::HighShelf => Coefs::high_shelf(rate, f, self.q, g),
         };
         for b in &mut self.filters {
             b.c = c;
@@ -269,6 +269,8 @@ impl Effect for Mastering {
             13 => self.width.target = 1.0 + (v / 100.0).clamp(-1.0, 1.0),
             14 => self.update_limiter(v),
             15 => self.out.target = db_to_gain(v),
+            16 => b[0].q = v.clamp(0.1, 10.0),
+            17 => b[2].q = v.clamp(0.1, 10.0),
             _ => {}
         }
         for band in &mut self.bands {

@@ -201,7 +201,6 @@ impl Oversampler {
 
 /// Curve shapes for one polarity. Each maps a >= 0 to the output magnitude
 /// with unit slope at zero (except `CUT`).
-#[allow(dead_code)]
 pub const LINEAR: u32 = 0;
 pub const SOFT: u32 = 1;
 pub const HARD: u32 = 2;
@@ -209,6 +208,27 @@ pub const TUBE: u32 = 3;
 pub const DIODE: u32 = 4;
 pub const FOLD: u32 = 5;
 pub const CUT: u32 = 6;
+/// Drawn curves: output magnitude looked up in `Shape::tables[0]` (positive)
+/// or `[1]` (negative), sampled evenly over input magnitudes 0..1; inputs
+/// above 1 hold the last value.
+pub const TABLE_POS: u32 = 7;
+pub const TABLE_NEG: u32 = 8;
+
+/// Linear interpolation in an evenly sampled 0..1 table (identity when empty).
+#[inline]
+fn lookup(table: &[f32], a: f32) -> f32 {
+    let n = table.len();
+    if n < 2 {
+        return a;
+    }
+    let t = a * (n - 1) as f32;
+    if t >= (n - 1) as f32 {
+        return table[n - 1];
+    }
+    let i = t as usize;
+    let f = t - i as f32;
+    table[i] + (table[i + 1] - table[i]) * f
+}
 
 /// Rational tanh approximation (exact at 0, saturates to 1 at |x| >= 3).
 #[inline]
@@ -258,7 +278,7 @@ pub fn curve(kind: u32, a: f32) -> f32 {
 }
 
 /// Static and dynamic waveshaper settings shared by every channel.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Shape {
     pub pos: u32,
     pub neg: u32,
@@ -266,11 +286,13 @@ pub struct Shape {
     pub smooth: f32,
     /// One-pole coefficient for gain smoothing at the oversampled rate (0 = off).
     pub time_coef: f32,
+    /// Drawn curve tables for TABLE_POS and TABLE_NEG.
+    pub tables: [Vec<f32>; 2],
 }
 
 impl Default for Shape {
     fn default() -> Self {
-        Shape { pos: SOFT, neg: SOFT, smooth: 0.0, time_coef: 0.0 }
+        Shape { pos: SOFT, neg: SOFT, smooth: 0.0, time_coef: 0.0, tables: [Vec::new(), Vec::new()] }
     }
 }
 
@@ -278,7 +300,11 @@ impl Shape {
     #[inline]
     pub fn eval(&self, x: f32) -> f32 {
         let (kind, a, sign) = if x >= 0.0 { (self.pos, x, 1.0) } else { (self.neg, -x, -1.0) };
-        let mut y = curve(kind, a);
+        let mut y = match kind {
+            TABLE_POS => lookup(&self.tables[0], a),
+            TABLE_NEG => lookup(&self.tables[1], a),
+            _ => curve(kind, a),
+        };
         if self.smooth > 0.0 {
             y += (fast_tanh(a) - y) * self.smooth;
         }
@@ -373,7 +399,7 @@ mod tests {
         let rate = 48000.0;
         let n = 16384;
         let x = sine(5000.0, rate, n, 0.9);
-        let s = Shape { pos: SOFT, neg: SOFT, smooth: 0.0, time_coef: 0.0 };
+        let s = Shape { pos: SOFT, neg: SOFT, ..Shape::default() };
         let naive: Vec<f32> = x.iter().map(|&v| s.eval(v * 4.0)).collect();
         let mut sh = Shaper::new(4);
         let mut over: Vec<f32> = x.iter().map(|&v| v * 4.0).collect();
@@ -407,17 +433,27 @@ mod tests {
             assert!((fold(a) - (a * PI32 * 0.5).sin() / (PI32 * 0.5)).abs() < 1e-3, "fold {a}");
             assert!((curve(TUBE, a) - (1.0 - (-a).exp())).abs() < 0.08, "tube {a}");
         }
-        let s = Shape { pos: HARD, neg: CUT, smooth: 0.0, time_coef: 0.0 };
+        let s = Shape { pos: HARD, neg: CUT, ..Shape::default() };
         assert_eq!(s.eval(-0.5), 0.0);
         assert_eq!(s.eval(2.0), 1.0);
+    }
+
+    #[test]
+    fn drawn_tables_interpolate_and_hold() {
+        // Positive: a curve that halves everything; negative: identity (empty table).
+        let half: Vec<f32> = (0..=4).map(|i| i as f32 * 0.125).collect();
+        let s = Shape { pos: TABLE_POS, neg: TABLE_NEG, tables: [half, Vec::new()], ..Shape::default() };
+        assert!((s.eval(0.3) - 0.15).abs() < 1e-6);
+        assert!((s.eval(3.0) - 0.5).abs() < 1e-6);
+        assert!((s.eval(-0.3) + 0.3).abs() < 1e-6);
     }
 
     #[test]
     fn time_smoothing_lets_short_bursts_through() {
         // With slow gain smoothing a short burst passes the curve's limit
         // briefly instead of being clipped flat.
-        let fast = Shape { pos: HARD, neg: HARD, smooth: 0.0, time_coef: 0.0 };
-        let slow = Shape { time_coef: 0.9999, ..fast };
+        let fast = Shape { pos: HARD, neg: HARD, ..Shape::default() };
+        let slow = Shape { time_coef: 0.9999, ..fast.clone() };
         let mut x = vec![0.2f32; 2000];
         for v in &mut x[1000..1100] {
             *v = 3.0;

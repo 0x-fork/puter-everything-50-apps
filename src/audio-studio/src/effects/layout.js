@@ -11,9 +11,9 @@ import { toPosition, fromPosition, formatValue, parseValue } from './params.js';
 
 const param = (ctx, id) => ctx.def.params.find((p) => p.id === id);
 
-/** The generated rows (sliders, checkboxes, choices) for just `ids`, in that order. */
-export function controlsFor(ctx, ids, { className = '' } = {}) {
-  const params = ids.map((id) => param(ctx, id)).filter(Boolean).map((p) => ({ ...p, hidden: false, section: undefined }));
+/** The generated rows (sliders, checkboxes, choices) for just `ids`, in that order; `labels` renames rows. */
+export function controlsFor(ctx, ids, { className = '', labels = {} } = {}) {
+  const params = ids.map((id) => param(ctx, id)).filter(Boolean).map((p) => ({ ...p, label: labels[p.id] ?? p.label, hidden: false, section: undefined }));
   // The id this block just set, so its own curve and envelope editors are not reset mid-drag.
   let from = null;
   const c = paramControls({ ...ctx.def, params }, () => ctx.values, (id, v) => {
@@ -161,12 +161,24 @@ export function readout(ctx, fn, className = '') {
   return el;
 }
 
-/** Disables `el`'s controls while when(values) is false (fields that only apply in some modes). */
+let blockers = 0;
+
+/**
+ * Disables `el`'s controls while when(values) is false (fields that only
+ * apply in some modes). Nested conditions combine: a control is enabled only
+ * while every enableWhen around it allows it.
+ */
 export function enableWhen(ctx, el, when) {
+  const key = ++blockers;
   const show = (values) => {
     const on = Boolean(when(values));
     el.classList.toggle('fx-disabled', !on);
-    el.querySelectorAll('input, select, button, textarea').forEach((c) => (c.disabled = !on));
+    el.querySelectorAll('input, select, button, textarea').forEach((c) => {
+      c.fxBlocked ??= new Set();
+      if (on) c.fxBlocked.delete(key);
+      else c.fxBlocked.add(key);
+      c.disabled = c.fxBlocked.size > 0;
+    });
   };
   show(ctx.values);
   ctx.subscribe(show);
@@ -199,4 +211,25 @@ export function numberField(ctx, id, { label } = {}) {
   });
   ctx.subscribe((values) => hot.setValue(values[id]));
   return hot;
+}
+
+/** A small line glyph (24 x 24 viewBox, stroked in the text colour) for icon radios and buttons. */
+export function glyph(d, size = 18) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  for (const path of [].concat(d)) {
+    const el = document.createElementNS(NS, 'path');
+    el.setAttribute('d', path);
+    svg.append(el);
+  }
+  return svg;
 }

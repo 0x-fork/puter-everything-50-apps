@@ -57,7 +57,7 @@ export function plot(className, label, draw) {
 }
 
 /** Drag helper for a handle: calls onMove(fx, fy) with fractions of the plot box. */
-function draggable(handle, box, onMove, onEnd) {
+export function draggable(handle, box, onMove, onEnd) {
   handle.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -690,12 +690,25 @@ function overviewPeaks(doc, start, end, columns) {
 
 // ------------------------------------------------------------ selection
 
+const CUSTOM = new Map();
+
+/**
+ * Registers the dialog editor for an effect id. Definitions stay free of DOM
+ * code (they also load in the effect worker), so UI modules register their
+ * editors here (fx-views.js). `editor.hides` lists the param ids the editor
+ * draws itself, or true when it lays out every param.
+ */
+export function registerEditor(id, editor) {
+  CUSTOM.set(id, editor);
+}
+
 const EQ_IDS = /eq|equali[sz]er|filter/i;
 const DYN_IDS = /dynamics|compressor|limiter|maximizer|leveler/i;
 
 /** The built-in editor that suits a definition without its own `editor`, or null. */
 export function autoEditor(def) {
   if (def.editor) return def.editor;
+  if (CUSTOM.has(def.id)) return CUSTOM.get(def.id);
   if (def.display === 'loudness') return loudnessMeterEditor();
   const transfer = def.params.find((p) => p.type === 'transfer');
   if (transfer) return transferCurveEditor({ id: transfer.id });

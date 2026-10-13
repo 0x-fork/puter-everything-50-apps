@@ -211,6 +211,7 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
     def,
     app,
     doc,
+    range,
     slotId,
     /** Runs fn when the dialog closes. */
     onClose: (fn) => cleanups.push(fn),
@@ -308,7 +309,10 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
   const editor = autoEditor(def);
   const editorEl = editor ? editor(ctx) : null;
   const smoothParam = def.params.find((p) => paramType(p) === 'bool' && /spline|smooth|curve/i.test(p.id));
-  controls = paramControls(def, () => values, (id, v) => setValue(id, v), { doc, range, smooth: (v) => smoothParam && v[smoothParam.id] });
+  // Params a custom editor lays out itself stay out of the generated grid.
+  const hides = editor?.hides;
+  const gridDef = hides ? { ...def, params: def.params.map((p) => (hides === true || hides.includes(p.id) ? { ...p, hidden: true } : p)) } : def;
+  controls = paramControls(gridDef, () => values, (id, v) => setValue(id, v), { doc, range, smooth: (v) => smoothParam && v[smoothParam.id] });
   const body = h('div.fx-dialog-body', presetBar, nameBar, editorEl ? h('div.fx-editor', editorEl) : null, controls.el);
 
   // ---------------------------------------------------------- footer
@@ -397,7 +401,7 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
   announceValues(values);
   return openDialog({
     title: title || `Effect - ${def.name}`,
-    className: 'fx-dialog',
+    className: editor?.dialogClass ? `fx-dialog.${editor.dialogClass}` : 'fx-dialog',
     body,
     footerStart,
     buttons,

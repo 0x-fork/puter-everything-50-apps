@@ -293,3 +293,128 @@ input[type='range'].slider.fx-vslider::-moz-range-track {
     overflow-x: auto;
   }
 }
+
+/* ----------------------------------------------------- effect layouts */
+
+.dialog.fx-dialog.fx-wide {
+  width: min(880px, 100%);
+  max-width: min(880px, 100%);
+}
+
+.fx-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fx-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.fx-split.fx-split-even {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.fx-checks {
+  display: flex;
+  gap: 16px;
+  padding-left: 8px;
+}
+
+.fx-response {
+  height: 200px;
+}
+
+/* Mastering band table under the EQ graph. */
+.ms-bands {
+  display: grid;
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.ms-band {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) repeat(3, minmax(64px, max-content));
+  align-items: center;
+  gap: 10px;
+}
+
+.ms-band-head {
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+}
+
+/* Doppler path graph. */
+.dp-graph-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dp-graph {
+  height: 260px;
+}
+
+.dp-status {
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+  .fx-split,
+  .fx-split.fx-split-even {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.fx-dialog-body [hidden] {
+  display: none !important;
+}
+
+.fx-bypass {
+  margin-top: 4px;
+}
+
+/* Distortion: two curve graphs with link and copy tools between them. */
+.dist-graphs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.dist-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dist-link[aria-pressed='true'] {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.fx-plot.dist-graph {
+  height: auto;
+  aspect-ratio: 1;
+  max-height: 300px;
+}
+
+.fx-plot.dist-graph.dist-mirrored {
+  opacity: 0.55;
+}
+
+.dist-caption {
+  min-height: 1.4em;
+  margin: 2px 0;
+  font-size: var(--fs-sm);
+}
+
+.fx-group .fx-plot.dist-graph {
+  width: 100%;
+  margin: 0 auto;
+}

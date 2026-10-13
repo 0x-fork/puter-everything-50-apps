@@ -8,6 +8,7 @@ import { installEffectCommands } from '../effects/commands.js';
 import { effectsRackPanel, extendFileGraph, addToRack, applyRack, rackFor, setRack, installRackCommands } from '../effects/rack-panel.js';
 import { installFavorites } from '../effects/favorites.js';
 import { installGenerators } from '../effects/generate-ui.js';
+import '../effects/views/index.js';
 
 export function installEffects(app) {
   registerIcons({
