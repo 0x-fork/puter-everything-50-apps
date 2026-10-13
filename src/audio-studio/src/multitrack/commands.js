@@ -726,8 +726,8 @@ export function installMultitrackCommands(app) {
     { id: 'export.mixdownClips', label: 'Selected Clips...', enabled: hasClips, run: async () => saveDocument(app, await mixdown('clips'), { copy: true }) },
 
     // ------------------------------------------------------ Multitrack
-    { id: 'mt.addMono', label: 'Add Mono Track', enabled: hasSession, run: addTrack('audio', 1) },
-    { id: 'mt.addStereo', label: 'Add Stereo Track', shortcut: 'Alt+A', enabled: hasSession, run: addTrack('audio', 2) },
+    { id: 'mt.addMono', label: 'Add Mono Audio Track', enabled: hasSession, run: addTrack('audio', 1) },
+    { id: 'mt.addStereo', label: 'Add Stereo Audio Track', shortcut: 'Alt+A', enabled: hasSession, run: addTrack('audio', 2) },
     { id: 'mt.addMonoBus', label: 'Add Mono Bus Track', enabled: hasSession, run: addTrack('bus', 1) },
     { id: 'mt.addBus', label: 'Add Stereo Bus Track', shortcut: 'Alt+B', enabled: hasSession, run: addTrack('bus', 2) },
     {

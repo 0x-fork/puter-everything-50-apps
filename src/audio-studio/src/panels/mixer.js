@@ -14,7 +14,7 @@ import { getEffect } from '../effects/registry.js';
 import { allTracks, wouldCycle, SILENT_DB, MAX_DB, AUTOMATION_MODES } from '../model/session-edits.js';
 import { SendControls, EqControls } from '../multitrack/send-eq.js';
 import { dbToFader, faderToDb, formatGain, formatGainShort, formatPan, parseGain } from '../multitrack/levels.js';
-import { MeterBar } from '../multitrack/meter.js';
+import { MeterBar, METER_RANGE } from '../multitrack/meter.js';
 
 const SCALE = [15, 10, 5, 0, -5, -10, -20, -30, -40, -60];
 
@@ -123,6 +123,8 @@ class Strip {
     this.sends = isMaster ? null : new SendControls(app, doc, track.id);
     this.eq = new EqControls(app, doc, track.id);
     const scale = h('div.mx-scale', { 'aria-hidden': 'true' }, SCALE.map((db) => h('span', { style: { bottom: `calc(${(dbToFader(db) * 100).toFixed(2)}% - ${(dbToFader(db) * 18 - 9).toFixed(1)}px)` } }, db > 0 ? `+${db}` : String(db))));
+    // Meter scale: dBFS every 12 dB beside the meter.
+    const mscale = h('div.mx-mscale', { 'aria-hidden': 'true' }, [0, -12, -24, -36, -48, -60].map((db) => h('span', { style: { bottom: `${((METER_RANGE + db) / METER_RANGE) * 100}%` } }, String(db))));
     this.el = h(
       `div.mx-strip${isMaster ? '.master' : ''}${track.type === 'bus' ? '.bus' : ''}`,
       { role: 'group', dataset: { id: this.id }, onpointerdown: () => doc.selectTrack(this.id) },
@@ -135,7 +137,7 @@ class Strip {
       h('div.mx-panrow', this.pan, this.pan ? this.panText : null),
       this.mode,
       h('div.mx-btns', this.mute, this.solo, this.arm, this.monitor),
-      h('div.mx-level', scale, this.fader, this.meter.el),
+      h('div.mx-level', scale, this.fader, this.meter.el, mscale),
       h('div.mx-db', this.dbNum),
       this.name,
     );
