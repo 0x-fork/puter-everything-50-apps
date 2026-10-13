@@ -80,6 +80,17 @@ describe('default keymap of the whole app', () => {
     expect(clashes).toEqual([]);
   });
 
+  it('gives every bound command a key the browser lets through, on every platform', async () => {
+    const app = await fullApp();
+    const C = app.commands;
+    const stuck = [];
+    for (const id of C.commands.keys()) {
+      const keys = C.keysFor(id);
+      for (const mac of [true, false]) if (keys.length && keys.every((k) => browserReserved(k, mac))) stuck.push(`${id} (${mac ? 'macOS' : 'other'})`);
+    }
+    expect(stuck).toEqual([]);
+  });
+
   it('every default key names a registered command', async () => {
     const app = await fullApp();
     const missing = Object.keys(DEFAULT_KEYS).filter((id) => !app.commands.commands.has(id));

@@ -248,13 +248,13 @@ describe('keyboard shortcut editor', () => {
     const search = dialog.querySelector('input[type=search]');
     search.value = 'reverse';
     search.dispatchEvent(new Event('input'));
-    const edit = dialog.querySelector('.shortcut-edit[data-id="fx.reverse"]');
-    edit.focus();
-    edit.click();
+    const add = dialog.querySelector('.sc-row[data-id="fx.reverse"] .sc-add');
+    add.focus();
+    add.click();
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'q', code: 'KeyQ', bubbles: true }));
     expect(app.commands.keysFor('fx.reverse')).toEqual(['q']);
     expect(document.activeElement?.dataset.id).toBe('fx.reverse');
-    expect(document.activeElement.textContent).toBe('Q');
+    expect(document.activeElement.querySelector('.sc-chip').textContent).toBe('Q');
     dialog.querySelector('.dialog-head .icon-btn').click();
     await done;
   });

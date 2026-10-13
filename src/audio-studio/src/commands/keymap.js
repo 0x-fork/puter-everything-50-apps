@@ -44,6 +44,7 @@ export const DEFAULT_KEYS = {
   'edit.insertIntoSession': ['Mod+Shift+I'],
   'edit.editOriginal': ['Mod+E'],
   'clip.editSource': [],
+  'edit.crop': ['Mod+T', 'Alt+Shift+T'],
   'edit.convertSampleType': ['Shift+T', 'F11'],
   'edit.clearTimeSelection': ['G'],
   'edit.selectNextClip': ['.'],
@@ -87,7 +88,7 @@ export const DEFAULT_KEYS = {
   'clip.suspendGroups': ['Mod+Shift+G'],
   'clip.ungroup': [],
   'clip.trimToSelection': ['Alt+T'],
-  // File (the browser keeps Mod+N, Mod+W and friends, so each has a second key)
+  // File (browsers keep Mod+N, Mod+W and the like for themselves, so these have a second key)
   'file.newSession': ['Mod+N', 'Alt+N'],
   'file.newAudio': ['Mod+Shift+N', 'Alt+Shift+N'],
   'file.close': ['Mod+W', 'Alt+W'],
@@ -132,9 +133,9 @@ export const DEFAULT_KEYS = {
   'view.specLinear': ['Mod+Alt+PageDown'],
   'view.scrollLeft': ['Mod+ArrowLeft'],
   'view.scrollRight': ['Mod+ArrowRight'],
-  'view.scrollPageLeft': ['Mod+PageUp'],
-  'view.scrollPageRight': ['Mod+PageDown'],
-  'view.videoFullScreen': ['Mod+`'],
+  'view.scrollPageLeft': ['Mod+PageUp', 'Shift+PageUp'],
+  'view.scrollPageRight': ['Mod+PageDown', 'Shift+PageDown'],
+  'view.videoFullScreen': ['Mod+`', 'Alt+`'],
   // Tools
   'spectral.opacityDown': ['Alt+[', 'Shift+['],
   'spectral.opacityUp': ['Alt+]', 'Shift+]'],
