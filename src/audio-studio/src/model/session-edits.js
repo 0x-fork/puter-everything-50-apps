@@ -122,8 +122,8 @@ export function createClip(o = {}) {
   };
 }
 
-/** A new session state with `tracks` stereo audio tracks and a stereo master. */
-export function createSessionState({ sampleRate = 48000, bitDepth = 32, tracks = 6, template, autoCrossfade = true } = {}) {
+/** A new session state with `tracks` stereo audio tracks and a stereo (or mono) master. */
+export function createSessionState({ sampleRate = 48000, bitDepth = 32, tracks = 6, template, autoCrossfade = true, masterChannels = 2 } = {}) {
   let list;
   if (Array.isArray(template)) list = template.map((t, i) => createTrack({ color: TRACK_COLORS[i % TRACK_COLORS.length], ...t }));
   else list = Array.from({ length: tracks }, (_, i) => createTrack({ name: `Track ${i + 1}`, color: TRACK_COLORS[i % TRACK_COLORS.length] }));
@@ -142,7 +142,7 @@ export function createSessionState({ sampleRate = 48000, bitDepth = 32, tracks =
     metronome: false,
     autoCrossfade,
     tracks: list,
-    master: createTrack({ type: 'master', name: 'Mix', color: '#7a8a99' }),
+    master: createTrack({ type: 'master', name: 'Mix', color: '#7a8a99', channels: masterChannels === 1 ? 1 : 2 }),
     clips: [],
     markers: [],
   };

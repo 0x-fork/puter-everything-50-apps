@@ -425,6 +425,9 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
       master[1][i] *= mg;
     }
   }
+  if (m.mono) {
+    for (let i = 0; i < frames; i++) master[0][i] = master[1][i] = (master[0][i] + master[1][i]) * 0.5;
+  }
 }
 
 export function createScratch(frames = QUANTUM) {

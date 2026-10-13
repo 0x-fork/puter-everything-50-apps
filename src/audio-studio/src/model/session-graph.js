@@ -235,6 +235,8 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
     master.gain = 1;
     master.volumeEnv = dbEnvelopeToGain(m.automation.volume);
   }
+  // A mono master folds the mix to mono (both outputs carry it).
+  if (m.channels === 1) master.mono = true;
   const graph = { rate: state.sampleRate, tracks, master };
   if (panLaw && panLaw.mode === 'equalPower') graph.panLaw = { mode: 'equalPower', centerDb: panLaw.centerDb };
   return { graph, sources };
