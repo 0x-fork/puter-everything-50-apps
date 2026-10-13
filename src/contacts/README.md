@@ -290,10 +290,6 @@ Tests run on [Vitest](https://vitest.dev). The pure logic (model, validation, se
 npm test
 ```
 
-## License
-
-MIT
-
 ## Populate a demo
 
 After signing in and letting the address book load, run this in the browser console:
@@ -309,3 +305,7 @@ are preserved. Each completed call adds a fresh batch; overlapping calls share o
 operation. Returns `{ created, ids, tag }`. Remove the samples through the normal
 contact selection/delete controls. A failed operation rejects and reports how many
 contacts were already saved; those remain available, and another call starts a fresh batch.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

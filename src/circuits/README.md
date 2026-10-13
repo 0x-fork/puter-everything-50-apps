@@ -44,3 +44,7 @@ The WebAssembly kernel is committed prebuilt at `src/kernel/kernel.wasm`, so bui
 ## Storage
 
 Signed-in users' projects are `.circuits` files (JSON) in the app's folder of their Puter storage, and can be opened from or saved anywhere in it. Signed out, projects stay in the browser's private file storage. Preferences are a single small key-value entry. Projects can always be downloaded and opened from the device.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

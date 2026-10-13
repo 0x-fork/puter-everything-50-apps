@@ -44,3 +44,7 @@ In development, `window.as` is the app and `as.openDev(['name.wav'])` opens test
 
 - [Lucide](https://lucide.dev) icons (ISC), plus original glyphs in `src/ui/icons.js`.
 - [Puter.js](https://docs.puter.com) for sign-in, cloud files and AI features.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

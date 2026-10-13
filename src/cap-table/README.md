@@ -89,3 +89,7 @@ Cap table math (vesting, ownership, conversion, round modeling) is pure and live
 - Form 3921 is built from ISO exercise certificates: box 3 is the certificate's price, box 4 the 409A in force on its date, box 5 its issued size. An exercise recorded on the grant without a certificate has no date and is listed as such.
 
 CapTable is a tool, not legal advice.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

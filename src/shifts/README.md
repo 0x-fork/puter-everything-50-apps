@@ -57,3 +57,7 @@ tests/        Vitest suites for lib/ and core/
 ```
 
 Each collection (employees, shifts, availability, swaps, attendance) is persisted as a JSON document under a namespaced key (`shifts.v1:*`) in Puter KV. The store keeps everything in memory, persists the affected collections after each action, and notifies subscribers, which re-render the active view.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

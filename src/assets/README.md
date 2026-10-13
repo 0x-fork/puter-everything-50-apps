@@ -84,3 +84,7 @@ tests/               vitest suites for every lib module
 ```
 
 All domain logic is pure and dependency-injected (time, storage, backend), which is what the test suite covers; the UI layer stays thin.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

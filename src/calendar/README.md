@@ -865,10 +865,6 @@ that reads arriving mail (`npm run publish:mail-handler` — see
 [Deploying the mail handler](#deploying-the-mail-handler)). The RSVP worker needs
 nothing from you; the app deploys it into each user's own account.
 
-## License
-
-MIT
-
 ## Populate a demo
 
 After signing in and letting the calendar load, run this in the browser console:
@@ -888,3 +884,7 @@ Returns `{ events, tasks, eventIds, taskIds }`. Sample descriptions/notes identi
 the records, which can be removed with the regular event/task controls. On failure,
 the promise rejects with the saved counts; completed writes remain, and retrying
 starts a fresh batch. If a category is hidden, its sample events stay hidden too.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

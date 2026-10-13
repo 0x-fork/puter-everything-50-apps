@@ -140,3 +140,7 @@ This is a forms, lists, and calendar app, so the right tools are plain DOM and S
 ## Data and privacy
 
 Each user's data lives in their own Puter account (KV and files). It is not shared with other users, and the app has no server of its own. The only exception is emailing a document, which passes the message through the email worker. That worker stores only hashed bookkeeping keys, so it holds nothing personal.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

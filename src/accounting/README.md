@@ -65,3 +65,7 @@ npm run build
 ## Tests
 
 `tests/` covers the logic the books depend on: money parsing, rounding and exact proration; dates and named periods; that every transaction type posts balanced entries on both cash and accrual basis; open balances, applications, voids and deletes; the closing date; every report (the balance sheet balances, the trial balance ties, cash flow ties to bank balances, retained earnings roll over at year end, aging buckets); CSV and OFX statement parsing and de-duplication; bank rules, matching, and suggestions; reconciliation; recurring schedules; search; validation; backup and restore; the sample company; and the sync engine (paging, the change log, gaps, the outbox while offline, and cost assertions such as "opening with nothing new costs one read").
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

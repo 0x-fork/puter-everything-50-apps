@@ -107,3 +107,7 @@ Host `dist/` anywhere (Puter hosting works). Two notes:
 - One document carries at most 20 signers and 200 fields (what the sign worker accepts), and each signer needs their own email address: one address gets one link and one message per send.
 - Signing is parallel by default; "sign in order" makes it sequential (one chain, no parallel stages or groups).
 - The certificate page records what this app observed (consent, views, signatures, declines, timestamps, IP, browser) plus a SHA-256 fingerprint of the file that was served to signers. It is an audit record, not a qualified electronic signature: no eIDAS QES, no RFC-3161 timestamping, no identity proofing.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

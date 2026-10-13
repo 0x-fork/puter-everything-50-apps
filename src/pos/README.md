@@ -208,3 +208,7 @@ dev/         browser Puter mock for mock.html
   formula as text; amounts and quantities stay numbers.
 - The customer directory, like everything else, lives only in the
   shopkeeper's own Puter account — no third party ever sees it.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

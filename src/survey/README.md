@@ -184,3 +184,7 @@ tests/                     Vitest suites
 - [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) (MIT)
 
 The app icon and brand mark are original.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

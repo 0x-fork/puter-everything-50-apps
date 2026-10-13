@@ -102,4 +102,8 @@ CI runs unit tests, the production build, and Chromium browser tests. Browser tr
 
 ## Dependency review
 
-See [DEPENDENCY_REVIEW.md](DEPENDENCY_REVIEW.md) and [third-party notices](public/THIRD_PARTY_NOTICES.txt). The application is private; third-party components retain their respective licenses.
+See [DEPENDENCY_REVIEW.md](DEPENDENCY_REVIEW.md) and [third-party notices](public/THIRD_PARTY_NOTICES.txt). Third-party components retain their respective licenses.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

@@ -161,3 +161,7 @@ With an image, shape, or drawing selected, drag its body to move it or a corner 
 - `src/core/annotations.js` (with `annotation-appearance.js` and `annotation-xfdf.js`) and `src/annotation-layer.js`: comments drawn as annotations, replies, review status, XFDF.
 - `src/core/compare.js` and `src/compare-view.js`: Compare files. `src/core/accessibility.js`, `src/core/autotag.js`, `src/accessibility-report.js`: accessibility. `src/core/pdfa*.js`: PDF/A.
 - `src/core/batch.js`, `src/core/measure.js`, `src/core/attachments.js`, `src/core/initial-view.js`, `src/core/page-mark-removal.js`: batch processing, measuring, attachments, the initial view and fonts, and removing page marks.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

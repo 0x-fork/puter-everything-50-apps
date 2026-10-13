@@ -132,3 +132,7 @@ Fleet is a forms, lists, and charts app, so the right tools are plain DOM and sm
 ## Data and privacy
 
 Each user's data lives in their own Puter account (KV and files). It is not shared with anyone unless the owner turns on team access, and then it stays in the owner's account. The app has no server of its own.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

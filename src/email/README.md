@@ -312,3 +312,7 @@ sample content. Existing mail is preserved. The samples survive reloads and can 
 archived or deleted normally. Each completed call adds a fresh batch; overlapping
 calls share one operation. Returns `{ created, paths }`. On failure it rejects with
 the number already saved; those files remain, and another call starts a fresh batch.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

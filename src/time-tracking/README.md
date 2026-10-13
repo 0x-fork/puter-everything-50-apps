@@ -85,3 +85,7 @@ Small, hot data lives in Puter KV (settings, clients, projects, the month
 index, and the running timer). Entries live in one JSON file per month under
 `hourly-data/`, so reads scale with the months you look at, not with the
 total number of entries.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

@@ -2,7 +2,7 @@
 
 A browser word processor with an original canvas editor and `.docx` files stored in your own Puter cloud.
 
-This branch implements the original canvas engine. Application licensing will be decided later. **AGPL code and dependencies must not be introduced.** The dependency policy is recorded in [AGENTS.md](AGENTS.md) and checked by `npm run check:licenses` and before production builds.
+This branch implements the original canvas engine. **AGPL code and dependencies must not be introduced.** The dependency policy is recorded in [AGENTS.md](AGENTS.md) and checked by `npm run check:licenses` and before production builds.
 
 ## Run
 
@@ -100,9 +100,13 @@ Older app-authored import/export helpers remain for later migration. They do not
 
 ## Licensing
 
-- Application and original canvas engine: license not yet selected.
+- Application and original canvas engine: [MIT](../../LICENSE).
 - ZIP codec `fflate`: MIT.
 - Noto Sans: [OFL-1.1](public/fonts/OFL.txt), with [source provenance](public/fonts/PROVENANCE.md).
 - Other retained dependencies: [third-party notices](public/licenses/THIRD_PARTY.txt).
 
 `tools/check-licenses.mjs` checks all locked dependency license declarations, rejects unknown declarations and removed engine packages, and verifies the vendored font license. This is a dependency-policy check, not a claim that package metadata replaces a source audit. Run `node tools/generate-licenses.mjs` after changing runtime dependencies to refresh distributed notices.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

@@ -108,3 +108,7 @@ See `ARCHITECTURE.md`.
 
 See `LICENSE` and `THIRD_PARTY_NOTICES.md`. License texts of bundled dependencies are in
 `public/licenses/`.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

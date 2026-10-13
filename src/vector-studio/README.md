@@ -33,3 +33,7 @@ npm run build   # production build in dist/ (includes the collaboration worker)
 - `src/ui/` the shell: menu bar, tools panel, panel dock, dialogs, status bar, rulers.
 - `src/features/` feature modules, each registering its tools, panels, commands and hooks (`src/features.js` installs them): files, import/export, geometry, paint, type, symbols, brushes, effects, 3D, envelopes, repeat, paint regions, trace, mesh, graphs, perspective, patterns, slices, workspaces, panels, collaboration and more.
 - `worker/` the collaboration server that sharing deploys to the owner's Puter account.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

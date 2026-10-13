@@ -167,3 +167,7 @@ npm run build
 
 Third-party code: CodeMirror 6 and Lezer (MIT), Lucide icons (ISC) and
 `yaml` (ISC). `npm run build` checks every dependency's license first.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

@@ -145,3 +145,7 @@ never falls back to showing the inventory workspace.
 
 The public-site tests cover links, assets, metadata, search, mobile navigation,
 sign-in retries, and offline page isolation alongside the existing inventory tests.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

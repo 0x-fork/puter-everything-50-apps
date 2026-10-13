@@ -75,3 +75,7 @@ tests/                 Vitest suites, including command integration tests
 Model space is split into chunks of about a thousand objects, each with its own GPU buffers, so an edit only re-uploads the chunks it touches. Lines are drawn as instanced quads whose fragment shader applies linetype patterns and anti-aliasing, and positions are split into high and low float parts so drawings far from the origin stay precise. Curves are tessellated for the current zoom and refreshed in the background when the zoom changes a lot.
 
 Drawings are stored as files (Puter FS or the device) and recovery copies in IndexedDB. The key-value store holds only one small settings record per user.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

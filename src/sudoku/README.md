@@ -162,6 +162,6 @@ npm test
 - **Save format.** `decode` is checked against truncation, wrong versions, clues
   that disagree with the solution, and a "solution" that is not solved.
 
-## Licence
+## License
 
-MIT.
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

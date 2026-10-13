@@ -784,3 +784,7 @@ the browser; there is no server.
 ---
 
 Powered by [Puter](https://developer.puter.com).
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

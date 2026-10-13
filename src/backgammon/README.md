@@ -266,3 +266,7 @@ only once you enable them, both in the site's settings.
 
 Icons by [Lucide](https://lucide.dev). The board, the checkers, and the dice
 are drawn in CSS, not image assets — see `src/style.css`.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

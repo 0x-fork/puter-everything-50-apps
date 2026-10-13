@@ -176,3 +176,7 @@ above `:root`. Re-extract it if the icon is ever replaced.
 
 Icons by [Lucide](https://lucide.dev). Checkers pieces are drawn in CSS, not
 image assets — see `src/style.css`.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

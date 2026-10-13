@@ -55,3 +55,7 @@ The built `dsp.wasm` is committed so the app builds without Rust.
 ## Licenses
 
 All dependencies are permissively licensed (checked by `npm run check:licenses` before every build). The bundled models are MediaPipe models, Apache 2.0: the selfie segmenter for people (`src/media/models/person-segmenter.tflite`), the face landmarker for faces (`src/media/models/face-landmarker.task`, float16) and the hair segmenter for hair color (`src/media/models/hair-segmenter.tflite`, float32). Fonts are SIL Open Font License or Apache 2.0. Icons are from Lucide (ISC) plus original glyphs. All effects, transitions, filters, graphics and sound effects are original.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

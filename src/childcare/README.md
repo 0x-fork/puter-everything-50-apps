@@ -180,3 +180,7 @@ This is a forms, lists, and photos app, so the right tools are plain DOM, CSS, a
 ## Data and privacy
 
 A school's data lives in the director's Puter account (KV and files). Staff and families reach it only through the school worker, which checks every request. The app has no server of its own.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

@@ -173,3 +173,7 @@ Each collection is also mirrored to IndexedDB (`src/lib/outbox.js`): that
 copy is what an offline cold start reads, and the queue beside it holds any
 write KV hasn't taken yet, with the value KV last had so a replay can tell
 "nothing changed" from "another device wrote".
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

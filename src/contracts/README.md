@@ -59,3 +59,7 @@ For UI work without a Puter account, open `/mock.html` on the dev server: it stu
 - `money.test.js`: currency codes, per-currency totals, and manual conversion
 - `ical.test.js`: RFC 5545 escaping and 75-octet folding, all-day events, alarms, stable UIDs, and which deadlines become events
 - `doctext.test.js`: which documents can be read, the OCR consent gate, and the text/OCR paths
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

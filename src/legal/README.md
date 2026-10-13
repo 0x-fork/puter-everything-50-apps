@@ -135,3 +135,7 @@ This is a records, forms, and calendar app, so the right tools are plain DOM, CS
 ## Data and privacy
 
 Each firm's data lives in its owner's Puter account (KV and files). The app has no server of its own. In a shared firm, colleagues reach the owner's data only through the owner's firm server, which checks membership on every request.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

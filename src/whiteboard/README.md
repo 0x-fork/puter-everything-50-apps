@@ -272,3 +272,7 @@ The icon’s blue (`#238cfd`) is the brand and browser theme color. Interface ac
 ## Dependencies and resources
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Fonts and icons are bundled locally. The only external runtime script is the official Puter.js SDK at `https://js.puter.com/v2/`. pdf.js (`pdfjs-dist`, legacy build) is bundled as a separate chunk with its worker and its WebAssembly image decoders for scanned pages, and is downloaded from the application's own host only when someone imports a PDF.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

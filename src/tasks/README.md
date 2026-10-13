@@ -111,3 +111,7 @@ storage, which is why joining needs the two-link handshake (there is no
 inbox to deliver the member's replica URL through). Known limits: minted
 URLs live for a year (re-invite to renew), and a removed member keeps the
 data they already fetched — same as any shared link.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

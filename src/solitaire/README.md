@@ -151,3 +151,7 @@ as a resumed game would, rather than drawn by hand; see the tool's own header
 comment for the full staging rationale, including why the win-cascade scene
 is the one exception (its pre-win position is hand-arranged, not autoplayed)
 and why that scene's exact composition varies between runs.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

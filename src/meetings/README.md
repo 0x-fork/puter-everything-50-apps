@@ -325,3 +325,7 @@ npm test
 Camera/permission flows and the live Puter Peer API are exercised manually —
 open two browser profiles, start a meeting in one, and join with the link in
 the other.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

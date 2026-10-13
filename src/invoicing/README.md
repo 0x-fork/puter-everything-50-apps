@@ -125,3 +125,7 @@ npm run build        # production build to dist/
 
 - When running inside the Puter desktop (`puter.env === 'app'`), the sign-out control is hidden; sessions belong to the OS shell there.
 - Sample data is available from onboarding and can be wiped from the banner at any time.
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.

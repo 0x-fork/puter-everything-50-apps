@@ -71,3 +71,7 @@ npm run preview  # serve the production build
 
 Chess piece images by Colin M.L. Burnett (CC BY-SA 3.0) — see
 `public/pieces/LICENSE.txt`. Icons by [Lucide](https://lucide.dev).
+
+## License
+
+This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.
