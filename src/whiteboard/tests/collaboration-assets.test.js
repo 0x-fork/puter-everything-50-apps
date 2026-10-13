@@ -267,6 +267,7 @@ test("an image the worker refuses is given up, and later edits still save", asyn
       : call(identity, input);
   let state,
     rejected = 0,
+    reason,
     shown;
   const session = new CollaborationSession({
     puter: env.sdk(editor),
@@ -277,7 +278,10 @@ test("an image the worker refuses is given up, and later edits still save", asyn
     changed: (next) => (state = next),
     activity() {},
     status: (text) => (shown = text),
-    rejected: () => rejected++,
+    rejected: (outcome) => {
+      rejected++;
+      reason = outcome.reason;
+    },
   });
   try {
     await session.start();
@@ -288,6 +292,11 @@ test("an image the worker refuses is given up, and later edits still save", asyn
     await session.flush();
     assert.equal(session.pendingAssets.size, 0, "The file is given up");
     assert.equal(rejected, 1, "The edit adding it is reported as refused");
+    // As a file that could not be saved, not as a conflict.
+    assert.equal(
+      reason,
+      "An image or file could not be saved to the shared board.",
+    );
     const current = structuredClone(state),
       retitled = structuredClone(state);
     retitled.items[0].text = "Saved after the image";

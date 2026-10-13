@@ -719,6 +719,11 @@ export class CollaborationSession {
       // It is given up: the worker then refuses the edit that added it,
       // which is recovered from like any other refused edit.
       if (![400, 413, 422].includes(error.status)) throw error;
+      // Said when the edit adding it is refused, rather than a conflict.
+      this.refusedFile =
+        error.status === 413 && /limit/.test(error.message)
+          ? error.message
+          : "An image or file could not be saved to the shared board.";
       this.pendingAssets.delete(asset);
       await this.store.collaborationDelete(`${this.scope}|asset:${asset}`);
       return;
@@ -952,7 +957,7 @@ export class CollaborationSession {
             throw error;
           } else if (![413, 422].includes(error.status) || this.closed)
             throw error;
-          await this.recover(rows);
+          await this.recover(rows, error);
           sent = true;
         }
         if (this.closed) return;
@@ -1038,7 +1043,7 @@ export class CollaborationSession {
   // clock and cannot be uploaded as they are, so the accepted prefix is saved,
   // the session returns to the authoritative document, and what each later
   // row changed is made again on top of it. Only the rejected edit is lost.
-  async recover(rows) {
+  async recover(rows, why) {
     let refused = rows[0];
     if (rows.length > 1) {
       refused = null;
@@ -1048,6 +1053,7 @@ export class CollaborationSession {
         } catch (error) {
           if (![409, 413, 422].includes(error.status)) throw error;
           refused = row;
+          why = error;
           break;
         }
         if (this.closed) return;
@@ -1073,7 +1079,13 @@ export class CollaborationSession {
     this.shared.undo.clear();
     await this.keepCopy();
     await this.publish();
-    if (!this.closed) this.rejected({ remade });
+    // A file the worker refused is what the edit lacked.
+    const reason =
+      why?.status === 422 && /file that was not uploaded/.test(why.message)
+        ? this.refusedFile
+        : undefined;
+    this.refusedFile = null;
+    if (!this.closed) this.rejected({ remade, reason });
   }
   // Commits again what each row changed, read on a copy of the shared state
   // that has the refused row and the rows before it. Changes to anything the

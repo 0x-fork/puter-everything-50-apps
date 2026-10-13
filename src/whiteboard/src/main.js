@@ -10446,7 +10446,7 @@ async function startCollaboration(target, token, localTimer) {
         renderParticipants();
         draw();
       },
-      rejected: ({ remade } = {}) => {
+      rejected: ({ remade, reason } = {}) => {
         if (collaboration !== session || current !== target) return;
         // Recovery replaced the shared document; bind the open editor to it.
         if (editing?.unbind) {
@@ -10465,7 +10465,8 @@ async function startCollaboration(target, token, localTimer) {
         // out was not lost.
         if (!remade)
           toast(
-            "Some changes could not be saved because they conflicted with the shared board.",
+            reason ||
+              "Some changes could not be saved because they conflicted with the shared board.",
           );
       },
     });
