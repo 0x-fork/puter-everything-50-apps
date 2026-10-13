@@ -2,8 +2,9 @@
 // Audio, adjust its settings, scan the selection or the entire file, and get
 // a table of what was found (start, length, channels, level). Clicking a row
 // selects that range in the editor. Repair (selected or all) rebuilds clicks
-// and clipped peaks, Delete shortens silences, Mark adds range markers; each
-// action is one undo step. Scanning and repair run in a worker.
+// and clipped peaks, Delete shortens silences, Mark adds range markers (for
+// any diagnostic, so problems can be reviewed later from the Markers panel);
+// each action is one undo step. Scanning and repair run in a worker.
 
 import { h, announce } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
@@ -11,7 +12,7 @@ import { getEffect } from '../effects/registry.js';
 import { normalizeValues } from '../effects/params.js';
 import { allPresets, matchPreset } from '../effects/presets.js';
 import { paramControls } from '../effects/dialog.js';
-import { scanProblems, repairClicks, repairClips, deleteSilences, shiftProblems, markAudio, createRunner } from './scan.js';
+import { scanProblems, repairClicks, repairClips, deleteSilences, shiftProblems, markAudio, markProblems, createRunner } from './scan.js';
 
 const PREFS = 'diagnostics';
 
@@ -136,7 +137,8 @@ export function diagnosticsPanel(app) {
   );
   const actSelBtn = h('button.btn', { type: 'button', onclick: () => act(false), 'aria-describedby': 'diag-gain-note' });
   const actAllBtn = h('button.btn', { type: 'button', onclick: () => act(true), 'aria-describedby': 'diag-gain-note' });
-  const actions = h('div.diag-actions', h('span.diag-count.faint'), h('div.spacer'), actSelBtn, actAllBtn);
+  const markBtn = h('button.btn', { type: 'button', onclick: () => markFound(), title: 'Add a range marker for each selected result (all results when none is selected)' }, 'Mark');
+  const actions = h('div.diag-actions', h('span.diag-count.faint'), h('div.spacer'), actSelBtn, actAllBtn, markBtn);
 
   const el = h(
     'div.diag-panel',
@@ -252,6 +254,27 @@ export function diagnosticsPanel(app) {
     }
   }
 
+  /** Marks the selected results (or all) as range markers without repairing them. */
+  function markFound() {
+    const doc = audioDoc();
+    if (!doc || !result || result.docId !== doc.id || abort || doc.state !== result.state) return;
+    const list = selected.size ? result.problems.filter((p) => selected.has(p.id)) : result.problems;
+    if (!list.length) return;
+    const m = meta();
+    const noun = m.noun[0].toUpperCase() + m.noun.slice(1);
+    applying = true;
+    try {
+      doc.apply(`${getEffect(result.effect).name}: Mark ${list.length} ${m.noun}${list.length === 1 ? '' : 's'}`, markProblems(doc.state, list, noun));
+    } finally {
+      applying = false;
+    }
+    const done = new Set(list.map((p) => p.id));
+    result = { ...result, state: doc.state, problems: result.problems.map((p) => (done.has(p.id) ? { ...p, marked: true } : p)) };
+    caption.textContent = `${list.length} marker${list.length === 1 ? '' : 's'} added.`;
+    announce(caption.textContent);
+    refresh();
+  }
+
   // ------------------------------------------------------------- the list
   function show(p) {
     const doc = audioDoc();
@@ -349,6 +372,10 @@ export function diagnosticsPanel(app) {
     actAllBtn.textContent = `${m.action} All`;
     actSelBtn.disabled = busy || !valid || !selected.size;
     actAllBtn.disabled = busy || !valid || !n;
+    // Mark Audio's own action already marks.
+    markBtn.hidden = effectId === 'markAudio';
+    markBtn.disabled = busy || !valid || !n;
+    markBtn.textContent = selected.size ? 'Mark Selected' : 'Mark All';
     actions.querySelector('.diag-count').textContent = valid ? `${selected.size ? `${selected.size} of ` : ''}${n} ${m.noun}${n === 1 ? '' : 's'}` : '';
     if (!valid && result && doc && result.docId !== doc.id) caption.textContent = '';
     renderRows();

@@ -6,7 +6,7 @@ import '../src/effects/index.js';
 import { getEffect } from '../src/effects/registry.js';
 import { normalizeValues } from '../src/effects/params.js';
 import { Channel } from '../src/audio/channel.js';
-import { setDiagnosticsWorker, scanProblems, mergeRuns, repairClicks, repairClips, deleteSilences, shiftProblems, markAudio, silenceCut, holdDb } from '../src/diagnostics/scan.js';
+import { setDiagnosticsWorker, scanProblems, mergeRuns, repairClicks, repairClips, deleteSilences, shiftProblems, markAudio, markProblems, silenceCut, holdDb } from '../src/diagnostics/scan.js';
 import { clickSettings } from '../src/diagnostics/kernels.js';
 
 const RATE = 48000;
@@ -165,5 +165,40 @@ describe('actions', () => {
     const state = stateOf([new Float32Array(1000)]);
     const next = markAudio(state, [{ start: 100, end: 300 }, { start: 500, end: 900 }]);
     expect(next.markers.map((m) => [m.start, m.duration, m.name])).toEqual([[100, 200, 'Audio 01'], [500, 400, 'Audio 02']]);
+  });
+});
+
+describe('marking any diagnostic', () => {
+  it('names markers after what was found', () => {
+    const state = stateOf([new Float32Array(1000)]);
+    const next = markProblems(state, [{ start: 10, end: 10 }, { start: 500, end: 520 }], 'Click');
+    expect(next.markers.map((m) => [m.start, m.duration, m.name])).toEqual([[10, 1, 'Click 01'], [500, 20, 'Click 02']]);
+  });
+
+  it('marks DeClicker results from the panel without repairing them', async () => {
+    globalThis.ResizeObserver ??= class {
+      observe() {}
+      disconnect() {}
+    };
+    const { App } = await import('../src/app.js');
+    const { installCore } = await import('../src/features/core.js');
+    const { AudioFile } = await import('../src/model/audio-file.js');
+    const { diagnosticsPanel } = await import('../src/diagnostics/panel.js');
+    localStorage.clear();
+    const app = new App();
+    installCore(app);
+    const x = withClicks(music(RATE), [10000, 30000]);
+    const doc = new AudioFile({ name: 'c.wav', sampleRate: RATE, channels: [Channel.fromSamples(x)] });
+    app.addDocument(doc);
+    const p = diagnosticsPanel(app);
+    p.select('declicker');
+    const button = (re) => [...p.el.querySelectorAll('button')].find((b) => re.test(b.textContent));
+    button(/^Scan File$/).click();
+    await expect.poll(() => button(/^Mark All$/)?.disabled, { timeout: 5000 }).toBe(false);
+    const before = doc.state.channels[0];
+    button(/^Mark All$/).click();
+    expect(doc.state.markers.length).toBeGreaterThanOrEqual(2);
+    expect(doc.state.markers[0].name).toMatch(/^Click 01$/);
+    expect(doc.state.channels[0]).toBe(before);
   });
 });

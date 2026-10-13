@@ -156,7 +156,7 @@ describe('Diagnostics panel', () => {
     const sel = panel.el.querySelector('.diag-effect');
     sel.value = 'markAudio';
     sel.dispatchEvent(new Event('change'));
-    expect([...panel.el.querySelectorAll('.diag-actions .btn')].map((b) => b.textContent)).toEqual(['Mark Selected', 'Mark All']);
+    expect([...panel.el.querySelectorAll('.diag-actions .btn')].filter((b) => !b.hidden).map((b) => b.textContent)).toEqual(['Mark Selected', 'Mark All']);
     expect(app.prefs.get('diagnostics').effect).toBe('markAudio');
     expect(panel.el.querySelector('.diag-settings').textContent).toMatch(/Marker Padding/);
   });
