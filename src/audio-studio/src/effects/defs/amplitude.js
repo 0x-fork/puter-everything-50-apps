@@ -91,6 +91,7 @@ registerEffect({
   name: 'Single-band Compressor',
   group: AMP,
   kind: 31,
+  about: 'Turns down levels above the threshold by the ratio, smoothing the change with the attack and release times. Output gain makes up the lost level.',
   params: [
     db('threshold', 'Threshold', -60, 0, -20),
     num('ratio', 'Ratio', 1, 30, 4, ':1', { step: 0.1 }),
@@ -640,6 +641,7 @@ registerEffect({
   name: 'Fade Envelope',
   group: AMP,
   kind: null,
+  about: 'Fades the selection along a drawn curve from silence to full level. Click to add points, drag them, double-click to remove one; Spline smooths the curve.',
   params: [
     { id: 'envelope', label: 'Envelope', type: 'envelope', min: 0, max: 1, unit: '%', default: [{ t: 0, v: 0 }, { t: 1, v: 1 }] },
     curveParam,
@@ -661,6 +663,7 @@ registerEffect({
   name: 'Gain Envelope',
   group: AMP,
   kind: null,
+  about: 'Raises or lowers the level across the selection along a drawn curve, up to four times louder. Click to add points, drag them, double-click to remove one.',
   params: [
     { id: 'envelope', label: 'Envelope', type: 'envelope', min: 0, max: 4, unit: '%', default: [{ t: 0, v: 1 }, { t: 1, v: 1 }] },
     curveParam,
