@@ -53,7 +53,7 @@ test("SVG documents are in the interface language, like PDFs", () => {
   assert.equal(root({ lang: "fr" }).getAttribute("xml:lang"), "fr-CA");
   assert.equal(root({ lang: "en" }).getAttribute("xml:lang"), "en-CA");
 });
-import { drawOrder, PathBuilder } from "../src/export-layout.js";
+import { drawOrder, PathBuilder, breathe } from "../src/export-layout.js";
 import {
   toCSV,
   exportCSV,
@@ -297,6 +297,11 @@ function checkPackage(entries) {
     if (!name.endsWith(".rels")) continue;
     const base = name.replace(/_rels\/[^/]*\.rels$/, "");
     for (const r of doc.querySelectorAll("Relationship")) {
+      // A web link's target is an address, not a part of the package.
+      if (r.getAttribute("TargetMode") === "External") {
+        assert.match(r.getAttribute("Target"), /^https?:\/\//);
+        continue;
+      }
       const target = new URL(
         r.getAttribute("Target"),
         `http://x/${base}`,
@@ -440,6 +445,36 @@ test("CSV quoting follows RFC 4180 with a BOM and neutralizes formulas", () => {
     /Sticky note,Bold words and a list\u0001?,Plan & <Build>,Urgent,/,
   );
   assert.match(text, /,Ada,2026-10-01,2026-10-15,In progress,Design,/);
+});
+
+test("spreadsheet exports list described pictures and refuse an area with nothing to list", async () => {
+  const b = board("Pictures");
+  const drawing = item("pen", 0, 0, {
+      w: 100,
+      h: 50,
+      points: [
+        [0, 0],
+        [100, 50],
+      ],
+    }),
+    photo = item("image", 200, 0, {
+      w: 100,
+      h: 80,
+      src: "data:image/png;base64,iVBORw0KGgo=",
+    });
+  b.items = [drawing, photo];
+  // Nothing to list: no empty file with only a header row.
+  assert.throws(() => exportCSV(b, exportRegions(b)), /Nothing to export/);
+  assert.throws(() => exportXLSX(b, exportRegions(b)), /Nothing to export/);
+  // Descriptions are text, as on PDF pages.
+  photo.alt = "Team photo, =1+1";
+  drawing.alt = "Red and blue arrows";
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+    await blobBytes(exportCSV(b, exportRegions(b))),
+  );
+  assert.match(text, /\r\nDrawing,Red and blue arrows,/);
+  assert.match(text, /\r\nImage,"Team photo, =1\+1",/);
+  assert.ok(exportXLSX(b, exportRegions(b)).size > 0);
 });
 
 test("CSV exports a single table and rejects tables outside the scope", async () => {
@@ -1644,15 +1679,32 @@ test("vector PDF keeps large objects it rasterizes sharp", async () => {
     item("frame", 0, 0, { w: 4000, h: 3000, text: "Ideas 💡" }),
     item("note", 4200, 0, { text: "Snow ☃" }),
   ];
+  const regions = exportRegions(b),
+    plan = pdfPlan(regions, {});
   rasterizer.calls = [];
-  await exportPDF(b, exportRegions(b), "en", rasterizer, {
-    mode: "vector",
-    measure,
-  });
-  const frame = rasterizer.calls.find((c) => c.rect.w > 4000);
-  assert.equal(frame.maxSize, 4096);
-  // Small objects are drawn at three times their size, as before.
-  assert.ok(rasterizer.calls.every((c) => c.scale === 3));
+  await exportPDF(b, regions, "en", rasterizer, { mode: "vector", measure });
+  const inside = (c, page) =>
+    c.rect.x >= page.rect.x - 1e-6 &&
+    c.rect.y >= page.rect.y - 1e-6 &&
+    c.rect.x + c.rect.w <= page.rect.x + page.rect.w + 1e-6 &&
+    c.rect.y + c.rect.h <= page.rect.y + page.rect.h + 1e-6;
+  const frameParts = rasterizer.calls.filter((c) =>
+    c.items.some((i) => i.type === "frame"),
+  );
+  // The frame is drawn for each page that shows it, the overview and the
+  // detail page under its title, there only as far as that page reaches.
+  assert.equal(frameParts.length, 2);
+  assert.ok(frameParts.some((c) => c.rect.w <= 1040 && c.rect.h <= 680));
+  for (const c of rasterizer.calls) {
+    const page = plan.find((p) => inside(c, p));
+    assert.ok(page, "Each picture lies on a page");
+    // At least 200 pixels per inch as printed, within the canvas limit.
+    const pixels = Math.min(c.scale, c.maxSize / Math.max(c.rect.w, c.rect.h));
+    assert.ok(
+      (pixels / page.scale) * 72 >= 199,
+      `${(pixels / page.scale) * 72} ppi`,
+    );
+  }
 });
 
 test("SVG text keeps its measured width when the viewer lacks the font", () => {
@@ -2058,6 +2110,41 @@ test("a fit-to-content PDF of a very large board is drawn as several pictures, n
   assert.equal(calls.length, 1);
 });
 
+test("image PDF pages hold no more pixels than print needs", async () => {
+  const b = board("Spread out");
+  // A few notes far apart: fitted on one page, or split into readable
+  // detail, the area is reduced far below one point per board pixel.
+  b.items = [0, 1, 2, 3].map((n) =>
+    item("note", n * 20000, (n % 2) * 10000, { text: `Note ${n}` }),
+  );
+  const calls = [];
+  const tiny = async (board, rect, options) => {
+    calls.push({ rect, ...options });
+    return createCanvas(2, 2);
+  };
+  for (const scale of ["fit", "auto"]) {
+    calls.length = 0;
+    const options = { pageSize: "a4", scale },
+      plan = pdfPlan(exportRegions(b), options);
+    await exportPDF(b, exportRegions(b), "en", tiny, options);
+    const pictures = calls.filter((c) => !c.transparent);
+    // Pixels drawn, against the printed area of every page at 400 pixels
+    // per inch (72 points to the inch).
+    const drawn = pictures.reduce((sum, c) => {
+        const s = Math.min(c.scale, c.maxSize / Math.max(c.rect.w, c.rect.h));
+        return sum + c.rect.w * s * (c.rect.h * s);
+      }, 0),
+      printed = plan.reduce(
+        (sum, page) =>
+          sum +
+          ((page.rect.w * page.scale * page.rect.h * page.scale) / 72 ** 2) *
+            400 ** 2,
+        0,
+      );
+    assert.ok(drawn <= printed * 1.01, `${scale}: ${drawn} > ${printed}`);
+  }
+});
+
 test("UML, BPMN and ERD connector ends validate and export as drawn", () => {
   const b = board("Ends");
   b.items = [
@@ -2238,4 +2325,607 @@ test("SVG and vector PDF draw a shape's set border inside its outline, as the bo
   const content = contentText(pdf);
   for (const dash of ["[16 12] 0 d", "[0.1 15] 0 d", "[8 6] 0 d", "[12 9] 0 d"])
     assert.ok(content.includes(dash), dash);
+});
+
+test("download names keep a title's dots and words and never split a character", async () => {
+  const { fileName } = await import("../src/file-name.js");
+  assert.equal(
+    fileName('Q3 Plan v1.2 / Café & "Co" <test>', "Whiteboard"),
+    "Q3 Plan v1.2 Café & Co test",
+  );
+  assert.equal(fileName("版本 1.0 — 計画", "Whiteboard"), "版本 1.0 計画");
+  assert.equal(fileName("...hidden.", "Whiteboard"), "hidden");
+  assert.equal(fileName("Réunion d’équipe", "Whiteboard"), "Réunion d’équipe");
+  assert.equal(fileName("???", "Whiteboard"), "Whiteboard");
+  assert.equal(fileName("", "Frame"), "Frame");
+  const long = fileName("a" + "\u{20000}".repeat(120), "Whiteboard");
+  assert.equal(Array.from(long).length, 100);
+  assert.ok(!long.includes("\ufffd") && long.isWellFormed());
+  assert.equal(fileName("a\u0000b\tc:d*e|f", "x"), "a b c d e f");
+});
+
+test("long exports report each slide and give the page its turn", async () => {
+  const b = fromTemplate("journey", "en"),
+    regions = exportRegions(b, { scope: "frames" }),
+    steps = [];
+  await exportPPTX(b, regions, {
+    rasterizer,
+    progress: (n, total) => steps.push(`${n}/${total}`),
+  });
+  assert.ok(steps.length > 1);
+  assert.deepEqual(
+    steps,
+    steps.map((_, n) => `${n + 1}/${steps.length}`),
+  );
+  // A task queued before a turn runs before the export goes on.
+  let ran = false;
+  setTimeout(() => (ran = true), 0);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  ran = false;
+  setTimeout(() => (ran = true), 0);
+  await breathe();
+  assert.ok(ran);
+});
+
+// A board with each kind of web link: a turned link card, an embed card,
+// and a linked word in a note.
+function linkedBoard() {
+  const b = board("Links");
+  b.items = [
+    {
+      ...item("link", 0, 0, {
+        w: 320,
+        h: 115,
+        url: "https://example.com/a?b=1&c=(2",
+        text: "Example",
+      }),
+      rotation: 30,
+    },
+    item("embed", 400, 0, {
+      w: 480,
+      h: 300,
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      provider: "youtube",
+      text: "Video",
+    }),
+    item("note", 0, 400, {
+      w: 300,
+      h: 200,
+      text: "Read the spec today",
+      textRuns: [
+        { start: 9, end: 13, style: { link: "https://example.com/spec" } },
+      ],
+    }),
+  ];
+  validateBoard(b);
+  return b;
+}
+
+test("PDF pages keep web links clickable", async () => {
+  const b = linkedBoard();
+  for (const mode of ["raster", "vector"]) {
+    const doc = await PDFDocument.load(
+      await blobBytes(
+        await exportPDF(b, exportRegions(b), "en", rasterizer, {
+          mode,
+          scale: "fit",
+        }),
+      ),
+    );
+    const [page] = doc.getPages(),
+      { width, height } = page.getSize();
+    const links = page.node
+      .Annots()
+      .asArray()
+      .map((ref) => doc.context.lookup(ref))
+      .filter((a) => a.get(PDFName.of("Subtype"))?.toString() === "/Link")
+      .map((a) => ({
+        url:
+          a.get(PDFName.of("A")).get(PDFName.of("URI")).decodeText?.() ??
+          Buffer.from(
+            a.get(PDFName.of("A")).get(PDFName.of("URI")).asString(),
+            "hex",
+          ).toString("latin1"),
+        rect: a
+          .get(PDFName.of("Rect"))
+          .asArray()
+          .map((n) => n.asNumber()),
+        quad: !!a.get(PDFName.of("QuadPoints")),
+      }));
+    assert.deepEqual(
+      links.map((l) => l.url).sort(),
+      [
+        "https://example.com/a?b=1&c=(2",
+        "https://example.com/spec",
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      ],
+      mode,
+    );
+    for (const { rect } of links) {
+      assert.ok(rect[0] >= 0 && rect[2] <= width && rect[0] < rect[2]);
+      assert.ok(rect[1] >= 0 && rect[3] <= height && rect[1] < rect[3]);
+    }
+    // Only the turned card is a quadrilateral; the word is narrower than
+    // its note's card.
+    assert.deepEqual(
+      links.map((l) => l.quad),
+      links.map((l) => l.url.includes("(2")),
+    );
+    const word = links.find((l) => l.url.endsWith("/spec")).rect,
+      card = links.find((l) => l.url.includes("(2")).rect;
+    assert.ok(word[2] - word[0] < (card[2] - card[0]) / 2);
+  }
+  // A region cutting the turned card keeps its link to the region, with no
+  // quadrilateral reaching past it, which viewers would ignore.
+  const cut = await PDFDocument.load(
+    await blobBytes(
+      await exportPDF(
+        b,
+        exportRegions(b, {
+          scope: "selection",
+          region: { x: 100, y: -100, w: 900, h: 800 },
+        }),
+        "en",
+        rasterizer,
+        { scale: "fit" },
+      ),
+    ),
+  );
+  const turned = cut
+    .getPages()[0]
+    .node.Annots()
+    .asArray()
+    .map((ref) => cut.context.lookup(ref))
+    .find(
+      (a) =>
+        a.get(PDFName.of("A"))?.get(PDFName.of("URI")) &&
+        Buffer.from(
+          a.get(PDFName.of("A")).get(PDFName.of("URI")).asString(),
+          "hex",
+        )
+          .toString("latin1")
+          .includes("(2"),
+    );
+  assert.ok(turned, "The cut card keeps its link");
+  assert.equal(turned.get(PDFName.of("QuadPoints")), undefined);
+});
+
+test("PDF overviews, page labels and bookmarks go to their pages", async () => {
+  const pageLinks = (doc) => {
+    const pages = doc.getPages(),
+      number = new Map(pages.map((p, n) => [p.ref.toString(), n + 1]));
+    return pages.map((page) =>
+      (page.node.Annots()?.asArray() || [])
+        .map((ref) => doc.context.lookup(ref))
+        .filter((a) => a.get(PDFName.of("Dest")))
+        .map((a) => number.get(a.get(PDFName.of("Dest")).get(0).toString())),
+    );
+  };
+  // One large area: an overview, then a page per part reached.
+  const wide = board("Wide");
+  wide.items = Array.from({ length: 6 }, (_, n) =>
+    item("note", n * 1100, 0, { text: `Part ${n}` }),
+  );
+  const plan = pdfPlan(exportRegions(wide), {});
+  assert.equal(plan[0].kind, "overview");
+  let doc = await PDFDocument.load(
+    await blobBytes(
+      await exportPDF(wide, exportRegions(wide), "en", rasterizer, {}),
+    ),
+  );
+  const links = pageLinks(doc);
+  // Each part on the overview goes to its page.
+  assert.deepEqual(
+    links[0].sort((p, q) => p - q),
+    plan.slice(1).map((p) => p.index),
+  );
+  // Each part's page names its neighbours, and goes to them.
+  for (const page of plan.slice(1))
+    assert.deepEqual(
+      links[page.index - 1].sort((p, q) => p - q),
+      Object.values(page.neighbors)
+        .filter(Boolean)
+        .sort((p, q) => p - q),
+    );
+  // A single area has no bookmarks.
+  assert.equal(doc.catalog.get(PDFName.of("Outlines")), undefined);
+  // A web link on the overview lies over a part's link to its page, and
+  // comes after it, as viewers take the last link under a click.
+  wide.items.push(
+    item("link", 0, 300, {
+      w: 320,
+      h: 115,
+      url: "https://example.com/",
+      text: "Example",
+    }),
+  );
+  doc = await PDFDocument.load(
+    await blobBytes(
+      await exportPDF(wide, exportRegions(wide), "en", rasterizer, {}),
+    ),
+  );
+  const kinds = doc
+    .getPages()[0]
+    .node.Annots()
+    .asArray()
+    .map((ref) =>
+      doc.context.lookup(ref).get(PDFName.of("Dest")) ? "page" : "web",
+    );
+  assert.ok(kinds.includes("web"));
+  assert.equal(kinds.indexOf("web"), kinds.lastIndexOf("page") + 1);
+  // Without page boundaries and labels, nothing is drawn to click.
+  doc = await PDFDocument.load(
+    await blobBytes(
+      await exportPDF(wide, exportRegions(wide), "en", rasterizer, {
+        markers: false,
+      }),
+    ),
+  );
+  assert.deepEqual(pageLinks(doc).flat(), []);
+
+  // Several frames are bookmarked by name at their first pages.
+  const frames = board("Frames");
+  frames.items = ["Ideas", "Plan", "Équipe"].map((text, n) =>
+    item("frame", n * 900, 0, { w: 800, h: 600, text }),
+  );
+  doc = await PDFDocument.load(
+    await blobBytes(
+      await exportPDF(
+        frames,
+        exportRegions(frames, { scope: "frames" }),
+        "en",
+        rasterizer,
+        { scale: "fit" },
+      ),
+    ),
+  );
+  const outline = doc.context.lookup(doc.catalog.get(PDFName.of("Outlines")));
+  assert.equal(outline.get(PDFName.of("Count")).asNumber(), 3);
+  const titles = [],
+    targets = [],
+    number = new Map(doc.getPages().map((p, n) => [p.ref.toString(), n + 1]));
+  for (
+    let entry = doc.context.lookup(outline.get(PDFName.of("First")));
+    entry;
+    entry = entry.get(PDFName.of("Next"))
+      ? doc.context.lookup(entry.get(PDFName.of("Next")))
+      : null
+  ) {
+    titles.push(entry.get(PDFName.of("Title")).decodeText());
+    targets.push(number.get(entry.get(PDFName.of("Dest")).get(0).toString()));
+  }
+  assert.deepEqual(titles, ["Ideas", "Plan", "Équipe"]);
+  assert.deepEqual(targets, [1, 2, 3]);
+  assert.equal(
+    doc.catalog.get(PDFName.of("PageMode")).toString(),
+    "/UseOutlines",
+  );
+});
+
+test("SVG exports keep web links clickable", () => {
+  const b = linkedBoard(),
+    svg = exportSVG(b, exportRegions(b)),
+    doc = new JSDOM(svg, { contentType: "image/svg+xml" }).window.document;
+  assert.equal(doc.querySelector("parsererror"), null);
+  const links = [...doc.getElementsByTagName("a")].map((a) => ({
+    href: a.getAttribute("href"),
+    legacy: a.getAttributeNS("http://www.w3.org/1999/xlink", "href"),
+    title: a.querySelector("title").textContent,
+    turned: a.querySelector("rect").hasAttribute("transform"),
+  }));
+  assert.deepEqual(links, [
+    {
+      href: "https://example.com/a?b=1&c=(2",
+      legacy: "https://example.com/a?b=1&c=(2",
+      title: "Example",
+      turned: true,
+    },
+    {
+      href: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      legacy: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      title: "Video",
+      turned: false,
+    },
+    {
+      href: "https://example.com/spec",
+      legacy: "https://example.com/spec",
+      title: "spec",
+      turned: false,
+    },
+  ]);
+  // Several frames keep each frame's links.
+  const framed = board("Framed");
+  const frame = item("frame", -50, -50, { w: 1000, h: 700, text: "All" });
+  framed.items = [
+    frame,
+    ...linkedBoard().items.map((i) => ({ ...i, parentId: frame.id })),
+    item("frame", 1200, 0, { w: 400, h: 300, text: "None" }),
+  ];
+  const many = exportSVG(framed, exportRegions(framed, { scope: "frames" }));
+  assert.equal(many.match(/<a /g).length, 3);
+});
+
+test("PowerPoint slides keep web links clickable", async () => {
+  const b = linkedBoard();
+  const entries = readZip(
+    await blobBytes(await exportPPTX(b, exportRegions(b), { rasterizer })),
+  );
+  const text = checkPackage(entries);
+  const all = (node, name) => [...node.getElementsByTagNameNS("*", name)];
+  const slide = parseXML(text("ppt/slides/slide1.xml")),
+    relations = parseXML(text("ppt/slides/_rels/slide1.xml.rels"));
+  const targets = new Map(
+    all(relations, "Relationship").map((r) => [
+      r.getAttribute("Id"),
+      r.getAttribute("TargetMode") === "External" && r.getAttribute("Target"),
+    ]),
+  );
+  const [picture] = all(slide, "pic"),
+    [pictureBox] = all(picture, "off"),
+    [pictureSize] = all(picture, "ext");
+  const area = {
+    x: +pictureBox.getAttribute("x"),
+    y: +pictureBox.getAttribute("y"),
+    w: +pictureSize.getAttribute("cx"),
+    h: +pictureSize.getAttribute("cy"),
+  };
+  const links = all(slide, "hlinkClick").map((link) => {
+    const shape = link.parentNode.parentNode.parentNode,
+      [off] = all(shape, "off"),
+      [ext] = all(shape, "ext"),
+      [box] = all(shape, "xfrm");
+    return {
+      url: targets.get(link.getAttribute("r:id")),
+      name: link.parentNode.getAttribute("descr"),
+      x: +off.getAttribute("x"),
+      y: +off.getAttribute("y"),
+      w: +ext.getAttribute("cx"),
+      h: +ext.getAttribute("cy"),
+      rot: box.getAttribute("rot"),
+      // Clear, yet taking clicks across the shape.
+      clear: all(shape, "alpha")[0]?.getAttribute("val"),
+    };
+  });
+  assert.deepEqual(
+    links.map(({ url, name, rot, clear }) => ({ url, name, rot, clear })),
+    [
+      {
+        url: "https://example.com/a?b=1&c=(2",
+        name: "Example",
+        rot: String(30 * 60000),
+        clear: "0",
+      },
+      {
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        name: "Video",
+        rot: null,
+        clear: "0",
+      },
+      {
+        url: "https://example.com/spec",
+        name: "spec",
+        rot: null,
+        clear: "0",
+      },
+    ],
+  );
+  // Unturned links lie on the board's picture.
+  for (const l of links.filter((l) => !l.rot)) {
+    assert.ok(l.x >= area.x - 1 && l.x + l.w <= area.x + area.w + 1);
+    assert.ok(l.y >= area.y - 1 && l.y + l.h <= area.y + area.h + 1);
+  }
+  // Shape ids stay unique on the slide.
+  const ids = all(slide, "cNvPr").map((c) => c.getAttribute("id"));
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("spreadsheet exports list the addresses of linked words", async () => {
+  const b = linkedBoard();
+  b.items[2].textRuns.push({
+    start: 0,
+    end: 4,
+    style: { link: "https://example.com/read" },
+  });
+  const rows = spreadsheetModel(b, exportRegions(b))[0].rows,
+    url = rows[0].indexOf("URL");
+  const byText = new Map(rows.slice(1).map((row) => [row[1], row[url]]));
+  assert.equal(byText.get("Example"), "https://example.com/a?b=1&c=(2");
+  assert.equal(
+    byText.get("Read the spec today"),
+    "https://example.com/read\nhttps://example.com/spec",
+  );
+  // CSV quotes the line break inside the cell.
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+    await blobBytes(exportCSV(b, exportRegions(b))),
+  );
+  assert.match(
+    text,
+    /,"https:\/\/example\.com\/read\nhttps:\/\/example\.com\/spec",/,
+  );
+});
+
+test("long slide picture descriptions end at a word and say they go on", async () => {
+  const b = board("Many notes");
+  const frame = item("frame", 0, 0, { w: 1600, h: 900, text: "Wall" });
+  b.items = [
+    frame,
+    ...Array.from({ length: 150 }, (_, n) =>
+      item("note", 20 + (n % 15) * 100, 60 + Math.floor(n / 15) * 80, {
+        w: 90,
+        h: 70,
+        text: `Note ${n} 😀`,
+        parentId: frame.id,
+      }),
+    ),
+  ];
+  const entries = readZip(
+    await blobBytes(
+      await exportPPTX(b, exportRegions(b, { scope: "frames" }), {
+        rasterizer,
+      }),
+    ),
+  );
+  const slide = parseXML(checkPackage(entries)("ppt/slides/slide1.xml")),
+    descr = [...slide.getElementsByTagNameNS("*", "cNvPr")]
+      .find((c) => c.parentNode.parentNode.localName === "pic")
+      .getAttribute("descr");
+  assert.ok(descr.length <= 1000, descr.length);
+  assert.ok(descr.endsWith("…"));
+  assert.ok(descr.isWellFormed());
+  // The last word before the ellipsis is whole.
+  assert.match(descr, /(😀|Note|\d+)…$/);
+  assert.doesNotMatch(descr, /Not…$|No…$/);
+});
+
+test("PDF text in any script can be found, copied and read aloud", async () => {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const b = board("Scripts");
+  const frame = item("frame", 0, 0, {
+    w: 900,
+    h: 600,
+    text: "日本語のフレーム",
+  });
+  b.items = [
+    frame,
+    item("note", 60, 80, {
+      text: "Привет мир и ελληνικά, café 👩‍💻",
+      parentId: frame.id,
+    }),
+    item("note", 360, 80, { text: "Plain note", parentId: frame.id }),
+    // More different characters than one of the text fonts holds.
+    item("text", 0, 700, {
+      w: 2000,
+      text: Array.from({ length: 300 }, (_, n) =>
+        String.fromCodePoint(0x4e00 + n),
+      ).join(""),
+    }),
+  ];
+  for (const mode of ["raster", "vector"]) {
+    const doc = await pdfjs.getDocument({
+      data: await blobBytes(
+        await exportPDF(b, exportRegions(b), "en", rasterizer, {
+          mode,
+          scale: "fit",
+          measure,
+        }),
+      ),
+      disableFontFace: true,
+      verbosity: 0,
+    }).promise;
+    const text = (await (await doc.getPage(1)).getTextContent()).items
+      .map((t) => t.str)
+      .join("");
+    for (const part of [
+      "日本語のフレーム",
+      "Привет",
+      "ελληνικά",
+      "café",
+      "👩‍💻",
+      "Plain note",
+      String.fromCodePoint(0x4e00),
+      String.fromCodePoint(0x4e00 + 299),
+    ])
+      assert.ok(text.includes(part), `${mode}: ${part}`);
+    assert.doesNotMatch(text, /\ufffd/);
+  }
+});
+
+test("SVG exports carry the font files their text uses", async () => {
+  const b = board("Fonts");
+  b.items = [
+    item("note", 0, 0, { text: "Handwritten", fontFamily: "caveat" }),
+    item("text", 0, 250, {
+      w: 400,
+      text: "Bold words",
+      textRuns: [{ start: 0, end: 4, style: { bold: true } }],
+    }),
+  ];
+  const fonts = new Map(
+    [
+      "Caveat|400|normal",
+      "Caveat|600|normal",
+      "DM Sans|400|normal",
+      "DM Sans|600|normal",
+      "DM Sans|400|italic",
+      "EB Garamond|400|normal",
+    ].map((key) => [key, `data:font/woff2;base64,${btoa(key)}`]),
+  );
+  const svg = exportSVG(b, exportRegions(b), { fonts });
+  const faces = [
+    ...svg.matchAll(
+      /@font-face\{font-family:"([^"]+)";font-weight:(\d+);font-style:(\w+);src:url\(data:font\/woff2;base64,([^)]+)\)/g,
+    ),
+  ].map((m) => `${m[1]}|${m[2]}|${m[3]}`);
+  // Only what is used, each once.
+  assert.deepEqual(faces, [
+    "Caveat|400|normal",
+    "DM Sans|400|normal",
+    "DM Sans|600|normal",
+  ]);
+  const doc = new JSDOM(svg, { contentType: "image/svg+xml" }).window.document;
+  assert.equal(doc.querySelector("parsererror"), null);
+  // Italic Caveat has no file of its own: the upright face goes, for the
+  // viewer to slant as the canvas does; a weight without a file takes the
+  // nearest.
+  b.items = [
+    item("note", 0, 0, {
+      text: "Slanted",
+      fontFamily: "caveat",
+      textRuns: [{ start: 0, end: 7, style: { italic: true } }],
+    }),
+  ];
+  const slanted = exportSVG(b, exportRegions(b), {
+    fonts: new Map([
+      ["Caveat|400|normal", "data:font/woff2;base64,AA=="],
+      ["Caveat|600|normal", "data:font/woff2;base64,AQ=="],
+      ["DM Sans|400|normal", "data:font/woff2;base64,Ag=="],
+    ]),
+  });
+  assert.match(slanted, /font-style="italic"/);
+  assert.deepEqual(
+    [
+      ...slanted.matchAll(
+        /font-family:"([^"]+)";font-weight:(\d+);font-style:(\w+)/g,
+      ),
+    ].map((m) => m.slice(1).join("|")),
+    ["Caveat|400|normal"],
+  );
+  // Without fonts to embed, the file only names them, as before.
+  assert.doesNotMatch(exportSVG(b, exportRegions(b)), /@font-face|<style>/);
+});
+
+test("the font files for an SVG come from the page's own font faces", async () => {
+  const { fontFiles } = await import("../src/svg-fonts.js");
+  const dom = new JSDOM(
+    `<style>
+      @font-face { font-family: "Caveat"; font-weight: 400; font-style: normal; src: url(/fonts/caveat-400.woff2) format("woff2"), url(/fonts/caveat-400.woff) format("woff"); }
+      @font-face { font-family: "DM Sans"; font-weight: 600; font-style: italic; src: url("/fonts/dm-600-italic.woff2") format("woff2"); }
+      @font-face { font-family: "Other"; src: url(/fonts/other.woff2); }
+    </style>`,
+    { url: "https://whiteboard.test/board" },
+  );
+  const asked = [];
+  const fetchBefore = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    asked.push(url);
+    if (url.includes("dm-600")) return { ok: false };
+    return {
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    };
+  };
+  try {
+    const files = await fontFiles(["Caveat", "DM Sans"], dom.window.document);
+    assert.deepEqual(asked.sort(), [
+      "https://whiteboard.test/fonts/caveat-400.woff2",
+      "https://whiteboard.test/fonts/dm-600-italic.woff2",
+    ]);
+    // A file that could not be read is left out.
+    assert.deepEqual(
+      [...files],
+      [["Caveat|400|normal", "data:font/woff2;base64,AQID"]],
+    );
+  } finally {
+    globalThis.fetch = fetchBefore;
+  }
 });

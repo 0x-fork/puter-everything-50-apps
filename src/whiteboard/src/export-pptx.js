@@ -1,7 +1,9 @@
 import { rasterRegion } from "./render.js";
-import { bounds } from "./model.js";
+import { bounds, truncate } from "./model.js";
 import { createZip, xml } from "./zip.js";
-import { textOf } from "./export-layout.js";
+import { textOf, breathe, measureContext } from "./export-layout.js";
+import { exportLinks } from "./export-links.js";
+import { rotatePoint } from "./geometry.js";
 import { canonicalLanguage } from "./accessibility/language-tag.js";
 import { appendRun, sliceTextRuns, textSegments } from "./rich-text.js";
 import { tableCellContent } from "./table-language.js";
@@ -37,11 +39,19 @@ const HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
 const REL =
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const TYPE = "application/vnd.openxmlformats-officedocument";
+// A picture's description, up to 1,000 characters: a longer one ends at
+// a word, never inside a character, and says it goes on.
+function shortDescription(text, limit = 1000) {
+  if (text.length <= limit) return text;
+  const cut = truncate(text, limit - 1),
+    space = cut.search(/\s\S*$/);
+  return `${(space > limit * 0.8 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
 const rels = (list) =>
   `${HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${list
     .map(
-      ([id, type, target]) =>
-        `<Relationship Id="${id}" Type="${type.includes("/") ? type : `${REL}/${type}`}" Target="${target}"/>`,
+      ([id, type, target, external]) =>
+        `<Relationship Id="${id}" Type="${type.includes("/") ? type : `${REL}/${type}`}" Target="${target}"${external ? ' TargetMode="External"' : ""}/>`,
     )
     .join("")}</Relationships>`;
 const group =
@@ -217,7 +227,7 @@ function slideSize(regions) {
 export async function exportPPTX(
   b,
   regions,
-  { lang = "en", rasterizer = rasterRegion, signal } = {},
+  { lang = "en", rasterizer = rasterRegion, signal, progress } = {},
 ) {
   const plan = regions.flatMap(slidePlan);
   if (plan.length > 200)
@@ -225,10 +235,13 @@ export async function exportPPTX(
   const language = lang === "fr" ? "fr-CA" : "en-CA";
   const size = slideSize(regions);
   const slides = [],
-    scenes = new WeakMap();
+    scenes = new WeakMap(),
+    measure = measureContext();
   for (const [n, slide] of plan.entries()) {
+    await breathe();
     // A cancelled export stops before its next slide.
     if (signal?.aborted) throw Error("Export cancelled.");
+    progress?.(n + 1, plan.length);
     const { region, tile } = slide,
       rect = tile || slide.rect;
     // A slide made on the board fills the slide, without the frame's own
@@ -254,6 +267,7 @@ export async function exportPPTX(
       ...slide,
       rect,
       fills,
+      links: exportLinks(items, measure),
       title: tile
         ? t("{title}, row {row} column {column}")
             .replace("{title}", region.name || t("Frame"))
@@ -401,7 +415,7 @@ export async function exportPPTX(
     data: rels([["rId1", "theme", "../theme/theme2.xml"]]),
   });
   slides.forEach(
-    ({ region, rect, title, png, notes, tiles, first, fills }, n) => {
+    ({ region, rect, title, png, notes, tiles, first, fills, links }, n) => {
       const scale = fills
           ? size.w / rect.w
           : Math.min(areaW / rect.w, areaH / rect.h),
@@ -411,8 +425,9 @@ export async function exportPPTX(
         top = fills ? 0 : PICTURE_Y + (areaH - h) / 2;
       const frame = b.items.find((i) => i.id === region.frameId);
       const titleContent = frame?.text === title ? frame : { text: title };
-      const descr =
-        `${title}. ${notes.map((line) => line.text).join(" ")}`.slice(0, 1000);
+      const descr = shortDescription(
+        `${title}. ${notes.map((line) => line.text).join(" ")}`,
+      );
       // An overview outlines each part shown on a slide of its own, with
       // that slide's number, which leads to it.
       const parts = (tiles || [])
@@ -427,12 +442,48 @@ export async function exportPPTX(
           );
         })
         .join("");
+      // Web links stay clickable in a slide show: a clear shape over each
+      // link card, embed card and linked word, cut to the picture, linked
+      // to its address. A fill fully transparent, rather than none, takes
+      // clicks across the whole shape.
+      const linked = [];
+      for (const link of links) {
+        const centre = rotatePoint(
+            { x: link.x + link.w / 2, y: link.y + link.h / 2 },
+            link.center || { x: 0, y: 0 },
+            link.rotation,
+          ),
+          cx = left + (centre.x - rect.x) * scale,
+          cy = top + (centre.y - rect.y) * scale;
+        let x = cx - (link.w * scale) / 2,
+          y = cy - (link.h * scale) / 2,
+          right = x + link.w * scale,
+          bottom = y + link.h * scale;
+        if (!link.rotation) {
+          x = Math.max(x, left);
+          y = Math.max(y, top);
+          right = Math.min(right, left + w);
+          bottom = Math.min(bottom, top + h);
+        } else if (cx < left || cx > left + w || cy < top || cy > top + h)
+          continue;
+        // Narrower than a point, or off the slide's picture.
+        if (right - x < 12700 || bottom - y < 12700) continue;
+        linked.push({ link, x, y, w: right - x, h: bottom - y });
+      }
+      const firstLink = 4 + (tiles?.length || 0),
+        firstShape = 4 + (tiles?.length || 0) * 2;
+      const linkShapes = linked
+        .map(
+          ({ link, x, y, w, h }, k) =>
+            `<p:sp><p:nvSpPr><p:cNvPr id="${firstShape + k}" name="${xml(t("Link"))}" descr="${xml(link.text)}"><a:hlinkClick r:id="rId${firstLink + k}"/></p:cNvPr><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>${xfrm(x, y, w, h).replace("<a:xfrm>", link.rotation ? `<a:xfrm rot="${Math.round(link.rotation * 60000)}">` : "<a:xfrm>")}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr></p:sp>`,
+        )
+        .join("");
       entries.push({
         name: `ppt/slides/slide${n + 1}.xml`,
         data:
           `${HEAD}<p:sld ${NS}><p:cSld><p:spTree>${group}${titleShape(titleContent, language, size.w, fills)}` +
           `<p:pic><p:nvPicPr><p:cNvPr id="3" name="${xml(t("Board image"))}" descr="${xml(descr)}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>${xfrm(left, top, w, h)}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>` +
-          `${parts}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`,
+          `${parts}${linkShapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`,
       });
       entries.push({
         name: `ppt/slides/_rels/slide${n + 1}.xml.rels`,
@@ -444,6 +495,12 @@ export async function exportPPTX(
             `rId${4 + k}`,
             "slide",
             `slide${first + k}.xml`,
+          ]),
+          ...linked.map(({ link }, k) => [
+            `rId${firstLink + k}`,
+            "hyperlink",
+            xml(link.url),
+            true,
           ]),
         ]),
       });

@@ -7244,7 +7244,7 @@ test("PNG export contains actual raster bytes and board rendering uses Canvas", 
     }
     assert.deepEqual(app.names.slice(1), [
       "नमस्ते दुनिया.png",
-      "Réunion déquipe.png",
+      "Réunion d’équipe.png",
     ]);
   } finally {
     await app.close();
@@ -26178,7 +26178,7 @@ test("an exact export region can be chosen without dragging, cancelled, and expo
     doc.querySelector("#region-x").value = "500";
     doc.querySelector("dialog").close();
     await click('[data-action="export"]');
-    doc.querySelector("#export-scope").value = "selection";
+    doc.querySelector("#export-scope").value = "region";
     doc.querySelector("#export-scope").dispatchEvent(new w.Event("change"));
     doc.querySelector("#export-format").value = "svg";
     doc.querySelector("#export-format").dispatchEvent(new w.Event("change"));
@@ -26207,7 +26207,7 @@ test("a region tool tap keeps the previous region without a false confirmation",
       await app.click('[data-action="export"]');
       const dialog = doc.querySelector("dialog[open]");
       const available = [...dialog.querySelectorAll("option")].some(
-        (o) => o.value === "selection" && !o.disabled,
+        (o) => o.value === "region" && !o.disabled,
       );
       dialog.close();
       return available;
@@ -26274,8 +26274,8 @@ test("joining a shared board from the editor starts without the previous export 
     assert.equal(doc.querySelector("#board-title").value, "Joined");
     await app.click('[data-action="export"]');
     assert.equal(
-      doc.querySelector('#export-scope option[value="selection"]').disabled,
-      true,
+      doc.querySelector('#export-scope option[value="region"]'),
+      null,
     );
   } finally {
     await app.close();
@@ -28114,6 +28114,68 @@ test("the export dialog counts no pages without a frame", async () => {
   }
 });
 
+test("the export dialog says when readable detail is shown smaller", async () => {
+  const app = await setup();
+  const { click, doc, w } = app;
+  try {
+    // Notes far apart need more pages at a readable scale than a PDF holds.
+    await rotationFixture(
+      app,
+      Array.from({ length: 200 }, (_, n) =>
+        item("note", (n % 20) * 15000, Math.floor(n / 20) * 15000, {
+          text: `Note ${n}`,
+        }),
+      ),
+    );
+    await click('[data-action="export"]');
+    const estimate = () => doc.querySelector("#pdf-estimate").textContent;
+    assert.match(
+      estimate(),
+      /^Estimated length: \d+ pages\. Detail is shown at \d+% to keep the export to a reasonable length\. Export frames or a selected region for more detail\.$/,
+    );
+    // A fixed scale or one page says nothing of it.
+    const scale = doc.querySelector("#pdf-scale");
+    scale.value = "fit";
+    scale.dispatchEvent(new w.Event("change", { bubbles: true }));
+    assert.equal(estimate(), "Estimated length: 1 page.");
+  } finally {
+    await app.close();
+  }
+});
+
+test("the export dialog chooses all frames or none at once", async () => {
+  const app = await setup();
+  const { click, doc, w } = app;
+  try {
+    await rotationFixture(app, [
+      item("frame", 0, 0, { w: 400, h: 300, text: "One" }),
+      item("frame", 500, 0, { w: 400, h: 300, text: "Two" }),
+      item("frame", 1000, 0, { w: 400, h: 300, text: "Three" }),
+    ]);
+    await click('[data-action="export"]');
+    const actions = doc.querySelector("#export-frame-actions"),
+      boxes = () =>
+        [...doc.querySelectorAll("#export-frames input")].map((i) => i.checked),
+      estimate = () => doc.querySelector("#pdf-estimate").textContent;
+    // Only with frames as the scope.
+    const scope = doc.querySelector("#export-scope");
+    scope.value = "board";
+    scope.dispatchEvent(new w.Event("change", { bubbles: true }));
+    assert.equal(actions.hidden, true);
+    scope.value = "frames";
+    scope.dispatchEvent(new w.Event("change", { bubbles: true }));
+    assert.equal(actions.hidden, false);
+    doc.querySelector("#export-frames-none").click();
+    assert.deepEqual(boxes(), [false, false, false]);
+    assert.equal(estimate(), "Choose at least one frame.");
+    doc.querySelector("#export-frames-all").click();
+    assert.deepEqual(boxes(), [true, true, true]);
+    assert.equal(estimate(), "Estimated length: 3 pages.");
+  } finally {
+    await app.close();
+  }
+});
+
 test("selected frames export as those frames by default", async () => {
   for (const outside of [false, true]) {
     const app = await setup();
@@ -28145,6 +28207,30 @@ test("selected frames export as those frames by default", async () => {
         doc.querySelector("#pdf-estimate").textContent,
         "Estimated length: 2 pages.",
       );
+      // The help says what the chosen scale and page size do, and is read
+      // out with the format and scale fields.
+      for (const field of ["#export-format", "#pdf-scale"])
+        assert.equal(
+          doc.querySelector(field).getAttribute("aria-describedby"),
+          "export-help",
+        );
+      const help = () => doc.querySelector("#export-help").textContent,
+        choose = (selector, value) => {
+          const field = doc.querySelector(selector);
+          field.value = value;
+          field.dispatchEvent(new app.w.Event("change", { bubbles: true }));
+        };
+      assert.match(help(), /^Each area prints on one page, reduced to fit/);
+      choose("#pdf-scale", "50");
+      assert.match(help(), /split across pages at 50%/);
+      choose("#pdf-scale", "auto");
+      assert.match(help(), /at a readable scale/);
+      choose("#pdf-page-size", "fit");
+      assert.equal(
+        help(),
+        "Each area prints on one page sized to its content.",
+      );
+      choose("#pdf-page-size", "a4");
       // The PowerPoint help says how a large area is split.
       const format = doc.querySelector("#export-format");
       format.value = "pptx";
@@ -31021,7 +31107,7 @@ test("CSV table choices preserve authored header languages and export the select
   try {
     const { selected } = await rotationFixture(app, tables);
     await showCSV();
-    const check = (prefix) => {
+    const check = (prefix, colon = ": ") => {
       const group = doc.querySelector("#export-sheet");
       const french = [...group.querySelectorAll("option, label")].find((el) =>
         el.textContent.includes("Bonjour à tous."),
@@ -31035,7 +31121,7 @@ test("CSV table choices preserve authored header languages and export the select
         "the French header has its own language, separate from the interface prefix",
       );
       assert.equal(content.getAttribute("lang"), "fr-CA");
-      assert.ok(french.textContent.startsWith(`${prefix} 1: `));
+      assert.ok(french.textContent.startsWith(`${prefix} 1${colon}`));
       assert.equal(french.hasAttribute("lang"), false);
       assert.equal(group.querySelector("img"), null);
       assert.ok(french.textContent.includes('<img src="bad">'));
@@ -31073,7 +31159,8 @@ test("CSV table choices preserve authored header languages and export the select
     doc.querySelector("#language").dispatchEvent(new w.Event("change"));
     await tick();
     await showCSV();
-    check("Tableau de données");
+    // French sets its colon apart, as elsewhere in the interface.
+    check("Tableau de données", " : ");
     assert.equal(
       doc.querySelector("#sheet-choice legend").textContent,
       "Contenu de la feuille de calcul",
@@ -45119,6 +45206,26 @@ test("the export dialog offers a drawn region as its own scope", async () => {
     assert.ok(option, "a drawn region can be chosen on its own");
     assert.equal(option.disabled, false);
     assert.equal(option.textContent, "Export region");
+    // Drawn to be exported, it is what the dialog starts with; selected
+    // objects are a choice of their own.
+    assert.equal(doc.querySelector("#export-scope").value, "region");
+    const selection = doc.querySelector(
+      '#export-scope option[value="selection"]',
+    );
+    assert.equal(selection.textContent, "Selected objects");
+    assert.equal(selection.disabled, true);
+    // Objects selected after the region was drawn are what is chosen now.
+    doc.querySelector("dialog[open]").close();
+    const paste = new w.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: transferData(
+        clipboardFormats([item("note", 0, 0, { text: "Later" })]),
+      ),
+    });
+    doc.querySelector("#canvas").dispatchEvent(paste);
+    await a.tick();
+    await a.click('[data-action="export"]');
+    assert.equal(doc.querySelector("#export-scope").value, "selection");
   } finally {
     await a.close();
   }

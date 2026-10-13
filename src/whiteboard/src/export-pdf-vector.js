@@ -1,3 +1,4 @@
+import { createUnicodeText } from "./pdf-unicode-text.js";
 import {
   StandardFonts,
   rgb,
@@ -90,6 +91,7 @@ export function createVectorContext(pdf, b, { ctx, rasterFallback }) {
     rasters = new Map();
   return {
     pdf,
+    unicode: createUnicodeText(pdf),
     b,
     ctx,
     rasterFallback,
@@ -260,15 +262,15 @@ function painter(page, context, invisible = false) {
       .replace(/[\r\n\u00ad]/g, "");
     if (!value || !value.trim()) return;
     const { font, chars } = await context.font(style);
-    // Hidden text keeps what the standard fonts can encode; the picture
-    // beneath shows the rest.
-    if (hidden) {
-      value = Array.from(value)
-        .filter((c) => chars.has(c.codePointAt(0)))
-        .join("");
-      if (!/[\p{L}\p{N}]/u.test(value)) return;
-    }
     const y = -(top + baselineOffset(context.ctx, style.font));
+    // Hidden text the standard fonts cannot encode, such as Cyrillic or
+    // Japanese, is written in fonts that can, for search, copying and
+    // screen readers; the picture beneath shows it.
+    if (hidden && Array.from(value).some((c) => !chars.has(c.codePointAt(0)))) {
+      if (/[\p{L}\p{N}]/u.test(value))
+        context.unicode.draw(page, value, x, y, style.size, width);
+      return;
+    }
     const natural = font.widthOfTextAtSize(value, style.size);
     const squeeze =
       width && natural > 0
@@ -873,21 +875,35 @@ async function drawRasterObject(page, i, rect, placement, scale, context, box) {
   // box further the wider the line is; its label is already in the box.
   const t = i.type === "arrow" ? i.lineWidth || 2.5 : 0,
     pad = Math.ceil(Math.max(12, t + 4, (9 + t * 1.2) * 0.48 + t / 2 + 2)),
-    area = {
+    whole = {
       x: box.x - pad,
       y: box.y - pad,
       w: box.w + pad * 2,
       h: box.h + pad * 2,
     };
-  if (!context.rasters.has(i.id))
+  // Only the part the page shows is drawn, at the page's resolution: one
+  // picture of a large object would be too coarse on a detailed page. An
+  // object wholly on its page is drawn once for every page that shows it
+  // at that scale.
+  const left = Math.max(whole.x, rect.x),
+    top = Math.max(whole.y, rect.y),
+    area = {
+      x: left,
+      y: top,
+      w: Math.min(whole.x + whole.w, rect.x + rect.w) - left,
+      h: Math.min(whole.y + whole.h, rect.y + rect.h) - top,
+    };
+  if (area.w <= 0 || area.h <= 0) return;
+  const key = `${i.id} ${scale} ${area.x} ${area.y} ${area.w} ${area.h}`;
+  if (!context.rasters.has(key))
     context.rasters.set(
-      i.id,
+      key,
       (async () => {
-        const canvas = await context.rasterFallback(i, area);
+        const canvas = await context.rasterFallback(i, area, scale);
         return context.pdf.embedPng(await rasterPNG(canvas));
       })(),
     );
-  const png = await context.rasters.get(i.id);
+  const png = await context.rasters.get(key);
   page.drawImage(png, {
     x: placement.x + (area.x - rect.x) * scale,
     y: placement.y - (area.y - rect.y + area.h) * scale,

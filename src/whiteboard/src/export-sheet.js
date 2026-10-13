@@ -4,6 +4,7 @@ import { createZip, xml } from "./zip.js";
 import { textOf } from "./export-layout.js";
 import { addTranslations, objectKind, t } from "./i18n.js";
 import { STATUS_LABELS, PRIORITY_LABELS } from "./planning/task.js";
+import { textLinks } from "./text-link-data.js";
 
 addTranslations({
   Type: "Type",
@@ -69,6 +70,16 @@ function taskValue(i, key) {
       : undefined;
 }
 const round = (n) => Math.round(n * 100) / 100;
+// An object's own address, then those of its linked words, one a line.
+const urlsOf = (i) =>
+  [
+    ...new Set([
+      ...(i.url ? [i.url] : []),
+      ...textLinks(i.text, i.textRuns || [])
+        .sort((a, c) => a.start - c.start)
+        .map((link) => link.url),
+    ]),
+  ].join("\n");
 function typeName(i) {
   if (i.type === "rect")
     return t(SHAPES.find((s) => s.key === (i.shape || "rectangle")).name);
@@ -84,6 +95,8 @@ function typeName(i) {
       file: "File",
       table: "Table",
       frame: "Frame",
+      image: "Image",
+      pen: "Drawing",
     }[i.type] || i.type,
   );
 }
@@ -111,8 +124,14 @@ export function spreadsheetModel(b, regions, added = []) {
   const frames = orderedFrames(all),
     frameRank = new Map(frames.map((f, n) => [f.id, n]));
   const tagNames = new Map((b.tags || []).map((tag) => [tag.id, tag.name]));
+  // Images and drawings are listed by their descriptions.
+  const described = (i) => ["image", "pen"].includes(i.type) && i.alt;
   const objects = items
-    .filter((i) => TEXT_TYPES.has(i.type) && (i.type !== "arrow" || i.text))
+    .filter(
+      (i) =>
+        (TEXT_TYPES.has(i.type) && (i.type !== "arrow" || i.text)) ||
+        described(i),
+    )
     .sort(
       (a, c) =>
         (frameRank.get(a.parentId) ?? Infinity) -
@@ -149,7 +168,7 @@ export function spreadsheetModel(b, regions, added = []) {
         ),
       ...objects.map((i) => [
         typeName(i),
-        textOf(i),
+        described(i) ? i.alt : textOf(i),
         byId.get(i.parentId)?.text || "",
         (i.tagIds || [])
           .map((id) => tagNames.get(id))
@@ -160,7 +179,7 @@ export function spreadsheetModel(b, regions, added = []) {
         round(i.y),
         round(Math.abs(i.w)),
         round(Math.abs(i.h)),
-        i.url || "",
+        urlsOf(i),
         ...fields.map(([key]) => taskValue(i, key) ?? ""),
         i.id,
       ]),
@@ -244,19 +263,23 @@ export function toCSV(rows) {
   );
 }
 
+// A sheet with no row below its header holds nothing to export.
+const NOTHING = "Nothing to export as a spreadsheet in this area.";
 export function exportCSV(b, regions, key = "objects", added = []) {
   const sheet = spreadsheetModel(b, regions, added).find((s) => s.key === key);
   if (!sheet)
     throw Error(
       key.startsWith("table:")
         ? "This table is outside the export scope."
-        : "Nothing to export as a spreadsheet in this area.",
+        : NOTHING,
     );
+  if (sheet.rows.length < 2 && !sheet.cells) throw Error(NOTHING);
   return new Blob([toCSV(sheet.rows)], { type: "text/csv;charset=utf-8" });
 }
 
 export function exportXLSX(b, regions, added = []) {
   const sheets = spreadsheetModel(b, regions, added);
+  if (sheets.every((s) => s.rows.length < 2 && !s.cells)) throw Error(NOTHING);
   return new Blob([buildXLSX(sheets, { title: b.title })], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });

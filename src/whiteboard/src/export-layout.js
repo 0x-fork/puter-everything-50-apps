@@ -10,6 +10,7 @@ import { tableFont, tableFontSize, tableTextAlign } from "./table-sizing.js";
 import { tagFooter } from "./tags.js";
 import { fontFamily, fontStack } from "./fonts.js";
 import { linkColor, inkOver } from "./text-link-data.js";
+import { fileDetails } from "./file-details.js";
 import { connectorPath, connectorLabel } from "./connectors.js";
 import { imageLayout } from "./image-crop.js";
 import { SHAPE_COLORS, shapeBorder } from "./shape-specs.js";
@@ -121,6 +122,19 @@ export class PathBuilder {
   }
 }
 
+// A long export gives the page a turn every so often, between pages or
+// slides, so its progress shows and closing the dialog can cancel it.
+let turn = 0;
+export async function breathe() {
+  const now = globalThis.performance?.now() ?? Date.now();
+  if (now - turn < 50) return;
+  // scheduler.yield resumes ahead of other tasks, without the 4 ms that
+  // repeated timers take.
+  await (globalThis.scheduler?.yield
+    ? globalThis.scheduler.yield()
+    : new Promise((resolve) => setTimeout(resolve, 0)));
+  turn = globalThis.performance?.now() ?? Date.now();
+}
 // A fresh measuring context per export; text layout caches are keyed by it.
 export function measureContext() {
   const ctx = globalThis.document?.createElement("canvas").getContext?.("2d");
@@ -447,7 +461,7 @@ export function cardLayout(i, ctx) {
   const lines = cachedWrapText(ctx, i.text || i.fileName || i.url || "", w - 32)
     .slice(0, 3)
     .map((text, n) => ({ text, x: 16, y: 16 + (n * labelSize * 4) / 3 }));
-  let host = i.fileName || "";
+  let host = i.type === "file" ? fileDetails(i) : "";
   if (i.type === "link")
     try {
       host = new URL(i.url).hostname;

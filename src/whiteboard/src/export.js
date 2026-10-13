@@ -3,7 +3,8 @@ import { mindVisibility } from "./mind-visibility.js";
 import { mindLines } from "./mind-map.js";
 import { orderedFrames, framesItems, isConnector } from "./scene.js";
 import { rasterRegion } from "./render.js";
-import { measureContext } from "./export-layout.js";
+import { measureContext, breathe } from "./export-layout.js";
+import { exportLinks, linkCorners } from "./export-links.js";
 import { addTranslations, t } from "./i18n.js";
 
 export function exportRegions(b, options = {}) {
@@ -310,6 +311,14 @@ const phrase = (lang, text, values = {}) =>
     (_, key) => values[key],
   );
 
+// The most pixels per inch a page's picture needs, as printed.
+const PRINT_PPI = 400;
+// Pixels per board pixel for a picture printed at `scale` points per board
+// pixel: two to four keep it sharp when zoomed, but never more than print
+// needs, as a large area reduced onto a page would otherwise take hundreds
+// of megapixels a page.
+const printPixels = (scale) =>
+  Math.min(4, Math.max(2, (scale * 200) / 72), (scale * PRINT_PPI) / 72);
 // Content area below the title band and above the footer labels, in PDF
 // coordinates (origin at the bottom left).
 const contentBox = ([width, height], m) => ({
@@ -381,7 +390,8 @@ export function pdfPlan(regions, options = {}) {
     let scale = fixed
         ? (0.75 * percent) / 100
         : Math.min(786 / 1040, 509 / 680),
-      tiles;
+      tiles,
+      reduce = 1;
     if (fixed) tiles = tileRegion(rect, box.w / scale, box.h / scale, boxes);
     else {
       const detail = readableTiles(
@@ -391,7 +401,8 @@ export function pdfPlan(regions, options = {}) {
         boxes,
       );
       tiles = detail.tiles;
-      scale *= detail.reduce;
+      reduce = detail.reduce;
+      scale *= reduce;
     }
     // Tiles widened by a small remainder still print inside the page.
     const inside = Math.min(
@@ -413,6 +424,8 @@ export function pdfPlan(regions, options = {}) {
       tiles,
       rows: tiles[0].rows,
       columns: tiles[0].columns,
+      // Readable detail shown smaller, to stay within the page limit.
+      reduce,
     };
     pages.push(overview);
     for (const tile of tiles)
@@ -525,7 +538,7 @@ export async function exportPDF(
   // The PDF writer and its fonts load when a PDF is first exported, as the
   // PowerPoint and SVG writers do, rather than with every visit.
   const [
-    { PDFDocument, StandardFonts, degrees, rgb },
+    { PDFDocument, PDFHexString, PDFName, StandardFonts, degrees, rgb },
     { createVectorContext, drawVectorRegion },
   ] = await Promise.all([
     import("pdf-lib"),
@@ -619,21 +632,89 @@ export async function exportPDF(
   // picture.
   const vector = createVectorContext(pdf, b, {
     ctx: o.measure || measureContext(),
-    // Large objects, such as a frame whose title needs a font the
-    // PDF lacks, stay about as sharp as on a detailed page.
-    rasterFallback: (i, area) =>
+    // Drawn at the page's resolution, so large objects, such as a frame
+    // whose title needs a font the PDF lacks, are as sharp as on a page
+    // drawn as a picture.
+    rasterFallback: (i, area, scale) =>
       rasterizer({ ...b, items: [i] }, area, {
-        scale: 3,
+        scale: printPixels(scale),
         maxSize: 4096,
         transparent: true,
       }),
   });
   const scenes = new WeakMap();
-  // A turned chip reads upward, to fit the narrow side margins.
-  const chip = (page, text, cx, cy, size = 7, color = muted, turned) => {
+  // Web links stay clickable: an invisible link annotation over each link
+  // card, embed card and linked word on the page, cut to the page's area.
+  const linkContext = o.measure || measureContext(),
+    regionLinks = new WeakMap();
+  const linksFor = (region) => {
+    if (!regionLinks.has(region))
+      regionLinks.set(region, exportLinks(region.items, linkContext));
+    return regionLinks.get(region);
+  };
+  const linked = [];
+  function addLinks(page, entry, drawn) {
+    const { rect, scale, placement } = entry;
+    for (const link of linksFor(entry.region)) {
+      const corners = linkCorners(link).map((p) => ({
+          x: placement.x + (p.x - rect.x) * scale,
+          y: placement.y - (p.y - rect.y) * scale,
+        })),
+        xs = corners.map((p) => p.x),
+        ys = corners.map((p) => p.y);
+      const box = [
+        Math.max(drawn.x, Math.min(...xs)),
+        Math.max(drawn.y, Math.min(...ys)),
+        Math.min(drawn.x + drawn.w, Math.max(...xs)),
+        Math.min(drawn.y + drawn.h, Math.max(...ys)),
+      ];
+      // Too small to click, or off this page.
+      if (box[2] - box[0] < 1 || box[3] - box[1] < 1) continue;
+      const annotation = pdf.context.obj({
+        Type: "Annot",
+        Subtype: "Link",
+        Rect: box,
+        Border: [0, 0, 0],
+        // A turned link is the quadrilateral it covers, counterclockwise
+        // from its bottom left, unless the page cuts it: corners outside
+        // the area would make viewers ignore the quadrilateral.
+        ...(link.rotation &&
+          box[0] <= Math.min(...xs) &&
+          box[1] <= Math.min(...ys) &&
+          box[2] >= Math.max(...xs) &&
+          box[3] >= Math.max(...ys) && {
+            QuadPoints: [3, 2, 1, 0].flatMap((n) => [
+              corners[n].x,
+              corners[n].y,
+            ]),
+          }),
+        // As hexadecimal, since an address may hold an unmatched
+        // parenthesis; addresses are ASCII once parsed.
+        A: {
+          Type: "Action",
+          S: "URI",
+          URI: PDFHexString.of(
+            Array.from(link.url, (c) =>
+              c.charCodeAt(0).toString(16).padStart(2, "0"),
+            ).join(""),
+          ),
+        },
+      });
+      page.node.addAnnot(pdf.context.register(annotation));
+    }
+  }
+  // Areas that go to another page of the file when clicked: the parts
+  // the overview shows, and the names of the pages beside a page.
+  const jumps = [];
+  const jump = (page, x, y, width, height, to) =>
+    jumps.push({ page, rect: [x, y, x + width, y + height], to });
+  // A turned chip reads upward, to fit the narrow side margins. One naming
+  // another page goes there.
+  const chip = (page, text, cx, cy, size = 7, color = muted, turned, to) => {
     const length = font.widthOfTextAtSize(text, size) + 8,
       thickness = size + 5,
       [width, height] = turned ? [thickness, length] : [length, thickness];
+    if (to) jump(page, cx - width / 2, cy - height / 2, width, height, to);
     page.drawRectangle({
       x: cx - width / 2,
       y: cy - height / 2,
@@ -653,6 +734,7 @@ export async function exportPDF(
     });
   };
   for (const [n, entry] of plan.entries()) {
+    await breathe();
     // A cancelled export stops before its next page, and says how far it is.
     if (o.signal?.aborted) throw Error("Export cancelled.");
     o.progress?.(n + 1, plan.length);
@@ -680,7 +762,7 @@ export async function exportPDF(
         entry.kind === "detail"
           ? pageItems(entry.region, rect, scenes)
           : entry.region.items;
-      const pixels = Math.min(4, Math.max(2, (scale * 200) / 72)),
+      const pixels = printPixels(scale),
         maxSize = entry.kind === "overview" ? 2400 : 4096;
       // One picture is at most 4,096 pixels a side, which on a very large
       // page, as fit to content makes for a big board, would print at a
@@ -715,6 +797,9 @@ export async function exportPDF(
           const png = await pdf.embedPng(canvas.toDataURL("image/png"));
           // The canvas memory goes before the next part is drawn.
           canvas.width = canvas.height = 0;
+          // Compressed now, between pages, rather than all at once when
+          // the file is written, which would hold up the page for seconds.
+          await png.embed();
           page.drawImage(png, {
             x: drawn.x + (part.x - rect.x) * scale,
             y: placement.y - (part.y - rect.y + part.h) * scale,
@@ -734,6 +819,7 @@ export async function exportPDF(
         { textOnly: true },
       );
     }
+    linked.push([page, entry, drawn]);
     if (o.markers && entry.kind === "detail") {
       page.drawRectangle({
         x: drawn.x,
@@ -769,8 +855,27 @@ export async function exportPDF(
       const n = entry.neighbors,
         label = (index) => phrase(lang, "Page {page}", { page: index });
       if (n.up)
-        chip(page, label(n.up), drawn.x + drawn.w / 2, drawn.y + drawn.h + 7);
-      if (n.down) chip(page, label(n.down), drawn.x + drawn.w / 2, drawn.y - 7);
+        chip(
+          page,
+          label(n.up),
+          drawn.x + drawn.w / 2,
+          drawn.y + drawn.h + 7,
+          7,
+          muted,
+          false,
+          n.up,
+        );
+      if (n.down)
+        chip(
+          page,
+          label(n.down),
+          drawn.x + drawn.w / 2,
+          drawn.y - 7,
+          7,
+          muted,
+          false,
+          n.down,
+        );
       if (n.left)
         chip(
           page,
@@ -780,6 +885,7 @@ export async function exportPDF(
           7,
           muted,
           true,
+          n.left,
         );
       if (n.right)
         chip(
@@ -790,6 +896,7 @@ export async function exportPDF(
           7,
           muted,
           true,
+          n.right,
         );
     }
     if (o.markers && entry.kind === "overview")
@@ -809,6 +916,7 @@ export async function exportPDF(
         });
         const index = entry.index + n + 1,
           text = phrase(lang, "Page {page}", { page: index });
+        jump(page, x, y, w, h, index);
         chip(
           page,
           font.widthOfTextAtSize(text, 8) + 12 < w ? text : String(index),
@@ -837,5 +945,58 @@ export async function exportPDF(
       (await label(b.title, 9, room, 60, muted));
     if (title) write(page, title, width - m - title.width, m - 6, 9, muted);
   }
+  const pageRefs = pdf.getPages().map((page) => page.ref);
+  for (const { page, rect, to } of jumps)
+    page.node.addAnnot(
+      pdf.context.register(
+        pdf.context.obj({
+          Type: "Annot",
+          Subtype: "Link",
+          Rect: rect,
+          Border: [0, 0, 0],
+          Dest: [pageRefs[to - 1], "Fit"],
+        }),
+      ),
+    );
+  // Web links go last, above the overview's links to its parts, as
+  // viewers take the last link under a click.
+  for (const args of linked) addLinks(...args);
+  // Several frames or areas are bookmarked by name, each at its first
+  // page, and the file opens with its bookmarks shown.
+  const starts = plan.filter(
+    (entry, n) => n === 0 || entry.region !== plan[n - 1].region,
+  );
+  if (starts.length > 1) {
+    const outline = pdf.context.nextRef(),
+      refs = starts.map(() => pdf.context.nextRef());
+    starts.forEach((entry, n) =>
+      pdf.context.assign(
+        refs[n],
+        pdf.context.obj({
+          Title: PDFHexString.fromText(
+            Array.from(entry.region.name || b.title || "")
+              .slice(0, 200)
+              .join(""),
+          ),
+          Parent: outline,
+          ...(n > 0 && { Prev: refs[n - 1] }),
+          ...(n < refs.length - 1 && { Next: refs[n + 1] }),
+          Dest: [pageRefs[entry.index - 1], "Fit"],
+        }),
+      ),
+    );
+    pdf.context.assign(
+      outline,
+      pdf.context.obj({
+        Type: "Outlines",
+        First: refs[0],
+        Last: refs.at(-1),
+        Count: refs.length,
+      }),
+    );
+    pdf.catalog.set(PDFName.of("Outlines"), outline);
+    pdf.catalog.set(PDFName.of("PageMode"), PDFName.of("UseOutlines"));
+  }
+  vector.unicode.finish();
   return new Blob([await pdf.save()], { type: "application/pdf" });
 }

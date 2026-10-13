@@ -1931,6 +1931,7 @@ test("built app: several documents dropped at once are attached, and each file c
     );
     // The file card is already on the board.
     assert.equal(importer.querySelector("#content-attach").checked, false);
+    assert.equal(importer.querySelector("#content-attach-only").hidden, true);
     await until(
       () => !importer.querySelector('[type="submit"]').disabled,
       "CSV ready",
@@ -2153,6 +2154,200 @@ test("built app: imported frames come after the board's last frame, whatever ord
       ),
       ["First", "Last", "doc", "Alpha", "Beta"],
     );
+  } finally {
+    w.close();
+  }
+});
+
+test("built app: embeds, link cards, and imports added from a menu go beside the board's content", async () => {
+  const { w, doc, click, tick, until, transfer, choose } = await app();
+  const stored = async () => {
+    const database = await new Promise((resolve, reject) => {
+      const request = w.indexedDB.open("whiteboard-v1", 3);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = database.transaction("boards", "readonly");
+        const request = transaction.objectStore("boards").getAll();
+        transaction.oncomplete = () => resolve(request.result[0]?.items || []);
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } finally {
+      database.close();
+    }
+  };
+  const overlap = (a, b) =>
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  try {
+    await click('[data-action="new"]');
+    await until(() => doc.querySelector("#canvas"), "Board opened");
+    doc.querySelector("#canvas").getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 1400,
+      height: 900,
+    });
+    await tick();
+    // A note in the middle of the view.
+    transfer(
+      "paste",
+      clipboardFormats([item("note", 0, 0, { text: "Here first" })]),
+    );
+    await tick();
+    const waitFor = async (count, message) => {
+      const deadline = Date.now() + 5000;
+      let items = await stored();
+      while (items.length < count) {
+        assert.ok(Date.now() < deadline, message);
+        await tick();
+        items = await stored();
+      }
+      return items;
+    };
+    await waitFor(1, "Note saved");
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="embed"]');
+    let dialog = doc.querySelector("dialog[open]");
+    const url = dialog.querySelector("#embed-url");
+    url.value = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    url.dispatchEvent(new w.Event("input"));
+    dialog.querySelector("form").requestSubmit();
+    await tick();
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="embed"]');
+    dialog = doc.querySelector("dialog[open]");
+    dialog.querySelector("#embed-url").value = "https://example.com/page";
+    dialog.querySelector("#embed-link").click();
+    await tick();
+    await click('.tools [data-action="import-document"]');
+    dialog = doc.querySelector("dialog[open]");
+    dialog.querySelector("#content-choose").click();
+    choose([new w.File(["One\nTwo\n"], "notes.txt", { type: "text/plain" })]);
+    await until(
+      () => !dialog.querySelector('[type="submit"]').disabled,
+      "Text ready",
+    );
+    dialog.querySelector("form").requestSubmit();
+    await until(() => dialog.dataset.done === "true", "Text imported");
+    dialog.querySelector(".content-cancel").click();
+    const items = await waitFor(7, "Everything saved");
+    const [note, embed, link, frame] = ["note", "embed", "link", "frame"].map(
+      (type) => items.find((i) => i.type === type && !i.parentId),
+    );
+    assert.equal(note.text, "Here first");
+    // The embed sits where the note was asked to go, beside it, and nothing
+    // covers anything else.
+    for (const [a, b] of [
+      [note, embed],
+      [note, link],
+      [embed, link],
+      [frame, note],
+      [frame, embed],
+      [frame, link],
+    ])
+      assert.ok(!overlap(a, b), `${a.type} and ${b.type} overlap`);
+  } finally {
+    w.close();
+  }
+});
+
+test("built app: links pasted without their scheme or over plain HTTP are still links", async () => {
+  const { w, doc, click, tick, until, transfer, outline } = await app();
+  try {
+    await click('[data-action="new"]');
+    await until(() => doc.querySelector("#canvas"), "Board opened");
+    await tick();
+    for (const text of [
+      "youtube.com/watch?v=dQw4w9WgXcQ",
+      "http://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    ]) {
+      transfer("paste", { "text/plain": text });
+      await tick();
+      const choice = doc.querySelector("dialog[open]");
+      assert.equal(choice?.getAttribute("aria-label"), "Add link", text);
+      choice.querySelector('[data-choice="link"]').click();
+      await tick();
+    }
+    // A www. address is a link card; a file name or version stays text.
+    for (const text of ["www.example.com/path?q=1", "notes.txt", "v1.2"]) {
+      transfer("paste", { "text/plain": text });
+      await tick();
+      assert.ok(!doc.querySelector("dialog[open]"), text);
+    }
+    await until(() => outline().length === 5, "Everything pasted");
+    const labels = outline();
+    assert.equal(labels.filter((l) => /youtube\.com/.test(l)).length, 2);
+    assert.ok(
+      labels.some((l) => /example\.com/.test(l)),
+      labels.join(" | "),
+    );
+    assert.ok(labels.some((l) => /notes\.txt/.test(l)));
+    assert.ok(labels.some((l) => /v1\.2/.test(l)));
+    assert.equal(
+      labels.filter((l) => /^Link/.test(l)).length,
+      3,
+      labels.join(" | "),
+    );
+  } finally {
+    w.close();
+  }
+});
+
+test("built app: the Embed and Google dialogs take links typed without a scheme or over plain HTTP", async () => {
+  const { w, doc, click, tick, until, outline } = await app();
+  try {
+    await click('[data-action="new"]');
+    await until(() => doc.querySelector("#canvas"), "Board opened");
+    await tick();
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="embed"]');
+    let dialog = doc.querySelector("dialog[open]");
+    const url = dialog.querySelector("#embed-url");
+    for (const typed of [
+      "youtube.com/watch?v=dQw4w9WgXcQ",
+      "http://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    ]) {
+      url.value = typed;
+      url.dispatchEvent(new w.Event("input"));
+      assert.match(
+        dialog.querySelector("#embed-detected").textContent,
+        /YouTube · Ready to embed/,
+        typed,
+      );
+      assert.equal(dialog.querySelector("#embed-submit").disabled, false);
+    }
+    // A file name or a host still being typed is not a link.
+    for (const typed of ["notes.txt", "youtube.c"]) {
+      url.value = typed;
+      url.dispatchEvent(new w.Event("input"));
+      assert.equal(dialog.querySelector("#embed-submit").disabled, true, typed);
+    }
+    // A link card from an address without its scheme.
+    url.value = "www.example.com/plan";
+    url.dispatchEvent(new w.Event("input"));
+    dialog.querySelector("#embed-link").click();
+    await tick();
+    assert.ok(!doc.querySelector("dialog[open]"), "Link card added");
+    assert.ok(outline().some((l) => /example\.com/.test(l)));
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="google-workspace"]');
+    dialog = doc.querySelector("dialog[open]");
+    const google = dialog.querySelector("#google-url");
+    for (const typed of [
+      `http://docs.google.com/document/d/${DOC_ID}/edit`,
+      `docs.google.com/document/d/${DOC_ID}/edit`,
+    ]) {
+      google.value = typed;
+      google.dispatchEvent(new w.Event("input"));
+      assert.match(
+        dialog.querySelector("#google-detected").textContent,
+        /Google Docs/,
+        typed,
+      );
+    }
+    dialog.close();
   } finally {
     w.close();
   }
