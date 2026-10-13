@@ -696,11 +696,21 @@ export class CollaborationSession {
   // Images and files are uploaded a few at a time, as they are downloaded,
   // so a deck of pictures added at once does not wait on each in turn.
   async uploadAssets() {
-    const queue = [...this.pendingAssets];
+    // Files added while others upload, as a second picture while the first
+    // goes up, are taken in the same pass: the edit adding them may already
+    // be on its way.
+    const taken = new Set();
+    const pick = () => {
+      for (const asset of this.pendingAssets)
+        if (!taken.has(asset)) {
+          taken.add(asset);
+          return asset;
+        }
+    };
     let failed = null;
     const next = async () => {
-      while (queue.length && !failed && !this.closed)
-        await this.uploadAsset(queue.shift()).catch((error) => {
+      for (let asset; !failed && !this.closed && (asset = pick());)
+        await this.uploadAsset(asset).catch((error) => {
           failed ??= error;
         });
     };

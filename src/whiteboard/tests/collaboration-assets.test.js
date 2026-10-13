@@ -445,6 +445,88 @@ test("images past what one person may add a minute wait for the worker without r
   }
 });
 
+test("an image added while another uploads is uploaded before the edit adding it", async () => {
+  const { SharedDocument } = await import("../src/collaboration/document.js");
+  const { encode } = await import("../src/collaboration/protocol.js");
+  const { environment } = await import("./collaboration-helpers.js");
+  const env = environment(),
+    b = board("Race");
+  b.items = [item("note", 0, 0, { text: "x" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  let state;
+  const toasts = [];
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed: (n) => (state = n),
+    activity() {},
+    status() {},
+    rejected: (r) => toasts.push(r),
+  });
+  const call = env.service.call.bind(env.service);
+  let release;
+  const held = new Promise((r) => (release = r));
+  let first = true;
+  env.service.call = async (user, input) => {
+    if (input.op === "asset.put" && first) {
+      first = false;
+      await held;
+    }
+    return call(user, input);
+  };
+  try {
+    await session.start();
+    let before = structuredClone(state),
+      next = structuredClone(state);
+    next.items.push(
+      item("image", 50, 50, {
+        src: "data:image/png;base64,AA==",
+        w: 10,
+        h: 10,
+      }),
+    );
+    await session.commit(next, before);
+    await session.queue;
+    const flushing = session.flush().catch((e) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    // While the first image uploads, a second is added.
+    before = structuredClone(state);
+    next = structuredClone(state);
+    next.items.push(
+      item("image", 90, 90, {
+        src: "data:image/png;base64,AQID",
+        w: 10,
+        h: 10,
+      }),
+    );
+    await session.commit(next, before);
+    await session.queue;
+    release();
+    await flushing;
+    await session.flushed();
+    const { doc } = await env.service.load(b.id);
+    const images = doc
+      .snapshot()
+      .items.filter((i) => i.type === "image" && ASSET.test(i.src));
+    doc.destroy();
+    assert.equal(images.length, 2);
+    assert.deepEqual(toasts, []);
+  } finally {
+    env.service.call = call;
+    session.close();
+  }
+});
+
 test("an image that could not be downloaded is tried again on a quiet board", async () => {
   const { SharedDocument } = await import("../src/collaboration/document.js");
   const { encode } = await import("../src/collaboration/protocol.js");
