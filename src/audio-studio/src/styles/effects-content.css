@@ -454,6 +454,27 @@ input[type='range'].slider.fx-vrange::-moz-range-track {
   background: var(--hot);
 }
 
+/* Hiss Reduction: noise floor graph and its scale/channel bar. */
+.hr-graph .fx-plot {
+  height: 220px;
+}
+
+.hr-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hr-bar .fx-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hr-spacer {
+  flex: 1;
+}
+
 .fx-split.rs-focus {
   grid-template-columns: minmax(0, 1fr) auto;
 }

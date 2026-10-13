@@ -5,7 +5,7 @@
 
 import { registerEffect, getEffect, paramArray } from '../registry.js';
 import { offloaded, runTask } from '../offline-fx.js';
-import { num, db, hz, ms, pct, bool, choice, preset, pause, checkAbort, dataId } from './util.js';
+import { num, db, hz, ms, pct, bool, choice, preset, pause, checkAbort, dataId, packCurve } from './util.js';
 
 const GROUP = 'Noise Reduction / Restoration';
 
@@ -76,6 +76,53 @@ registerEffect({
 
 // ------------------------------------------------------------ Hiss Reduction
 
+/** Level range of the hiss noise floor graph (dB of per-bin power). */
+export const FLOOR_DB = [-140, 0];
+
+/**
+ * Noise floor level at `f` from floor points ([{ f, g }] sorted by f):
+ * linear in frequency from a point at or below 1 Hz (the 0 Hz end), linear
+ * in log frequency elsewhere, flat beyond the ends (hiss.rs floor_at).
+ */
+export function floorAt(points, f) {
+  if (!points?.length) return FLOOR_DB[0];
+  if (f <= points[0].f) return points[0].g;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (f <= b.f) {
+      const t = a.f <= 1 ? (f - a.f) / Math.max(1e-6, b.f - a.f) : Math.log(f / a.f) / Math.max(1e-9, Math.log(b.f / a.f));
+      return a.g + (b.g - a.g) * Math.min(1, Math.max(0, t));
+    }
+  }
+  return points[points.length - 1].g;
+}
+
+/**
+ * Editable floor points from a captured mean power spectrum (`spectrum`,
+ * fftSize / 2 + 1 bins): a 0 Hz end, a few points through the low end, then
+ * `count` points evenly spaced up to Nyquist (where hiss lives, and so they
+ * stay apart on both the linear and the log axis), each the mean power within
+ * a sixth of an octave around it, in dB.
+ */
+export function floorPoints(spectrum, fftSize, rate, count = 20) {
+  const bins = spectrum.length;
+  const nyq = rate / 2;
+  const level = (lo, hi) => {
+    const a = Math.max(1, Math.floor((lo * fftSize) / rate));
+    const b = Math.min(bins - 1, Math.max(a, Math.ceil((hi * fftSize) / rate)));
+    let sum = 0;
+    for (let k = a; k <= b; k++) sum += spectrum[k];
+    const db = 10 * Math.log10(sum / (b - a + 1) + 1e-30);
+    return Math.round(Math.min(FLOOR_DB[1], Math.max(FLOOR_DB[0], db)) * 10) / 10;
+  };
+  const band = 2 ** (1 / 12);
+  const top = nyq / 12;
+  const freqs = [200, 500, 1000].filter((f) => f < top * 0.8);
+  for (let i = 0; i < count; i++) freqs.push(top + ((nyq - top) * i) / (count - 1));
+  return [{ f: 1, g: level(20, freqs[0] / band) }, ...freqs.map((f) => ({ f: Math.round(f * 10) / 10, g: level(f / band, Math.min(nyq, f * band)) }))];
+}
+
 registerEffect({
   id: 'hissReduction',
   name: 'Hiss Reduction',
@@ -89,6 +136,12 @@ registerEffect({
     db('transition', 'Transition Width', 0, 40, 6),
     fftChoice('fftSize', 'FFT Size', [512, 1024, 2048, 4096, 8192], 2048),
     bool('hissOnly', 'Output Hiss Only', false),
+    // The noise floor graph's frequency axis (a view setting kept with the values).
+    choice('floorScale', 'Scale', ['Linear', 'Logarithmic'], 0, { hidden: true }),
+    // Captured or drawn noise floors per channel ([{ f, g }], dB of per-bin
+    // power); empty = the floor is tracked from the audio as it plays.
+    { id: 'floorLeft', label: 'Left Noise Floor', type: 'curve', default: [], min: FLOOR_DB[0], max: FLOOR_DB[1], unit: 'dB', hidden: true },
+    { id: 'floorRight', label: 'Right Noise Floor', type: 'curve', default: [], min: FLOOR_DB[0], max: FLOOR_DB[1], unit: 'dB', hidden: true },
   ],
   presets: [
     preset('Light Tape Hiss', { noiseFloor: 0, reduceBy: 12, decay: 60, precision: 7, transition: 6, fftSize: 2048, hissOnly: false }),
@@ -97,6 +150,8 @@ registerEffect({
     preset('Fast and Transparent', { noiseFloor: -3, reduceBy: 10, decay: 40, precision: 5, transition: 4, fftSize: 1024, hissOnly: false }),
   ],
   latency: (v) => pow2(v.fftSize, 256, 16384),
+  // An empty floor still sends one value (no pairs), so the processor drops an old one.
+  data: (v) => ['floorLeft', 'floorRight'].map((id, slot) => ({ slot, id: dataId(v[id] || []), values: v[id]?.length ? packCurve(v[id]) : new Float32Array([-1]) })),
 });
 
 // -------------------------------------------------------------------- DeNoise

@@ -161,3 +161,57 @@ describe('denoise and dereverb', () => {
     expect(rms(run(dr, { amount: 100, decay: 3000, autoGain: true }).subarray(12000))).toBeGreaterThan(rms(run(dr, { amount: 100, decay: 3000 }).subarray(12000)));
   });
 });
+
+describe('hiss reduction noise floor', () => {
+  it('turns a captured spectrum into floor points and reads them back', async () => {
+    const { floorPoints, floorAt } = await import('../src/effects/defs/restoration.js');
+    const spec = new Float32Array(2049).fill(1e-6);
+    const pts = floorPoints(spec, 4096, 48000);
+    expect(pts[0].f).toBe(1);
+    expect(pts.length).toBe(24);
+    expect(pts.at(-1).f).toBe(24000);
+    pts.forEach((p) => expect(p.g).toBeCloseTo(-60, 1));
+    const c = [{ f: 1, g: -60 }, { f: 101, g: -80 }, { f: 10100, g: -100 }];
+    expect(floorAt(c, 51)).toBeCloseTo(-70);
+    expect(floorAt(c, 1010)).toBeCloseTo(-90);
+    expect(floorAt(c, 20000)).toBe(-100);
+    expect(floorAt([], 100)).toBe(-140);
+  });
+  it('sends each channel floor as a data block, empty while tracking', () => {
+    const def = getEffect('hissReduction');
+    const auto = slotSpec(def, {}).data;
+    expect(auto.map((d) => d.slot)).toEqual([0, 1]);
+    expect(auto[0].values.length).toBe(1);
+    const spec = slotSpec(def, { floorLeft: [{ f: 1, g: -70 }, { f: 24000, g: -90 }] }).data;
+    expect(Array.from(spec[0].values)).toEqual([1, -70, 24000, -90]);
+    expect(spec[0].id).not.toBe(auto[0].id);
+    expect(spec[1].id).toBe(auto[1].id);
+  });
+  it('captures the floor in the dialog, edits it and returns to tracking', async () => {
+    const app = fakeApp();
+    let seed = 1;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5) * 0.02;
+    const doc = new AudioFile({ name: 'a.wav', sampleRate: 48000, channels: [Channel.fromSamples(filled(48000, rnd)), Channel.fromSamples(filled(48000, () => rnd() * 0.1))] });
+    app.active = doc;
+    const p = openEffectDialog(app, getEffect('hissReduction'), { doc });
+    const dlg = document.querySelector('.fx-dialog');
+    expect(dlg.querySelector('.nr-status').textContent).toMatch(/automatically/);
+    expect(dlg.querySelector('.hr-graph .fx-point')).toBeNull();
+    [...dlg.querySelectorAll('.btn')].find((b) => b.textContent === 'Capture Noise Floor').click();
+    for (let i = 0; i < 20 && !dlg.querySelector('.hr-graph .fx-point'); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(dlg.querySelector('.nr-status').textContent).toMatch(/captured/);
+    const handle = dlg.querySelector('.hr-graph .fx-point');
+    handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    // The log scale shows the same points.
+    const scale = [...dlg.querySelectorAll('select')].find((s) => s.getAttribute('aria-label') === 'Graph scale');
+    scale.value = '1';
+    scale.dispatchEvent(new Event('change'));
+    expect(dlg.querySelectorAll('.hr-graph .fx-point').length).toBe(24);
+    dlg.querySelector('.btn.primary').click();
+    const values = await p;
+    expect(values.floorLeft.length).toBe(24);
+    // The quieter right channel reads about 20 dB lower.
+    expect(values.floorLeft[12].g - values.floorRight[12].g).toBeGreaterThan(15);
+    expect(values.floorScale).toBe(1);
+  });
+});
