@@ -344,11 +344,15 @@ registerEffect({
     choice('channel', 'Adjust', ['Left Channel', 'Right Channel', 'Both (Center)'], 2),
     ms('resolution', 'Time Resolution', 10, 2000, 300, { step: 10 }),
     fftChoice('analysisSize', 'Analysis Size', [512, 1024, 2048, 4096, 8192], 2048),
+    num('leftShift', 'Left Channel Shift', -1000, 1000, 0, '\u00b5s', { step: 1 }),
+    num('rightShift', 'Right Channel Shift', -1000, 1000, 0, '\u00b5s', { step: 1 }),
+    bool('centerPan', 'Auto Center Panning', false),
   ],
   presets: [
     preset('Align Two Microphones', { globalShift: true, alignBands: false, channel: 2, resolution: 500, analysisSize: 4096 }),
     preset('Tape Azimuth Fix', { globalShift: true, alignBands: true, channel: 1, resolution: 300, analysisSize: 2048 }),
     preset('Fast Tracking', { globalShift: true, alignBands: false, channel: 2, resolution: 80, analysisSize: 1024 }),
+    preset('Even Out a Lopsided Recording', { globalShift: true, alignBands: false, channel: 2, resolution: 500, analysisSize: 2048, centerPan: true }),
   ],
   latency: (v) => pow2(v.analysisSize, 512, 8192),
 });

@@ -110,3 +110,33 @@ describe('dehummer view', () => {
     expect((await p).frequency).toBeLessThan(60);
   });
 });
+
+describe('automatic phase correction', () => {
+  it('shifts a channel by hand while the automatic shift is off', async () => {
+    await import('./fx-wasm.js');
+    const { dsp } = await import('../src/audio/dsp.js');
+    const { paramArray } = await import('../src/effects/registry.js');
+    const { normalizeValues } = await import('../src/effects/params.js');
+    const d = await dsp();
+    const def = getEffect('autoPhaseCorrection');
+    const n = 24000;
+    const x = Float32Array.from({ length: n }, (_, i) => Math.sin(i * 0.05) + 0.5 * Math.sin(i * 0.31));
+    const v = normalizeValues(def, { globalShift: false, rightShift: 10 / 48000 * 1e6 });
+    const [l, r] = d.runEffect(def.kind, 48000, [x, x], paramArray(def, v));
+    // The right channel now trails the left by 10 frames.
+    let err = 0;
+    for (let i = 12000; i < 20000; i++) err = Math.max(err, Math.abs(r[i] - l[i - 10]));
+    expect(err).toBeLessThan(0.05);
+  });
+  it('greys out the manual shifts while the automatic shift is on', async () => {
+    const app = fakeApp();
+    const doc = new AudioFile({ name: 'a.wav', sampleRate: 48000, channels: [Channel.fromSamples(filled(4800, 0.1)), Channel.fromSamples(filled(4800, 0.1))] });
+    app.active = doc;
+    const p = openEffectDialog(app, getEffect('autoPhaseCorrection'), { doc, values: { globalShift: true } });
+    const dlg = document.querySelector('.fx-dialog');
+    const left = [...dlg.querySelectorAll('input[type=range]')].find((s) => s.getAttribute('aria-label') === 'Left Channel Shift');
+    expect(left.disabled).toBe(true);
+    dlg.querySelector('.dialog-head .icon-btn').click();
+    await p;
+  });
+});

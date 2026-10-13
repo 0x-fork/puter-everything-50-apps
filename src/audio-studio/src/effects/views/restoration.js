@@ -4,7 +4,7 @@
 
 import { h, announce } from '../../lib/dom.js';
 import { registerEditor } from '../editors.js';
-import { controlsFor, disclosure, radioChoice, vSlider, groupBox, glyph } from '../layout.js';
+import { controlsFor, disclosure, radioChoice, vSlider, groupBox, glyph, enableWhen } from '../layout.js';
 import { responseEditor, spectrumMonitor } from './common.js';
 import { learnSoundModel, MAX_SOUND_SECONDS } from '../defs/restoration.js';
 import { downloadBlob, pickLocalFiles } from '../../storage/files.js';
@@ -124,7 +124,19 @@ function soundRemoverView(ctx) {
 }
 soundRemoverView.hides = true;
 
+// Automatic Phase Correction: manual channel shifts apply while the automatic time shift is off.
+function phaseView(ctx) {
+  return h(
+    'div.fx-stack',
+    controlsFor(ctx, ['globalShift']),
+    enableWhen(ctx, controlsFor(ctx, ['leftShift', 'rightShift']), (v) => !v.globalShift),
+    controlsFor(ctx, ['alignBands', 'centerPan', 'channel', 'resolution', 'analysisSize']),
+  );
+}
+phaseView.hides = true;
+
 registerEditor('dehummer', dehummer);
+registerEditor('autoPhaseCorrection', phaseView);
 registerEditor('denoise', focusView([]));
 registerEditor('dereverb', focusView(['decay']));
 registerEditor('hissReduction', hissView);
