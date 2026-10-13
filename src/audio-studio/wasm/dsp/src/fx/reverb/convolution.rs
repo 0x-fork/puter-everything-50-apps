@@ -17,8 +17,20 @@
 //! 4 HF damping (JS), 5 pre-delay ms, 6 width %, 7 gain dB,
 //! 8 centre send % (how much of the centre of a stereo input reaches the
 //! room; 100 all), 9 centre wet % (level of the centre of the reverb, 50
-//! unity), 10 balance % (-100 left .. 100 right, on the reverb). Surround
-//! Reverb uses all eleven; Convolution Reverb leaves 8..10 at their defaults.
+//! unity), 10 balance % (-100 left .. 100 right, on the reverb), 11 unused
+//! (the loaded impulse's name on the JS side), 12 LFE send %, 13 surround
+//! width %, 14 front/back balance % (-100 front .. 100 back).
+//! Surround Reverb uses them all; Convolution Reverb leaves 8.. at defaults.
+//!
+//! Surround: the room is a stereo convolution. Its rear pair is the wet
+//! signal crossed (left from right) and delayed by REAR_MS, so the rear
+//! reverb is decorrelated from the front. Created for six channels (5.1:
+//! L, R, C, LFE, Ls, Rs) the effect feeds the room from L + Ls and R + Rs
+//! plus the centre (centre send) and LFE (LFE send) on both sides, and
+//! returns the front pair (front width), the rear pair (surround width), the
+//! reverb's centre on C (centre wet) and nothing on LFE; front/back balance
+//! trades the front against the rear. On one or two channels the rear pair
+//! folds into the output as the balance moves back (none at 0 or in front).
 
 use super::fastfft::FastRealFft as RealFft;
 use crate::fx::util::{db_to_gain, DelayLine};
@@ -33,6 +45,8 @@ const HISTORY: usize = 8192;
 const RING: usize = 32768;
 pub const MAX_IR_SECONDS: f32 = 8.0;
 pub const MAX_PREDELAY_MS: f32 = 500.0;
+/// Extra delay of the rear reverb (decorrelation from the front pair).
+pub const REAR_MS: f32 = 13.0;
 
 /// One partition size of a uniformly partitioned convolver for all channels.
 struct Level {
@@ -221,7 +235,16 @@ struct Stage {
 
 pub struct ConvolutionReverb {
     rate: f32,
+    /// Channels of the room (1 or 2).
     channels: usize,
+    /// Channels in and out: 1, 2, or 6 (5.1).
+    io: usize,
+    dry6: Vec<DelayLine>,
+    rear: [DelayLine; 2],
+    rear_frames: usize,
+    lfe_send: Smooth,
+    rear_width: Smooth,
+    front_back: Smooth,
     head: Option<Level>,
     stages: Vec<Stage>,
     ir_len: usize,
@@ -243,11 +266,21 @@ pub struct ConvolutionReverb {
 }
 
 impl ConvolutionReverb {
-    pub fn new(rate: f32, channels: usize) -> ConvolutionReverb {
+    pub fn new(rate: f32, io: usize) -> ConvolutionReverb {
+        let io = if io >= 6 { 6 } else { io.clamp(1, 2) };
+        let channels = io.min(2);
         let pre = (MAX_PREDELAY_MS * rate / 1000.0) as usize + 2;
+        let rear_frames = (REAR_MS * rate / 1000.0).round() as usize;
         ConvolutionReverb {
             rate,
             channels,
+            io,
+            dry6: (0..if io == 6 { 6 } else { 0 }).map(|_| DelayLine::new(B1 + 1)).collect(),
+            rear: [DelayLine::new(rear_frames + 2), DelayLine::new(rear_frames + 2)],
+            rear_frames,
+            lfe_send: Smooth::new(0.0, rate, 20.0),
+            rear_width: Smooth::new(1.0, rate, 20.0),
+            front_back: Smooth::new(0.0, rate, 20.0),
             head: None,
             stages: Vec::new(),
             ir_len: 0,
@@ -274,6 +307,59 @@ impl ConvolutionReverb {
             let mask = r.len() - 1;
             for (k, &v) in o.iter().enumerate() {
                 r[(start as usize + k) & mask] += v;
+            }
+        }
+    }
+
+    fn settle(&mut self) {
+        for sm in [&mut self.mix, &mut self.width, &mut self.gain, &mut self.centre_send, &mut self.centre_wet, &mut self.balance, &mut self.lfe_send, &mut self.rear_width, &mut self.front_back] {
+            sm.settle();
+        }
+    }
+
+    /// 5.1 in and out (planar L, R, C, LFE, Ls, Rs); see the module notes.
+    fn process_surround(&mut self, buf: &mut [f32], frames: usize) {
+        const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
+        let ch = self.channels;
+        for i in 0..frames {
+            let (mix, width, gain) = (self.mix.next(), self.width.next(), self.gain.next());
+            let (csend, cwet, bal) = (self.centre_send.next(), self.centre_wet.next(), self.balance.next());
+            let (lfe, rw, fb) = (self.lfe_send.next(), self.rear_width.next(), self.front_back.next());
+            let x: [f32; 6] = std::array::from_fn(|c| buf[c * frames + i]);
+            let common = (csend * x[2] + lfe * x[3]) * H;
+            let send = [x[0] + x[4] + common, x[1] + x[5] + common];
+            let read = (self.n.wrapping_sub(B1 as u64) as usize) & (RING - 1);
+            let at = (self.n as usize) & (HISTORY - 1);
+            let mut wet = [0.0f32; 2];
+            for c in 0..ch {
+                // A mono room hears both sides.
+                let s = if ch == 1 { 0.5 * (send[0] + send[1]) } else { send[c] };
+                self.pre[c].push(s);
+                self.hist[c][at] = self.pre[c].tap(self.pre_frames);
+                wet[c] = self.ring[c][read] * gain;
+                self.ring[c][read] = 0.0;
+            }
+            if ch == 1 {
+                wet[1] = wet[0];
+            }
+            let rl = self.rear[0].tap(self.rear_frames);
+            let rr = self.rear[1].tap(self.rear_frames);
+            self.rear[0].push(wet[1]);
+            self.rear[1].push(wet[0]);
+            let (lg, rg) = ((1.0 - bal).min(1.0), (1.0 + bal).min(1.0));
+            let (front, back) = ((1.0 - fb).min(1.0), (1.0 + fb).min(1.0));
+            let mid = 0.5 * (wet[0] + wet[1]);
+            let side = 0.5 * (wet[0] - wet[1]) * width;
+            let (rm, rs) = (0.5 * (rl + rr), 0.5 * (rl - rr) * rw);
+            let out_wet = [(mid + side) * lg * front, (mid - side) * rg * front, mid * cwet * H * front, 0.0, (rm + rs) * lg * back, (rm - rs) * rg * back];
+            for c in 0..6 {
+                self.dry6[c].push(x[c]);
+                let dry = self.dry6[c].tap(B1);
+                buf[c * frames + i] = if c == 3 { dry } else { dry * (1.0 - mix) + out_wet[c] * mix };
+            }
+            self.n += 1;
+            if self.n % B1 as u64 == 0 {
+                self.block_done();
             }
         }
     }
@@ -322,6 +408,9 @@ impl Effect for ConvolutionReverb {
             8 => self.centre_send.target = (v * 0.01).clamp(0.0, 1.0),
             9 => self.centre_wet.target = (v * 0.02).clamp(0.0, 2.0),
             10 => self.balance.target = (v * 0.01).clamp(-1.0, 1.0),
+            12 => self.lfe_send.target = (v * 0.01).clamp(0.0, 1.0),
+            13 => self.rear_width.target = (v * 0.01).clamp(0.0, 3.0),
+            14 => self.front_back.target = (v * 0.01).clamp(-1.0, 1.0),
             _ => {}
         }
     }
@@ -357,16 +446,15 @@ impl Effect for ConvolutionReverb {
     }
 
     fn process(&mut self, buf: &mut [f32], channels: usize, frames: usize) {
-        let ch = channels.min(self.channels);
         if self.fresh {
             self.fresh = false;
-            self.mix.settle();
-            self.width.settle();
-            self.gain.settle();
-            self.centre_send.settle();
-            self.centre_wet.settle();
-            self.balance.settle();
+            self.settle();
         }
+        if self.io == 6 && channels >= 6 {
+            self.process_surround(buf, frames);
+            return;
+        }
+        let ch = channels.min(self.channels);
         for i in 0..frames {
             let (mix, width, gain) = (self.mix.next(), self.width.next(), self.gain.next());
             let (csend, cwet, bal) = (self.centre_send.next(), self.centre_wet.next(), self.balance.next());
@@ -392,10 +480,25 @@ impl Effect for ConvolutionReverb {
                 wet[c] = self.ring[c][read] * gain;
                 self.ring[c][read] = 0.0;
             }
+            let (rw, fb) = (self.rear_width.next(), self.front_back.next());
+            self.lfe_send.next();
+            // The rear pair: the wet signal crossed and delayed.
+            let rl = self.rear[0].tap(self.rear_frames);
+            let rr = self.rear[1].tap(self.rear_frames);
+            self.rear[0].push(if ch == 2 { wet[1] } else { wet[0] });
+            self.rear[1].push(wet[0]);
             if ch == 2 {
                 let mid = 0.5 * (wet[0] + wet[1]) * cwet;
                 let side = 0.5 * (wet[0] - wet[1]) * width;
                 wet = [(mid + side) * (1.0 - bal).min(1.0), (mid - side) * (1.0 + bal).min(1.0)];
+            }
+            if fb > 0.0 {
+                // Folded down: the balance moves the reverb back into the delayed, crossed rear.
+                let (rm, rs) = (0.5 * (rl + rr), 0.5 * (rl - rr) * rw);
+                let rear = [(rm + rs) * (1.0 - bal).min(1.0), (rm - rs) * (1.0 + bal).min(1.0)];
+                for c in 0..ch {
+                    wet[c] = wet[c] * (1.0 - fb) + rear[c] * fb;
+                }
             }
             for c in 0..ch {
                 buf[c * frames + i] = dry[c] * (1.0 - mix) + wet[c] * mix;
@@ -411,7 +514,7 @@ impl Effect for ConvolutionReverb {
         for v in self.hist.iter_mut().chain(self.ring.iter_mut()) {
             v.iter_mut().for_each(|s| *s = 0.0);
         }
-        self.dry_line.iter_mut().chain(self.pre.iter_mut()).for_each(|l| l.clear());
+        self.dry_line.iter_mut().chain(self.pre.iter_mut()).chain(self.dry6.iter_mut()).chain(self.rear.iter_mut()).for_each(|l| l.clear());
         if let Some(l) = self.head.as_mut() {
             l.clear();
         }
@@ -420,12 +523,7 @@ impl Effect for ConvolutionReverb {
             st.job_start = 0;
         }
         self.n = 0;
-        self.mix.settle();
-        self.width.settle();
-        self.gain.settle();
-        self.centre_send.settle();
-        self.centre_wet.settle();
-        self.balance.settle();
+        self.settle();
     }
 
     fn latency(&self) -> u32 {
@@ -573,6 +671,65 @@ mod tests {
         let (l, _) = run_stereo(fx.as_mut(), &x, &x);
         assert!(peak(&l) < 1e-6);
     }
+
+    #[test]
+    fn surround_feeds_and_returns_six_channels() {
+        let rate = 48000.0;
+        let ir: Vec<f32> = noise(4800, 0.5, 2).iter().enumerate().map(|(i, v)| v * (-(i as f32) / 1500.0).exp()).collect();
+        let run = |params: &[(u32, f32)], input: usize| {
+            let mut fx = make(83, rate, 6);
+            load(fx.as_mut(), &[ir.clone(), ir.iter().rev().cloned().collect()]);
+            fx.set_param(1, 100.0);
+            for &(i, v) in params {
+                fx.set_param(i, v);
+            }
+            fx.reset();
+            let n = 9600;
+            let mut buf = vec![0.0f32; 6 * n];
+            buf[input * n + 10] = 1.0;
+            fx.process(&mut buf, 6, n);
+            (0..6).map(|c| rms(&buf[c * n..(c + 1) * n])).collect::<Vec<f32>>()
+        };
+        // The centre input reverberates in all but the LFE output.
+        let all = run(&[], 2);
+        assert!(all[0] > 0.0 && all[1] > 0.0 && all[2] > 0.0 && all[4] > 0.0 && all[5] > 0.0, "{all:?}");
+        assert_eq!(all[3], 0.0);
+        // The LFE reaches the room only with its send.
+        assert_eq!(run(&[], 3)[0], 0.0);
+        assert!(run(&[(12, 100.0)], 3)[0] > 0.0);
+        // Front/back balance fully back silences the front, fully front the rear.
+        let back = run(&[(14, 100.0)], 2);
+        assert!(back[0] == 0.0 && back[4] > 0.0, "{back:?}");
+        let front = run(&[(14, -100.0)], 2);
+        assert!(front[4] == 0.0 && front[0] > 0.0, "{front:?}");
+        // Surround width widens only the rear pair.
+        let narrow = run(&[(13, 0.0)], 0);
+        let wide = run(&[(13, 300.0)], 0);
+        // (A left input reaches the rear crossed, on Rs only, so width spreads it to Ls.)
+        assert!((narrow[0] - wide[0]).abs() < 1e-6);
+        assert!(wide[4] > narrow[4] * 1.2, "{} {}", wide[4], narrow[4]);
+    }
+
+    #[test]
+    fn stereo_folds_the_rear_in_only_as_the_balance_moves_back() {
+        let rate = 48000.0;
+        let ir: Vec<f32> = noise(2400, 0.5, 5);
+        let run = |fb: f32| {
+            let mut fx = make(83, rate, 2);
+            load(fx.as_mut(), &[ir.clone()]);
+            fx.set_param(1, 100.0);
+            fx.set_param(14, fb);
+            fx.reset();
+            let mut x = vec![0.0f32; 4800];
+            x[0] = 1.0;
+            run_stereo(fx.as_mut(), &x, &x).0
+        };
+        let (a, b, c) = (run(0.0), run(-100.0), run(100.0));
+        assert_eq!(a, b);
+        // Fully back: the crossed rear arrives REAR_MS later.
+        let first = |y: &[f32]| y.iter().position(|v| v.abs() > 1e-6).unwrap_or(0);
+        assert!(first(&c) >= first(&a) + 600, "{} {}", first(&c), first(&a));
+    }
 }
 
 #[cfg(test)]
@@ -601,4 +758,3 @@ mod debug_tests {
         }
     }
 }
-

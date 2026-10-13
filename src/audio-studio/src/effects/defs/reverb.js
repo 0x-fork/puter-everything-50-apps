@@ -235,7 +235,15 @@ registerEffect({
     pct('centerWet', 'Center Wet Level', 50, { section: 'Output' }),
     num('balance', 'Left/Right Balance', -100, 100, 0, '%', { step: 1, section: 'Output' }),
     { id: 'impulseName', label: 'Loaded Impulse File', type: 'text', default: '', hidden: true },
+    // 5.1 (on 6-channel tracks and a 5.1 master): the LFE's share of the room's
+    // input, the rear pair's width, and the reverb's front/back balance. On
+    // stereo the rear folds into the output as the balance moves back.
+    pct('lfeSend', 'LFE', 0, { section: 'Input' }),
+    pct('surroundWidth', 'Surround Width', 100, { max: 300, section: 'Reverb Settings' }),
+    num('fbBalance', 'Front/Back Balance', -100, 100, 0, '%', { step: 1, section: 'Output' }),
   ],
+  // Processes all six channels of a 5.1 track or master.
+  surround: true,
   presets: [
     preset('Default', {}),
     preset('Wide Hall Around Dialogue', { impulse: 3, mix: 35, centerSend: 40, centerWet: 30, width: 180 }),

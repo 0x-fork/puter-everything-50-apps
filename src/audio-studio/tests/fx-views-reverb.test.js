@@ -84,13 +84,20 @@ describe('surround reverb', () => {
     const conv = getEffect('convolutionReverb');
     const p = paramArray(conv, defaults(conv));
     expect(p.slice(8, 11)).toEqual([100, 50, 0]);
+    // Stereo: front/back balance at the front (or centred) leaves the output as it was; toward the back it changes it.
+    const [l0] = run({ mix: 100 });
+    const [l1] = run({ mix: 100, fbBalance: -60 });
+    const [l2] = run({ mix: 100, fbBalance: 80 });
+    expect(Array.from(l1)).toEqual(Array.from(l0));
+    expect(rms(l2.map((v, i) => v - l0[i]))).toBeGreaterThan(rms(l0) * 0.1);
   });
   it('shows input, settings and output boxes with faders', async () => {
     const { app, doc } = setup();
     const p = openEffectDialog(app, getEffect('surroundReverb'), { doc });
     const dlg = document.querySelector('.fx-dialog');
     expect([...dlg.querySelectorAll('.fx-group-title')].map((l) => l.textContent)).toEqual(['Input', 'Reverb Settings', 'Output']);
-    expect(dlg.querySelectorAll('.rv-faders .fx-vrange')).toHaveLength(5);
+    expect([...dlg.querySelectorAll('.rv-faders .fx-vfader-label')].map((l) => l.textContent)).toEqual(['Center', 'LFE', 'C Wet', 'L/R Bal', 'F/B Bal', 'Mix', 'Gain']);
+    expect([...dlg.querySelectorAll('input[type=range]')].some((r) => r.getAttribute('aria-label') === 'Surround Width')).toBe(true);
     expect([...dlg.querySelectorAll('.btn')].some((b) => b.textContent === 'Load...')).toBe(true);
     dlg.querySelector('.dialog-head .icon-btn').click();
     await p;

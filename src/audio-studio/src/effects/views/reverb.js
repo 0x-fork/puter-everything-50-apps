@@ -112,13 +112,22 @@ function convolutionView(ctx) {
 convolutionView.hides = true;
 
 function surroundView(ctx) {
-  const input = groupBox('Input', h('div.rv-faders', vSlider(ctx, 'centerSend', { label: 'Center' })));
-  const settings = groupBox('Reverb Settings', impulseRow(ctx), controlsFor(ctx, ['roomSize', 'dampLF', 'dampHF', 'preDelay', 'width']));
+  const input = groupBox('Input', h('div.rv-faders', vSlider(ctx, 'centerSend', { label: 'Center' }), vSlider(ctx, 'lfeSend', { label: 'LFE' })));
+  const settings = groupBox('Reverb Settings', impulseRow(ctx), controlsFor(ctx, ['roomSize', 'dampLF', 'dampHF', 'preDelay', 'width', 'surroundWidth']));
   const output = groupBox(
     'Output',
-    h('div.rv-faders', vSlider(ctx, 'centerWet', { label: 'C Wet' }), vSlider(ctx, 'balance', { label: 'L/R Bal' }), vSlider(ctx, 'mix', { label: 'Mix' }), vSlider(ctx, 'gain', { label: 'Gain' })),
+    h(
+      'div.rv-faders',
+      vSlider(ctx, 'centerWet', { label: 'C Wet' }),
+      vSlider(ctx, 'balance', { label: 'L/R Bal' }),
+      vSlider(ctx, 'fbBalance', { label: 'F/B Bal' }),
+      vSlider(ctx, 'mix', { label: 'Mix' }),
+      vSlider(ctx, 'gain', { label: 'Gain' }),
+    ),
   );
-  return h('div.rv-surround', input, settings, output);
+  // On stereo there is no LFE or rear pair: the LFE send waits for 5.1, and the rear folds into the front as F/B moves back.
+  const note = h('div.faint.rv-note', 'On 5.1 tracks and a 5.1 master the reverb fills all six speakers. On stereo, moving F/B toward the back blends in the delayed rear reverb; the LFE send needs 5.1.');
+  return h('div.fx-stack', h('div.rv-surround', input, settings, output), note);
 }
 surroundView.hides = true;
 surroundView.dialogClass = 'fx-wide';

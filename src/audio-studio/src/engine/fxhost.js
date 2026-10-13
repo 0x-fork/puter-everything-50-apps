@@ -8,6 +8,9 @@
 // readouts() collects their latest values for the UI. A `route`
 // ({ in: [l, r], out: [l, r] }, see src/effects/routing.js) picks which
 // channels feed the effect and which channels receive its output.
+// A slot with `channels: 6` (a surround-capable effect on a 5.1 chain) is
+// created for six channels; run() over a 6-channel buffer processes those
+// slots and leaves the stereo ones out.
 
 const MAX_FRAMES = 8192;
 const READOUT_MAX = 64;
@@ -16,7 +19,7 @@ export class FxHost {
   constructor(instance, rate) {
     this.x = instance.exports;
     this.rate = rate;
-    this.buf = this.x.mem_alloc(2 * MAX_FRAMES * 4);
+    this.buf = this.x.mem_alloc(6 * MAX_FRAMES * 4);
     this.slots = new Map(); // key -> { handle, kind, params }
   }
 
@@ -29,16 +32,17 @@ export class FxHost {
     const live = [];
     for (const spec of specs || []) {
       let s = this.slots.get(spec.key);
-      if (s && s.kind !== spec.kind) {
+      const channels = spec.channels === 6 ? 6 : 2;
+      if (s && (s.kind !== spec.kind || s.channels !== channels)) {
         this.x.fx_free(s.handle);
         this.slots.delete(spec.key);
         s = null;
       }
       let created = false;
       if (!s) {
-        const handle = this.x.fx_new(spec.kind, this.rate, 2);
+        const handle = this.x.fx_new(spec.kind, this.rate, channels);
         if (!handle) continue;
-        s = { handle, kind: spec.kind, params: [], data: [], readout: false };
+        s = { handle, kind: spec.kind, channels, params: [], data: [], readout: false };
         this.slots.set(spec.key, s);
         created = true;
       }
@@ -61,7 +65,7 @@ export class FxHost {
       // (otherwise offline renders begin with a parameter ramp).
       if (created) this.x.fx_reset(s.handle);
       s.readout = Boolean(spec.readout);
-      live.push({ handle: s.handle, enabled: spec.enabled !== false, shadow: Boolean(spec.shadow), mix: spec.mix ?? 1, key: spec.key, route: spec.route || null });
+      live.push({ handle: s.handle, channels, enabled: spec.enabled !== false, shadow: Boolean(spec.shadow), mix: spec.mix ?? 1, key: spec.key, route: spec.route || null });
     }
     return live;
   }
@@ -130,15 +134,47 @@ export class FxHost {
     }
   }
 
-  /** Runs a resolved chain over stereo planar `buf` (Float32Array[2]) in place. */
+  /**
+   * Runs a resolved chain over 5.1 planar `buf` (Float32Array[6]) in place:
+   * only the six-channel slots process it (the others are stereo effects).
+   */
+  runSix(chain, buf, frames) {
+    const slots = chain.filter((c) => c.channels === 6 && (c.enabled || c.shadow));
+    if (!slots.length) return;
+    for (let at = 0; at < frames; at += MAX_FRAMES) {
+      const n = Math.min(MAX_FRAMES, frames - at);
+      let heap = new Float32Array(this.memory, this.buf, 6 * n);
+      for (let c = 0; c < 6; c++) heap.set(buf[c].subarray(at, at + n), c * n);
+      for (const slot of slots) {
+        heap = new Float32Array(this.memory, this.buf, 6 * n);
+        const keep = !slot.enabled || slot.mix < 1 ? heap.slice() : null;
+        this.x.fx_process(slot.handle, this.buf, n);
+        heap = new Float32Array(this.memory, this.buf, 6 * n);
+        if (!slot.enabled) heap.set(keep);
+        else if (keep) {
+          const w = slot.mix;
+          for (let i = 0; i < 6 * n; i++) heap[i] = keep[i] * (1 - w) + heap[i] * w;
+        }
+      }
+      heap = new Float32Array(this.memory, this.buf, 6 * n);
+      for (let c = 0; c < 6; c++) buf[c].set(heap.subarray(c * n, c * n + n), at);
+    }
+  }
+
+  /** Runs a resolved chain over stereo planar `buf` (Float32Array[2], or [6] for 5.1: runSix) in place. */
   run(chain, buf, frames) {
-    if (!chain.some((c) => c.enabled || c.shadow)) return;
+    if (buf.length >= 6) {
+      this.runSix(chain, buf, frames);
+      return;
+    }
+    if (!chain.some((c) => c.channels !== 6 && (c.enabled || c.shadow))) return;
     for (let at = 0; at < frames; at += MAX_FRAMES) {
       const n = Math.min(MAX_FRAMES, frames - at);
       let heap = new Float32Array(this.memory, this.buf, 2 * n);
       heap.set(buf[0].subarray(at, at + n), 0);
       heap.set(buf[1].subarray(at, at + n), n);
       for (const slot of chain) {
+        if (slot.channels === 6) continue;
         if (!slot.enabled) {
           // A bypassed slot kept running: process a copy and throw the output away.
           if (slot.shadow) {

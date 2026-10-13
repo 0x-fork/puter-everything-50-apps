@@ -48,6 +48,8 @@
 //   measureOnly: true              // optional: passes audio through unchanged to measure it
 //                                  // (Loudness Meter); its dialog has no Apply
 //   display: 'loudness'            // optional: a built-in live display for the dialog (editors.js)
+//   surround: true                 // optional: also runs on 5.1 (6-channel tracks, a 5.1 master),
+//                                  // created with six channels (slotSpec `channels`)
 //   readout: true                  // optional: the processor reports live readings (fx_readout:
 //                                  // meters, detector levels) while playing; editors receive them
 //                                  // through ctx.onReadout(fn(Float32Array))
@@ -84,8 +86,10 @@ export function paramArray(def, values) {
  * with `data` (FFT Filter curve, convolution impulse, noise print), and a
  * channel `route` (routing.js) to feed and write chosen channels.
  */
-export function slotSpec(def, values, { key = def.id, enabled = true, mix = 1, doc = null, rate = doc?.sampleRate ?? 48000, route = null } = {}) {
+export function slotSpec(def, values, { key = def.id, enabled = true, mix = 1, doc = null, rate = doc?.sampleRate ?? 48000, route = null, channels = 2 } = {}) {
   const spec = { key, kind: def.kind, params: paramArray(def, values), enabled, mix };
+  // On a 5.1 chain a surround-capable effect gets all six channels; the others are not run there.
+  if (channels === 6 && def.surround) spec.channels = 6;
   if (route && !(route.in[0] === 0 && route.in[1] === 1 && route.out[0] === 0 && route.out[1] === 1)) spec.route = { in: [...route.in], out: [...route.out] };
   if (def.readout) spec.readout = true;
   if (def.data) spec.data = def.data({ ...defaults(def), ...values }, { doc, rate }) || [];

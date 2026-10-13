@@ -40,8 +40,9 @@
 // their inputs in 6 channels). Mono and stereo tracks keep their effects and
 // are placed in the field by their `surround` panner settings, instead of
 // the stereo pan, when they feed the master or a 5.1 bus. Effect chains on
-// 6-channel tracks and on a 5.1 master are not run (the effects are stereo),
-// sends from 5.1 tracks are skipped, and sends into a 5.1 bus feed its front
+// 6-channel tracks and on a 5.1 master run only their surround-capable slots
+// (specs with `channels: 6`, e.g. Surround Reverb; the other effects are
+// stereo and left out), sends from 5.1 tracks are skipped, and sends into a 5.1 bus feed its front
 // pair. A 6-channel track routed to a stereo bus is downmixed.
 
 import { surroundMatrix, channelMap } from './surround.js';
@@ -255,13 +256,14 @@ function runChain(track, buf, frames, scratch, runFx) {
     return;
   }
   if (track.fxParts?.src !== track.fx) track.fxParts = { src: track.fx, wet: track.fx.slice(0, n), rest: track.fx.slice(n) };
-  const dry = clipBuffer(scratch, '\u0000dry', frames);
-  dry[0].set(buf[0].subarray(0, frames));
-  dry[1].set(buf[1].subarray(0, frames));
+  const nch = buf.length;
+  if (!scratch.dry || scratch.dry.length < nch || scratch.dry[0].length < frames) scratch.dry = Array.from({ length: nch }, () => new Float32Array(Math.max(frames, scratch.gains.length)));
+  const dry = scratch.dry;
+  for (let c = 0; c < nch; c++) dry[c].set(buf[c].subarray(0, frames));
   runFx(track.fxParts.wet, buf, frames);
   const d = (1 - Math.max(0, mix)) * (track.fxDry ?? 1);
   const w = Math.max(0, mix);
-  for (let c = 0; c < 2; c++) {
+  for (let c = 0; c < nch; c++) {
     const b = buf[c];
     const x = dry[c];
     for (let i = 0; i < frames; i++) b[i] = b[i] * w + x[i] * d;
@@ -406,7 +408,7 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
     if (!audible && !meters) continue;
     const six = surround && plan.six.has(track.id);
     if (six) {
-      renderSix(graph, store, pos, frames, track, plan, master, scratch, { meters, missing, audible, chOf });
+      renderSix(graph, store, pos, frames, track, plan, master, scratch, { meters, missing, audible, chOf, runFx });
       continue;
     }
     tbuf[0].fill(0, 0, frames);
@@ -546,7 +548,7 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
     }
   }
   const m = graph.master || {};
-  if (m.fx && m.fx.length && runFx && !surround) runChain(m, master, frames, scratch, runFx);
+  if (m.fx && m.fx.length && runFx) runChain(m, surround ? master.slice(0, 6) : master, frames, scratch, runFx);
   const mg = (m.invert ? -1 : 1) * (m.gain ?? 1) * (m.volumeEnv ? envelopeAt(m.volumeEnv, pos) : 1);
   if (mg !== 1) {
     for (const c of master) for (let i = 0; i < frames; i++) c[i] *= mg;
@@ -567,7 +569,7 @@ function usedBus(scratch, id, frames, channels) {
 }
 
 /** Renders a 6-channel track (5.1 audio or bus track) into its destination. */
-function renderSix(graph, store, pos, frames, track, plan, master, scratch, { meters, missing, audible, chOf }) {
+function renderSix(graph, store, pos, frames, track, plan, master, scratch, { meters, missing, audible, chOf, runFx }) {
   if (!scratch.six || scratch.six[0].length < frames) scratch.six = Array.from({ length: 6 }, () => new Float32Array(Math.max(frames, scratch.gains.length)));
   const buf = scratch.six;
   for (const c of buf) c.fill(0, 0, frames);
@@ -607,6 +609,8 @@ function renderSix(graph, store, pos, frames, track, plan, master, scratch, { me
     if (meters) meters.set(track.id, [0, 0]);
     return;
   }
+  // Surround-capable effects (the stereo ones are left out on six channels).
+  if (track.fx?.length && runFx) runChain(track, buf, frames, scratch, runFx);
   const v0 = (track.invert ? -1 : 1) * track.gain * envelopeAt(track.volumeEnv, pos);
   const v1 = (track.invert ? -1 : 1) * track.gain * envelopeAt(track.volumeEnv, pos + frames);
   let pkL = 0;

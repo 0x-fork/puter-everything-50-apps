@@ -91,11 +91,11 @@ export function playableSlots(slots) {
  * rackOptions.processBypassed, switched-off slots come along as `shadow`
  * specs that the effect host processes without using their output.
  */
-export function slotSpecs(slots, prefix = 'rack', doc = null) {
+export function slotSpecs(slots, prefix = 'rack', doc = null, channels = 2) {
   const list = (slots || []).filter((s) => s && getEffect(s.effect) && isRealtime(getEffect(s.effect)) && (s.enabled !== false || rackOptions.processBypassed));
   return list.map((s) => {
     const def = getEffect(s.effect);
-    const spec = slotSpec(def, normalizeValues(def, s.values), { key: `${prefix}:${s.id}`, doc, rate: doc?.sampleRate });
+    const spec = slotSpec(def, normalizeValues(def, s.values), { key: `${prefix}:${s.id}`, doc, rate: doc?.sampleRate, channels });
     if (s.enabled === false) {
       spec.enabled = false;
       spec.shadow = true;

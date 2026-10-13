@@ -23,9 +23,9 @@ export const dbToGain = (db) => (db <= SILENT_DB ? 0 : Math.pow(10, db / 20));
  * below 100%, { fxMix, fxWet, fxDry } (see mixcore runChain). Input and
  * output gain only apply while the rack has effects to run.
  */
-export function trackRackSpecs(t, rateDoc) {
+export function trackRackSpecs(t, rateDoc, channels = 2) {
   if (!t.fxPower) return { fx: [] };
-  const slots = slotSpecs(t.fx, `trk:${t.id}`, rateDoc);
+  const slots = slotSpecs(t.fx, `trk:${t.id}`, rateDoc, channels);
   if (!slots.length) return { fx: [] };
   const inGain = t.fxIn ? gainSpec(`trk:${t.id}:in`, t.fxIn) : null;
   const wet = inGain ? [inGain, ...slots] : slots;
@@ -178,7 +178,7 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
       pan: panPts.length ? 0 : (o.pan ?? t.pan) / 100,
       mute: t.mute,
       solo: t.solo,
-      ...trackRackSpecs(t, rateDoc),
+      ...trackRackSpecs(t, rateDoc, surround && t.channels === 6 ? 6 : 2),
       clips: [],
     };
     if (t.invert) gt.invert = true;
@@ -259,7 +259,7 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
   }
   const m = state.master;
   const mo = overrides[m.id] || {};
-  const master = { gain: dbToGain(mo.volume ?? m.volume), ...trackRackSpecs(m, rateDoc) };
+  const master = { gain: dbToGain(mo.volume ?? m.volume), ...trackRackSpecs(m, rateDoc, surround ? 6 : 2) };
   if (m.invert) master.invert = true;
   if (m.eq?.on) master.fx = [...master.fx, ...slotSpecs([{ id: 'eq', effect: 'parametricEq', values: m.eq.values, enabled: true }], `eq:${m.id}`, rateDoc)];
   if (m.mode !== 'off' && mo.volume === undefined && m.automation.volume.length) {
