@@ -44,6 +44,7 @@ export const TRACK_CONTEXT = [
   'mt.addStereo',
   'mt.addMonoBus',
   'mt.addBus',
+  'mt.addVideoTrack',
   '-',
   'mt.duplicateTrack',
   'mt.deleteTrack',

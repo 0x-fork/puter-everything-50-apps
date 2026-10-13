@@ -5,7 +5,9 @@
 import { h } from '../lib/dom.js';
 import { cssVar } from '../ui/theme.js';
 
-const RANGE = 60;
+/** dB span of the meters (0 dBFS at the top). */
+export const METER_RANGE = 60;
+const RANGE = METER_RANGE;
 
 /** Colour crossover levels in dBFS (Preferences > Playback and Recording, set by the app). */
 export const meterLevels = { caution: -12, warning: -3 };

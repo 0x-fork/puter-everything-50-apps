@@ -65,7 +65,7 @@ export class TrackControls {
     const track = findTrack(this.doc.state, trackId);
     if (!track) return;
     const v = value ?? !track[key];
-    const labels = { mute: 'Mute', solo: 'Solo', arm: 'Record Arm', monitor: 'Monitor Input', fxPower: 'Effects Power' };
+    const labels = { mute: 'Mute', solo: 'Solo', arm: 'Record Arm', monitor: 'Monitor Input', fxPower: 'Effects Power', invert: 'Invert Polarity' };
     let state = updateTrack(this.doc.state, trackId, { [key]: v });
     // Preferences > Multitrack: exclusive solo turns the other solos off.
     if (key === 'solo' && v && this.app.prefs.get('soloExclusive')) {

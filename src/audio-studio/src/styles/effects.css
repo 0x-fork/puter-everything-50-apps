@@ -550,6 +550,7 @@
 
 .rack-toolbar [hidden],
 .rack-footer[hidden],
+.rack-process[hidden],
 .rack-missing[hidden] {
   display: none;
 }
