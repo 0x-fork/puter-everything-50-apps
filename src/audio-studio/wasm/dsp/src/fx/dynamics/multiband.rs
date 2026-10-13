@@ -6,9 +6,14 @@
 //!   then per band b (0..4) at 3 + 7 b: threshold dB, gain dB, ratio, attack ms,
 //!   release ms, solo, bypass;
 //!   31 output gain dB, 32 limiter on, 33 limiter threshold dB, 34 limiter margin dB,
-//!   35 limiter release ms, 36 brickwall (lookahead) limiting, 37 link channels.
+//!   35 limiter release ms, 36 brickwall (lookahead) limiting, 37 link channels,
+//!   38 limiter attack ms.
 //! The limiter boosts by (margin - threshold) and caps peaks at the margin.
-//! Latency: 5 ms lookahead minus one frame when the limiter is on and brickwall.
+//! Brickwall limiting looks ahead by the attack time, so the gain has reached
+//! its target when a peak arrives; otherwise the attack smooths the gain
+//! drop and short peaks may pass.
+//! Latency: the attack (as lookahead) minus one frame when the limiter is on
+//! and brickwall.
 //! Readout (9 values): per band its input peak dB and deepest gain reduction
 //! dB since the last read, then the output peak dB.
 //!
@@ -20,10 +25,11 @@ use super::common::{db_lin, lin_db, Detector, GainSmoother, Ramp};
 use crate::fx::util::{compress_db, lr_allpass, ms_coef, ms_frames, Biquad, Crossover, Limiter};
 use crate::fx::Effect;
 
-pub const BRICKWALL_LOOKAHEAD_MS: f32 = 5.0;
+/// Longest limiter attack (the brickwall lookahead buffer).
+pub const MAX_ATTACK_MS: f32 = 50.0;
 const BANDS: usize = 4;
 const PER_BAND: usize = 7;
-const NPARAMS: usize = 38;
+const NPARAMS: usize = 39;
 /// Control-rate block for gain computation.
 const K: usize = 8;
 
@@ -93,6 +99,7 @@ pub struct Multiband {
     lim: Limiter,
     fast_env: f32,
     fast_rel: f32,
+    fast_att: f32,
     lim_boost: Ramp,
     lim_on: bool,
     brickwall: bool,
@@ -112,7 +119,8 @@ pub const DEFAULTS: [f32; NPARAMS] = [
     -18.0, 0.0, 2.0, 5.0, 150.0, 0.0, 0.0, //
     -18.0, 0.0, 2.0, 3.0, 100.0, 0.0, 0.0, //
     -18.0, 0.0, 2.0, 1.0, 80.0, 0.0, 0.0, //
-    0.0, 1.0, 0.0, -0.1, 100.0, 1.0, 1.0,
+    0.0, 1.0, 0.0, -0.1, 100.0, 1.0, 1.0, //
+    5.0,
 ];
 
 impl Multiband {
@@ -124,9 +132,10 @@ impl Multiband {
             freq: [Ramp::new(0.0, rate / K as f32, 30.0); 3],
             bands: [Band { gain: Ramp::new(1.0, rate / K as f32, 20.0), last: [1.0; 2], ..Band::default() }; BANDS],
             out: Ramp::new(1.0, rate, 20.0),
-            lim: Limiter::new(rate, BRICKWALL_LOOKAHEAD_MS),
+            lim: Limiter::new(rate, MAX_ATTACK_MS),
             fast_env: 1.0,
             fast_rel: 0.0,
+            fast_att: 0.0,
             lim_boost: Ramp::new(1.0, rate, 20.0),
             lim_on: true,
             brickwall: true,
@@ -178,8 +187,14 @@ impl Multiband {
         let (thr, margin) = (self.p[33].min(0.0), self.p[34].min(0.0));
         self.lim_boost.target = db_lin((margin - thr).max(0.0));
         self.brickwall = self.p[36] >= 0.5;
-        self.lim.set(r, BRICKWALL_LOOKAHEAD_MS, self.p[35].max(1.0), db_lin(margin));
+        let attack = self.attack_ms();
+        self.lim.set(r, attack, self.p[35].max(1.0), db_lin(margin));
         self.fast_rel = ms_coef(self.p[35].max(1.0), r);
+        self.fast_att = ms_coef(attack, r);
+    }
+
+    fn attack_ms(&self) -> f32 {
+        self.p[38].clamp(0.1, MAX_ATTACK_MS)
     }
 
     fn apply_freqs(&mut self) {
@@ -305,10 +320,11 @@ impl Effect for Multiband {
                         l = y.0;
                         r = y.1;
                     } else {
-                        // Instant attack, smooth release, no lookahead.
+                        // No lookahead: the gain falls over the attack time and recovers over the release.
                         let peak = l.abs().max(r.abs());
                         let need = if peak > ceiling { ceiling / peak } else { 1.0 };
-                        self.fast_env = if need < self.fast_env { need } else { need + (self.fast_env - need) * self.fast_rel };
+                        let k = if need < self.fast_env { self.fast_att } else { self.fast_rel };
+                        self.fast_env = need + (self.fast_env - need) * k;
                         l *= self.fast_env;
                         r *= self.fast_env;
                     }
@@ -350,7 +366,7 @@ impl Effect for Multiband {
 
     fn latency(&self) -> u32 {
         if self.lim_on && self.brickwall {
-            (ms_frames(BRICKWALL_LOOKAHEAD_MS, self.rate).max(1) - 1) as u32
+            (ms_frames(self.attack_ms(), self.rate).clamp(1, ms_frames(MAX_ATTACK_MS, self.rate).max(1)) - 1) as u32
         } else {
             0
         }
@@ -449,5 +465,26 @@ mod tests {
         assert_eq!(fx.latency(), 239);
         fx.set_param(36, 0.0);
         assert_eq!(fx.latency(), 0);
+    }
+
+    #[test]
+    fn limiter_attack_sets_lookahead_or_smooths_the_drop() {
+        let r = 48000.0;
+        let mut fx = make(33, r, 1);
+        fx.set_param(38, 20.0);
+        assert_eq!(fx.latency(), 959);
+        // Without lookahead a slow attack lets the start of a burst through; a fast one barely does.
+        let burst: Vec<f32> = (0..9600).map(|i| if i >= 4800 { 0.9 * (i as f32 * 0.3).sin() } else { 0.0 }).collect();
+        let over = |attack: f32| {
+            let mut fx = make(33, r, 1);
+            fx.set_param(36, 0.0);
+            fx.set_param(34, -6.0);
+            fx.set_param(33, -6.0);
+            fx.set_param(38, attack);
+            fx.reset();
+            peak(&run_mono(fx.as_mut(), &burst)[4800..5400])
+        };
+        let (fast, slow) = (over(0.1), over(30.0));
+        assert!(slow > fast + 0.1, "fast {fast} slow {slow}");
     }
 }

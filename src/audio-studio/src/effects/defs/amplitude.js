@@ -284,9 +284,15 @@ registerEffect({
     bool('limiter', 'Limiter', true, { section: 'Limiter' }),
     db('limThreshold', 'Threshold', -30, 0, 0, { section: 'Limiter' }),
     db('limMargin', 'Margin', -30, 0, -0.1, { section: 'Limiter' }),
-    ms('limRelease', 'Release', 10, 1000, 100, { scale: 'log', section: 'Limiter' }),
+    ms('limRelease', 'Release', 10, 1000, 100, { scale: 'log', section: 'Limiter', order: 2 }),
     bool('brickwall', 'Brickwall Limiter', true, { section: 'Options', enabledIf: (v) => v.limiter }),
     bool('link', 'Link Channels', true, { section: 'Options' }),
+    // Brickwall: how far the limiter looks ahead; otherwise how fast its gain falls.
+    ms('limAttack', 'Attack', 0.1, 50, 5, { scale: 'log', section: 'Limiter', order: 1 }),
+    // Dialog settings the processor ignores: moving one band's setting moves the others
+    // by the same amount, and the live input spectrum behind the crossover graph.
+    bool('linkBands', 'Link Band Controls', false, { section: 'Options' }),
+    bool('spectrum', 'Spectrum on Input', false, { section: 'Options' }),
   ],
   readout: true,
   display: 'multiband',
@@ -300,7 +306,7 @@ registerEffect({
     preset('Loud Broadcast', bands([[-24, 1, 3], [-24, 0, 3], [-24, 1, 3], [-26, 1, 3]], { limThreshold: -8, limMargin: -1 })),
     preset('Soften Harsh Highs', bands([[-18, 0, 1], [-18, 0, 1], [-26, 0, 3], [-30, -1, 4]], { xover2: 2500, xover3: 7500 })),
   ],
-  latency: (v, rate) => (v.limiter && v.brickwall ? Math.max(1, msFrames(5, rate)) - 1 : 0),
+  latency: (v, rate) => (v.limiter && v.brickwall ? Math.min(Math.max(1, msFrames(Math.min(50, Math.max(0.1, v.limAttack ?? 5)), rate)), Math.max(1, msFrames(50, rate))) - 1 : 0),
 });
 
 // ---------------------------------------------------------- Tube Compressor

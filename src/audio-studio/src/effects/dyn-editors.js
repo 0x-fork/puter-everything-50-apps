@@ -13,6 +13,7 @@ import { plot, gridLines, labelText, transferCurveEditor } from './editors.js';
 import { formatValue, formatParts, parseValue } from './params.js';
 import { splineOutput } from './defs/transfer-curve.js';
 import { levelMeter } from './meters-ui.js';
+import { liveSpectrum, drawSpectrum } from './views/common.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -227,10 +228,17 @@ export function multibandEditor() {
     const edges = (v) => [FREQ_MIN, v.xover1, v.xover2, v.xover3, FREQ_MAX];
     const levels = [-120, -120, -120, -120];
     const reds = [0, 0, 0, 0];
+    // Spectrum on Input: the live input spectrum behind the bands.
+    const spec = liveSpectrum(ctx, { onFrame: () => ctx.values.spectrum && view.redraw() });
     const view = plot('fx-mb', 'Crossovers and band levels', (g, W, H) => {
       const yOf = freqGrid(g, W, H, { top: 0, bottom: -80, step: 10 });
       const v = v0();
       const e = edges(v);
+      if (v.spectrum && spec.live()) {
+        g.strokeStyle = cssVar('--text-faint');
+        g.lineWidth = 1;
+        drawSpectrum(g, spec, (f) => xOfF(f, W), yOf, { H, fill: cssVar('--wave-dim') });
+      }
       for (let b = 0; b < 4; b++) {
         const x0 = xOfF(e[b], W);
         const x1 = xOfF(e[b + 1], W);
@@ -266,6 +274,27 @@ export function multibandEditor() {
       ctx.subscribe(hot.show);
       return [h('span.fx-label', `${['Low', 'Mid', 'High'][k - 1]}:`), hot.el];
     }));
+    // Link Band Controls: a change to one band's setting moves every band by
+    // the same amount (dB settings) or the same factor (ratio and times).
+    const bandCtx = {
+      ...ctx,
+      get values() {
+        return ctx.values;
+      },
+      set: (id, v) => {
+        const m = /^(band\d)(Threshold|Gain|Ratio|Attack|Release)$/.exec(id);
+        const old = ctx.values[id];
+        if (!m || !ctx.values.linkBands || !Number.isFinite(old)) return ctx.set(id, v);
+        const additive = m[2] === 'Threshold' || m[2] === 'Gain';
+        for (const k of BAND_KEYS) {
+          const other = `${k}${m[2]}`;
+          const p = ctx.def.params.find((q) => q.id === other);
+          const cur = ctx.values[other];
+          const next = other === id ? v : additive ? cur + (v - old) : old > 0 ? cur * (v / old) : v;
+          ctx.set(other, clamp(next, p.min, p.max));
+        }
+      },
+    };
     const strips = BAND_KEYS.map((key, b) => {
       const toggle = (role, text, title) => {
         const id = `${key}${role}`;
@@ -277,7 +306,7 @@ export function multibandEditor() {
       const inMeter = levelMeter({ label: 'In', kind: 'level', min: -60, vertical: true });
       const grMeter = levelMeter({ label: 'GR', kind: 'gr', min: -24, vertical: true });
       const rows = ['Threshold', 'Gain', 'Ratio', 'Attack', 'Release'].map((role) => {
-        const hot = paramHot(ctx, `${key}${role}`, { label: `${BAND_NAMES[b]} ${role.toLowerCase()}` });
+        const hot = paramHot(bandCtx, `${key}${role}`, { label: `${BAND_NAMES[b]} ${role.toLowerCase()}` });
         ctx.subscribe(hot.show);
         return h('div.fx-mb-row', h('span.fx-label', `${role === 'Threshold' ? 'Thresh' : role}:`), hot.el);
       });
