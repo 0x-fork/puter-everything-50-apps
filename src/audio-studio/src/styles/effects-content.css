@@ -651,3 +651,15 @@ input[type='range'].slider.fx-vrange::-moz-range-track {
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
+
+/* Normalize: switch, target and unit on one row. */
+.nm-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 28px;
+}
+
+.nm-target .hot {
+  min-width: 64px;
+}

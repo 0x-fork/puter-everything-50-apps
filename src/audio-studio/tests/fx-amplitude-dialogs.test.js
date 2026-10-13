@@ -7,6 +7,7 @@ import { openEffectDialog } from '../src/effects/dialog.js';
 import { curveSegments } from '../src/effects/dyn-editors.js';
 import { FxHost } from '../src/engine/fxhost.js';
 import { fakeApp, filled } from './fx-helpers.js';
+import '../src/effects/views/index.js';
 
 const RATE = 48000;
 
@@ -199,16 +200,22 @@ describe('Amplitude and Compression dialogs', () => {
 
   it('Normalize greys out the target it does not use', async () => {
     const { dlg, close } = open('normalize');
-    const ranges = dlg.querySelectorAll('input[type=range]');
+    const hots = () => [...dlg.querySelectorAll('.hot')].filter((x) => !x.closest('[hidden]'));
     const unit = () => dlg.querySelector('.fx-radios input:checked').nextSibling.textContent;
     expect(unit()).toBe('%');
-    expect(ranges[0].disabled).toBe(false);
-    expect(ranges[1].disabled).toBe(true);
+    expect(hots().map((x) => x.textContent)).toEqual(['100.0 %', '0.0 %']);
     const db = dlg.querySelector('.fx-radios input');
     db.checked = true;
     db.dispatchEvent(new Event('change'));
-    expect(ranges[0].disabled).toBe(true);
-    expect(ranges[1].disabled).toBe(false);
+    expect(hots()[0].textContent).toMatch(/dB/);
+    // Normalize To off greys the target, unit and equal-channels option; DC bias waits for its switch.
+    const box = (text) => [...dlg.querySelectorAll('label.check input')].find((i) => i.closest('label').textContent.startsWith(text));
+    expect(hots()[1].disabled).toBe(true);
+    box('Normalize To').click();
+    expect(box('Normalize All').disabled).toBe(true);
+    expect([...dlg.querySelectorAll('.fx-radios input')].every((i) => i.disabled)).toBe(true);
+    box('DC Bias').click();
+    expect(hots()[1].disabled).toBe(false);
     await close();
   });
 });

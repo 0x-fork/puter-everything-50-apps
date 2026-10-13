@@ -513,14 +513,16 @@ async function runNormalize({ channels, values, dsp, onProgress, signal }) {
     info.push({ mean, peak: Math.max(Math.abs(max - mean), Math.abs(min - mean)) });
   }
   const loudest = Math.max(0, ...info.map((i) => i.peak));
+  // DC Bias Adjust moves each channel's offset to the bias amount (0 % removes it).
+  const bias = values.removeDc ? (values.dcAmount || 0) / 100 : 0;
   const out = [];
   for (let c = 0; c < channels.length; c++) {
     const { mean, peak } = info[c];
     const p = values.equal ? loudest : peak;
-    const gain = p > 0 ? target / p : 1;
+    const gain = values.normalizeTo === false ? 1 : p > 0 ? target / p : 1;
     const src = channels[c];
     const dst = new Float32Array(src.length);
-    for (let i = 0; i < src.length; i++) dst[i] = (src[i] - mean) * gain;
+    for (let i = 0; i < src.length; i++) dst[i] = (src[i] - mean) * gain + bias;
     out.push(dst);
     onProgress?.((c + 1) / channels.length);
     await pause();
@@ -533,13 +535,16 @@ registerEffect({
   name: 'Normalize',
   group: AMP,
   kind: null,
-  about: 'Scales the selection so its loudest peak reaches the target. Equal normalization keeps the balance between channels; DC bias adjust centers each channel first.',
+  about: 'Scales the selection so its loudest peak reaches the target. Equal normalization keeps the balance between channels. DC bias adjust measures each channel\'s offset and moves it to the amount you set (0 % centers the waveform), with or without normalizing.',
   params: [
-    choice('unit', 'Normalize To', ['dB', '%'], 1),
-    num('targetPercent', 'Target (%)', 1, 200, 100, '%', { step: 0.1, enabledIf: (v) => v.unit === 1 }),
-    db('targetDb', 'Target (dB)', -60, 6, 0, { enabledIf: (v) => v.unit === 0 }),
-    bool('equal', 'Normalize All Channels Equally', true),
+    choice('unit', 'Normalize To', ['dB', '%'], 1, { enabledIf: (v) => v.normalizeTo }),
+    num('targetPercent', 'Target (%)', 1, 200, 100, '%', { step: 0.1, enabledIf: (v) => v.normalizeTo && v.unit === 1 }),
+    db('targetDb', 'Target (dB)', -60, 6, 0, { enabledIf: (v) => v.normalizeTo && v.unit === 0 }),
+    bool('equal', 'Normalize All Channels Equally', true, { enabledIf: (v) => v.normalizeTo }),
     bool('removeDc', 'DC Bias Adjust', false),
+    // Off: no level change, so DC Bias Adjust can run on its own.
+    bool('normalizeTo', 'Normalize To', true, { order: -1 }),
+    num('dcAmount', 'DC Bias', -50, 50, 0, '%', { step: 0.1, enabledIf: (v) => v.removeDc }),
   ],
   presets: [
     preset('Full Scale', { unit: 1, targetPercent: 100, equal: true, removeDc: false }),
