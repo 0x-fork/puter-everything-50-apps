@@ -422,13 +422,77 @@
 .metadata-panel {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  container-type: inline-size;
+}
+
+.metadata-panel .empty-state {
+  flex: 1;
+}
+
+.meta-pane {
   gap: 10px;
   padding: 10px 12px;
-  height: 100%;
+}
+
+.meta-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.meta-error {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+.meta-error[hidden],
+.metadata-panel .subtabs-host[hidden] {
+  display: none;
+}
+
+.meta-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.meta-actions .btn .icon {
+  margin-right: 4px;
+}
+
+/* A dot on format tabs that hold values. */
+.metadata-panel .subtab.has-data::before {
+  position: absolute;
+  top: 5px;
+  right: 1px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  content: '';
+}
+
+/* Narrow frames: labels above their fields. */
+@container (max-width: 260px) {
+  .meta-form {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2px;
+  }
+
+  .meta-form > label {
+    margin-top: 6px;
+    padding-top: 0;
+  }
 }
 
 .meta-form {
   grid-template-columns: max-content minmax(0, 1fr);
+  align-items: start;
+}
+
+.meta-form > label {
+  padding-top: 5px;
 }
 
 .meta-form[hidden],
@@ -484,6 +548,7 @@
   .io-grid > label,
   .meta-form > label {
     margin-top: 6px;
+    padding-top: 0;
   }
 
   .media-actions .btn {

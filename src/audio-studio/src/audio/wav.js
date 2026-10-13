@@ -3,7 +3,7 @@
 // (cue + LIST/adtl labl/ltxt), which round-trip markers with other editors,
 // mu-law/A-law and LIST/INFO metadata (title, artist, ...).
 
-import { parseRiffInfo } from './meta.js';
+import { parseRiffInfo, parseBext, parseCart } from './meta.js';
 import { ulaw, alaw } from './aiff.js';
 
 const ascii = (dv, o, n) => {
@@ -57,7 +57,11 @@ export function parseWav(buffer) {
         cues.set(dv.getUint32(p, true), dv.getUint32(p + 20, true));
       }
     } else if (id === 'LIST' && body + 4 <= buffer.byteLength && ascii(dv, body, 4) === 'INFO') {
-      meta = parseRiffInfo(new Uint8Array(buffer, body, Math.min(size, buffer.byteLength - body)));
+      meta = { ...meta, ...parseRiffInfo(new Uint8Array(buffer, body, Math.min(size, buffer.byteLength - body))) };
+    } else if (id === 'bext' || id === 'cart') {
+      const bytes = new Uint8Array(buffer, body, Math.max(0, Math.min(size, buffer.byteLength - body)));
+      // INFO wins for the shared title and artist; the cart chunk fills them in only when missing.
+      meta = { ...(id === 'bext' ? parseBext(bytes) : parseCart(bytes)), ...meta };
     } else if (id === 'LIST' && body + 4 <= buffer.byteLength && ascii(dv, body, 4) === 'adtl') {
       let q = body + 4;
       while (q + 8 <= body + size) {

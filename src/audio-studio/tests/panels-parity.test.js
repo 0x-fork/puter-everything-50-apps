@@ -12,6 +12,10 @@ import { MENUS } from '../src/ui/menus.js';
 import { HOLD_COLORS, spectrumBars } from '../src/analysis/frequency.js';
 import { statsRows, histogramSeries } from '../src/analysis/amplitude.js';
 import { accumulateRmsHistogram, HIST_BINS, HIST_FLOOR } from '../src/analysis/rms-histogram.js';
+import { bextChunk, parseBext, cartChunk, parseCart, cleanMeta, id3v2Tag, parseId3v2, vorbisComment, parseVorbisComment } from '../src/audio/meta.js';
+import { WavWriter } from '../src/export/pcm.js';
+import { parseWav } from '../src/audio/wav.js';
+import { META_TABS, normalizeMetaValue, metadataPanel } from '../src/panels/metadata.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
 
 const RATE = 1000;
@@ -171,5 +175,78 @@ describe('Amplitude Statistics', () => {
     tabs[2].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     expect(tabs[0].getAttribute('aria-selected')).toBe('true');
     expect([...p.el.querySelectorAll('button')].some((b) => b.textContent === 'Copy All')).toBe(true);
+  });
+});
+
+describe('Metadata', () => {
+  const bwf = { bextDescription: 'Interview, take 2', bextOriginator: 'Field Rec', bextOriginatorRef: 'REF-0042', bextDate: '2026-10-13', bextTime: '09:30:00', bextTimeRef: '5000000000', bextCodingHistory: 'A=PCM,F=48000,W=24,M=stereo\nA=PCM,F=48000,W=16' };
+  const cart = { title: 'Spot', artist: 'Agency', cartCutId: '1234', cartClientId: 'ACME', cartCategory: 'COM', cartStartDate: '2026-11-01', cartStartTime: '06:00:00', cartUrl: 'https://example.com', cartTagText: 'Line one\nLine two' };
+
+  it('round-trips bext and cart chunks', () => {
+    const b = bextChunk(bwf);
+    expect(String.fromCharCode(...b.subarray(0, 4))).toBe('bext');
+    expect(parseBext(b.subarray(8))).toEqual(bwf);
+    expect(bextChunk({ title: 'x' })).toBe(null);
+    const c = cartChunk(cart);
+    expect(String.fromCharCode(...c.subarray(0, 4))).toBe('cart');
+    expect(String.fromCharCode(...c.subarray(8, 12))).toBe('0101');
+    expect(parseCart(c.subarray(8))).toEqual(cart);
+    expect(cartChunk({ title: 'x' })).toBe(null);
+    // Fixed fields are cut on a character boundary.
+    expect(parseBext(bextChunk({ bextOriginator: 'é'.repeat(40) }).subarray(8)).bextOriginator).toBe('é'.repeat(16));
+  });
+
+  it('writes and reads them in WAV exports, with the extra INFO and ID3 tags', async () => {
+    const meta = { ...bwf, ...cart, copyright: '(c) 2026', engineer: 'NJ', track: '3' };
+    const w = new WavWriter({ sampleRate: 8000, channels: 1, bitDepth: 16, dither: 'none', frames: 100, meta });
+    w.write([new Float32Array(100)], 100);
+    const buf = await w.finish().arrayBuffer();
+    const parsed = parseWav(buf);
+    expect(parsed.meta).toEqual(cleanMeta(meta));
+    expect(parsed.channels[0].length).toBe(100);
+    const tags = { title: 'T', track: '4/12', albumArtist: 'Various', composer: 'C', copyright: 'X', bpm: '120', key: 'Am' };
+    expect(parseId3v2(id3v2Tag(tags))).toEqual(tags);
+    expect(parseVorbisComment(vorbisComment(tags))).toEqual(tags);
+  });
+
+  it('checks dates, times and numbers', () => {
+    expect(normalizeMetaValue('bextDate', '2026/1/5')).toEqual({ value: '2026-01-05' });
+    expect(normalizeMetaValue('bextDate', '2026-13-01').error).toBeTruthy();
+    expect(normalizeMetaValue('bextTime', '9:5')).toEqual({ value: '09:05:00' });
+    expect(normalizeMetaValue('bextTime', '25:00:00').error).toBeTruthy();
+    expect(normalizeMetaValue('bextTimeRef', '00480000')).toEqual({ value: '480000' });
+    expect(normalizeMetaValue('bpm', 'fast').error).toBeTruthy();
+    expect(normalizeMetaValue('bextOriginator', 'x'.repeat(33)).error).toBeTruthy();
+    expect(normalizeMetaValue('title', '  Song  ')).toEqual({ value: 'Song' });
+  });
+
+  it('edits fields on BWF, ID3, RIFF and Cart tabs, sharing common ones', () => {
+    const app = makeApp();
+    const doc = audioDoc();
+    app.addDocument(doc);
+    const p = metadataPanel(app);
+    expect([...p.el.querySelectorAll('[role=tab]')].map((t) => t.textContent)).toEqual(META_TABS.map((t) => t.label));
+    const inputFor = (tab, label) => {
+      const pane = p.el.querySelector(`#${p.el.querySelector(`[data-tab=${tab}]`).getAttribute('aria-controls')}`);
+      const l = [...pane.querySelectorAll('label')].find((x) => x.textContent === `${label}:`);
+      return pane.querySelector(`#${l.htmlFor}`);
+    };
+    const date = inputFor('bwf', 'Origination Date');
+    date.value = '2026-2-3';
+    date.dispatchEvent(new Event('change'));
+    expect(doc.state.meta.bextDate).toBe('2026-02-03');
+    date.value = 'soon';
+    date.dispatchEvent(new Event('change'));
+    expect(date.getAttribute('aria-invalid')).toBe('true');
+    expect(doc.state.meta.bextDate).toBe('2026-02-03');
+    const name = inputFor('riff', 'Name');
+    name.value = 'Shared';
+    name.dispatchEvent(new Event('change'));
+    expect(doc.state.meta.title).toBe('Shared');
+    expect(inputFor('id3', 'Title').value).toBe('Shared');
+    expect(inputFor('cart', 'Title').value).toBe('Shared');
+    expect(p.el.querySelector('[data-tab=riff]').classList.contains('has-data')).toBe(true);
+    doc.history.undo();
+    expect(inputFor('id3', 'Title').value).toBe('');
   });
 });
