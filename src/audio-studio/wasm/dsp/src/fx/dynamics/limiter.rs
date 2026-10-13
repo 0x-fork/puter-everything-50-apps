@@ -2,17 +2,22 @@
 //! lookahead limiting with util::Limiter.
 //!
 //! Hard Limiter params: 0 ceiling dB, 1 input boost dB, 2 lookahead ms,
-//! 3 release ms, 4 link channels (0/1).
+//! 3 release ms, 4 link channels (0/1), 5 true peak (0/1: detect peaks 4x
+//! oversampled so peaks between samples stay under the ceiling too; adds
+//! TP_DELAY frames of latency).
 //! Loudness Maximizer params: 0 boost dB, 1 ceiling dB, 2 release ms,
 //! 3 lookahead ms, 4 low level boost % (slow upward compression of quiet passages).
 
 use super::common::{db_lin, frame_peak, Detector, GainSmoother};
 use crate::fx::util::{db_to_gain, Limiter};
+use crate::loudness::TruePeak;
 use crate::fx::Effect;
 use super::common::Ramp;
 
 /// Longest lookahead either effect accepts.
 pub const MAX_LOOKAHEAD_MS: f32 = 10.0;
+/// Frames the true-peak interpolator lags its input (half its 64-tap 4x filter).
+pub const TP_DELAY: usize = 8;
 
 pub struct HardLimiter {
     rate: f32,
@@ -22,6 +27,11 @@ pub struct HardLimiter {
     look_ms: f32,
     release_ms: f32,
     link: bool,
+    true_peak: bool,
+    tp: TruePeak,
+    /// Audio delayed by TP_DELAY so it lines up with the true-peak detector.
+    tp_delay: [[f32; TP_DELAY]; 2],
+    tp_pos: usize,
 }
 
 impl HardLimiter {
@@ -34,9 +44,36 @@ impl HardLimiter {
             look_ms: 5.0,
             release_ms: 80.0,
             link: true,
+            true_peak: false,
+            tp: TruePeak::new(2),
+            tp_delay: [[0.0; TP_DELAY]; 2],
+            tp_pos: 0,
         };
         h.update();
         h
+    }
+    /// One frame through the true-peak path: detects on the oversampled
+    /// input and limits the matching delayed frame.
+    #[inline]
+    fn true_peak_frame(&mut self, l: f32, r: f32, stereo: bool) -> (f32, f32) {
+        let pl = self.tp.push(0, l);
+        let pr = if stereo { self.tp.push(1, r) } else { pl };
+        self.tp.advance();
+        let k = self.tp_pos;
+        let (dl, dr) = (self.tp_delay[0][k], self.tp_delay[1][k]);
+        self.tp_delay[0][k] = l;
+        self.tp_delay[1][k] = r;
+        self.tp_pos = (k + 1) % TP_DELAY;
+        let (a, b) = (pl.max(dl.abs()), pr.max(dr.abs()));
+        if !stereo {
+            let y = self.lim[0].process_peak(dl, dl, a).0;
+            return (y, y);
+        }
+        if self.link {
+            self.lim[0].process_peak(dl, dr, a.max(b))
+        } else {
+            (self.lim[0].process_peak(dl, dl, a).0, self.lim[1].process_peak(dr, dr, b).0)
+        }
     }
     fn update(&mut self) {
         let ceiling = db_to_gain(self.ceiling_db);
@@ -54,11 +91,31 @@ impl Effect for HardLimiter {
             2 => self.look_ms = v.clamp(0.1, MAX_LOOKAHEAD_MS),
             3 => self.release_ms = v.clamp(1.0, 5000.0),
             4 => self.link = v >= 0.5,
+            5 => {
+                let on = v >= 0.5;
+                if on != self.true_peak {
+                    self.true_peak = on;
+                    self.reset();
+                }
+            }
             _ => return,
         }
         self.update();
     }
     fn process(&mut self, buf: &mut [f32], channels: usize, frames: usize) {
+        if self.true_peak {
+            for i in 0..frames {
+                let g = self.boost.next();
+                if channels >= 2 {
+                    let (a, b) = self.true_peak_frame(buf[i] * g, buf[frames + i] * g, true);
+                    buf[i] = a;
+                    buf[frames + i] = b;
+                } else {
+                    buf[i] = self.true_peak_frame(buf[i] * g, 0.0, false).0;
+                }
+            }
+            return;
+        }
         for i in 0..frames {
             let g = self.boost.next();
             if channels >= 2 {
@@ -81,9 +138,12 @@ impl Effect for HardLimiter {
         for l in &mut self.lim {
             l.reset();
         }
+        self.tp = TruePeak::new(2);
+        self.tp_delay = [[0.0; TP_DELAY]; 2];
+        self.tp_pos = 0;
     }
     fn latency(&self) -> u32 {
-        self.lim[0].latency() as u32
+        (self.lim[0].latency() + if self.true_peak { TP_DELAY } else { 0 }) as u32
     }
 }
 
@@ -200,6 +260,58 @@ mod tests {
         assert!(peak(&rr) <= db_to_gain(-3.0) + 1e-6);
         assert!(peak(&l) > db_to_gain(-3.5));
         assert_eq!(fx.latency() as usize, ms_frames(5.0, r) - 1);
+    }
+
+    /// Largest 4x-oversampled peak of a signal from frame `from` on (the
+    /// interpolator runs from the start so its onset ringing is skipped).
+    fn true_peak(x: &[f32], from: usize) -> f32 {
+        let mut tp = crate::loudness::TruePeak::new(1);
+        let mut m = 0.0f32;
+        for (i, &v) in x.iter().enumerate() {
+            let p = tp.push(0, v);
+            tp.advance();
+            if i >= from {
+                m = m.max(p);
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn true_peak_mode_keeps_peaks_between_samples_under_the_ceiling() {
+        let r = 48000.0;
+        // A quarter-rate tone sampled 45 degrees off its crests: samples reach
+        // only 71 % of the waveform's true peak.
+        let x: Vec<f32> = (0..9600).map(|i| 0.95 * (std::f32::consts::FRAC_PI_2 * i as f32 + std::f32::consts::FRAC_PI_4).sin()).collect();
+        let ceiling = db_to_gain(-1.0);
+        let run = |tp: f32| {
+            let mut fx = make(30, r, 1);
+            fx.set_param(0, -1.0);
+            fx.set_param(5, tp);
+            fx.reset();
+            let y = run_mono(fx.as_mut(), &x);
+            (true_peak(&y, 2400), fx.latency() as usize)
+        };
+        let (sample_mode, lat0) = run(0.0);
+        let (tp_mode, lat1) = run(1.0);
+        assert!(sample_mode > ceiling * 1.05, "{sample_mode}");
+        // Within the interpolator's accuracy.
+        assert!(tp_mode <= ceiling * 1.005, "{tp_mode}");
+        assert_eq!(lat1, lat0 + super::TP_DELAY);
+    }
+
+    #[test]
+    fn true_peak_mode_passes_quiet_audio_delayed() {
+        let r = 48000.0;
+        let mut fx = make(30, r, 1);
+        fx.set_param(5, 1.0);
+        fx.reset();
+        let lat = fx.latency() as usize;
+        let x = sine(440.0, r, 4800, 0.3);
+        let y = run_mono(fx.as_mut(), &x);
+        for i in lat..x.len() {
+            assert!((y[i] - x[i - lat]).abs() < 1e-5);
+        }
     }
 
     #[test]

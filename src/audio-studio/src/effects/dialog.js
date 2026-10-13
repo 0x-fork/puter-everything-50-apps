@@ -14,7 +14,7 @@ import { normalizeValues, paramType, setLinked, linkGroups, coerce } from './par
 import { paramControls as buildControls } from './param-ui.js';
 import { channelNames, defaultRoute, routeSummary, rememberRoute, recallRoute, sameRoute } from './routing.js';
 import { allPresets, savePreset, deletePreset, matchPreset, lastValues } from './presets.js';
-import { autoEditor } from './editors.js';
+import { editorFor } from './displays.js';
 import { isRealtime } from './apply.js';
 
 const CUSTOM = '\u0000custom';
@@ -293,11 +293,11 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
   syncPresetSelect();
 
   // ------------------------------------------------------------ body
-  const editor = autoEditor(def);
+  const editor = editorFor(def);
   const editorEl = editor ? editor(ctx) : null;
   const smoothParam = def.params.find((p) => paramType(p) === 'bool' && /spline|smooth|curve/i.test(p.id));
   const set = (id, v) => setValue(id, v);
-  const ctlOpts = { doc, range, smooth: (v) => smoothParam && v[smoothParam.id] };
+  const ctlOpts = { doc, range, smooth: (v) => smoothParam && v[smoothParam.id], onReadout: def.readout ? ctx.onReadout : null };
   const tabs = def.layout?.tabs || null;
   let main;
   if (tabs) {

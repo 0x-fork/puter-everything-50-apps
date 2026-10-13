@@ -98,10 +98,11 @@ registerEffect({
   name: 'Amplify',
   group: 'Amplitude and Compression',
   kind: 1,
+  about: 'Raises or lowers the level of each channel. Link the sliders to keep the channels balanced.',
   params: [
-    { id: 'left', label: 'Left Gain', min: -60, max: 30, step: 0.1, default: 0, unit: 'dB' },
-    { id: 'right', label: 'Right Gain', min: -60, max: 30, step: 0.1, default: 0, unit: 'dB' },
-    { id: 'linked', label: 'Link Sliders', type: 'bool', default: true },
+    { id: 'left', label: 'Left', min: -96, max: 48, step: 0.1, default: 0, unit: 'dB', section: 'Gain' },
+    { id: 'right', label: 'Right', min: -96, max: 48, step: 0.1, default: 0, unit: 'dB', section: 'Gain' },
+    { id: 'linked', label: 'Link Sliders', type: 'bool', default: true, section: 'Gain' },
   ],
   presets: [
     { name: 'Default', values: { left: 0, right: 0, linked: true } },

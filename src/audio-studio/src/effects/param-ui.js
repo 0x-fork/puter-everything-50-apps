@@ -14,17 +14,22 @@
 //   layout: {
 //     columns: [['Left Channel', 'Right Channel'], ['Echo Equalizer']], // side-by-side columns
 //     vertical: ['Bands'],         // sections drawn as a row of vertical sliders (graphic EQ)
+//     knobs: ['Compressor'],       // sections drawn as a grid of rotary knobs (Dynamics)
 //     collapsed: ['Advanced'],     // sections in a collapsible disclosure, closed at first
 //     tabs: [{ label: 'Dynamics', sections: [...], editor: true }, ...] // tabbed pages (dialog.js)
+//     meters: { Compressor: [{ index: 1, label: 'Reduction', kind: 'gr' }] } // live readout meters
+//     wide: true                   // a wider dialog
 //   }
 // Per param: `ends: ['Dry', 'Wet']` labels the slider's ends; `enabledIf(values)`
 // greys a control out while it has no effect; `control: 'select' | 'radio'`
-// overrides the choice rendering; `short` is a compact label for vertical sliders.
+// overrides the choice rendering; `short` is a compact label for vertical sliders
+// and knobs; `order` moves a param within its frame.
 
 import { h } from '../lib/dom.js';
-import { hotNumber, select } from '../ui/controls.js';
+import { hotNumber, select, knob } from '../ui/controls.js';
 import { paramType, toPosition, fromPosition, formatValue, formatParts, parseValue, coerce, scaleTicks } from './params.js';
 import { envelopeControl, curveControl } from './editors.js';
+import { meterStrip } from './meters-ui.js';
 
 let uid = 0;
 
@@ -168,6 +173,33 @@ function verticalControl(p, getValues, onSet) {
   return { el, show: c.show, setDisabled: c.setDisabled };
 }
 
+/** A rotary knob cell: knob, value, label (positions map log params like the sliders). */
+function knobControl(p, getValues, onSet) {
+  const label = p.short || p.label || p.id;
+  const c = numberControl(p, getValues, onSet);
+  const k = knob({
+    value: toPosition(p, getValues()[p.id]),
+    min: 0,
+    max: 1,
+    step: 0.002,
+    defaultValue: toPosition(p, p.default),
+    label: p.label || p.id,
+    size: 40,
+    format: (x) => formatValue(p, fromPosition(p, x)),
+    onInput: (x) => onSet(p.id, fromPosition(p, x)),
+    onChange: (x) => onSet(p.id, fromPosition(p, x)),
+  });
+  const el = h('div.fx-knob', k, h('div.fx-value', c.hot), h('div.fx-knob-label', label));
+  const show = (v) => {
+    c.show(v);
+    k.setValue(toPosition(p, v[p.id]));
+  };
+  return { el, show, setDisabled: (off) => {
+    c.setDisabled(off);
+    k.disabled = off;
+  } };
+}
+
 /** Params grouped by section, in first-appearance order: [{ name, params }]. */
 export function sectionGroups(params) {
   const groups = new Map();
@@ -177,6 +209,8 @@ export function sectionGroups(params) {
     if (!groups.has(name)) groups.set(name, { name, params: [] });
     groups.get(name).params.push(p);
   }
+  // `order` moves a param within its frame (WASM index order stays as declared).
+  for (const g of groups.values()) g.params = g.params.map((p, i) => ({ p, k: (p.order ?? 0) * 1000 + i })).sort((a, b) => a.k - b.k).map((x) => x.p);
   return [...groups.values()];
 }
 
@@ -186,7 +220,7 @@ export function sectionGroups(params) {
  * include; null stands for the unsectioned params), doc, range, smooth.
  * Returns { el, refresh(values, from) }; onSet(id, value) reports changes.
  */
-export function paramControls(def, getValues, onSet, { doc = null, range = null, smooth, params = def.params, sections = null, layout = def.layout || {} } = {}) {
+export function paramControls(def, getValues, onSet, { doc = null, range = null, smooth, params = def.params, sections = null, layout = def.layout || {}, onReadout = null } = {}) {
   const refreshers = [];
   const toggles = [];
   const built = new Map();
@@ -208,10 +242,18 @@ export function paramControls(def, getValues, onSet, { doc = null, range = null,
   }
 
   function buildGroup({ name, params: list }) {
+    // Live meters under the frame title (layout.meters: { section: [{ index, label, kind }] };
+    // `main` holds the meters for the params outside any section).
+    const meterSpecs = layout.meters?.[name ?? 'main'];
+    let meters = null;
+    if (meterSpecs && onReadout) {
+      meters = meterStrip(meterSpecs);
+      onReadout((v) => meters.feed(v));
+    }
     if (!name) {
       const grid = h('div.fx-params');
       rowsFor(list, grid);
-      return grid;
+      return meters ? h('div.fx-plain', meters.el, grid) : grid;
     }
     // A bool labelled like its section switches the whole section.
     const sw = list.find((p) => paramType(p) === 'bool' && (p.label || p.id) === name);
@@ -236,14 +278,33 @@ export function paramControls(def, getValues, onSet, { doc = null, range = null,
       const others = rest.filter((p) => paramType(p) !== 'number');
       const grid = h('div.fx-params');
       rowsFor(others, grid);
-      return h('fieldset.fx-group.fx-vgroup', { dataset: { section: name } }, h('legend', title), strip, others.length ? grid : null);
+      return h('fieldset.fx-group.fx-vgroup', { dataset: { section: name } }, h('legend', title), meters?.el, strip, others.length ? grid : null);
+    }
+    if ((layout.knobs || []).includes(name)) {
+      const knobs = h('div.fx-knobs');
+      const others = [];
+      for (const p of rest) {
+        if (paramType(p) !== 'number') {
+          others.push(p);
+          continue;
+        }
+        const c = knobControl(p, getValues, onSet);
+        knobs.append(c.el);
+        refreshers.push((v) => {
+          c.show(v);
+          if (p.enabledIf) c.setDisabled(!p.enabledIf(v));
+        });
+      }
+      const grid = h('div.fx-params');
+      rowsFor(others, grid);
+      return h('fieldset.fx-group.fx-knobgroup', { dataset: { section: name } }, h('legend', title), meters?.el, others.length ? grid : null, knobs);
     }
     const grid = h('div.fx-params');
     rowsFor(rest, grid);
     if ((layout.collapsed || []).includes(name)) {
-      return h('details.fx-group.fx-collapsible', { dataset: { section: name } }, h('summary', title), grid);
+      return h('details.fx-group.fx-collapsible', { dataset: { section: name } }, h('summary', title), meters?.el, grid);
     }
-    return h('fieldset.fx-group', { dataset: { section: name } }, h('legend', title), grid);
+    return h('fieldset.fx-group', { dataset: { section: name } }, h('legend', title), meters?.el, grid);
   }
 
   const el = h('div.fx-controls');
@@ -253,6 +314,7 @@ export function paramControls(def, getValues, onSet, { doc = null, range = null,
     el.append(
       h(
         'div.fx-columns',
+        { style: { '--cols': String(cols.length) } },
         cols.map((names) =>
           h(
             'div.fx-column',
