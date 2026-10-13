@@ -328,7 +328,7 @@ export const MENUS = [
       'view.scrollToPlayhead',
       'view.autoScroll',
       '-',
-      { label: 'Status Bar', submenu: ['view.statusBar', '-', 'status.cursor', 'status.fileStatus', 'status.sampleType', 'status.size', 'status.duration', 'status.freeSpace', 'status.freeTime', 'status.dropped'] },
+      { label: 'Status Bar', submenu: ['view.statusBar', '-', 'status.cursor', 'status.frameRate', 'status.fileStatus', 'status.sampleType', 'status.size', 'status.duration', 'status.freeSpace', 'status.freeTime', 'status.dropped'] },
       {
         label: 'Metering',
         submenu: ['transport.meterInput', '-', 'meter.reset', 'meter.valleys', 'meter.gradient', 'meter.led', '-', 'meter.range120', 'meter.range96', 'meter.range72', 'meter.range60', 'meter.range48', 'meter.range24', '-', 'meter.dynamicPeaks', 'meter.staticPeaks'],

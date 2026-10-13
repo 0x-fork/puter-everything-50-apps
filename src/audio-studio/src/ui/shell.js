@@ -96,10 +96,6 @@ export function createShell(app, root) {
     status.textContent = app.statusMessage || '';
     const doc = app.active;
     statusbar.hidden = !app.prefs.get('statusBar');
-    if (!doc) {
-      statusInfo.replaceChildren();
-      return;
-    }
     const parts = statusParts(app, doc, app.statusLive || {});
     statusInfo.replaceChildren(...parts.map((p) => h('span.status-cell', p)));
   };

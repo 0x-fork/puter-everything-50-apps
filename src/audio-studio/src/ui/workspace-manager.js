@@ -12,7 +12,7 @@
 import { h } from '../lib/dom.js';
 import { icon } from './icons.js';
 import { openDialog, promptDialog, confirmDialog } from './dialog.js';
-import { WORKSPACES } from './workspaces.js';
+import { WORKSPACES, DEFAULT_TABS } from './workspaces.js';
 
 const TAB_LIMIT = 6;
 
@@ -22,11 +22,11 @@ export function orderedNames(all, order = []) {
   return [...known, ...all.filter((n) => !known.includes(n))];
 }
 
-/** Names shown as toolbar tabs: the saved choice, else the first three. */
+/** Names shown as toolbar tabs: the saved choice, else the default set. */
 export function tabNames(app) {
   const all = app.workspaceNames();
   const saved = app.prefs.get('workspaceTabs');
-  const tabs = Array.isArray(saved) ? saved.filter((n) => all.includes(n)) : all.slice(0, 3);
+  const tabs = (Array.isArray(saved) ? saved : DEFAULT_TABS).filter((n) => all.includes(n));
   return tabs.length ? tabs : all.slice(0, 1);
 }
 

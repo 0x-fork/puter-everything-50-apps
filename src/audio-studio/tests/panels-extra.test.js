@@ -436,8 +436,20 @@ describe('workspaces and window commands', () => {
     expect(ids(WORKSPACES.Loudness())).toEqual(expect.arrayContaining(['loudness', 'levels']));
     expect(ids(WORKSPACES.Restoration())).toEqual(expect.arrayContaining(['diagnostics', 'frequency']));
     expect(ids(WORKSPACES['Simple Editing']())).toEqual(expect.arrayContaining(['editor', 'files', 'transport', 'time']));
-    // The first three stay the toolbar's workspace tabs.
-    expect(Object.keys(WORKSPACES).slice(0, 3)).toEqual(['Default', 'Classic', 'Edit Audio']);
+    // Every workspace of Window > Workspace, listed alphabetically.
+    expect(Object.keys(WORKSPACES)).toEqual([
+      'Advanced Mixing',
+      'Classic',
+      'Default',
+      'Edit Audio to Video',
+      'Essential Video Mixing',
+      'Loudness',
+      'Mastering and Analysis',
+      'Maximum Editing (Dual Monitor)',
+      'Radio Production',
+      'Restoration',
+      'Simple Editing',
+    ]);
     for (const make of [...Object.values(WORKSPACES), PHONE, TABLET]) {
       const list = ids(make());
       expect(new Set(list).size).toBe(list.length);
