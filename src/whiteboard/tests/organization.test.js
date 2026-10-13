@@ -5974,6 +5974,64 @@ test("organization administrators on a board hear of mentions and replies", asyn
   assert.deepEqual(await types(viewer), ["mention", "reply"]);
 });
 
+test("a reply in a long discussion notifies everyone who wrote in it without one write after another", async () => {
+  const { boards } = setup();
+  const { input, room } = createInput("Workshop");
+  await boards.call(owner, input);
+  const { token } = await boards.call(owner, {
+    op: "invite",
+    room,
+    role: "editor",
+  });
+  const people = Array.from({ length: 30 }, (_, n) => ({
+    uuid: `00000000-0000-4000-8000-${String(n + 1).padStart(12, "0")}`,
+    username: `Person${n}`,
+  }));
+  for (const person of people)
+    await boards.call(person, { op: "join", room, token });
+  const say = (user, n) =>
+    commit(boards, user, room, (b) => {
+      const message = {
+        id: `m${n}`,
+        authorId: user.uuid,
+        authorName: user.username,
+        text: `Point ${n}`,
+        createdAt: n + 1,
+      };
+      if (b.comments?.length) b.comments[0].messages.push(message);
+      else
+        b.comments = [
+          { id: "t1", x: 0, y: 0, resolved: false, messages: [message] },
+        ];
+    });
+  for (const [n, person] of people.slice(0, 29).entries()) await say(person, n);
+  // Each notification takes a moment to store, as Puter's storage does.
+  const notify = boards.org.notify.bind(boards.org);
+  const told = [];
+  let writing = 0,
+    most = 0;
+  boards.org.notify = async (uuid, notice) => {
+    most = Math.max(most, ++writing);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    try {
+      told.push([uuid, notice.type]);
+      return await notify(uuid, notice);
+    } finally {
+      writing--;
+    }
+  };
+  await say(people[29], 29);
+  assert.deepEqual(
+    told.map(([uuid]) => uuid).sort(),
+    people
+      .slice(0, 29)
+      .map((p) => p.uuid)
+      .sort(),
+  );
+  assert.ok(told.every(([, type]) => type === "reply"));
+  assert.ok(most > 1, "Notifications are written together");
+});
+
 test("a board shared with the organization notifies colleagues mentioned before they open it", async () => {
   const { boards, call } = setup();
   await call(owner, { op: "org.setup", name: "Fabrikam" });

@@ -3557,35 +3557,61 @@ export class BoardService {
         const tag = canonicalLanguage(run.style.lang);
         if (tag) appendRun(runs, run.start, run.end, { lang: tag });
       }
+      // A reply in a long discussion reaches everyone who wrote in it.
+      // Their access is checked and their notifications written twenty at a
+      // time, as one at a time a hundred-person discussion kept each reply's
+      // save waiting seconds; who is told, and of what, is unchanged.
+      const chosen = [];
       for (const [uuid, type] of recipients) {
         if (index >= 20 || notified.has(uuid)) continue;
         notified.add(uuid);
-        if (
-          !colleagues.has(uuid) &&
-          !(await this.canOpen(room, people.get(uuid)))
-        )
-          continue;
+        chosen.push([uuid, type]);
+      }
+      const reach = [];
+      for (let n = 0; n < chosen.length; n += 20)
+        reach.push(
+          ...(await Promise.all(
+            chosen
+              .slice(n, n + 20)
+              .map(
+                ([uuid]) =>
+                  colleagues.has(uuid) || this.canOpen(room, people.get(uuid)),
+              ),
+          )),
+        );
+      const sends = [];
+      for (const [n, [uuid, type]] of chosen.entries()) {
+        if (!reach[n]) continue;
         const channel = type === "mention" && !posted;
         posted ||= channel;
-        await this.org.notify(uuid, {
-          type,
-          board: room,
-          boardTitle: after.title,
-          thread: thread.id,
-          item: thread.anchorId || null,
-          url: await this.org.boardLink(room, thread.anchorId, thread.id),
-          actor: { uuid: user.uuid, username: user.username },
-          subject:
-            type === "mention"
-              ? `${user.username} mentioned you on ${after.title}`
-              : `${user.username} replied on ${after.title}`,
-          text: `${user.username}: ${excerpt}`,
-          excerpt,
-          ...(lang ? { excerptLang: lang } : {}),
-          ...(runs.length ? { excerptRuns: runs } : {}),
-          channel,
-        });
+        sends.push([uuid, type, channel]);
       }
+      const url = sends.length
+        ? await this.org.boardLink(room, thread.anchorId, thread.id)
+        : null;
+      for (let n = 0; n < sends.length; n += 20)
+        await Promise.all(
+          sends.slice(n, n + 20).map(([uuid, type, channel]) =>
+            this.org.notify(uuid, {
+              type,
+              board: room,
+              boardTitle: after.title,
+              thread: thread.id,
+              item: thread.anchorId || null,
+              url,
+              actor: { uuid: user.uuid, username: user.username },
+              subject:
+                type === "mention"
+                  ? `${user.username} mentioned you on ${after.title}`
+                  : `${user.username} replied on ${after.title}`,
+              text: `${user.username}: ${excerpt}`,
+              excerpt,
+              ...(lang ? { excerptLang: lang } : {}),
+              ...(runs.length ? { excerptRuns: runs } : {}),
+              channel,
+            }),
+          ),
+        );
       // An edit is not a new comment.
       if (only) continue;
       const mentioned = [...recipients.values()].filter(
