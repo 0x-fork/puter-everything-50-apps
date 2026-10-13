@@ -426,16 +426,16 @@ let nextModelId = 1;
 /**
  * NMF settings from Sound Remover values: FFT size, sound bases (model
  * complexity), free bases for everything else (content complexity) and the
- * iteration counts the refinement passes buy for learning and removal.
+ * iteration counts the sound and content refinement passes buy for learning
+ * and removal.
  */
 export function soundSettings(v) {
-  const passes = Math.max(1, Math.round(v.passes));
   return {
     fft: pow2(v.fftSize, 512, 8192),
     k: Math.max(1, Math.round(v.complexity)),
     kFree: Math.max(1, Math.round(v.contentComplexity)),
-    learnIters: 40 + 20 * passes,
-    removeIters: 10 + 10 * passes,
+    learnIters: 20 + 2 * Math.max(1, Math.round(v.passes)),
+    removeIters: Math.max(1, Math.round(v.contentPasses ?? 40)),
   };
 }
 
@@ -503,7 +503,7 @@ export async function removeSound(dsp, channels, rate, w, values, { onProgress, 
       const buf = dsp.floats(nch * n);
       const v = buf.view();
       for (let c = 0; c < nch; c++) v.set(channels[c].subarray(a, b), c * n);
-      dsp.x.rs_sound_remove(buf.ptr, nch, n, s.fft, model.ptr, s.k, s.kFree, s.removeIters, values.strength / 100, -values.reduceBy, alpha, values.speech ? 1 : 0, rate);
+      dsp.x.rs_sound_remove(buf.ptr, nch, n, s.fft, model.ptr, s.k, s.kFree, s.removeIters, values.strength / 100, -values.reduceBy, alpha, values.speech ? 1 : 0, rate, values.enhanced ? values.suppression / 100 : 0);
       const r = buf.view();
       for (let c = 0; c < nch; c++) {
         const dst = out[c];
@@ -534,22 +534,27 @@ registerEffect({
   kind: null,
   needsSoundModel: true,
   params: [
-    num('complexity', 'Sound Model Complexity', 1, 30, 8, '', { step: 1 }),
-    num('passes', 'Sound Refinement Passes', 1, 10, 3, '', { step: 1 }),
-    num('contentComplexity', 'Content Complexity', 2, 64, 16, '', { step: 1 }),
+    num('complexity', 'Sound Model Complexity', 1, 100, 8, '', { step: 1 }),
+    num('passes', 'Sound Refinement Passes', 1, 150, 40, '', { step: 1 }),
+    num('contentComplexity', 'Content Complexity', 1, 100, 16, '', { step: 1 }),
     pct('strength', 'Reduction Strength', 100),
     db('reduceBy', 'Maximum Reduction', 0, 80, 40),
     num('sensitivity', 'Sensitivity', 1, 10, 5, '', { step: 0.5 }),
     fftChoice('fftSize', 'FFT Size', [512, 1024, 2048, 4096, 8192], 2048),
     bool('speech', 'Enhance for Speech', false),
+    // Iterations fitting the content around the sound during removal.
+    num('contentPasses', 'Content Refinement Passes', 1, 150, 40, '', { step: 1 }),
+    // A harder mask that clears cells the sound dominates more completely.
+    bool('enhanced', 'Enhanced Suppression', false),
+    pct('suppression', 'Suppression Strength', 50, { enabledIf: (v) => v.enhanced }),
   ],
   presets: [
     preset('Default', {}),
-    preset('Remove Beeps and Tones', { complexity: 4, passes: 3, contentComplexity: 24, strength: 100, reduceBy: 60, sensitivity: 6, fftSize: 4096, speech: false }),
-    preset('Remove Background Hum or Whine', { complexity: 6, passes: 4, contentComplexity: 20, strength: 100, reduceBy: 40, sensitivity: 5, fftSize: 8192, speech: false }),
-    preset('Remove Sound Under Dialogue', { complexity: 10, passes: 4, contentComplexity: 16, strength: 90, reduceBy: 30, sensitivity: 5, fftSize: 2048, speech: true }),
-    preset('Gentle Reduction', { complexity: 8, passes: 2, contentComplexity: 24, strength: 60, reduceBy: 15, sensitivity: 4, fftSize: 2048, speech: false }),
-    preset('Aggressive Removal', { complexity: 16, passes: 6, contentComplexity: 12, strength: 100, reduceBy: 70, sensitivity: 8, fftSize: 2048, speech: false }),
+    preset('Remove Beeps and Tones', { complexity: 4, passes: 40, contentPasses: 40, contentComplexity: 24, strength: 100, reduceBy: 60, sensitivity: 6, fftSize: 4096, speech: false }),
+    preset('Remove Background Hum or Whine', { complexity: 6, passes: 50, contentPasses: 50, contentComplexity: 20, strength: 100, reduceBy: 40, sensitivity: 5, fftSize: 8192, speech: false }),
+    preset('Remove Sound Under Dialogue', { complexity: 10, passes: 50, contentPasses: 50, contentComplexity: 16, strength: 90, reduceBy: 30, sensitivity: 5, fftSize: 2048, speech: true }),
+    preset('Gentle Reduction', { complexity: 8, passes: 30, contentPasses: 30, contentComplexity: 24, strength: 60, reduceBy: 15, sensitivity: 4, fftSize: 2048, speech: false }),
+    preset('Aggressive Removal', { complexity: 16, passes: 70, contentPasses: 70, contentComplexity: 12, strength: 100, reduceBy: 70, sensitivity: 8, fftSize: 2048, speech: false, enhanced: true, suppression: 60 }),
   ],
   run: async ({ channels, rate, values, extra, dsp, onProgress, signal }) => {
     const model = extra?.soundModel;

@@ -17,6 +17,11 @@
 //! gain is 1). The factorization runs on the sum of the channels'
 //! magnitudes, so all channels get the same mask and the stereo image holds.
 //!
+//! Enhanced suppression (0..1) hardens the mask, (aS)^p / ((aS)^p + O^p)
+//! with p rising from 2 to 6, and raises the sensitivity up to three times:
+//! cells the sound dominates are cleared more completely, while cells the
+//! rest dominates are left more alone.
+//!
 //! "Enhance for speech" smooths the mask over neighbouring frames (fewer
 //! isolated, warbling cells) and halves the attenuation in the 300 Hz to
 //! 3.4 kHz band that carries speech intelligibility.
@@ -209,6 +214,8 @@ pub struct RemoveSettings {
     pub sensitivity: f32,
     pub speech: bool,
     pub rate: f32,
+    /// 0..1: enhanced suppression (0 = off).
+    pub enhance: f32,
 }
 
 /// Removes the sound described by `model` (k bases, k-major, n/2 + 1 each)
@@ -244,7 +251,9 @@ pub fn remove(buf: &mut [f32], channels: usize, len: usize, model: &[f32], k: us
     let mut gain = vec![1.0f32; frames * bins];
     let mut sv = vec![0.0f32; bins];
     let mut ov = vec![0.0f32; bins];
-    let alpha = s.sensitivity.max(0.0);
+    let enh = s.enhance.clamp(0.0, 1.0);
+    let alpha = s.sensitivity.max(0.0) * (1.0 + 2.0 * enh);
+    let pw = 2.0 + 4.0 * enh;
     for t in 0..frames {
         sv.iter_mut().for_each(|x| *x = 0.0);
         ov.iter_mut().for_each(|x| *x = EPS);
@@ -259,7 +268,13 @@ pub fn remove(buf: &mut [f32], channels: usize, len: usize, model: &[f32], k: us
         let row = &mut gain[t * bins..(t + 1) * bins];
         for f in 0..bins {
             let a = alpha * sv[f];
-            let m = a * a / (a * a + ov[f] * ov[f]);
+            let m = if enh > 0.0 {
+                // (a / o)^p as a ratio keeps the powers in range.
+                let r = (a / ov[f]).powf(pw);
+                r / (1.0 + r)
+            } else {
+                a * a / (a * a + ov[f] * ov[f])
+            };
             row[f] = m; // the mask for now
         }
     }
@@ -342,7 +357,7 @@ mod tests {
     }
 
     fn settings() -> RemoveSettings {
-        RemoveSettings { n: 2048, k_free: 8, iters: 40, strength: 1.0, floor: 0.001, sensitivity: 1.0, speech: false, rate: RATE }
+        RemoveSettings { n: 2048, k_free: 8, iters: 40, strength: 1.0, floor: 0.001, sensitivity: 1.0, speech: false, rate: RATE, enhance: 0.0 }
     }
 
     #[test]
@@ -407,5 +422,23 @@ mod tests {
         let rs = rms(&buf[n + 4800..2 * n - 4800]);
         // Right keeps its (quieter) tone: about 0.5 x 0.316 / sqrt 2.
         assert!((rs - 0.112).abs() < 0.03, "{rs}");
+    }
+
+    #[test]
+    fn enhanced_suppression_removes_more_of_a_faint_sound_estimate() {
+        let n = 96000;
+        let sound = beeps(n, 0.3);
+        let keep = tone(n);
+        let mix: Vec<f32> = (0..n).map(|i| sound[i] + keep[i]).collect();
+        let mut model = vec![0.0f32; 6 * 1025];
+        learn(&beeps(48000, 0.4), 2048, 6, 80, &mut model);
+        let residual = |enhance: f32| {
+            let mut y = mix.clone();
+            // A low sensitivity leaves part of the sound behind.
+            remove(&mut y, 1, n, &model, 6, &RemoveSettings { sensitivity: 0.3, enhance, ..settings() });
+            (4800..n - 4800).map(|i| (y[i] - keep[i]).powi(2)).sum::<f32>()
+        };
+        let (plain, enhanced) = (residual(0.0), residual(1.0));
+        assert!(enhanced < plain * 0.85, "plain {plain} enhanced {enhanced}");
     }
 }

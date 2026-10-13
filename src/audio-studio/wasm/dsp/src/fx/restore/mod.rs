@@ -122,6 +122,7 @@ pub extern "C" fn rs_sound_remove(
     sensitivity: f32,
     speech: u32,
     rate: f32,
+    enhance: f32,
 ) {
     let n = nmf::fft_size(fft);
     let b = unsafe { slice_mut(buf, channels * len) };
@@ -135,6 +136,7 @@ pub extern "C" fn rs_sound_remove(
         sensitivity,
         speech: speech != 0,
         rate,
+        enhance,
     };
     nmf::remove(b, channels as usize, len as usize, m, k as usize, &s);
 }

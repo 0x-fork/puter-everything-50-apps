@@ -273,8 +273,9 @@ function soundRemoverView(ctx) {
   return h(
     'div.fx-stack',
     h('div.nr-bar', learn, save, load, status),
-    groupBox('Sound Model', controlsFor(ctx, ['complexity', 'passes'])),
-    groupBox('Removal', controlsFor(ctx, ['strength', 'reduceBy', 'sensitivity', 'contentComplexity'])),
+    groupBox('Sound Model', controlsFor(ctx, ['complexity', 'passes', 'enhanced', 'suppression'])),
+    groupBox('Content', controlsFor(ctx, ['contentComplexity', 'contentPasses'])),
+    groupBox('Removal', controlsFor(ctx, ['strength', 'reduceBy', 'sensitivity'])),
     controlsFor(ctx, ['speech', 'fftSize']),
   );
 }
