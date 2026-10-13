@@ -4536,6 +4536,7 @@ function draw() {
     quickPreview,
     marquee: drag?.marquee || exportRegion,
   });
+  warmTextLater(liveItems);
   renderOutline();
   const zoomLabel = document.querySelector(".zoom-label"),
     zoomText = Math.round(view.z * 100) + "%";
@@ -6405,6 +6406,99 @@ function updateTextFitStatus(budget = 0) {
       : "";
   if (status.textContent !== message) status.textContent = message;
 }
+// Zoomed out past the point where text is drawn, notes are painted without
+// it and their text is never laid out, so the first draw that shows text
+// again, zooming in past 15% or out to near it, would lay out every note it
+// shows at once: one frame of 200 ms on a large board of wordy notes. While
+// the browser is idle, the text such a draw would show is laid out ahead,
+// from the middle of the view outwards, as painting lays it out, so the
+// draw finds it ready and shows the same.
+const warmText = {
+  board: null,
+  items: null,
+  key: null,
+  queue: [],
+  at: 0,
+  later: 0,
+};
+function warmTextLater(items) {
+  warmText.board = current;
+  warmText.items = items;
+  if (!warmText.later && !document.hidden && window.requestIdleCallback)
+    warmText.later = requestIdleCallback(warmTextNow);
+}
+function warmTextNow(deadline) {
+  warmText.later = 0;
+  const canvas = document.querySelector("#canvas");
+  if (!canvas || !current || warmText.board !== current) {
+    // A board closed, or left for another, lets its objects go; the next
+    // board's first draw starts again.
+    Object.assign(warmText, {
+      board: null,
+      items: null,
+      key: null,
+      queue: [],
+      at: 0,
+    });
+    return;
+  }
+  // A hidden tab waits until it is seen again.
+  if (document.hidden) return;
+  // Beyond the view, what the view would show at the zoom where text
+  // begins, around its middle.
+  const shown = viewBounds(),
+    grow = Math.max(1, view.z / DETAIL_ZOOM),
+    middle = { x: shown.x + shown.w / 2, y: shown.y + shown.h / 2 },
+    area = {
+      x: middle.x - (shown.w * grow) / 2,
+      y: middle.y - (shown.h * grow) / 2,
+      w: shown.w * grow,
+      h: shown.h * grow,
+    };
+  const key = [warmText.items, area.x, area.y, area.w, area.h];
+  if (!warmText.key?.every((value, n) => value === key[n])) {
+    warmText.key = key;
+    warmText.at = 0;
+    const distance = (b) =>
+      (b.x + b.w / 2 - middle.x) ** 2 + (b.y + b.h / 2 - middle.y) ** 2;
+    const near = [];
+    for (const i of warmText.items) {
+      if (!i.text || !i.autoFontSize || !canAutoFitText(i)) continue;
+      const b = bounds([i]);
+      if (
+        b.x < area.x + area.w &&
+        b.x + b.w > area.x &&
+        b.y < area.y + area.h &&
+        b.y + b.h > area.y
+      )
+        near.push([distance(b), i]);
+    }
+    warmText.queue = near.sort((a, b) => a[0] - b[0]).map(([, i]) => i);
+  }
+  // A frame's time at most at once, so input is never kept waiting long.
+  const ctx = canvas.getContext("2d"),
+    font = ctx.font,
+    until = performance.now() + 16;
+  while (
+    warmText.at < warmText.queue.length &&
+    deadline.timeRemaining() > 1 &&
+    performance.now() < until
+  )
+    fitTextLayout(warmText.queue[warmText.at++], ctx);
+  ctx.font = font;
+  if (warmText.at < warmText.queue.length)
+    warmText.later = requestIdleCallback(warmTextNow);
+}
+document.addEventListener("visibilitychange", () => {
+  if (
+    !document.hidden &&
+    warmText.items &&
+    warmText.board === current &&
+    !warmText.later &&
+    window.requestIdleCallback
+  )
+    warmText.later = requestIdleCallback(warmTextNow);
+});
 function positionTextEditor() {
   if (!editing) return;
   const { item: i, input } = editing;

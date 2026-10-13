@@ -11737,6 +11737,134 @@ test("selecting many notes never laid out says whether their text fits once each
   }
 });
 
+test("text laid out ahead while the browser is idle draws the same when zooming in past 15%", async () => {
+  // Two boards alike, one of them lent idle time while zoomed out.
+  const open = async (idle) => {
+    const app = await setup();
+    const queue = [];
+    if (idle) app.w.requestIdleCallback = (f) => queue.push(f);
+    await app.click('[data-action="new"]');
+    const zoom = () =>
+      parseInt(app.doc.querySelector(".zoom-label").textContent);
+    while (zoom() >= 15) await app.click('[data-action="zoom-out"]');
+    const notes = Array.from({ length: 24 }, (_, n) =>
+      item("note", (n % 6) * 220, Math.floor(n / 6) * 220, {
+        text: `Idea ${n} needs a few more words than fit at first sight`,
+      }),
+    );
+    dispatchTransfer(app, "paste", transferData(clipboardFormats(notes)));
+    await app.tick();
+    app.doc.querySelector("#canvas").dispatchEvent(
+      new app.w.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    // A canvas of another size draws with a new context, for which no text
+    // was laid out yet: the notes were only ever drawn zoomed out.
+    const canvas = app.doc.querySelector("#canvas");
+    canvas.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      width: 800,
+      height: 600,
+    });
+    app.w.dispatchEvent(new app.w.Event("resize"));
+    for (let n = 0; n < 100 && queue.length; n++)
+      queue.shift()({ timeRemaining: () => 50, didTimeout: false });
+    assert.equal(queue.length, 0);
+    const ctx = canvas.getContext("2d");
+    const measure = ctx.measureText;
+    let measured = 0;
+    ctx.measureText = function (...args) {
+      measured++;
+      return measure.apply(this, args);
+    };
+    while (zoom() < 15) await app.click('[data-action="zoom-in"]');
+    ctx.measureText = measure;
+    return {
+      app,
+      measured,
+      picture: app.doc.querySelector("#canvas").toDataURL(),
+    };
+  };
+  const warm = await open(true);
+  const cold = await open(false);
+  try {
+    assert.ok(cold.measured > 0);
+    assert.equal(warm.measured, 0, "the notes were laid out ahead");
+    assert.equal(warm.picture, cold.picture);
+  } finally {
+    await warm.app.close();
+    await cold.app.close();
+  }
+});
+
+test("text is laid out ahead only for the open board, and not while the tab is hidden", async () => {
+  const app = await setup();
+  const { doc, w, click } = app;
+  try {
+    const queue = [];
+    w.requestIdleCallback = (f) => queue.push(f);
+    const idle = () => {
+      for (let n = 0; n < 100 && queue.length; n++)
+        queue.shift()({ timeRemaining: () => 50, didTimeout: false });
+    };
+    await click('[data-action="new"]');
+    const zoom = () => parseInt(doc.querySelector(".zoom-label").textContent);
+    while (zoom() >= 15) await click('[data-action="zoom-out"]');
+    dispatchTransfer(
+      app,
+      "paste",
+      transferData(
+        clipboardFormats(
+          Array.from({ length: 12 }, (_, n) =>
+            item("note", n * 220, 0, { text: `Idea ${n} in a few words` }),
+          ),
+        ),
+      ),
+    );
+    idle();
+    const canvas = doc.querySelector("#canvas");
+    const measured = () => {
+      const ctx = canvas.getContext("2d"),
+        measure = ctx.measureText;
+      let count = 0;
+      ctx.measureText = function (...args) {
+        count++;
+        return measure.apply(this, args);
+      };
+      return () => {
+        ctx.measureText = measure;
+        return count;
+      };
+    };
+    // Hidden, the tab schedules nothing; seen again, it goes on.
+    let hidden = true;
+    Object.defineProperty(doc, "hidden", {
+      configurable: true,
+      get: () => hidden,
+    });
+    doc.dispatchEvent(new w.Event("visibilitychange"));
+    await click('[data-action="zoom-out"]');
+    assert.equal(queue.length, 0, "nothing waits for idle time while hidden");
+    hidden = false;
+    doc.dispatchEvent(new w.Event("visibilitychange"));
+    assert.equal(queue.length, 1);
+    // A board closed before the browser is idle is not laid out.
+    await click('[data-action="home"]');
+    const stop = measured();
+    idle();
+    assert.equal(stop(), 0);
+    assert.equal(queue.length, 0, "and nothing more is scheduled");
+  } finally {
+    await app.close();
+  }
+});
+
 test("automatic text fitting updates live, cancels drafts, resizes, and persists with accessible controls", async () => {
   const app = await setup();
   const { doc, w, click } = app;
