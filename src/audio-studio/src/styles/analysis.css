@@ -135,24 +135,11 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Phase Meter */
+/* Phase Analysis */
 .phase-scope {
   position: relative;
   flex: 1;
   min-height: 80px;
-}
-
-.phase-bottom {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px 6px 0;
-}
-
-.phase-meter {
-  position: relative;
-  flex: 1;
-  height: 34px;
 }
 
 .phase-value {
@@ -160,6 +147,37 @@
   color: var(--hot);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+/* Phase Meter: horizontal bar, or vertical in a tall narrow frame */
+.phase-meter-row {
+  display: flex;
+  flex: 1;
+  align-items: stretch;
+  gap: 6px;
+  min-height: 0;
+  padding: 6px 8px 4px 2px;
+}
+
+.phase-meter {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+}
+
+.phase-meter-row > .phase-value {
+  align-self: center;
+}
+
+.phase-meter-panel.vertical .phase-meter-row {
+  flex-direction: column;
+  padding: 2px 6px 6px;
+}
+
+.phase-meter-panel.vertical .phase-meter-row > .phase-value {
+  min-width: 0;
+  text-align: center;
 }
 
 /* Match Loudness */

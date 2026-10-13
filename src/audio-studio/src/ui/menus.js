@@ -359,6 +359,7 @@ export const MENUS = [
       'window.media',
       'window.metadata',
       'window.mixer',
+      'window.phaseAnalysis',
       'window.phase',
       'window.playlist',
       'window.properties',

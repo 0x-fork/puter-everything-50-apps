@@ -846,6 +846,7 @@ export function installCoreCommands(app) {
       ['loudness', 'Match Loudness'],
       ['media', 'Media Browser'],
       ['metadata', 'Metadata'],
+      ['phaseAnalysis', 'Phase Analysis'],
       ['phase', 'Phase Meter'],
       ['selection', 'Selection/View'],
       ['events', 'Events'],
