@@ -1896,3 +1896,14 @@ input[type='range'].fx-slider:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* ------------------------------------------------------- generator preview */
+
+.gen-preview {
+  align-items: center;
+}
+
+.gen-preview-status {
+  font-size: var(--fs-sm);
+  max-width: 260px;
+}
