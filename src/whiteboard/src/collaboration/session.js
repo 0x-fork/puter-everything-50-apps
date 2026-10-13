@@ -944,7 +944,12 @@ export class CollaborationSession {
           if (error.status === 409 && !this.closed) {
             this.conflicts = (this.conflicts || 0) + 1;
             if (this.conflicts < 8) {
-              this.soon = true;
+              // A worker short of storage requests refuses many people's
+              // edits at once; waiting longer each time, and not all for
+              // the same time, lets it catch up.
+              this.soon =
+                Math.min(8000, 1500 * 2 ** (this.conflicts - 1)) *
+                (0.75 + Math.random() / 2);
               break;
             }
             this.conflicts = 0;
@@ -981,7 +986,13 @@ export class CollaborationSession {
       if (this.pending.size && !this.closed && !this.readOnly)
         this.retryTimer = setTimeout(
           () => this.flush().catch((e) => this.failure(e)),
-          this.soon ? 1500 : this.flushAgain ? this.batchDelay() : 10000,
+          this.soon
+            ? typeof this.soon === "number"
+              ? this.soon
+              : 1500
+            : this.flushAgain
+              ? this.batchDelay()
+              : 10000,
         );
       this.soon = this.flushAgain = false;
     }
@@ -1077,7 +1088,12 @@ export class CollaborationSession {
     this.track();
     previous.destroy();
     for (const row of discarded) await this.store.collaborationDelete(row.id);
-    const remade = this.replay(decode(result.update), refused, later);
+    const remade = this.replay(
+      decode(result.update),
+      refused,
+      later,
+      why?.status === 409,
+    );
     // Undo history belonged to the replaced document.
     this.shared.undo.clear();
     await this.keepCopy();
@@ -1092,9 +1108,12 @@ export class CollaborationSession {
   }
   // Commits again what each row changed, read on a copy of the shared state
   // that has the refused row and the rows before it. Changes to anything the
-  // refused row added are dropped with it, as the shared state lacks it.
+  // refused row added are dropped with it, as the shared state lacks it. A
+  // row the worker kept refusing because edits it builds on had not arrived
+  // (`remake`) is made again on its state as far as that allows, rather than
+  // lost: the edits it lacks may never come, but its own changes are fine.
   // Returns whether the refused row itself was made again.
-  replay(state, refused, rows) {
+  replay(state, refused, rows, remake = false) {
     const copy = new SharedDocument(state);
     let remade = false;
     try {
@@ -1107,6 +1126,7 @@ export class CollaborationSession {
       const made = copy.snapshot(this.room),
         current = this.shared.snapshot(this.room);
       if (
+        remake ||
         namedChanges(
           made.workshop,
           base.workshop,

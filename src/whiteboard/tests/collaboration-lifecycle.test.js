@@ -901,7 +901,7 @@ test("a board's owner who is not an administrator can bring it back from the tra
   assert.ok(synced.update, "The restored board is read again");
 });
 
-test("edits the worker keeps refusing as out of order are rebuilt on its state instead of waiting forever", async () => {
+test("edits the worker keeps refusing as out of order are made again on its state instead of waiting forever or being lost", async () => {
   const env = environment();
   const b = board("Conflicts");
   b.items = [item("note", 0, 0, { text: "Hi" })];
@@ -943,17 +943,27 @@ test("edits the worker keeps refusing as out of order are rebuilt on its state i
     next.items[0].text = "Changed";
     await session.commit(next, before);
     await session.queue;
+    const [first] = session.pending.keys();
     for (let n = 0; n < 7; n++) {
       await session.flush();
       assert.equal(session.pending.size, 1, `still waiting after ${n + 1}`);
       assert.equal(statuses.at(-1), "Saving shared changes…");
     }
     await session.flush();
-    assert.equal(session.pending.size, 0, "The refused edit is given up");
-    assert.notEqual(statuses.at(-1), "Saving shared changes…");
     assert.equal(commits, 8);
-    // The session follows the worker's state and saves again afterwards.
+    // The refused row is given up, and its change made again on the
+    // worker's state rather than lost.
+    await session.queue;
+    assert.equal(session.pending.size, 1);
+    assert.notEqual([...session.pending.keys()][0], first);
+    assert.equal(session.shared.snapshot().items[0].text, "Changed");
     env.service.call = call;
+    await session.flush();
+    assert.equal(session.pending.size, 0);
+    const { doc: saved } = await env.service.load(b.id);
+    assert.equal(saved.snapshot().items[0].text, "Changed");
+    saved.destroy();
+    // The session follows the worker's state and saves again afterwards.
     const again = session.shared.snapshot(),
       after = structuredClone(again);
     after.items[0].text = "Later";
