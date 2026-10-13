@@ -339,7 +339,7 @@ export const MENUS = [
       { label: 'Status Bar', submenu: ['view.statusBar', '-', 'status.cursor', 'status.frameRate', 'status.fileStatus', 'status.sampleType', 'status.size', 'status.duration', 'status.freeSpace', 'status.freeTime', 'status.dropped'] },
       {
         label: 'Metering',
-        submenu: ['transport.meterInput', '-', 'meter.reset', 'meter.valleys', 'meter.gradient', 'meter.led', '-', 'meter.range120', 'meter.range96', 'meter.range72', 'meter.range60', 'meter.range48', 'meter.range24', '-', 'meter.dynamicPeaks', 'meter.staticPeaks'],
+        submenu: ['transport.meterInput', '-', 'meter.reset', 'meter.valleys', 'meter.gradient', 'meter.led', '-', 'meter.range120', 'meter.range96', 'meter.range72', 'meter.range60', 'meter.range48', 'meter.range24', '-', 'meter.dynamicPeaks', 'meter.staticPeaks', '-', 'meter.orientAuto', 'meter.orientHorizontal', 'meter.orientVertical'],
       },
       { label: 'Theme', submenu: ['theme.system', 'theme.light', 'theme.dark'] },
     ],
@@ -367,6 +367,7 @@ export const MENUS = [
       'window.media',
       'window.metadata',
       'window.mixer',
+      'window.phaseAnalysis',
       'window.phase',
       'window.playlist',
       'window.properties',

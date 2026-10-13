@@ -1,7 +1,9 @@
 // Frequency Analysis panel: the spectrum at the playhead while playing (from
 // the mixer's output tap), or of the selection (averaged) / at the playhead
-// when stopped. Log or linear frequency axis, FFT size, window, channel view,
-// held traces for comparison and a cursor readout of frequency, note and level.
+// when stopped; Scan averages the selection or the whole file. Log or linear
+// frequency axis, lines / filled area / bars, channel view, eight colored hold
+// slots for comparison, FFT size and window under Advanced, and a cursor
+// readout of frequency, note and level.
 
 import { h, debounce, announce } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
@@ -20,17 +22,40 @@ const WINDOWS = [
   [3, 'Blackman-Harris'],
   [4, 'Rectangular'],
 ];
-const MAX_HOLDS = 5;
 const DB_TOP = 0;
 const DB_BOTTOM = -120;
-const HOLD_COLORS = ['--marker', '--envelope-pan', '--warning', '--danger', '--text-dim'];
+// One fixed color per hold slot (readable on both themes).
+export const HOLD_COLORS = ['#e5484d', '#f08a24', '#e2c400', '#8fcf3a', '#2fbf57', '#29c4d6', '#3d8ef0', '#c25bd6'];
+const DISPLAYS = [
+  { value: 'lines', label: 'Lines' },
+  { value: 'area', label: 'Area' },
+  { value: 'bars', label: 'Bars' },
+];
 
-const DEFAULTS = { log: true, fft: 4096, window: 0, channel: 'both' };
+const DEFAULTS = { log: true, fft: 4096, window: 0, channel: 'both', display: 'lines', advanced: false };
+
+/**
+ * Bars for the Bars display: `count` equal slices of the plot, each the
+ * loudest bin in its frequency span. `toHz(frac)` maps 0..1 across the plot.
+ */
+export function spectrumBars(db, rate, fft, toHz, count) {
+  const df = rate / fft;
+  const out = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const ka = Math.max(0, Math.floor(toHz(i / count) / df));
+    const kb = Math.min(db.length - 1, Math.max(ka, Math.ceil(toHz((i + 1) / count) / df)));
+    let v = -Infinity;
+    for (let k = ka; k <= kb; k++) if (db[k] > v) v = db[k];
+    out[i] = v;
+  }
+  return out;
+}
 
 export function frequencyPanel(app) {
   const prefs = () => ({ ...DEFAULTS, ...(app.prefs.get('frequencyAnalysis') || {}) });
   const setPref = (patch) => {
     app.prefs.set('frequencyAnalysis', { ...prefs(), ...patch });
+    syncControls();
     recompute();
   };
   const p0 = prefs();
@@ -38,20 +63,38 @@ export function frequencyPanel(app) {
   const fftSel = select({ label: 'FFT size', value: p0.fft, options: FFTS.map((n) => ({ value: n, label: `${n}` })), onChange: (v) => setPref({ fft: Number(v) }) });
   const winSel = select({ label: 'Window', value: p0.window, options: WINDOWS.map(([value, label]) => ({ value, label })), onChange: (v) => setPref({ window: Number(v) }) });
   const chSel = select({ label: 'Channels', value: p0.channel, options: [{ value: 'both', label: 'Left and Right' }, { value: 'left', label: 'Left' }, { value: 'right', label: 'Right' }, { value: 'mid', label: 'Mid (L+R)' }], onChange: (v) => setPref({ channel: v }) });
-  const holdBtn = h('button.btn.sm', { type: 'button', title: 'Hold the current trace for comparison (up to 5)', onclick: () => hold() }, icon('pause', 13), 'Hold');
+  // Hold slots: an empty slot takes the current trace, a filled one clears.
+  const holdBtns = HOLD_COLORS.map((color, i) =>
+    h('button.freq-hold', { type: 'button', 'aria-pressed': 'false', style: { '--hold': color }, onclick: () => toggleHold(i) }, String(i + 1)),
+  );
   const clearBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Clear held traces', title: 'Clear held traces', onclick: () => clearHolds() }, icon('trash-2', 14));
-  const toolbar = h('div.panel-toolbar.analysis-toolbar', scaleSel, fftSel, winSel, chSel, holdBtn, clearBtn);
+  const toolbar = h(
+    'div.panel-toolbar.analysis-toolbar',
+    h('label.freq-field', h('span', 'Scale:'), scaleSel),
+    h('div.freq-holds', { role: 'group', 'aria-label': 'Hold slots' }, h('span.freq-holds-label', 'Hold:'), ...holdBtns),
+    clearBtn,
+  );
+  const displaySel = select({ label: 'Display', value: p0.display, options: DISPLAYS, onChange: (v) => setPref({ display: v }) });
+  const scanBtn = h('button.btn.sm', { type: 'button', title: 'Average the spectrum of the selection, or of the whole file', onclick: () => recompute.now({ scan: true }) }, 'Scan');
+  const advBtn = h('button.disclosure.freq-adv-toggle', { type: 'button', 'aria-expanded': String(Boolean(p0.advanced)), onclick: () => setPref({ advanced: !prefs().advanced }) }, icon('chevron-right', 12), 'Advanced');
+  const advanced = h('div.freq-advanced', { hidden: !p0.advanced }, h('label.freq-field', h('span', 'FFT Size:'), fftSel), h('label.freq-field', h('span', 'Window:'), winSel));
+  const bottom = h(
+    'div.freq-bottom',
+    h('div.freq-controls', h('label.freq-field', h('span', 'Display:'), displaySel), h('label.freq-field', h('span', 'Channel:'), chSel), h('div.spacer'), scanBtn),
+    h('div.freq-controls', advBtn, advanced),
+  );
   const canvas = h('canvas', { 'aria-hidden': 'true' });
   const plot = h('div.freq-plot', { tabindex: '0', role: 'img', 'aria-label': 'Frequency spectrum' }, canvas);
   const readout = h('div.analysis-readout', { 'aria-live': 'polite' }, 'Play, or select audio, to see its spectrum.');
   const legend = h('div.freq-legend');
-  const el = h('div.analysis-panel.frequency-panel', toolbar, plot, h('div.analysis-foot', readout, legend));
+  const el = h('div.analysis-panel.frequency-panel', toolbar, plot, h('div.analysis-foot', readout, legend), bottom);
 
   let visible = false;
   let raf = 0;
   let live = null; // { L: dB[], R: dB[], rate, fft }
   let still = null; // computed from the document when stopped
-  let holds = [];
+  let holds = new Array(HOLD_COLORS.length).fill(null);
+  let scanRange = null; // set by Scan until the selection or document changes
   let hoverX = null;
   let gen = 0;
   let d = null;
@@ -90,20 +133,22 @@ export function frequencyPanel(app) {
     schedule();
   });
 
-  const recompute = debounce(async () => {
+  const compute = async ({ scan = false } = {}) => {
     const doc = app.active;
     const my = ++gen;
+    if (scan && doc?.kind === 'audio') scanRange = { doc, ...(doc.hasSelection ? doc.selection : { start: 0, end: doc.length }) };
+    if (scanRange && scanRange.doc !== doc) scanRange = null;
     if (!doc || doc.kind !== 'audio' || !doc.length || app.engine.playing) {
       if (!app.engine.playing) still = null;
       schedule();
       return;
     }
     const { fft, window } = prefs();
-    const sel = doc.selection;
+    const sel = scanRange || doc.selection;
     const hasSel = sel.end - sel.start >= fft;
     let positions;
     if (hasSel) {
-      const frames = Math.max(1, Math.min(128, Math.floor((sel.end - sel.start - fft) / (fft / 2)) + 1));
+      const frames = Math.max(1, Math.min(scanRange ? 256 : 128, Math.floor((sel.end - sel.start - fft) / (fft / 2)) + 1));
       const step = frames > 1 ? (sel.end - sel.start - fft) / (frames - 1) : 0;
       positions = Array.from({ length: frames }, (_, i) => Math.round(sel.start + i * step));
     } else positions = [Math.round(doc.cursor - fft / 2)];
@@ -117,12 +162,14 @@ export function frequencyPanel(app) {
         }),
       );
       if (my !== gen) return;
-      still = { L: results[0], R: results[1] || results[0], rate: doc.sampleRate, fft, label: hasSel ? 'Selection' : 'Playhead' };
+      const label = scanRange ? (scanRange.start === 0 && scanRange.end === doc.length ? 'Whole file' : 'Scanned selection') : hasSel ? 'Selection' : 'Playhead';
+      still = { L: results[0], R: results[1] || results[0], rate: doc.sampleRate, fft, label };
       schedule();
     } catch (err) {
       console.warn('[frequency]', err);
     }
-  }, 150);
+  };
+  const recompute = debounce(() => compute(), 150);
 
   const current = () => (app.engine.playing && live ? live : still);
 
@@ -138,18 +185,37 @@ export function frequencyPanel(app) {
     return data.L === data.R ? [['L', data.L]] : [['L', data.L], ['R', data.R]];
   };
 
-  const hold = () => {
-    const data = current();
-    if (!data) return;
-    const t = traces(data, prefs().channel);
-    holds.push({ traces: t.map(([n, a]) => [n, a.slice()]), rate: data.rate, fft: data.fft, n: holds.length + 1 });
-    if (holds.length > MAX_HOLDS) holds.shift();
-    announce(`Trace ${holds.length} held`);
+  const toggleHold = (i) => {
+    if (holds[i]) {
+      holds[i] = null;
+      announce(`Hold ${i + 1} cleared`);
+    } else {
+      const data = current();
+      if (!data) return;
+      const t = traces(data, prefs().channel);
+      holds[i] = { traces: t.map(([n, a]) => [n, a.slice()]), rate: data.rate, fft: data.fft };
+      announce(`Trace held in slot ${i + 1}`);
+    }
+    syncControls();
     schedule();
   };
   const clearHolds = () => {
-    holds = [];
+    holds = holds.map(() => null);
+    syncControls();
     schedule();
+  };
+  const syncControls = () => {
+    const p = prefs();
+    holdBtns.forEach((b, i) => {
+      b.setAttribute('aria-pressed', String(Boolean(holds[i])));
+      b.title = holds[i] ? `Clear held trace ${i + 1}` : `Hold the current trace in slot ${i + 1}`;
+      b.setAttribute('aria-label', b.title);
+    });
+    clearBtn.disabled = !holds.some(Boolean);
+    advBtn.setAttribute('aria-expanded', String(Boolean(p.advanced)));
+    advanced.hidden = !p.advanced;
+    displaySel.value = p.display;
+    scanBtn.disabled = app.active?.kind !== 'audio' || !app.active.length;
   };
 
   const schedule = () => {
@@ -199,7 +265,20 @@ export function frequencyPanel(app) {
     ctx.textAlign = 'left';
     ctx.fillText('dB', 4, g.top - 2);
     // Curves.
-    const curve = (db, fft, color, width = 1.25, dash = null) => {
+    const drawBars = (db, fft, color, alpha) => {
+      const width = g.right - g.left;
+      const count = Math.max(8, Math.min(160, Math.floor(width / 7)));
+      const bars = spectrumBars(db, rate, fft, scale.toHz, count);
+      const bw = width / count;
+      ctx.fillStyle = color;
+      ctx.globalAlpha = alpha;
+      bars.forEach((v, i) => {
+        const y = Math.min(g.bottom, Math.max(g.top, yOf(Math.max(DB_BOTTOM - 10, v))));
+        ctx.fillRect(g.left + i * bw + 0.5, y, Math.max(1, bw - 1.5), g.bottom - y);
+      });
+      ctx.globalAlpha = 1;
+    };
+    const curve = (db, fft, color, width = 1.25, dash = null, fill = false) => {
       const df = rate / fft;
       const bins = db.length;
       ctx.strokeStyle = color;
@@ -228,6 +307,15 @@ export function frequencyPanel(app) {
         else ctx.moveTo(x, y);
       }
       ctx.stroke();
+      if (fill) {
+        ctx.lineTo(g.right, g.bottom);
+        ctx.lineTo(g.left, g.bottom);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.25;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
       ctx.setLineDash([]);
       ctx.lineWidth = 1;
     };
@@ -236,10 +324,16 @@ export function frequencyPanel(app) {
     ctx.rect(g.left, g.top, g.right - g.left, g.bottom - g.top);
     ctx.clip();
     holds.forEach((hd, i) => {
-      for (const [, db] of hd.traces) curve(db, hd.fft, cssVar(HOLD_COLORS[i % HOLD_COLORS.length]), 1, [4, 3]);
+      if (hd) for (const [, db] of hd.traces) curve(db, hd.fft, HOLD_COLORS[i], 1, [4, 3]);
     });
     const colors = { L: cssVar('--wave'), M: cssVar('--wave'), R: cssVar('--accent-strong') };
-    for (const [name, db] of traces(data, channel)) curve(db, data.fft, colors[name], 1.5);
+    const shown = traces(data, channel);
+    const display = prefs().display;
+    // The first channel is drawn last, on top.
+    for (const [name, db] of shown.slice().reverse()) {
+      if (display === 'bars') drawBars(db, data.fft, colors[name], shown.length > 1 && name === 'R' ? 0.45 : 0.85);
+      else curve(db, data.fft, colors[name], 1.5, null, display === 'area');
+    }
     // Cursor.
     if (hoverX !== null && hoverX >= g.left && hoverX <= g.right) {
       ctx.fillStyle = cssVar('--text-strong');
@@ -249,7 +343,7 @@ export function frequencyPanel(app) {
     // Legend and readout.
     legend.replaceChildren(
       ...traces(data, channel).map(([name]) => h('span.legend-item', h('span.swatch', { style: { background: colors[name] } }), name === 'M' ? 'Mid' : name === 'L' ? 'Left' : 'Right')),
-      ...holds.map((hd, i) => h('span.legend-item', h('span.swatch.dashed', { style: { borderColor: cssVar(HOLD_COLORS[i % HOLD_COLORS.length]) } }), `Hold ${hd.n}`)),
+      ...holds.flatMap((hd, i) => (hd ? [h('span.legend-item', h('span.swatch.dashed', { style: { borderColor: HOLD_COLORS[i] } }), `Hold ${i + 1}`)] : [])),
     );
     if (hoverX !== null && data) {
       const f = scale.toHz((hoverX - g.left) / (g.right - g.left));
@@ -293,8 +387,17 @@ export function frequencyPanel(app) {
   });
 
   const offs = [
-    app.on('active', () => recompute()),
-    app.on('doc-change', (doc, e) => doc === app.active && e.kind !== 'view' && recompute()),
+    app.on('active', () => {
+      scanRange = null;
+      syncControls();
+      recompute();
+    }),
+    app.on('doc-change', (doc, e) => {
+      if (doc !== app.active || e.kind === 'view') return;
+      if (e.kind === 'selection' || e.kind === 'edit' || e.kind === 'history') scanRange = null;
+      syncControls();
+      recompute();
+    }),
     app.on('transport', (s) => {
       if (s === 'stopped') {
         live = null;
@@ -306,6 +409,7 @@ export function frequencyPanel(app) {
   const ro = new ResizeObserver(() => schedule());
   ro.observe(plot);
   void offs;
+  syncControls();
 
   return {
     el,

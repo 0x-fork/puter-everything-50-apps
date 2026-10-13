@@ -1,6 +1,6 @@
 // Levels panel: peak meters for the master output (or the input while
 // recording or input metering). Horizontal when the panel is wide, vertical
-// when tall. Peak-hold ticks (dynamic: they fall back after a moment; static:
+// when tall, unless the panel menu fixes the orientation. Peak-hold ticks (dynamic: they fall back after a moment; static:
 // they stay until reset), optional valley ticks, clip indicators (click to
 // reset) and a dB scale. The bar is drawn as solid color zones, a smooth
 // gradient, or LED segments; the zone boundaries come from preferences.
@@ -10,6 +10,13 @@ import { h } from '../lib/dom.js';
 import { cssVar, CANVAS_FONT } from '../ui/theme.js';
 
 export const METER_RANGES = [120, 96, 72, 60, 48, 24];
+
+/** Whether to draw horizontally for a panel W x H and the orientation preference ('auto' | 'horizontal' | 'vertical'). */
+export function meterHorizontal(W, H, orientation = 'auto') {
+  if (orientation === 'horizontal') return true;
+  if (orientation === 'vertical') return false;
+  return W >= H;
+}
 
 /** Zone boundaries in dB: below caution is green, up to warning yellow, above red. */
 export function meterZones(prefs) {
@@ -98,7 +105,7 @@ export function levelsPanel(app) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     const range = prefs.get('meterRange') || 60;
-    const horizontal = W >= H;
+    const horizontal = meterHorizontal(W, H, prefs.get('meterOrientation'));
     const scale = 18;
     const len = horizontal ? W - 30 : H - 24;
     const pos = (db) => Math.max(0, Math.min(1, (db + range) / range)) * len;
@@ -235,6 +242,11 @@ export function installMeterCommands(app) {
     { id: 'meter.valleys', label: 'Show Valleys', checked: () => Boolean(prefs.get('meterValleys')), run: () => prefs.toggle('meterValleys') },
     { id: 'meter.gradient', label: 'Show Color Gradient', checked: () => Boolean(prefs.get('meterGradient')), run: () => prefs.toggle('meterGradient') },
     { id: 'meter.led', label: 'Show LED Meters', checked: () => Boolean(prefs.get('meterLed')), run: () => prefs.toggle('meterLed') },
+    ...[
+      ['Auto', 'auto', 'Automatic Orientation'],
+      ['Horizontal', 'horizontal', 'Horizontal'],
+      ['Vertical', 'vertical', 'Vertical'],
+    ].map(([key, value, label]) => ({ id: `meter.orient${key}`, label, checked: () => (prefs.get('meterOrientation') || 'auto') === value, run: () => prefs.set('meterOrientation', value) })),
     ...METER_RANGES.map((r) => ({ id: `meter.range${r}`, label: `${r} dB Range`, checked: () => prefs.get('meterRange') === r, run: () => prefs.set('meterRange', r) })),
     { id: 'meter.dynamicPeaks', label: 'Dynamic Peaks', checked: () => prefs.get('meterPeaks') !== 'static', run: () => prefs.set('meterPeaks', 'dynamic') },
     {
@@ -247,7 +259,7 @@ export function installMeterCommands(app) {
       },
     },
   ]);
-  app.meterMenuIds = ['transport.meterInput', '-', 'meter.reset', 'meter.valleys', 'meter.gradient', 'meter.led', '-', ...METER_RANGES.map((r) => `meter.range${r}`), '-', 'meter.dynamicPeaks', 'meter.staticPeaks'];
+  app.meterMenuIds = ['transport.meterInput', '-', 'meter.reset', 'meter.valleys', 'meter.gradient', 'meter.led', '-', ...METER_RANGES.map((r) => `meter.range${r}`), '-', 'meter.dynamicPeaks', 'meter.staticPeaks', '-', 'meter.orientAuto', 'meter.orientHorizontal', 'meter.orientVertical'];
   app.levelsMenu = () =>
     app.meterMenuIds
       .filter((id) => id === '-' || app.commands.commands.has(id))

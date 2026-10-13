@@ -6,13 +6,14 @@
 //      { id, op: 'columns', fft, window, hop, frames, samples, floor }
 //      { id, op: 'average', size, window, hop, frames, samples }
 //      { id, op: 'pitch', samples, rate, n, hop, frames, fmin, fmax, threshold }
-//      { id, op: 'open', sid, kind: 'stats' | 'loudness' | 'limit', ...params }
+//      { id, op: 'open', sid, kind: 'stats' | 'loudness' | 'limit', ...params }  (stats: windowMs)
 //      { id, op: 'push', sid, channels }     (limit sessions reply with processed channels)
 //      { id, op: 'close', sid }              replies with the session result
 // out: { id, result } | { id, error }
 
 import { Dsp } from '../audio/dsp.js';
 import { loudnessMeter, limiter, pitchTrack, bitDepth, windowRms, averageSpectrum } from './dsp-ext.js';
+import { accumulateRmsHistogram, HIST_BINS } from './rms-histogram.js';
 
 let d = null;
 const analyzers = new Map();
@@ -39,8 +40,8 @@ function openSession(m) {
     return {
       kind: 'stats',
       rate: m.rate,
-      win: Math.max(1, Math.round(m.rate * 0.05)),
-      chans: Array.from({ length: m.channels }, () => ({ min: Infinity, max: -Infinity, sum: 0, sq: 0, clipped: 0, bad: 0, bits: 0, rmsMin: Infinity, rmsMax: 0, rmsSum: 0, rmsCount: 0, frames: 0 })),
+      win: Math.max(1, Math.round(m.rate * ((m.windowMs || 50) / 1000))),
+      chans: Array.from({ length: m.channels }, () => ({ min: Infinity, max: -Infinity, sum: 0, sq: 0, clipped: 0, bad: 0, bits: 0, rmsMin: Infinity, rmsMax: 0, rmsSum: 0, rmsCount: 0, frames: 0, hist: new Uint32Array(HIST_BINS) })),
       meter: loudnessMeter(d, m.rate, m.channels),
     };
   }
@@ -75,6 +76,7 @@ function push(s, channels) {
         st.rmsSum += rsum;
         st.rmsCount += rcount;
       }
+      accumulateRmsHistogram(st.hist, x, s.win);
     });
     s.meter.push(channels);
     return null;

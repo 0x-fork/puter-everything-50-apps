@@ -1,13 +1,50 @@
 // Properties panel: details of the active file (or of whatever a feature
 // module provides through app.propertySections, e.g. track and clip
-// properties in a multitrack session).
+// properties in a multitrack session), under a header naming the file or
+// session. Every section collapses from its heading; collapsed headings are
+// remembered across files and sessions.
 
+import '../styles/docked-panels.css';
 import { h } from '../lib/dom.js';
+import { icon } from '../ui/icons.js';
+
+/**
+ * Turns each `section.prop-section` with an `h3.prop-heading` inside `root`
+ * into a disclosure: the heading becomes a toggle button; `collapsed` holds
+ * the heading texts that start closed and is updated as the user toggles.
+ */
+export function makeCollapsible(root, collapsed, onToggle) {
+  for (const section of root.querySelectorAll('section.prop-section')) {
+    const heading = section.querySelector(':scope > .prop-heading');
+    if (!heading || heading.querySelector('.prop-toggle')) continue;
+    const key = heading.textContent.trim();
+    const body = h('div.prop-body');
+    for (const child of [...section.childNodes]) if (child !== heading) body.append(child);
+    section.append(body);
+    const btn = h('button.prop-toggle', { type: 'button' }, icon('chevron-down', 12), h('span', key));
+    const set = (open) => {
+      btn.setAttribute('aria-expanded', String(open));
+      body.hidden = !open;
+      section.classList.toggle('collapsed', !open);
+    };
+    set(!collapsed.has(key));
+    btn.addEventListener('click', () => {
+      const open = btn.getAttribute('aria-expanded') !== 'true';
+      if (open) collapsed.delete(key);
+      else collapsed.add(key);
+      set(open);
+      onToggle?.(key, open);
+    });
+    heading.replaceChildren(btn);
+  }
+}
 
 export function propertiesPanel(app) {
   const el = h('div.properties-panel');
   /** Feature modules push (app, doc) => HTMLElement | null section builders. */
   app.propertySections = app.propertySections || [];
+  const collapsed = new Set(app.prefs.get('propertiesCollapsed') || []);
+  const remember = () => app.prefs.set('propertiesCollapsed', [...collapsed]);
 
   const row = (label, value) => h('div.prop-row', h('span.prop-label', label), h('span.prop-value', value));
 
@@ -18,11 +55,15 @@ export function propertiesPanel(app) {
       el.append(h('div.empty-state', 'No Selection'));
       return;
     }
+    el.append(h('div.prop-header', icon(doc.kind === 'audio' ? 'file-audio' : 'mode-multitrack', 15), h('span.prop-title', { title: doc.name }, doc.name)));
     for (const build of app.propertySections) {
       const section = build(app, doc);
       if (section) el.append(section);
     }
-    if (doc.kind !== 'audio') return;
+    if (doc.kind !== 'audio') {
+      makeCollapsible(el, collapsed, remember);
+      return;
+    }
     const name = h('input.input', { type: 'text', value: doc.name, 'aria-label': 'File name' });
     name.addEventListener('change', () => {
       const v = name.value.trim();
@@ -46,6 +87,7 @@ export function propertiesPanel(app) {
         row('Markers', String(doc.state.markers.length)),
       ),
     );
+    makeCollapsible(el, collapsed, remember);
   };
   app.on('active', render);
   app.on('doc-change', (doc, e) => doc === app.active && (e.kind === 'edit' || e.kind === 'history' || e.kind === 'saved' || e.kind === 'rename' || e.kind === 'properties') && render());

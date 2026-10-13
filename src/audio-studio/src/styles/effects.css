@@ -785,7 +785,44 @@
 .favorites-panel {
   display: flex;
   flex-direction: column;
-  min-height: 100%;
+  height: 100%;
+  container-type: inline-size;
+}
+
+/* The list, and the selected favorite's actions and settings beside it in wide frames. */
+.fav-split {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(170px, 2fr) minmax(0, 3fr);
+  min-height: 0;
+}
+
+.fav-split > .table-scroll {
+  min-height: 0;
+}
+
+.fav-details {
+  min-width: 0;
+  overflow: auto;
+  border-left: 1px solid var(--border-soft);
+}
+
+.fav-settings {
+  margin-top: 8px;
+}
+
+.fav-note {
+  margin: 8px;
+}
+
+@container (max-width: 420px) {
+  .fav-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fav-details {
+    display: none;
+  }
 }
 
 .fav-table td.fav-shortcut-cell {

@@ -65,7 +65,7 @@ export const WORKSPACES = {
     row(
       [
         col([g(['files', 'effects', 'favorites']), g(['amplitude', 'history'])], [1.4, 1]),
-        col([g(['editor', 'mixer']), row([g(['loudness']), g(['phase', 'frequency']), col([g(['time']), g(['selection'])])], [1.6, 1.2, 1])], [2.2, 1]),
+        col([g(['editor', 'mixer']), row([g(['loudness']), g(['phaseAnalysis', 'phase', 'frequency']), col([g(['time']), g(['selection'])])], [1.6, 1.2, 1])], [2.2, 1]),
         col([g(['levels'])]),
       ],
       [1, 3.4, 0.4],
@@ -74,7 +74,7 @@ export const WORKSPACES = {
     row(
       [
         col([g(['effects', 'files']), g(['amplitude', 'history', 'events'])], [1.6, 1]),
-        col([g(['editor', 'mixer']), row([g(['frequency']), g(['phase', 'loudness'])], [1.6, 1])], [2.4, 1]),
+        col([g(['editor', 'mixer']), row([g(['frequency']), g(['phaseAnalysis', 'loudness'])], [1.6, 1]), g(['phase'])], [2.4, 1, 0.22]),
         col([g(['levels'])]),
       ],
       [1, 3.4, 0.35],
