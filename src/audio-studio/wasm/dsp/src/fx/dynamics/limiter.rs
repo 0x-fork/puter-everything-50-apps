@@ -15,7 +15,7 @@ use crate::fx::Effect;
 use super::common::Ramp;
 
 /// Longest lookahead either effect accepts.
-pub const MAX_LOOKAHEAD_MS: f32 = 10.0;
+pub const MAX_LOOKAHEAD_MS: f32 = 20.0;
 /// Frames the true-peak interpolator lags its input (half its 64-tap 4x filter).
 pub const TP_DELAY: usize = 8;
 
@@ -86,8 +86,8 @@ impl HardLimiter {
 impl Effect for HardLimiter {
     fn set_param(&mut self, idx: u32, v: f32) {
         match idx {
-            0 => self.ceiling_db = v.clamp(-60.0, 0.0),
-            1 => self.boost.target = db_to_gain(v.clamp(-24.0, 48.0)),
+            0 => self.ceiling_db = v.clamp(-100.0, 0.0),
+            1 => self.boost.target = db_to_gain(v.clamp(-100.0, 48.0)),
             2 => self.look_ms = v.clamp(0.1, MAX_LOOKAHEAD_MS),
             3 => self.release_ms = v.clamp(1.0, 5000.0),
             4 => self.link = v >= 0.5,

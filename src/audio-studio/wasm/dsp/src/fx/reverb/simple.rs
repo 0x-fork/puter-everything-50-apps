@@ -3,7 +3,10 @@
 //! gradually instead of starting at full density.
 //!
 //! Params: 0 decay ms (T60), 1 pre-delay ms, 2 attack ms, 3 high cut Hz,
-//! 4 low cut Hz, 5 diffusion %, 6 dry %, 7 wet %.
+//! 4 low cut Hz, 5 diffusion %, 6 dry % (0..200), 7 wet % (0..500),
+//! 8 perception % (0..200: absorbent surfaces lose their highs sooner,
+//! reflective ones keep them and shimmer slightly), 9 sum inputs (0/1: both
+//! channels feed the room as one source).
 
 use super::fdn::{Diffuser, Fdn};
 use super::reverb_tail;
@@ -33,6 +36,8 @@ pub struct Reverb {
     high_cut: f32,
     low_cut: f32,
     diffusion: f32,
+    perception: f32,
+    sum: bool,
     dry: Smooth,
     wet: Smooth,
     fresh: bool,
@@ -60,6 +65,8 @@ impl Reverb {
             high_cut: 7000.0,
             low_cut: 100.0,
             diffusion: 0.8,
+            perception: 0.7,
+            sum: false,
             dry: Smooth::new(0.8, rate, 20.0),
             wet: Smooth::new(0.35, rate, 20.0),
             fresh: true,
@@ -71,7 +78,8 @@ impl Reverb {
     fn update(&mut self) {
         let t = self.decay / 1000.0;
         let scale = (0.45 + 0.22 * t).min(MAX_SCALE);
-        self.fdn.set(scale, t, 0.55, 0.25, 0.27);
+        // Perception 70 % keeps the original high-frequency decay (0.545 of the low).
+        self.fdn.set(scale, t, 0.3 + 0.35 * self.perception, 0.15 + 0.15 * self.perception, 0.27);
         self.diff.set(self.diffusion, 0.5 + 0.5 * scale);
         self.pre_frames = (self.predelay * self.rate / 1000.0).round() as usize;
         let a = (self.attack * self.rate / 1000.0) as usize;
@@ -109,11 +117,13 @@ impl Effect for Reverb {
             3 => self.high_cut = v.clamp(500.0, 22000.0),
             4 => self.low_cut = v.clamp(10.0, 2000.0),
             5 => self.diffusion = (v * 0.01).clamp(0.0, 1.0),
-            6 => self.dry.target = (v * 0.01).clamp(0.0, 1.0),
-            7 => self.wet.target = (v * 0.01).clamp(0.0, 1.0),
+            6 => self.dry.target = (v * 0.01).clamp(0.0, 2.0),
+            7 => self.wet.target = (v * 0.01).clamp(0.0, 5.0),
+            8 => self.perception = (v * 0.01).clamp(0.0, 2.0),
+            9 => self.sum = v >= 0.5,
             _ => return,
         }
-        if idx < 6 {
+        if idx < 6 || idx == 8 {
             self.update();
         }
     }
@@ -129,8 +139,10 @@ impl Effect for Reverb {
             let x = [buf[i], if stereo { buf[frames + i] } else { buf[i] }];
             let (dry, wet) = (self.dry.next(), self.wet.next());
             let mut d = [0.0f32; 2];
+            let m = 0.5 * (x[0] + x[1]);
+            let send = if self.sum { [m, m] } else { x };
             for c in 0..2 {
-                self.pre[c].push(x[c]);
+                self.pre[c].push(send[c]);
                 let p = self.pre[c].tap(self.pre_frames);
                 self.att[c].push(p);
                 let mut s = 0.0;
@@ -185,6 +197,34 @@ mod tests {
         assert!(peak(&l[..4700]) < 1e-6);
         assert!(peak(&l[4800..]) > 1e-3);
         assert_eq!(fx.tail(), ((2000.0 + 100.0 + 250.0) * 48.0) as u32);
+    }
+
+    #[test]
+    fn perception_keeps_or_loses_the_highs_and_sum_inputs_feeds_both_sides() {
+        let rate = 48000.0;
+        // High-frequency energy late in the tail: reflective keeps more than absorbent.
+        let late_hf = |perception: f32| {
+            let mut fx = make(81, rate, 1);
+            for (i, v) in [(1, 0.0), (3, 20000.0), (6, 0.0), (7, 100.0), (8, perception)] {
+                fx.set_param(i, v);
+            }
+            let (l, _) = impulse_response(fx.as_mut(), 1.0, rate);
+            let hp: Vec<f32> = l.windows(2).map(|w| w[1] - w[0]).collect();
+            rms(&hp[24000..47000]) / rms(&l[24000..47000]).max(1e-12)
+        };
+        assert!(late_hf(200.0) > late_hf(0.0) * 1.3, "{} vs {}", late_hf(200.0), late_hf(0.0));
+        // Input on the left only: with Sum Inputs both outputs carry the same energy.
+        let mut fx = make(81, rate, 2);
+        for (i, v) in [(1, 0.0), (6, 0.0), (7, 100.0), (9, 1.0)] {
+            fx.set_param(i, v);
+        }
+        let n = 48000;
+        let mut l = vec![0.0f32; n];
+        l[0] = 1.0;
+        let r = vec![0.0f32; n];
+        let (yl, yr) = run_stereo(fx.as_mut(), &l, &r);
+        let (el, er) = (rms(&yl), rms(&yr));
+        assert!((el / er - 1.0).abs() < 0.3, "{el} vs {er}");
     }
 
     #[test]

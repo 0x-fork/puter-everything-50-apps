@@ -25,8 +25,8 @@ function msFrames(msValue, rate) {
 
 /** Latency of util::Limiter with a 10 ms maximum lookahead. */
 function limiterLatency(lookMs, rate) {
-  const max = Math.max(1, msFrames(10, rate));
-  const look = Math.min(Math.max(msFrames(Math.min(Math.max(lookMs, 0.1), 10), rate), 1), max);
+  const max = Math.max(1, msFrames(20, rate));
+  const look = Math.min(Math.max(msFrames(Math.min(Math.max(lookMs, 0.1), 20), rate), 1), max);
   return look - 1;
 }
 
@@ -67,9 +67,9 @@ registerEffect({
   kind: 30,
   about: 'Keeps peaks under a ceiling without audible clipping, looking ahead so it can turn the level down just before each peak. True Peak also catches peaks that fall between samples.',
   params: [
-    db('ceiling', 'Maximum Amplitude', -60, 0, -0.1),
-    db('inputBoost', 'Input Boost', -24, 48, 0),
-    ms('lookahead', 'Look-Ahead Time', 0.5, 10, 5),
+    db('ceiling', 'Maximum Amplitude', -100, 0, -0.1),
+    db('inputBoost', 'Input Boost', -100, 48, 0),
+    ms('lookahead', 'Look-Ahead Time', 0.5, 20, 5),
     release(80, { min: 10, max: 1000 }),
     bool('link', 'Link Channels', true),
     choice('truePeak', 'Detection', ['Peak', 'True Peak'], 0, { order: -1 }),
