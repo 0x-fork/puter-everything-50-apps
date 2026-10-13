@@ -15,7 +15,8 @@ import { pickLocalFiles, downloadBlob, openAccept } from '../storage/files.js';
 import * as puter from '../storage/puter.js';
 import { loadFavorites } from '../effects/favorites.js';
 import { PUTER_DRAG_TYPE, resolveMediaItems } from '../panels/media-browser.js';
-import { STATUS_LABELS, addSources, removeItems, resetItems, batchSettings, plannedNames, describeBatch, runQueue, uniqueName } from './queue.js';
+import { STATUS_LABELS, addSources, removeItems, resetItems, batchSettings, plannedNames, describeBatch, runQueue, uniqueName, sourceSampleType } from './queue.js';
+import { probeAudio, HEAD_BYTES } from '../storage/probe.js';
 import { processItem, batchFavoriteProblem } from './process.js';
 
 const PREFS = 'batchExport';
@@ -41,7 +42,7 @@ export function batchPanel(app) {
   const table = h(
     'table.data-table.batch-table',
     { role: 'grid', 'aria-label': 'Files to process', 'aria-multiselectable': 'true' },
-    h('thead', h('tr', h('th', { scope: 'col' }, 'File'), h('th.batch-status-col', { scope: 'col' }, 'Status'))),
+    h('thead', h('tr', h('th', { scope: 'col' }, 'File'), h('th.batch-type-col', { scope: 'col' }, 'Sample Type'), h('th.batch-out-col', { scope: 'col' }, 'Output'), h('th.batch-status-col', { scope: 'col' }, 'Status'))),
     body,
   );
   const listWrap = h('div.table-scroll.batch-list', table);
@@ -384,11 +385,29 @@ export function batchPanel(app) {
     e.stopPropagation();
   }
 
+  /** Reads the header of local files once, for the Sample Type column. */
+  function probeLocal() {
+    for (const item of items) {
+      if (item.source.type !== 'local' || item.probe !== undefined) continue;
+      item.probe = null;
+      const f = item.source.file;
+      f.slice(0, HEAD_BYTES)
+        .arrayBuffer()
+        .then((buf) => {
+          item.probe = probeAudio(new Uint8Array(buf), f.size) || null;
+          if (item.probe?.sampleRate && items.includes(item)) renderRows();
+        })
+        .catch(() => {});
+    }
+  }
+
   function renderRows() {
     if (!items.length) {
-      body.replaceChildren(h('tr', h('td.empty-row', { colspan: '2' }, h('span.empty-text', 'Add open files, files from this device or from Puter, or drop files here.'))));
+      body.replaceChildren(h('tr', h('td.empty-row', { colspan: '4' }, h('span.empty-text', 'Add open files, files from this device or from Puter, or drop files here.'))));
       return;
     }
+    probeLocal();
+    const outputs = plannedNames(items, settings());
     const hadFocus = body.contains(document.activeElement);
     body.replaceChildren(
       ...items.map((item, i) =>
@@ -401,6 +420,8 @@ export function batchPanel(app) {
             onkeydown: (e) => rowKeys(e, i),
           },
           h('td.batch-name', { title: item.source.type === 'puter' ? item.source.path : item.name }, h('span.name-cell', icon(item.source.type === 'doc' ? 'file-audio' : item.source.type === 'puter' ? 'cloud' : 'hard-drive', 14), h('span', item.name))),
+          h('td.batch-type', sourceSampleType(item)),
+          h('td.batch-out', { title: outputs[i] }, outputs[i]),
           statusCell(item),
         ),
       ),

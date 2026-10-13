@@ -120,6 +120,20 @@ export function plannedNames(items, settings) {
   return items.map((i) => uniqueName(outputName(i.name, settings), taken));
 }
 
+/** Sample type of a queued source when known without decoding: open files, and local files once probed (item.probe). */
+export function sourceSampleType(item) {
+  const d = item.source.doc;
+  if (d) {
+    const bits = d.info?.bitDepth;
+    const ch = d.channelCount === 1 ? 'Mono' : d.channelCount === 2 ? 'Stereo' : `${d.channelCount} ch`;
+    return [`${d.sampleRate} Hz`, bits ? (bits === 32 ? '32-bit float' : `${bits}-bit`) : '', ch].filter(Boolean).join(', ');
+  }
+  const p = item.probe;
+  if (!p?.sampleRate) return '';
+  const ch = p.channels === 1 ? 'Mono' : p.channels === 2 ? 'Stereo' : p.channels ? `${p.channels} ch` : '';
+  return [`${p.sampleRate} Hz`, p.bitDepth && /WAV|AIFF|FLAC/.test(p.format || '') ? `${p.bitDepth}-bit` : '', ch].filter(Boolean).join(', ');
+}
+
 /** Short text for the settings summary. */
 export function describeBatch(settings) {
   const f = getFormat(settings.format) || getFormat('wav');
