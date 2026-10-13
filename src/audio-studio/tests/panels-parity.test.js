@@ -16,6 +16,7 @@ import { bextChunk, parseBext, cartChunk, parseCart, cleanMeta, id3v2Tag, parseI
 import { WavWriter } from '../src/export/pcm.js';
 import { makeCollapsible } from '../src/panels/properties.js';
 import { meterHorizontal } from '../src/panels/levels.js';
+import { visibleFiles } from '../src/panels/files.js';
 import { parseWav } from '../src/audio/wav.js';
 import { META_TABS, normalizeMetaValue, metadataPanel } from '../src/panels/metadata.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
@@ -296,5 +297,38 @@ describe('Level Meters', () => {
     expect(app.prefs.get('meterOrientation')).toBe('vertical');
     expect(app.commands.isChecked('meter.orientVertical')).toBe(true);
     expect(app.commands.isChecked('meter.orientAuto')).toBe(false);
+  });
+});
+
+describe('Files panel', () => {
+  it('sorts by any column and hides columns from the panel menu', () => {
+    const app = makeApp();
+    const a = audioDoc(3, 2);
+    a.name = 'b.wav';
+    const b = audioDoc(1, 1);
+    b.name = 'a.wav';
+    app.addDocument(a);
+    app.addDocument(b);
+    expect(visibleFiles([a, b]).map((d) => d.name)).toEqual(['a.wav', 'b.wav']);
+    expect(visibleFiles([a, b], { sort: { col: 'duration', dir: -1 } }).map((d) => d.name)).toEqual(['b.wav', 'a.wav']);
+    expect(visibleFiles([a, b], { sort: { col: null } }).map((d) => d.name)).toEqual(['b.wav', 'a.wav']);
+    expect(visibleFiles([a, b], { query: 'B.W' }).map((d) => d.name)).toEqual(['b.wav']);
+    const p = create(app, 'files');
+    const names = () => [...p.el.querySelectorAll('tbody tr[data-id] td.name-cell span:last-child')].map((x) => x.textContent);
+    expect(names()).toEqual(['b.wav', 'a.wav']);
+    const header = (label) => [...p.el.querySelectorAll('th')].find((th) => th.textContent === label);
+    header('Channels').querySelector('button').click();
+    expect(names()).toEqual(['a.wav', 'b.wav']);
+    expect(header('Channels').getAttribute('aria-sort')).toBe('ascending');
+    expect(header('Bit Depth')).toBeTruthy();
+    const menu = app.panels.get('files').menu(app);
+    // menu() reads the panel created through the dock; use the instance's own menu here.
+    expect(Array.isArray(menu)).toBe(true);
+    const cols = p.menu().find((i) => i.label === 'Columns');
+    cols.items.find((i) => i.label === 'Format').run();
+    expect(header('Format')).toBeUndefined();
+    expect(app.prefs.get('filesHiddenColumns')).toEqual(['format']);
+    p.menu().find((i) => i.label === 'Show Preview Transport').run();
+    expect(p.el.querySelector('.files-footer').hidden).toBe(true);
   });
 });

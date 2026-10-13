@@ -38,7 +38,7 @@ export function installCore(app) {
       { type: 'cmd', label: 'Close All Files', enabled: a.documents.length > 0, run: () => a.commands.run('file.closeAll') },
     ],
   });
-  app.registerPanel({ id: 'files', title: 'Files', create: filesPanel, near: ['favorites', 'media'] });
+  app.registerPanel({ id: 'files', title: 'Files', create: filesPanel, near: ['favorites', 'media'], menu: (a) => a.dock?.instances.get('files')?.menu?.() || [] });
   app.registerPanel({ id: 'history', title: 'History', create: historyPanel, near: ['markers'] });
   app.registerPanel({ id: 'markers', title: 'Markers', create: markersPanel, near: ['effects', 'media'] });
   app.registerPanel({ id: 'levels', title: 'Levels', create: levelsPanel, menu: (a) => a.levelsMenu?.() || [] });
