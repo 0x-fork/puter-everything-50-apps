@@ -441,6 +441,7 @@ import {
   RESIZE_HANDLES,
   resizeBounds,
   truncate,
+  MAX_OBJECTS,
 } from "./model.js";
 import { local, CloudStore } from "./storage.js";
 import { CollaborationSession } from "./collaboration/session.js";
@@ -7159,7 +7160,7 @@ function reframeResized(plan, skip = facilitation.concealedIds()) {
 }
 function addObject(type, p, extra = {}, event, after) {
   if (isSharedReadOnly()) return toast("This board is read-only.");
-  if (current.items.length >= 5000)
+  if (current.items.length >= MAX_OBJECTS)
     return toast("A board can contain at most 5,000 objects.");
   p ??= openSpot(
     type,
@@ -7265,7 +7266,7 @@ const armedProps = (type) =>
     : {};
 function addShape(key, { arm = false } = {}) {
   if (!canEditSelection(new Set())) return;
-  if (current.items.length >= 5000)
+  if (current.items.length >= MAX_OBJECTS)
     return toast("A board can contain at most 5,000 objects.");
   if (arm) {
     setTool(key === "ellipse" ? "ellipse" : "rect");
@@ -7365,7 +7366,7 @@ function startQuickConnection(id, event) {
   const source = current?.items.find((i) => i.id === id);
   if (!canQuickConnect(source) || !canEditSelection(new Set([id])))
     return false;
-  if (current.items.length >= 5000) {
+  if (current.items.length >= MAX_OBJECTS) {
     toast("A board can contain at most 5,000 objects.");
     return false;
   }
@@ -7877,7 +7878,7 @@ function pointerDown(
   if (tool === "arrow" || tool === "pen") {
     // Said now, rather than drawing a stroke that is dropped on release.
     if (isSharedReadOnly()) return toast(sharedReadOnlyReason());
-    if (current.items.length >= 5000)
+    if (current.items.length >= MAX_OBJECTS)
       return toast("A board can contain at most 5,000 objects.");
     const original = undoCopy(current.items),
       previousSelection = new Set(selection);
@@ -8654,7 +8655,7 @@ function pointerUp(event) {
     clickedCell && current.items.find((i) => i.id === drag.id);
   if (
     drag.duplicate &&
-    (!drag.changed || isSharedReadOnly() || current.items.length > 5000)
+    (!drag.changed || isSharedReadOnly() || current.items.length > MAX_OBJECTS)
   )
     return cancelTransform();
   const linkedItem = drag.link && current.items.find((i) => i.id === drag.id);
@@ -10384,7 +10385,7 @@ async function startCollaboration(target, token, localTimer) {
             const present = new Set(target.items.map((i) => i.id));
             if (
               isSharedReadOnly() ||
-              target.items.length > 5000 ||
+              target.items.length > MAX_OBJECTS ||
               hasLocked(target.items, drag.duplicate.sourceSelection) ||
               [...drag.duplicate.sourceSelection].some((id) => !present.has(id))
             )

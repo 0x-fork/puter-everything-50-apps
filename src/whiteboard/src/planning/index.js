@@ -1,6 +1,6 @@
 import "./i18n.js";
 import { createElement, ListChecks, ChartGantt, SquareCheck } from "lucide";
-import { bounds, escape, validateBoard } from "../model.js";
+import { bounds, escape, validateBoard, MAX_OBJECTS } from "../model.js";
 import { t, labelled } from "../i18n.js";
 import { addMoreTools, addShapeChoices } from "../features.js";
 import { addCommands } from "../commands.js";
@@ -344,7 +344,7 @@ export function createPlanning(api) {
           ? { x: Math.round(box.x), y: Math.round(box.y + box.h + 120) }
           : { x: 0, y: 0 },
       });
-      if (all.length + plan.items.length > 5000)
+      if (all.length + plan.items.length > MAX_OBJECTS)
         throw Error("A board can contain at most 5,000 objects.");
       // The board must stay valid to load and save.
       validateBoard({ ...target, items: [...target.items, ...plan.items] });
@@ -413,7 +413,7 @@ export function createPlanning(api) {
         changed = new Set(found.generated.map((i) => i.id));
       for (const i of target.items) if (!kept.has(i.id)) changed.add(i.id);
       if (found.frame.locked || !writable(changed)) return api.toast(refusal());
-      if (items.length > 5000)
+      if (items.length > MAX_OBJECTS)
         throw Error("A board can contain at most 5,000 objects.");
       validateBoard({ ...target, items });
       api.mutate(() => {

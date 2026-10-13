@@ -3,7 +3,7 @@ import { toUnicode } from "../idn.js";
 // extract"). Everything the editor provides arrives through `api`, so this
 // module never reaches into main.js state.
 import { createElement, FileUp } from "lucide";
-import { item, clone, escape, truncate } from "../model.js";
+import { item, clone, escape, truncate, MAX_OBJECTS } from "../model.js";
 import { t, labelled } from "../i18n.js";
 import { nextFrameOrder } from "../scene.js";
 import { createTextEditor } from "../text-editor.js";
@@ -82,7 +82,7 @@ export function createContentTools(api) {
   const canCreate = (target = api.board()) =>
     !!target && api.board() === target && api.canAdd();
   function roomFor(target, count) {
-    if (target.items.length + count > 5000)
+    if (target.items.length + count > MAX_OBJECTS)
       throw Error("A board can contain up to 5,000 objects.");
   }
   function embedItem(result, title, point) {
@@ -424,7 +424,7 @@ export function createContentTools(api) {
   }
   const layoutOptions = (target, extra) => ({
     ctx: api.measure(),
-    room: 5000 - target.items.length,
+    room: MAX_OBJECTS - target.items.length,
     // Imported frames come after the board's last, as a count of frames
     // would repeat an order once one was deleted.
     baseOrder: nextFrameOrder(target.items),

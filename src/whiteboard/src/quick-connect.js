@@ -1,4 +1,11 @@
-import { bounds, clone, item, uid, validateBoard } from "./model.js";
+import {
+  bounds,
+  clone,
+  item,
+  uid,
+  validateBoard,
+  MAX_OBJECTS,
+} from "./model.js";
 import { assertUnlocked } from "./locking.js";
 import { inferParents, updateConnectors } from "./scene.js";
 import { growsWithText, textStyle } from "./text.js";
@@ -151,7 +158,7 @@ export function quickConnectPlan(
     item("arrow", 0, 0, { ...lineStyle, startId: id, endId: destination.id });
   if (!existing) updateConnectors([source, destination, line]);
   const added = existing ? [] : node ? [node, line] : [line];
-  if (items.length + added.length > 5000)
+  if (items.length + added.length > MAX_OBJECTS)
     throw Error("A board can contain at most 5,000 objects.");
   // Validate the small fragment, including relationships, before any mutation.
   if (!existing)

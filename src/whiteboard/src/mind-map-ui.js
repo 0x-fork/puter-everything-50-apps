@@ -1,5 +1,5 @@
 import { fold } from "./libraries.js";
-import { item, validateBoard, bounds } from "./model.js";
+import { item, validateBoard, bounds, MAX_OBJECTS } from "./model.js";
 import { language, t } from "./i18n.js";
 import { planMindReparent } from "./mind-map-drag.js";
 import { mindAncestors, visibleMindItems } from "./mind-visibility.js";
@@ -23,7 +23,7 @@ export function createMindMapUI(api) {
   function commit(next, selected, edit = false, overview = false) {
     const board = api.board(),
       before = new Map(board.items.map((i) => [i.id, i]));
-    if (next.length > 5000)
+    if (next.length > MAX_OBJECTS)
       throw Error("A board can contain at most 5,000 objects.");
     validateBoard({ ...board, items: next });
     const patch = next.filter((i) => {

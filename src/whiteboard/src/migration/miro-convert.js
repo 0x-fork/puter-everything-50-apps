@@ -1,4 +1,11 @@
-import { item, uid, imageSize, validateBoard, bounds } from "../model.js";
+import {
+  item,
+  uid,
+  imageSize,
+  validateBoard,
+  bounds,
+  MAX_OBJECTS,
+} from "../model.js";
 import { TAG_LIMIT, TAG_COLORS, tagKey } from "../tags.js";
 import { canRotateItem, normalizeRotation } from "../geometry.js";
 import { appendRun } from "../rich-text.js";
@@ -14,7 +21,7 @@ import { applyMindLayout, repairMindTrees, trimMindMap } from "../mind-map.js";
 // real migration produce the same board and report.
 
 export const MIRO_LIMITS = {
-  objects: 5000,
+  objects: MAX_OBJECTS,
   // A larger board becomes several, up to this many: Miro's own limit of
   // 100,000 objects.
   parts: 20,

@@ -46,6 +46,8 @@ export function truncate(text, limit) {
 }
 // The farthest a coordinate may lie from the board's centre.
 export const BOARD_EXTENT = 1e6;
+// The most objects a board holds.
+export const MAX_OBJECTS = 5000;
 // The view zooms out to 1%, as Miro's does, so Fit shows a board of any
 // size; below 15% the board leaves out text too small to read.
 export const MIN_ZOOM = 0.01;
@@ -381,7 +383,7 @@ export function validateBoard(value, allowed = {}, only = null) {
     typeof value.title !== "string" ||
     value.title.length > 200 ||
     !Array.isArray(value.items) ||
-    value.items.length > Math.max(5000, allowed.items ?? 0)
+    value.items.length > Math.max(MAX_OBJECTS, allowed.items ?? 0)
   )
     throw Error("This is not a supported Whiteboard file.");
   validateComments(value.comments);

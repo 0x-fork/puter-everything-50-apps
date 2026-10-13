@@ -2,7 +2,7 @@ import { canonicalLanguage } from "./accessibility/language-tag.js";
 import { appendRun, textSegments } from "./rich-text.js";
 import { tableCellContent } from "./table-language.js";
 import { authoredTextHTML } from "./accessibility/object-content.js";
-import { item, validateBoard, COLORS, escape } from "./model.js";
+import { item, validateBoard, COLORS, escape, MAX_OBJECTS } from "./model.js";
 import { wrapText } from "./text.js";
 import { tableFont, tableFontSize } from "./table-sizing.js";
 import { t, labelled } from "./i18n.js";
@@ -202,7 +202,7 @@ export function bulkLines(text, columns = 3) {
     .replace(/\r\n?/g, "\n")
     .split("\n")
     .filter((line) => line.trim());
-  if (lines.length > 5000)
+  if (lines.length > MAX_OBJECTS)
     throw Error("A board can contain up to 5,000 objects.");
   const rows = [];
   for (let n = 0; n < lines.length; n += columns)
@@ -391,7 +391,10 @@ export function createBulkContent(api) {
             cells.some((row) => row.some((value) => value.length > 20000))
           )
             throw Error("Use up to 20,000 characters per sticky note.");
-          if (target.items.length + (mode() === "notes" ? count : 1) > 5000)
+          if (
+            target.items.length + (mode() === "notes" ? count : 1) >
+            MAX_OBJECTS
+          )
             throw Error("A board can contain up to 5,000 objects.");
           return count;
         };

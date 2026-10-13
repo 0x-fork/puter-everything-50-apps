@@ -1,5 +1,5 @@
 import { remapMindMap } from "./mind-map.js";
-import { bounds, clone, uid } from "./model.js";
+import { bounds, clone, uid, MAX_OBJECTS } from "./model.js";
 import { remapObjectLink } from "./object-link-data.js";
 import { unlinkCopiedJira } from "./planning/task.js";
 import {
@@ -40,7 +40,7 @@ export function planDuplication(
   const source = hidden?.size ? items.filter((i) => !hidden.has(i.id)) : items;
   const ids = duplicateSourceIds(source, selection, options),
     chosen = source.filter((i) => ids.has(i.id));
-  if (items.length + chosen.length > 5000)
+  if (items.length + chosen.length > MAX_OBJECTS)
     throw Error("A board can contain at most 5,000 objects.");
   if (direction) {
     const box = bounds(chosen),
