@@ -358,6 +358,13 @@ export function installCoreCommands(app) {
       label: 'Repeat Previous Command',
       shortcut: 'Mod+R',
       enabled: (a) => Boolean(a.lastCommand),
+      // Commands with settings open their dialog again; see edit.repeatNoDialog.
+      run: () => C.run(app.lastCommand.id, { ...app.lastCommand.args, repeat: false }),
+    },
+    {
+      id: 'edit.repeatNoDialog',
+      label: 'Repeat Previous Command Without Dialog',
+      enabled: (a) => Boolean(a.lastCommand),
       run: () => C.run(app.lastCommand.id, { ...app.lastCommand.args, repeat: true }),
     },
     {
@@ -642,7 +649,7 @@ export function installCoreCommands(app) {
         doc.apply('Silence', E.silenceRange(doc.state, doc.selection.start, doc.selection.end, doc.channelMask));
       },
     },
-    { id: 'fx.applyLast', label: (a) => (a.lastCommand ? `Repeat ${C.label(a.lastCommand.id)}` : 'Repeat Last Effect'), enabled: (a) => Boolean(a.lastCommand), run: () => C.run('edit.repeat') },
+    { id: 'fx.applyLast', label: (a) => (a.lastCommand ? `Repeat ${C.label(a.lastCommand.id)}` : 'Repeat Last Effect'), enabled: (a) => Boolean(a.lastCommand), run: () => C.run('edit.repeatNoDialog') },
 
     // ---------------------------------------------------------------- View
     {
@@ -728,7 +735,7 @@ export function installCoreCommands(app) {
         doc.setView(doc.selection.end - span / 2, doc.selection.end + span / 2);
       },
     },
-    ...[1, 2, 3].flatMap((n) => [
+    ...[1, 2, 3, 4, 5].flatMap((n) => [
       {
         id: `view.zoomPreset${n}`,
         label: `Zoom to Preset ${n}`,

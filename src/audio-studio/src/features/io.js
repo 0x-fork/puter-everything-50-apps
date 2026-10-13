@@ -66,6 +66,13 @@ export function installIo(app) {
       run: () => toggleRecord(app),
     },
     {
+      id: 'transport.punchRoll',
+      label: 'Punch and Roll',
+      // Waveform editor: rolls in from before the playhead (or selection) and records over what follows.
+      enabled: (a) => Boolean(audio(a)) && !a.recording,
+      run: () => punchAndRoll(app),
+    },
+    {
       id: 'transport.meterInput',
       label: 'Meter Input Signal',
       checked: (a) => Boolean(a.inputMetering),
@@ -199,6 +206,24 @@ async function toggleRecord(app) {
     if (!(await preroll(app, doc, replace[0], secs))) return;
   }
   return app.recorder.start({ doc, replace, at: doc.cursor });
+}
+
+/**
+ * Punch and Roll: plays the pre-roll (Preferences > Playback and Recording,
+ * at least two seconds) before the punch-in point, then records from there:
+ * over the selection, or over everything after the playhead.
+ */
+async function punchAndRoll(app) {
+  const doc = audio(app);
+  if (!doc || app.recorder.active) return;
+  if (prerolling) return prerolling.cancel();
+  const at = doc.hasSelection ? doc.selection.start : Math.round(app.playhead);
+  if (app.engine.playing) app.stop();
+  doc.setCursor(at);
+  const replace = doc.hasSelection ? [doc.selection.start, doc.selection.end] : [at, Infinity];
+  const secs = Math.max(2, Number(app.prefs.get('prerollSeconds')) || 0);
+  if (at > 0 && !(await preroll(app, doc, at, secs))) return;
+  return app.recorder.start({ doc, replace, at });
 }
 
 // ----------------------------------------------------------------- pre-roll

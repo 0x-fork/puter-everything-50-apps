@@ -1228,6 +1228,8 @@ export function installMultitrackCommands(app) {
     },
     { id: 'clip.nudgeLeft', label: 'Nudge Left', shortcut: 'Alt+,', enabled: hasClips, run: nudge(-1, 0) },
     { id: 'clip.nudgeRight', label: 'Nudge Right', shortcut: 'Alt+.', enabled: hasClips, run: nudge(1, 0) },
+    { id: 'clip.nudgeLeft5', label: 'Nudge Left 5 Steps', enabled: hasClips, run: nudge(-5, 0) },
+    { id: 'clip.nudgeRight5', label: 'Nudge Right 5 Steps', enabled: hasClips, run: nudge(5, 0) },
     { id: 'clip.nudgeUp', label: 'Nudge Up', shortcut: 'Alt+ArrowUp', enabled: hasClips, run: nudge(0, -1) },
     { id: 'clip.nudgeDown', label: 'Nudge Down', shortcut: 'Alt+ArrowDown', enabled: hasClips, run: nudge(0, 1) },
 
