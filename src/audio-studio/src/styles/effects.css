@@ -1410,6 +1410,16 @@ input[type='range'].fx-slider:disabled {
   margin: 8px;
 }
 
+.fav-edit-dialog .fav-steps-edit {
+  max-height: 280px;
+  min-width: 560px;
+  border: 1px solid var(--border-soft);
+}
+
+.fav-steps-edit .select {
+  width: auto;
+}
+
 @container (max-width: 420px) {
   .fav-split {
     grid-template-columns: minmax(0, 1fr);

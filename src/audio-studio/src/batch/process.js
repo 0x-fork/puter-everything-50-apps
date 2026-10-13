@@ -14,6 +14,7 @@ import { audioFileFromBlob } from '../storage/files.js';
 import * as puter from '../storage/puter.js';
 import { exportOptionsFor } from './queue.js';
 import { UserError } from '../lib/errors.js';
+import { batchStepsProblem, applyStepsToState } from '../effects/favorite-sequence.js';
 
 /**
  * Commands a Favorite may run that Batch Process can apply without opening
@@ -38,6 +39,7 @@ export function batchFavoriteProblem(fav) {
   const a = fav.action || {};
   if (a.type === 'effect') return getEffect(a.effect) ? '' : 'This effect is not available.';
   if (a.type === 'command') return BATCH_COMMANDS[a.command] ? '' : 'This favorite runs an editor command that Batch Process cannot run.';
+  if (a.type === 'sequence' && Array.isArray(a.steps) && a.steps.length) return batchStepsProblem(a.steps);
   return 'This favorite is damaged.';
 }
 
@@ -48,6 +50,7 @@ export async function applyFavoriteToState(fav, state, { signal, onProgress, doc
   if (problem) throw new UserError(problem);
   const a = fav.action;
   if (a.type === 'command') return BATCH_COMMANDS[a.command](state, a.args);
+  if (a.type === 'sequence') return applyStepsToState(a.steps, state, { signal, onProgress, doc, applyChain });
   const def = getEffect(a.effect);
   if (def.needsNoisePrint && !doc?.noisePrint) throw new UserError(`${def.name} needs a captured noise print, which a batch cannot provide.`);
   if (def.needsSoundModel && !doc?.soundModel) throw new UserError(`${def.name} needs a learned sound model, which a batch cannot provide.`);

@@ -1,14 +1,17 @@
-// Favorites: named one-click actions (an effect with stored settings, or a
-// command with arguments) applied without dialogs. They fill the Favorites
-// menu and panel, can carry a keyboard shortcut, and can be recorded: after
-// Start Recording Favorite, the next applied effect is captured with its
-// settings and saved under a name you choose.
+// Favorites: named one-click actions (an effect with stored settings, a
+// command with arguments, or a recorded sequence of them) applied without
+// dialogs. They fill the Favorites menu and panel, can carry a keyboard
+// shortcut, and can be recorded: between Start and Stop Recording Favorite
+// every effect and supported edit is captured (see favorite-sequence.js) and
+// saved under a name you choose.
 //
 // prefs key 'favorites': [{ id, name, shortcut, action }] where action is
 //   { type: 'effect', effect, values } | { type: 'command', command, args }
+//   | { type: 'sequence', steps: [step] }
 
 import { h, announce } from '../lib/dom.js';
-import { icon } from '../ui/icons.js';
+import { ListOrdered } from 'lucide';
+import { icon, registerIcons } from '../ui/icons.js';
 import { openDialog } from '../ui/dialog.js';
 import { formatShortcut, eventShortcut, normalizeShortcut } from '../commands/registry.js';
 import { getEffect } from './registry.js';
@@ -17,6 +20,7 @@ import { lastValues } from './presets.js';
 import { openEffectDialog } from './dialog.js';
 import { groupedEffects } from './rack.js';
 import { showNotice } from '../ui/notices.js';
+import { createRecorder, actionFromSteps, runSteps, stepProblem, placeSelection } from './favorite-sequence.js';
 
 let nextFav = 1;
 const favId = () => `fav${Date.now().toString(36)}${nextFav++}`;
@@ -156,6 +160,14 @@ export function favoriteProblem(app, fav) {
     if (!app.commands.isEnabled(a.command, a.args)) return 'Not available for the current file or selection.';
     return '';
   }
+  if (a.type === 'sequence' && Array.isArray(a.steps) && a.steps.length) {
+    if (app.active?.kind !== 'audio' || !app.active.length) return 'Open an audio file first.';
+    for (const st of a.steps) {
+      const p = stepProblem(app, st);
+      if (p) return p;
+    }
+    return '';
+  }
   return 'This favorite is damaged. Delete it and record it again.';
 }
 
@@ -166,6 +178,7 @@ export async function applyFavorite(app, fav) {
     return false;
   }
   const a = fav.action;
+  if (a.type === 'sequence') return runSteps(app, a.steps);
   if (a.type === 'effect') {
     const def = getEffect(a.effect);
     return app.runEffect(def.id, { values: normalizeValues(def, a.values) });
@@ -174,11 +187,37 @@ export async function applyFavorite(app, fav) {
   return true;
 }
 
+/** Name of one step (or plain action): the effect or command, with its main argument. */
+export function describeStep(app, step) {
+  if (step.type === 'effect') return getEffect(step.effect)?.name || `${step.effect} (not available)`;
+  if (step.type === 'command') {
+    const label = String(app.commands.label(step.command)).replace(/\.\.\.$/, '');
+    if (step.command === 'edit.insertSilence' && step.args?.seconds) return `Insert ${label} (${step.args.seconds.toFixed(3)} s)`;
+    if (step.command === 'fx.normalizePeak' && step.args?.peak != null) return `${label} (${step.args.peak} dB)`;
+    return label;
+  }
+  return '';
+}
+
+/** [selection, start, end] texts for a step's recorded selection. */
+export function stepSelectionText(app, step) {
+  const sel = step.select;
+  if (!sel) return ['Current', '', ''];
+  const empty = sel.start === sel.end;
+  if (sel.mode === 'absolute') {
+    const t = (f) => app.formatTime ? app.formatTime(f, sel.rate) : `${(f / sel.rate).toFixed(3)}`;
+    return [empty ? 'Playhead (time)' : 'Time range', t(sel.start), empty ? '' : t(sel.end)];
+  }
+  const pct = (f) => `${((f / Math.max(1, sel.length)) * 100).toFixed(1)}%`;
+  return [empty ? 'Playhead (relative)' : 'Relative range', pct(sel.start), empty ? '' : pct(sel.end)];
+}
+
 /** Short description of what a favorite does (panel tooltip). */
 export function describeFavorite(app, fav) {
   const a = fav.action || {};
   if (a.type === 'effect') return getEffect(a.effect)?.name || `${a.effect} (not available)`;
   if (a.type === 'command') return app.commands.label(a.command);
+  if (a.type === 'sequence') return `${a.steps.length} steps: ${a.steps.map((st) => describeStep(app, st)).join(', ')}`;
   return '';
 }
 
@@ -282,20 +321,66 @@ export async function newFavoriteDialog(app) {
   return fav;
 }
 
+/**
+ * Step list of a recorded sequence for Edit Favorite: each step's selection
+ * can be switched between the recorded range (relative or by time) and the
+ * current selection, and steps can be removed. Returns { el, steps() }.
+ */
+function stepsEditor(app, steps) {
+  let list = steps.map((st) => ({ ...st }));
+  const body = h('tbody');
+  const render = () => {
+    body.replaceChildren(
+      ...list.map((st, i) => {
+        const mode = h('select.select', { 'aria-label': `Selection for step ${i + 1}` }, h('option', { value: 'current' }, 'Current selection'));
+        const rec = st.select || st._select;
+        if (rec) mode.append(h('option', { value: 'relative' }, 'Recorded range (relative)'), h('option', { value: 'absolute' }, 'Recorded range (time)'));
+        mode.value = st.select ? st.select.mode || 'relative' : 'current';
+        mode.disabled = !rec;
+        mode.addEventListener('change', () => {
+          if (mode.value === 'current') list[i] = { ...st, select: null, _select: rec };
+          else list[i] = { ...st, select: { ...rec, mode: mode.value } };
+          render();
+        });
+        const [, start, end] = stepSelectionText(app, list[i]);
+        const remove = h('button.icon-btn', { type: 'button', 'aria-label': `Remove step ${i + 1}`, title: 'Remove step', disabled: list.length < 2 }, icon('trash-2', 14));
+        remove.addEventListener('click', () => {
+          list = list.filter((_, j) => j !== i);
+          render();
+        });
+        return h('tr', h('td.tabular', String(i + 1)), h('td', describeStep(app, st)), h('td', mode), h('td.tabular', start), h('td.tabular', end), h('td', remove));
+      }),
+    );
+  };
+  render();
+  const el = h(
+    'div.table-scroll.fav-steps-edit',
+    h('table.data-table.fav-actions', { 'aria-label': 'Steps' }, h('thead', h('tr', h('th', '#'), h('th', 'Action Name'), h('th', 'Selection'), h('th', 'Start'), h('th', 'End'), h('th', h('span.sr-only', 'Remove')))), body),
+  );
+  return { el, steps: () => list.map(({ _select, ...st }) => st) };
+}
+
 export async function editFavoriteDialog(app, fav) {
   const name = h('input.input', { type: 'text', value: fav.name, 'aria-label': 'Favorite name' });
   const shortcut = shortcutField(app, fav.shortcut, fav.id);
+  const seq = fav.action?.type === 'sequence' ? stepsEditor(app, fav.action.steps) : null;
   const isEffect = fav.action?.type === 'effect' && getEffect(fav.action.effect);
   const buttons = [{ label: 'Cancel', value: null }];
   if (isEffect && getEffect(fav.action.effect).params.length) buttons.push({ label: 'Edit Settings...', value: 'settings' });
   buttons.push({ label: 'Save', value: 'save', primary: true });
   const r = await openDialog({
     title: 'Edit Favorite',
-    body: h('div.form-grid', h('label', 'Name:'), name, h('label', 'Action:'), h('span.muted', describeFavorite(app, fav)), h('label', 'Shortcut:'), shortcut.el),
+    className: seq ? 'fav-edit-dialog' : undefined,
+    body: h(
+      'div.dlg-stack',
+      h('div.form-grid', h('label', 'Name:'), name, seq ? null : h('label', 'Action:'), seq ? null : h('span.muted', describeFavorite(app, fav)), h('label', 'Shortcut:'), shortcut.el),
+      seq ? h('div.dlg-group-title', 'Steps') : null,
+      seq?.el,
+    ),
     buttons,
   });
   if (!r) return false;
-  updateFavorite(app.prefs, fav.id, { name: name.value.trim() || fav.name, shortcut: shortcut.get() });
+  updateFavorite(app.prefs, fav.id, { name: name.value.trim() || fav.name, shortcut: shortcut.get(), ...(seq ? { action: { type: 'sequence', steps: seq.steps() } } : {}) });
   if (r === 'settings') {
     const def = getEffect(fav.action.effect);
     const values = await openEffectDialog(app, def, { mode: 'apply', values: fav.action.values, title: `Favorite Settings - ${def.name}`, applyLabel: 'Save Favorite' });
@@ -315,7 +400,7 @@ async function nameDialog(title, value) {
 export function favoritesPanel(app) {
   let selectedId = null;
   const tbtn = (ic, label, onclick, extra = {}) => h('button.icon-btn', { type: 'button', 'aria-label': label, title: label, onclick, ...extra }, icon(ic, 15));
-  const recordBtn = tbtn('transport-record', 'Record a favorite: captures the next effect you apply', () => app.commands.run(app.favorites.recording ? 'fav.recordStop' : 'fav.recordStart'), { 'aria-pressed': 'false' });
+  const recordBtn = tbtn('transport-record', 'Record a favorite: captures the effects and edits you apply until you stop', () => app.commands.run(app.favorites.recording ? 'fav.recordStop' : 'fav.recordStart'), { 'aria-pressed': 'false' });
   recordBtn.classList.add('fav-record');
   const applyBtn = tbtn('transport-play', 'Apply favorite', () => current() && applyFavorite(app, current()));
   const editBtn = tbtn('pencil', 'Edit favorite', () => current() && editFavoriteDialog(app, current()));
@@ -350,6 +435,19 @@ export function favoritesPanel(app) {
     }
     const settings = favoriteSettings(app, f);
     const problem = favoriteProblem(app, f);
+    if (f.action?.type === 'sequence') {
+      const rows = f.action.steps.map((st) => {
+        const [sel, start, end] = stepSelectionText(app, st);
+        return h('tr', h('td', describeStep(app, st)), h('td', sel), h('td.tabular', start), h('td.tabular', end));
+      });
+      details.replaceChildren(
+        ...[
+          h('table.data-table.fav-actions', { 'aria-label': `${f.name} actions` }, h('thead', h('tr', h('th', { scope: 'col' }, 'Action Name'), h('th', { scope: 'col' }, 'Selection'), h('th', { scope: 'col' }, 'Start'), h('th', { scope: 'col' }, 'End'))), h('tbody', ...rows)),
+          problem ? h('p.muted.fav-note', problem) : null,
+        ].filter(Boolean),
+      );
+      return;
+    }
     const parts = [
       h(
         'table.data-table.fav-actions',
@@ -377,11 +475,11 @@ export function favoritesPanel(app) {
     if (!selectedId && list.length) selectedId = list[0].id;
     const hadFocus = el.contains(document.activeElement) && document.activeElement.tagName === 'TR';
     body.replaceChildren();
-    if (!list.length) body.append(h('tr', h('td.empty-row', { colspan: '2' }, h('span.empty-text', 'No favorites. Press Record, then apply an effect.'))));
+    if (!list.length) body.append(h('tr', h('td.empty-row', { colspan: '2' }, h('span.empty-text', 'No favorites. Press Record, apply effects or edits, then press it again.'))));
     for (const fav of list) {
       const sel = fav.id === selectedId;
       const problem = favoriteProblem(app, fav);
-      const missing = fav.action?.type === 'effect' ? !getEffect(fav.action.effect) : !app.commands.get(fav.action?.command);
+      const missing = fav.action?.type === 'effect' ? !getEffect(fav.action.effect) : fav.action?.type === 'sequence' ? fav.action.steps.some((st) => stepProblem(app, st)) : !app.commands.get(fav.action?.command);
       const row = h(
         `tr${missing ? '.unavailable' : ''}`,
         {
@@ -406,7 +504,7 @@ export function favoritesPanel(app) {
             requestAnimationFrame(() => body.querySelector('tr[aria-selected="true"]')?.focus());
           },
         },
-        h('td.name-cell', icon(fav.action?.type === 'effect' ? 'fx' : 'star', 14), h('span', fav.name)),
+        h('td.name-cell', icon(fav.action?.type === 'effect' ? 'fx' : fav.action?.type === 'sequence' ? 'list-ordered' : 'star', 14), h('span', fav.name)),
         h('td.fav-shortcut-cell', fav.shortcut ? h('kbd', formatShortcut(fav.shortcut)) : ''),
       );
       body.append(row);
@@ -420,9 +518,10 @@ export function favoritesPanel(app) {
     const rec = app.favorites.recording;
     recordBtn.setAttribute('aria-pressed', String(rec));
     recordBtn.classList.toggle('recording', rec);
-    recordBtn.setAttribute('aria-label', rec ? 'Stop recording favorite' : 'Record a favorite: captures the next effect you apply');
+    recordBtn.setAttribute('aria-label', rec ? 'Stop recording favorite' : 'Record a favorite: captures the effects and edits you apply until you stop');
     recordBtn.title = recordBtn.getAttribute('aria-label');
-    status.textContent = rec ? 'Recording: apply an effect to capture it as a favorite.' : '';
+    const n = app.favorites.recordedSteps?.().length || 0;
+    status.textContent = rec ? `Recording: ${n} step${n === 1 ? '' : 's'} so far. Press Record again to stop and save.` : '';
     status.hidden = !rec;
   };
   const select = (id) => {
@@ -440,6 +539,7 @@ export function favoritesPanel(app) {
 // ---------------------------------------------------------- install
 
 export function installFavorites(app) {
+  registerIcons({ 'list-ordered': ListOrdered });
   mergeNewSeeds(app.prefs);
   const fav = {
     recording: false,
@@ -451,21 +551,35 @@ export function installFavorites(app) {
     },
   };
   app.favorites = fav;
-  const setRecording = (on) => {
-    fav.recording = on;
+  const recorder = createRecorder(app);
+  fav.recordedSteps = () => recorder.steps;
+  const startRecording = () => {
+    recorder.start();
+    fav.recording = true;
     app.emit('favorites');
-    app.setStatus(on ? 'Recording favorite: apply an effect to capture it' : '');
-    announce(on ? 'Recording favorite. Apply an effect to capture it.' : 'Stopped recording favorite');
+    app.setStatus('Recording favorite: apply effects and edits, then choose Stop Recording Favorite');
+    announce('Recording favorite. Apply effects and edits, then stop recording.');
   };
-  app.on('fx-applied', async ({ effect: id, values, name }) => {
-    if (!fav.recording) return;
-    setRecording(false);
-    const n = await nameDialog('Save Favorite', name);
-    if (!n) return;
-    fav.addEffect(n, id, values);
+  /** Stops recording and offers to save what was captured. */
+  const stopRecording = async () => {
+    const steps = recorder.stop();
+    fav.recording = false;
+    app.emit('favorites');
+    app.setStatus('');
+    announce('Stopped recording favorite');
+    if (!steps.length) {
+      app.notify('Nothing was recorded. Apply an effect or an edit while recording.');
+      return null;
+    }
+    const first = describeStep(app, steps[0]);
+    const n = await nameDialog(`Save Favorite (${steps.length} step${steps.length === 1 ? '' : 's'})`, steps.length === 1 ? first : `${first} and more`);
+    if (!n) return null;
+    const action = actionFromSteps(steps);
+    const item = addFavorite(app.prefs, { name: n, action });
     announce(`Favorite ${n} saved`);
     app.notify(`Saved favorite "${n}".`);
-  });
+    return item;
+  };
 
   app.commands.register([
     { id: 'fav.add', label: 'New Favorite...', run: () => newFavoriteDialog(app) },
@@ -479,14 +593,14 @@ export function installFavorites(app) {
           id: 'favoriteRecording',
           title: 'Recording a Favorite',
           message: [
-            'Audio Studio is recording a favorite. Apply an effect in the Waveform editor and its settings are saved as a favorite you can run from the Favorites menu, the Favorites panel or a batch process.',
-            'To stop without saving, choose Favorites > Stop Recording Favorite.',
+            'Audio Studio is recording a favorite. Effects, fades, normalizing, inverting, reversing, silencing, deleting, cropping and inserting silence in the Waveform editor are captured in order, with their settings and any selection you make between them.',
+            'When you are done, choose Favorites > Stop Recording Favorite and name it. It then runs from the Favorites menu, the Favorites panel or a batch process.',
           ],
         });
-        if (go) setRecording(true);
+        if (go) startRecording();
       },
     },
-    { id: 'fav.recordStop', label: 'Stop Recording Favorite', enabled: () => fav.recording, run: () => setRecording(false) },
+    { id: 'fav.recordStop', label: 'Stop Recording Favorite', enabled: () => fav.recording, run: () => stopRecording() },
   ]);
 
   app.favoriteMenuItems = () => {

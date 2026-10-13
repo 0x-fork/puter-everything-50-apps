@@ -368,9 +368,10 @@ export function installCoreCommands(app) {
       id: 'edit.insertSilence',
       label: 'Silence...',
       enabled: hasAudio,
-      run: async () => {
+      run: async (a, args) => {
         const doc = audio(app);
-        const frames = await durationDialog(app, 'Insert Silence', 'Duration');
+        // args.seconds (a recorded favorite) inserts without asking.
+        const frames = args?.seconds > 0 ? Math.round(args.seconds * doc.sampleRate) : await durationDialog(app, 'Insert Silence', 'Duration');
         if (!frames) return;
         const at = doc.hasSelection ? doc.selection.start : doc.cursor;
         doc.apply('Insert Silence', E.insertSilence(doc.state, at, frames), { selection: { start: at, end: at + frames } });

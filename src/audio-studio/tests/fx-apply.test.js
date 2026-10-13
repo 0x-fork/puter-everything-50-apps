@@ -127,7 +127,8 @@ describe('effect commands', () => {
     expect(doc.state.channels[1].toArray(150, 151)[0]).toBeCloseTo(0.1);
     expect(doc.state.channels[0].toArray(50, 51)[0]).toBeCloseTo(0.1);
     expect(doc.selection).toMatchObject({ start: 100, end: 300 });
-    expect(applied).toEqual([{ effect: 'testDouble', values: { amount: 0.5 }, name: 'Test Double' }]);
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ effect: 'testDouble', values: { amount: 0.5 }, name: 'Test Double', doc, before: [100, 300] });
     expect(app.prefs.get('fxLast').testDouble).toEqual({ amount: 0.5 });
     doc.history.undo();
     expect(doc.state.channels[0].toArray(150, 151)[0]).toBeCloseTo(0.1);
