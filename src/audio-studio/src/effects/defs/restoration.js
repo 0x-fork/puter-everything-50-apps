@@ -155,7 +155,9 @@ registerEffect({
     num('decay', 'Spectral Decay Rate', 0, 2000, 150, 'ms', { step: 10 }),
     num('broadband', 'Broadband Preservation', 0, 500, 100, 'Hz', { step: 5 }),
     fftChoice('fftSize', 'FFT Size', [256, 512, 1024, 2048, 4096, 8192], 1024),
+    bool('highQuality', 'High Quality Mode (slower)', false),
   ],
+  about: 'Learns the noise floor as it plays and keeps reducing whatever stays near it, so it needs no noise print. High Quality Mode overlaps more analysis frames and smooths the reduction, leaving less watery residue for about twice the processing.',
   presets: [
     preset('Light Background Noise', { reduceBy: 8, noisiness: 15, noiseFloor: 0, threshold: 3, decay: 150, broadband: 100, fftSize: 1024 }),
     preset('Heavy Background Noise', { reduceBy: 24, noisiness: 40, noiseFloor: 2, threshold: 2, decay: 250, broadband: 150, fftSize: 2048 }),
