@@ -1335,16 +1335,19 @@ export class BoardService {
       await this.notify(room);
     }
   }
-  // Each board's member records, listed once for every request on this
-  // instance within a few seconds: a workshop's participants joining
+  // Each board's member records. With `shared`, as for the member list a
+  // participant's editor asks for and for comment notifications (which
+  // check each recipient's access), a listing is used for every request on
+  // this instance within a few seconds: a workshop's participants joining
   // together, and opening its comments, would otherwise list them once
   // each, using up the worker's listing quota. A member record written
   // here is seen at once (see setRecord), one written elsewhere within
-  // those seconds.
-  async members(room) {
+  // those seconds. Counts, indexes and notifications that act on
+  // membership read it afresh.
+  async members(room, { shared = false } = {}) {
     const now = this.now(),
       hit = MEMBER_LISTS.get(room);
-    if (hit && now - hit.at < MEMBERS_FRESH && now >= hit.at)
+    if (shared && hit && now - hit.at < MEMBERS_FRESH && now >= hit.at)
       return [...(await hit.rows)];
     const rows = this.list(`wb:${room}:member:`).then((list) =>
       list.map((r) => r.value),
@@ -2066,7 +2069,7 @@ export class BoardService {
         }
         return m.accessEnds !== undefined && m.accessEnds < now;
       };
-      const records = await this.members(room);
+      const records = await this.members(room, { shared: true });
       // Their records are read together first, so an instance that has
       // read none of them reads them in a request or two, not one each.
       await this.org.users(records.map((m) => m.uuid));
@@ -3458,7 +3461,7 @@ export class BoardService {
         if (only.size) added.push({ thread, message, only });
       }
     if (!added.length) return;
-    const records = await this.members(room),
+    const records = await this.members(room, { shared: true }),
       members = records.filter((m) => m.role !== "removed"),
       removed = new Set(
         records.filter((m) => m.role === "removed").map((m) => m.uuid),

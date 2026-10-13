@@ -430,24 +430,35 @@ test("people joining together share one listing of the board's members", async (
   for (let n = 0; n < 50; n++)
     env.data.set(`wb:room:member:u${n}`, { uuid: `u${n}`, role: "editor" });
   const lists = await Promise.all(
-    Array.from({ length: 20 }, () => env.service.members("room")),
+    Array.from({ length: 20 }, () =>
+      env.service.members("room", { shared: true }),
+    ),
   );
   assert.ok(lists.every((list) => list.length === 50));
   env.now += 2000;
-  assert.equal((await env.service.members("room")).length, 50);
+  assert.equal(
+    (await env.service.members("room", { shared: true })).length,
+    50,
+  );
   assert.equal(counts.list, 1);
   // A member added or changed through this instance shows at once,
   // without listing them again.
   await env.service.setMember("room", { uuid: "u50", role: "viewer" });
   await env.service.setMember("room", { uuid: "u3", role: "removed" });
-  const members = await env.service.members("room");
+  const members = await env.service.members("room", { shared: true });
   assert.equal(members.length, 51);
   assert.equal(members.find((m) => m.uuid === "u3").role, "removed");
   assert.equal(counts.list, 1);
   // Five seconds on, they are listed again.
   env.now += 3000;
-  assert.equal((await env.service.members("room")).length, 51);
+  assert.equal(
+    (await env.service.members("room", { shared: true })).length,
+    51,
+  );
   assert.equal(counts.list, 2);
+  // Counting the members reads them afresh.
+  assert.equal((await env.service.members("room")).length, 51);
+  assert.equal(counts.list, 3);
 });
 
 // A board on its own worker instance, with an editor whose edits each add a
@@ -1323,4 +1334,44 @@ test("listing a large board's members on a new instance reads their records toge
   assert.equal(members.filter((m) => m.guest).length, 30);
   assert.equal(members.filter((m) => m.inactive).length, 1);
   assert.ok(reads.length <= 5, `${reads.length} reads`);
+});
+
+test("two instances admitting people at once leave the board's member count right", async () => {
+  const { viewer } = await import("./collaboration-helpers.js");
+  const env = environment();
+  const b = board("Count");
+  b.items = [item("note", 0, 0)];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  // A second worker instance: its own memory, the same storage.
+  const { BoardService } = await import("../worker/service.js?instance=count");
+  const first = env.service;
+  const second = new BoardService(first.puter, {
+    now: () => env.now,
+    fetcher: first.fetcher,
+  });
+  // Both listed the members moments before, as when comments were opened.
+  await first.members(b.id, { shared: true });
+  await second.members(b.id, { shared: true });
+  env.now += 1000;
+  await first.setMember(
+    b.id,
+    { uuid: editor.uuid, username: editor.username, role: "editor" },
+    true,
+  );
+  await first.recount(b.id);
+  await second.setMember(
+    b.id,
+    { uuid: viewer.uuid, username: viewer.username, role: "viewer" },
+    true,
+  );
+  await second.recount(b.id);
+  const registry = await env.service.kv.get("org:board:" + b.id);
+  assert.equal(registry.memberCount, 3);
 });
