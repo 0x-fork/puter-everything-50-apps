@@ -15,6 +15,7 @@ import { accumulateRmsHistogram, HIST_BINS, HIST_FLOOR } from '../src/analysis/r
 import { bextChunk, parseBext, cartChunk, parseCart, cleanMeta, id3v2Tag, parseId3v2, vorbisComment, parseVorbisComment } from '../src/audio/meta.js';
 import { WavWriter } from '../src/export/pcm.js';
 import { makeCollapsible } from '../src/panels/properties.js';
+import { meterHorizontal } from '../src/panels/levels.js';
 import { parseWav } from '../src/audio/wav.js';
 import { META_TABS, normalizeMetaValue, metadataPanel } from '../src/panels/metadata.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
@@ -279,5 +280,21 @@ describe('Properties', () => {
     root.querySelector('.prop-toggle').click();
     expect(collapsed.has('Track')).toBe(false);
     expect(root.querySelector('.prop-body').textContent).toBe('x');
+  });
+});
+
+describe('Level Meters', () => {
+  it('follows the panel shape or a fixed orientation from the panel menu', () => {
+    expect(meterHorizontal(400, 80)).toBe(true);
+    expect(meterHorizontal(80, 400)).toBe(false);
+    expect(meterHorizontal(80, 400, 'horizontal')).toBe(true);
+    expect(meterHorizontal(400, 80, 'vertical')).toBe(false);
+    const app = makeApp();
+    const labels = app.levelsMenu().filter((i) => i.type === 'cmd').map((i) => i.label);
+    expect(labels).toEqual(expect.arrayContaining(['Automatic Orientation', 'Horizontal', 'Vertical', '60 dB Range']));
+    app.commands.run('meter.orientVertical');
+    expect(app.prefs.get('meterOrientation')).toBe('vertical');
+    expect(app.commands.isChecked('meter.orientVertical')).toBe(true);
+    expect(app.commands.isChecked('meter.orientAuto')).toBe(false);
   });
 });
