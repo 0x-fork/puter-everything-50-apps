@@ -23379,7 +23379,10 @@ test("a lock arriving during a shared move or resize cancels the gesture", async
 
 test("others are told a dropped move is settling until its save goes through, and a cancelled one is not", async () => {
   const hub = createPeerHub(),
-    sent = [];
+    sent = [],
+    // The tickets of the collaborator's packets, which later packets on a
+    // link name instead of carrying.
+    theirs = new Set();
   // The collaborator's presence as it leaves their device.
   const connect = hub.peer.connect;
   hub.peer.connect = async (code) => {
@@ -23391,9 +23394,12 @@ test("others are told a dropped move is settling until its save goes through, an
           through = made.send;
         made.send = (data) => {
           const packet = JSON.parse(data);
+          if (packet.ticket?.user === collaborator.uuid)
+            theirs.add(`${packet.ticket.session}:${packet.ticket.expires}`);
           if (
             packet.body?.kind === "presence" &&
-            packet.ticket.user === collaborator.uuid
+            (packet.ticket?.user === collaborator.uuid ||
+              theirs.has(packet.ref))
           )
             sent.push({ at: Date.now(), ...packet.body.data });
           return through(data);
