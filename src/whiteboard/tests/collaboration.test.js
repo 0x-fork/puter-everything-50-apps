@@ -729,6 +729,91 @@ test("a save whose edit already arrived over a peer link is not read back from t
     other?.destroy();
   }
 });
+test("a finished move stays shown until an edit that moves it arrives, not just the author's previous one", async () => {
+  const env = environment(),
+    b = await room(env);
+  await invite(env, b, editor);
+  env.dropEvents = true;
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed() {},
+    activity() {},
+    status() {},
+  });
+  let other;
+  const ticket = { session: "remote", user: editor.uuid, role: "editor" };
+  const [note, rect] = b.items;
+  let sequence = 0;
+  const presence = (preview) =>
+    session.receive(
+      "presence",
+      { cursor: { x: 3, y: 4 }, selection: [], preview, settling: true },
+      ticket,
+      ++sequence,
+    );
+  const moved = (i, x) => ({
+    id: i.id,
+    x,
+    y: i.y,
+    w: i.w,
+    h: i.h,
+    rotation: 0,
+  });
+  const shown = () =>
+    session.people
+      .get("remote")
+      .preview.map((i) => i.id)
+      .sort();
+  const save = async (id, x) => {
+    const vector = other.vector(),
+      next = other.snapshot();
+    next.items.find((i) => i.id === id).x = x;
+    other.commit(next);
+    const update = other.update(vector);
+    const { receipt, receiptProof } = await env.service.call(editor, {
+      op: "commit",
+      room: b.id,
+      id: await hash(update),
+      update: encode(update),
+    });
+    return { update: encode(update), receipt, receiptProof };
+  };
+  try {
+    await session.start();
+    other = new SharedDocument(session.shared.update());
+    session.synchronize = async () => {};
+    // The note is moved and let go, then the shape, before either is saved.
+    await presence([moved(note, 500)]);
+    await presence([]);
+    await presence([moved(rect, 900)]);
+    await presence([]);
+    assert.deepEqual(shown(), [note.id, rect.id].sort());
+    // The note's edit arrives, with its notice: the shape stays where it
+    // was let go, as its own edit waits for a later upload.
+    const first = await save(note.id, 500);
+    await session.receive("edit", first, ticket, ++sequence);
+    await session.receive(
+      "committed",
+      { id: first.receipt.id },
+      ticket,
+      ++sequence,
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(shown(), [rect.id]);
+    // Its own edit then shows it as saved.
+    const second = await save(rect.id, 900);
+    await session.receive("edit", second, ticket, ++sequence);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(shown(), []);
+  } finally {
+    session.close();
+    other?.destroy();
+  }
+});
 test("a notice whose edit arrives with it, or a failed poll, leaves later polls plain", async () => {
   const env = environment(),
     b = await room(env);

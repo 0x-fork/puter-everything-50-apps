@@ -1683,7 +1683,14 @@ export class CollaborationSession {
           return;
         // The receipt shows the worker checked and saved these exact bytes,
         // so they are applied as a synchronization would apply them.
-        this.shared.apply(update);
+        const { items } = this.shared.applyTracked(update);
+        // What it changed, for the previews it ends (see settled).
+        const person = this.people.get(ticket.session);
+        if (person)
+          for (const id of items) (person.edited ??= new Set()).add(id);
+        (this.touched ??= new Map()).set(data.receipt.id, items);
+        if (this.touched.size > 64)
+          this.touched.delete(this.touched.keys().next().value);
         // Complete edits need no synchronization when their save is
         // announced; one waiting on missing edits still does.
         const store = this.shared.doc.store;
@@ -1735,12 +1742,18 @@ export class CollaborationSession {
             ids = this.committedIds;
           this.committedPeople = new Set();
           this.committedIds = new Set();
+          // What the saves changed, when their edits came over peer links.
+          let touched = new Set();
+          for (const id of ids)
+            if (this.touched?.has(id))
+              for (const item of this.touched.get(id)) touched.add(item);
+            else touched = null;
           const end = () => {
             let ended = false;
             for (const session of settled) {
               const p = this.people.get(session);
               if (!p || (!p.settling && !p.held.length)) continue;
-              this.settled(p);
+              this.settled(p, touched);
               ended = true;
             }
             if (ended && !this.closed)
@@ -1772,7 +1785,9 @@ export class CollaborationSession {
         this.showTimer = null;
         for (const id of this.shownPeople) {
           const person = this.people.get(id);
-          if (person) this.settled(person);
+          if (!person) continue;
+          this.settled(person, person.edited ?? null);
+          person.edited = null;
         }
         this.shownPeople.clear();
         if (this.closed) return;
@@ -1796,11 +1811,19 @@ export class CollaborationSession {
   // Someone's edit arrived: what it changed is shown as the board has it.
   // New objects they finished whose edits have not arrived yet, such as the
   // drawing after the one just saved, stay held, as does anything they are
-  // still creating. A move of an existing object is not told apart from
-  // their other edits; mind-map moves, for one, can save no new position.
-  settled(person) {
+  // still creating. Given the objects their edits changed (`touched`), as
+  // edits arriving over peer links tell, a finished move of any other
+  // object stays held too, for as long as holds last, since its own edit
+  // may wait for a later upload: busy rooms space uploads seconds apart.
+  // Without it, as when the edit was read from the worker, every move gives
+  // way; mind-map moves, for one, can save no new position.
+  settled(person, touched = null) {
     person.live = person.live.filter((i) => this.creating(i));
-    person.held = person.held.filter((h) => h.created && this.creating(h.item));
+    person.held = person.held.filter(
+      (h) =>
+        (h.created && this.creating(h.item)) ||
+        (touched && !touched.has(h.item.id)),
+    );
     this.showPerson(person);
     person.text = null;
     person.settling = person.settleUntil = null;
