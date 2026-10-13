@@ -1503,3 +1503,77 @@ test("members whose links all drop are told to catch up then and when a link ret
     for (const network of networks) network.close();
   }
 });
+test("peers send a ticket until the other end keeps it, then name it, and never to older clients", async () => {
+  const { networks, received, steps } = await peerRoom(3);
+  // 002 runs an older client: it never says it keeps tickets.
+  const older = networks[2],
+    sendOn = older.sendOn.bind(older);
+  older.sendOn = (conn, packet) =>
+    packet.known ||
+    sendOn(conn, packet.hello ? { ...packet, compact: undefined } : packet);
+  for (const conn of older.links.values()) conn.close();
+  await until(() =>
+    networks.every((n) =>
+      [...n.wanted].every((id) => n.links.get(id)?.whiteboardAuthorized),
+    ),
+  );
+  // What goes over each link, as sent.
+  const wire = [];
+  const watch = (network) => {
+    const original = network.wire.bind(network);
+    network.wire = (conn, packet) => {
+      const text = original(conn, packet);
+      const to = [...network.links].find(([, c]) => c === conn)?.[0];
+      wire.push({ from: network.session, to, text });
+      return text;
+    };
+  };
+  networks.forEach(watch);
+  try {
+    for (let k = 1; k <= 5; k++) {
+      await networks[0].broadcast("presence", { step: k, cursor: far });
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await until(() =>
+      networks.slice(1).every((n) => steps(n.session, "000").length === 5),
+    );
+    const sent = (to) =>
+      wire.filter(
+        (w) => w.from === "000" && w.to === to && w.text.includes('"body"'),
+      );
+    // The first packet carries the ticket; once 001 says it keeps it, the
+    // rest name it.
+    assert.match(sent("001")[0].text, /"ticket"/);
+    assert.ok(
+      sent("001")
+        .slice(2)
+        .every((w) => /"ref"/.test(w.text)),
+    );
+    assert.ok(sent("001").at(-1).text.length < sent("001")[0].text.length / 2);
+    // The older client always gets the ticket.
+    assert.ok(sent("002").every((w) => /"ticket"/.test(w.text)));
+    // A link that lost the ticket says so and gets it again.
+    const link = networks[1].links.get("000");
+    link.whiteboardTickets.clear();
+    await networks[0].broadcast("presence", { step: 6, cursor: far });
+    await new Promise((r) => setTimeout(r, 50));
+    await networks[0].broadcast("presence", { step: 7, cursor: far });
+    await until(() => steps("001", "000").includes(7));
+    // A packet naming a ticket with someone else's signature, or a ticket
+    // this link never carried, is not taken.
+    await networks[1].broadcast("presence", { step: 1, cursor: far });
+    await until(() => steps("000", "001").length === 1);
+    await until(() => networks[1].links.get("000").whiteboardKnown?.size);
+    const before = received.get("000").length;
+    const body = { v: 1, seq: 9999, kind: "presence", data: { cursor: far } };
+    const forged = await sign(networks[2].keys.privateKey, body);
+    const toZero = networks[1].links.get("000");
+    const name = [...networks[0].links.get("001").whiteboardTickets.keys()][0];
+    toZero.send(JSON.stringify({ ref: name, body, proof: forged }));
+    toZero.send(JSON.stringify({ ref: "002:1", body, proof: forged }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.get("000").length, before);
+  } finally {
+    for (const network of networks) network.close();
+  }
+});

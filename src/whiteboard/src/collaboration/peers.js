@@ -43,6 +43,9 @@ const ASK = 1000,
 // A link whose presence channel holds this much unsent is behind: presence
 // and camera views, which are soon replaced, wait for the next ones.
 const BACKLOG = 16384;
+// Tickets a link keeps for the packets that name them; see wire().
+const KEPT_TICKETS = 1024;
+const ticketName = (ticket) => `${ticket.session}:${ticket.expires}`;
 // Widens box `n` of `a` ([left, top, right, bottom]) to hold an object's box,
 // or a rotated one's reach.
 function grow(a, n, g) {
@@ -371,6 +374,8 @@ export class PeerNetwork {
             ticket: this.ticket,
             signature: this.signature,
             proof,
+            // This client keeps the tickets it is sent; see wire().
+            compact: 1,
           });
           return;
         }
@@ -413,6 +418,7 @@ export class PeerNetwork {
           if (prior && prior !== conn) prior.close();
           this.links.set(authorized, conn);
           conn.whiteboardAuthorized = true;
+          conn.whiteboardCompact = packet.compact === 1;
           alive = Date.now();
           for (const waiting of early.splice(0)) message(waiting);
           if (this.stranded) {
@@ -424,6 +430,33 @@ export class PeerNetwork {
         if (!authorized) {
           if (packet.body && early.length < 8) early.push(event);
           return;
+        }
+        // The other end keeps a ticket it was sent, or lost one; see wire().
+        if (typeof packet.known === "string" && packet.known.length < 200) {
+          if (!conn.whiteboardKnown) conn.whiteboardKnown = new Set();
+          conn.whiteboardKnown.add(packet.known);
+          if (conn.whiteboardKnown.size > KEPT_TICKETS)
+            conn.whiteboardKnown.delete(
+              conn.whiteboardKnown.values().next().value,
+            );
+          return;
+        }
+        if (typeof packet.unknown === "string") {
+          conn.whiteboardKnown?.delete(packet.unknown);
+          return;
+        }
+        // A packet naming a ticket this link was sent before is checked as
+        // the packet with that ticket would be.
+        const named = typeof packet.ref === "string" && packet.ref;
+        if (named) {
+          const kept = conn.whiteboardTickets?.get(named);
+          if (!kept) {
+            this.sendOn(conn, { unknown: named });
+            return;
+          }
+          packet.ticket = kept.ticket;
+          packet.signature = kept.signature;
+          delete packet.ref;
         }
         // In a large room each packet arrives from both of the group's
         // relays, often together. A copy arriving while another is checked
@@ -440,6 +473,17 @@ export class PeerNetwork {
         if (this.checking.get(key) === check) this.checking.delete(key);
         if (!valid) return;
         const { body, ticket } = packet;
+        // A ticket that proved valid is kept, and the other end told, so its
+        // later packets can name it.
+        if (!named && conn.whiteboardCompact) {
+          const name = ticketName(ticket);
+          const kept = (conn.whiteboardTickets ??= new Map());
+          if (!kept.has(name)) {
+            kept.set(name, { ticket, signature: packet.signature });
+            if (kept.size > KEPT_TICKETS) kept.delete(kept.keys().next().value);
+            this.sendOn(conn, { known: name });
+          }
+        }
         // A signed packet already received may finish verification after its
         // transport closes (for example, a participant's final view-left).
         if (this.closed) return;
@@ -524,15 +568,32 @@ export class PeerNetwork {
       const channel = conn.whiteboardPresence;
       if (packet.body?.kind === "presence") {
         if (channel?.readyState === "open" && channel.bufferedAmount < BACKLOG)
-          channel.send(JSON.stringify(packet));
+          channel.send(this.wire(conn, packet));
       } else if (
         packet.body?.kind !== "view" ||
         !(channel?.bufferedAmount >= BACKLOG)
       )
-        conn.send(JSON.stringify(packet));
+        conn.send(this.wire(conn, packet));
     } catch {
       /* Reconnection will repair the link. */
     }
+  }
+  // A packet as sent on one link. Most of a small packet, such as a cursor's,
+  // is its sender's ticket and the two signatures; a peer that said it keeps
+  // a ticket (see attach) is sent the packet naming it instead, so a relay
+  // passing a large room's presence on sends a fraction of the bytes. The
+  // full packet goes until the peer says it has the ticket, as presence
+  // travels on a channel that may lose or reorder packets, and older
+  // clients, which never say so, always get it in full.
+  wire(conn, packet) {
+    const name = packet.body && packet.ticket && ticketName(packet.ticket);
+    if (!name || !conn.whiteboardKnown?.has(name))
+      return JSON.stringify(packet);
+    return JSON.stringify({
+      ref: name,
+      body: packet.body,
+      proof: packet.proof,
+    });
   }
   async broadcast(kind, data) {
     if (this.closed || !this.ticket) return;
