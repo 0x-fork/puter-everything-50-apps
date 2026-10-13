@@ -13,6 +13,7 @@ import { plot, gridLines, labelText, transferCurveEditor } from './editors.js';
 import { formatValue, formatParts, parseValue } from './params.js';
 import { splineOutput } from './defs/transfer-curve.js';
 import { levelMeter } from './meters-ui.js';
+import { glyph } from './layout.js';
 import { liveSpectrum, drawSpectrum } from './views/common.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -123,6 +124,25 @@ export function curveSegments(points) {
 
 const ratioText = (r) => (!Number.isFinite(r) ? 'inf:1' : r >= 1 ? `${r.toFixed(2)}:1` : `1:${(1 / r).toFixed(2)}`);
 
+/**
+ * The inverse of a transfer curve ([{ x, y }] in dB over [lo, hi]): every
+ * point mirrored across the unity line, so a compressor becomes the matching
+ * expander and back. Points that land on the same input level are spread
+ * 0.1 dB apart, and the ends are extended at unity gain (held at the top)
+ * so the curve still spans the whole input range.
+ */
+export function invertCurve(points, lo = -100, hi = 0) {
+  const r1 = (v) => Math.round(v * 10) / 10;
+  const out = (points || []).map((q) => ({ x: q.y, y: q.x })).sort((a, b) => a.x - b.x || a.y - b.y);
+  for (let k = 1; k < out.length; k++) if (out[k].x <= out[k - 1].x) out[k] = { ...out[k], x: r1(out[k - 1].x + 0.1) };
+  if (!out.length) return [{ x: lo, y: lo }, { x: hi, y: hi }];
+  const first = out[0];
+  const last = out[out.length - 1];
+  if (first.x > lo) out.unshift({ x: lo, y: Math.max(lo, r1(first.y - (first.x - lo))) });
+  if (last.x < hi) out.push({ x: hi, y: Math.min(hi, r1(last.y + (hi - last.x))) });
+  return out.filter((q) => q.x <= hi + 1e-9).map((q) => ({ x: Math.min(hi, q.x), y: Math.min(hi, Math.max(lo, q.y)) }));
+}
+
 export function dynamicsProcessingEditor({ id = 'curve' } = {}) {
   const inner = transferCurveEditor({ id, spline: { id: 'spline', at: splineOutput } });
   return (ctx) => {
@@ -148,10 +168,12 @@ export function dynamicsProcessingEditor({ id = 'curve' } = {}) {
       list.splice(k, 1);
       ctx.set(id, list);
     } }, icon('minus', 15));
+    // Mirror the curve across the unity line: compression becomes expansion and back.
+    const invertBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Invert the curve', title: 'Invert the curve: compression becomes expansion and back', onclick: () => ctx.set(id, invertCurve(pts(), p.min ?? -100, p.max ?? 0)) }, glyph(['M5 19L19 5', 'M8 5h11v11', 'M5 8v11h11'], 15));
     const resetBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Reset the curve', title: 'Reset the curve', onclick: () => ctx.set(id, structuredClone(p.default)) }, icon('rotate-ccw', 15));
     const splineBox = h('input', { type: 'checkbox', checked: Boolean(ctx.values.spline), onchange: () => ctx.set('spline', splineBox.checked) });
     const splineEl = ctx.def.params.some((q) => q.id === 'spline') ? h('label.check.fx-check', { title: 'Bend the curve smoothly through its points' }, splineBox, 'Spline Curves') : null;
-    const tools = h('div.fx-dp-tools', addBtn, removeBtn, resetBtn, splineEl);
+    const tools = h('div.fx-dp-tools', addBtn, removeBtn, invertBtn, resetBtn, splineEl);
     const body = h('tbody');
     const table = h('table.fx-dp-table', h('thead', h('tr', h('th', 'Segment'), h('th', 'Ratio'), h('th', 'Type'), h('th', 'Threshold'))), body);
     const update = (values) => {

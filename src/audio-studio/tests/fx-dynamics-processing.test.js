@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest';
 import { instance } from './fx-wasm.js';
 import { getEffect, defaults, slotSpec, effectLatency } from '../src/effects/index.js';
 import { curveOutput, splineOutput, transferPoints } from '../src/effects/defs/amplitude.js';
-import { dynamicsProcessingEditor } from '../src/effects/dyn-editors.js';
+import { dynamicsProcessingEditor, invertCurve } from '../src/effects/dyn-editors.js';
 import { coerce, normalizeValues } from '../src/effects/params.js';
 import { autoEditor } from '../src/effects/editors.js';
 import { Emitter } from '../src/lib/emitter.js';
@@ -185,6 +185,23 @@ describe('transfer curve editor', () => {
     expect(ctx.values.spline).toBe(true);
     ctx.set('spline', false);
     expect(box.checked).toBe(false);
+    close();
+  });
+
+  it('inverts the curve: a compressor becomes the matching expander', () => {
+    const comp = [{ x: -100, y: -100 }, { x: -20, y: -20 }, { x: 0, y: -10 }];
+    const inv = invertCurve(comp);
+    expect(inv).toEqual([{ x: -100, y: -100 }, { x: -20, y: -20 }, { x: -10, y: 0 }, { x: 0, y: 0 }]);
+    // Twice is the original where it was invertible.
+    expect(invertCurve([{ x: -100, y: -100 }, { x: -20, y: -20 }, { x: 0, y: 0 }])).toEqual([{ x: -100, y: -100 }, { x: -20, y: -20 }, { x: 0, y: 0 }]);
+    // A gate's flat floor turns into a step; points stay strictly ordered.
+    const gate = invertCurve([{ x: -100, y: -100 }, { x: -51, y: -100 }, { x: -50, y: -50 }, { x: 0, y: 0 }]);
+    for (let k = 1; k < gate.length; k++) expect(gate[k].x).toBeGreaterThan(gate[k - 1].x);
+    expect(gate[1]).toEqual({ x: -99.9, y: -51 });
+    const { ctx, close } = ctxFor(normalizeValues(def, { curve: comp }));
+    const el = dynamicsProcessingEditor()(ctx);
+    el.querySelector('[aria-label="Invert the curve"]').click();
+    expect(ctx.values.curve).toEqual(inv);
     close();
   });
 
