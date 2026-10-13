@@ -322,5 +322,6 @@ export function frequencyPanel(app) {
     focus() {
       plot.focus();
     },
+    scan: () => recompute(),
   };
 }

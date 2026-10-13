@@ -140,6 +140,7 @@ export function createShell(app, root) {
   dock.setLayout(app.currentLayout());
 
   // Keyboard -----------------------------------------------------------------
+  const NAV_WIDGETS = '[role=menu], [role=listbox], [role=grid], [role=tree], [role=treegrid], [role=tablist], [role=slider], [role=radiogroup], [role=spinbutton], [role=separator], input[type=range], [data-own-keys]';
   window.addEventListener('keydown', (e) => {
     if (e.defaultPrevented || e.isComposing) return;
     const t = e.target;
@@ -151,7 +152,10 @@ export function createShell(app, root) {
     // Plain keys (Space, letters) should still activate focused buttons and menus.
     const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
     if (plain && (e.key === ' ' || e.key === 'Enter') && t instanceof HTMLElement && t.closest('button, [role=menuitem], [role=tab], [role=option], a, summary')) return;
-    if (plain && t instanceof HTMLElement && t.closest('[role=menu], [role=listbox], [role=grid]') && /^(Delete|Backspace|Home|End)$/.test(e.key)) return;
+    // Navigation keys stay with focused widgets that move with them (lists, tabs, sliders).
+    const nav = /^(Delete|Backspace|Home|End|PageUp|PageDown|Arrow(Up|Down|Left|Right))$/.test(e.key);
+    if (plain && nav && t instanceof HTMLElement && t.closest(NAV_WIDGETS)) return;
+    if (plain && nav && !app.commands.isEnabled(id)) return;
     if (typing && plain) return;
     e.preventDefault();
     app.commands.run(id);

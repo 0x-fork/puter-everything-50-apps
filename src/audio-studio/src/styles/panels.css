@@ -620,29 +620,6 @@
     padding: 0 14px 6px;
   }
 }
-
-.shortcuts {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: min(560px, 82vw);
-}
-
-.shortcut-list {
-  max-height: 60vh;
-  overflow: auto;
-}
-
-.shortcut-group {
-  margin: 12px 0 4px;
-  font-size: var(--fs-md);
-  color: var(--text-strong);
-}
-
-.shortcut-table td {
-  max-width: none;
-}
-
 .kbd-cell {
   text-align: right;
 }
@@ -665,21 +642,6 @@ kbd {
 .about p {
   margin: 0 0 8px;
   max-width: 460px;
-}
-
-.shortcut-status {
-  min-height: 1.3em;
-  color: var(--text-dim);
-}
-
-.shortcut-edit {
-  height: 22px;
-  min-width: 64px;
-}
-
-.shortcut-edit.capturing {
-  border-color: var(--focus);
-  color: var(--hot);
 }
 
 .kbd-cell .icon-btn {
@@ -791,100 +753,3 @@ kbd {
   white-space: pre-wrap;
 }
 
-/* Keyboard Shortcuts: sets, view switch and the keyboard map. */
-.shortcut-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
-}
-.shortcut-bar .select {
-  min-width: 140px;
-}
-.seg {
-  display: inline-flex;
-  border: 1px solid var(--divider);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-.seg-btn {
-  padding: 3px 10px;
-  border: 0;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  cursor: pointer;
-}
-.seg-btn[aria-checked='true'] {
-  background: var(--accent-soft);
-  color: var(--text-strong);
-}
-.kb-view {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.kb-view[hidden] {
-  display: none;
-}
-.kb-mods {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.kb-mods .btn[aria-pressed='true'] {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-.kb-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  overflow-x: auto;
-}
-.kb-row {
-  display: flex;
-  gap: 4px;
-  min-width: 680px;
-}
-.kb-key,
-.kb-gap {
-  flex: 1 1 0;
-  min-width: 0;
-}
-.kb-key {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  height: 44px;
-  padding: 3px 4px;
-  border: 1px solid var(--divider);
-  border-radius: 4px;
-  background: var(--bg-input);
-  color: var(--text-faint);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  overflow: hidden;
-}
-.kb-key.on {
-  border-color: var(--accent);
-  color: var(--text);
-}
-.kb-key:hover {
-  background: var(--bg-hover);
-}
-.kb-cap {
-  font-size: 11px;
-  font-weight: 600;
-}
-.kb-cmd {
-  display: -webkit-box;
-  font-size: 9.5px;
-  line-height: 1.15;
-  overflow: hidden;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}

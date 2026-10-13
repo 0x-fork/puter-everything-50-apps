@@ -152,5 +152,6 @@ export function amplitudePanel(app) {
     el,
     show: refresh,
     focus: () => (scanAll.disabled ? scanSel : scanAll).focus(),
+    scan: (selectionOnly) => scan(Boolean(selectionOnly)),
   };
 }
