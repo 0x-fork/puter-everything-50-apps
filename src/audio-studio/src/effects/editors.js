@@ -422,10 +422,11 @@ export function transferEditor(opts = {}) {
 
 /**
  * Breakpoint envelope editor for a param of type 'envelope'.
- * o: { param, value (points), onChange(points), smooth: () => bool, doc, range: [start, end] }
+ * o: { param, value (points), onChange(points), smooth: () => bool, doc, range: [start, end],
+ *      render(points, n) to draw the curve some other way (n samples across) }
  * Click empty space to add a point, drag points, Delete or double-click to remove.
  */
-export function envelopeControl({ param, value, onChange, smooth = () => false, doc = null, range = null, xLabel = (t) => `${Math.round(t * 100)}%`, xTicks = [0.25, 0.5, 0.75], xTickLabels = [], yTicks = null, overlay = null, className = '', pointText = null }) {
+export function envelopeControl({ param, value, onChange, smooth = () => false, doc = null, range = null, xLabel = (t) => `${Math.round(t * 100)}%`, xTicks = [0.25, 0.5, 0.75], xTickLabels = [], yTicks = null, overlay = null, className = '', pointText = null, render = null }) {
   const min = param.min ?? 0;
   const max = param.max ?? 100;
   const fmt = (v) => formatPoint(param, v);
@@ -451,7 +452,7 @@ export function envelopeControl({ param, value, onChange, smooth = () => false, 
     labelText(g, fmt(max), 3, 3);
     labelText(g, fmt(min), 3, H - 16);
     xTickLabels.forEach((text, i) => text && labelText(g, text, xTicks[i] * W + 3, H - 14));
-    const curve = renderEnvelope(points, Math.max(2, Math.round(W)), { smooth: smooth() });
+    const curve = render ? render(points, Math.max(2, Math.round(W))) : renderEnvelope(points, Math.max(2, Math.round(W)), { smooth: smooth() });
     g.strokeStyle = cssVar('--envelope-vol');
     g.lineWidth = 2;
     g.beginPath();
@@ -598,7 +599,7 @@ export function curveControl({ param, value, onChange, smooth = () => false }) {
  * the effect, a dot shows the current detector level on the curve
  * (readout [level dB, gain change dB]).
  */
-export function transferCurveEditor({ id = 'curve' } = {}) {
+export function transferCurveEditor({ id = 'curve', spline = null } = {}) {
   return (ctx) => {
     const p = ctx.def.params.find((q) => q.id === id);
     const min = p.min ?? -100;
@@ -625,6 +626,14 @@ export function transferCurveEditor({ id = 'curve' } = {}) {
       xTickLabels: ticks.map((v) => String(v)),
       yTicks: ticks,
       className: 'fx-transfer-curve',
+      // Spline Curves: spline(points as { x, y }, x) gives the output level.
+      render: spline
+        ? (env, n) => {
+            if (!ctx.values[spline.id]) return renderEnvelope(env, n);
+            const pts = env.map((q) => ({ x: min + q.t * span, y: q.v }));
+            return Float32Array.from({ length: n }, (_, i) => spline.at(pts, min + (i / (n - 1)) * span));
+          }
+        : null,
       overlay: (g, W, H, { yOf }) => {
         // Unity line: points on it leave the level unchanged.
         g.strokeStyle = cssVar('--grid-strong');
@@ -654,7 +663,10 @@ export function transferCurveEditor({ id = 'curve' } = {}) {
     showStatus();
     ctx.subscribe((values) => {
       const now = JSON.stringify(values[id]);
-      if (now === last) return; // our own edit: the points are already in place
+      if (now === last) {
+        el.redraw(); // our own edit (the points are in place) or another setting, such as Spline Curves
+        return;
+      }
       last = now;
       el.setPoints(toEnv(values[id]));
     });

@@ -3,7 +3,8 @@
 import { describe, it, expect } from 'vitest';
 import { instance } from './fx-wasm.js';
 import { getEffect, defaults, slotSpec, effectLatency } from '../src/effects/index.js';
-import { curveOutput } from '../src/effects/defs/amplitude.js';
+import { curveOutput, splineOutput, transferPoints } from '../src/effects/defs/amplitude.js';
+import { dynamicsProcessingEditor } from '../src/effects/dyn-editors.js';
 import { coerce, normalizeValues } from '../src/effects/params.js';
 import { autoEditor } from '../src/effects/editors.js';
 import { Emitter } from '../src/lib/emitter.js';
@@ -100,6 +101,37 @@ describe('Dynamics Processing', () => {
     }
   });
 
+  it('bends Spline Curves smoothly through the points without overshooting', () => {
+    const pts = [{ x: -100, y: -100 }, { x: -40, y: -40 }, { x: -20, y: -24 }, { x: 0, y: -22 }];
+    for (const p of pts) expect(splineOutput(pts, p.x)).toBeCloseTo(p.y, 6);
+    let prev = -Infinity;
+    for (let x = -100; x <= 0; x += 0.5) {
+      const y = splineOutput(pts, x);
+      // Monotone and inside each segment's range: no overshoot.
+      expect(y).toBeGreaterThanOrEqual(prev - 1e-9);
+      const k = pts.findIndex((p) => p.x >= x);
+      if (k > 0) expect(y).toBeLessThanOrEqual(pts[k].y + 1e-9);
+      prev = y;
+    }
+    // Smooth where the straight curve has a corner: between the lines' values at -30.
+    expect(splineOutput(pts, -30)).not.toBeCloseTo(curveOutput(pts, -30), 2);
+    // Two points: the same straight line.
+    expect(splineOutput([{ x: -100, y: -100 }, { x: 0, y: -10 }], -50)).toBeCloseTo(curveOutput([{ x: -100, y: -100 }, { x: 0, y: -10 }], -50));
+  });
+
+  it('sends the sampled spline to the processor and compresses along it', () => {
+    const v = { ...defaults(def), lookahead: 0, spline: true };
+    const dense = transferPoints(v);
+    expect(dense.length).toBeGreaterThan(150);
+    expect(slotSpec(def, v).data[0].values.length).toBe(dense.length * 2);
+    expect(slotSpec(def, v).data[0].id).not.toBe(slotSpec(def, { ...v, spline: false }).data[0].id);
+    const { out } = run(slotSpec(def, v), sine(RATE / 2, 1000, 0.5));
+    const outDb = 20 * Math.log10(peak(out, RATE / 4));
+    const want = def.transfer(v, -6);
+    expect(outDb).toBeGreaterThan(want - 1);
+    expect(outDb).toBeLessThan(want + 1);
+  });
+
   it('applies every preset without errors', () => {
     for (const p of def.presets) {
       const { out } = run(slotSpec(def, { ...defaults(def), ...p.values }), sine(9600, 300, 0.8));
@@ -140,6 +172,19 @@ describe('transfer curve editor', () => {
     // Changing the curve from outside (a preset) re-lays the handles.
     ctx.set('curve', [{ x: -100, y: -100 }, { x: -50, y: -60 }, { x: -10, y: -10 }, { x: 0, y: -1 }]);
     expect(el.querySelectorAll('.fx-point')).toHaveLength(4);
+    close();
+  });
+
+  it('has a Spline Curves switch beside the point tools', () => {
+    const { ctx, close } = ctxFor(normalizeValues(def, {}));
+    const el = dynamicsProcessingEditor()(ctx);
+    const box = [...el.querySelectorAll('.fx-dp-tools label')].find((l) => l.textContent === 'Spline Curves').querySelector('input');
+    expect(box.checked).toBe(false);
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    expect(ctx.values.spline).toBe(true);
+    ctx.set('spline', false);
+    expect(box.checked).toBe(false);
     close();
   });
 

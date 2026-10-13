@@ -11,6 +11,7 @@ import { hotNumber } from '../ui/controls.js';
 import { cssVar } from '../ui/theme.js';
 import { plot, gridLines, labelText, transferCurveEditor } from './editors.js';
 import { formatValue, formatParts, parseValue } from './params.js';
+import { splineOutput } from './defs/transfer-curve.js';
 import { levelMeter } from './meters-ui.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -122,7 +123,7 @@ export function curveSegments(points) {
 const ratioText = (r) => (!Number.isFinite(r) ? 'inf:1' : r >= 1 ? `${r.toFixed(2)}:1` : `1:${(1 / r).toFixed(2)}`);
 
 export function dynamicsProcessingEditor({ id = 'curve' } = {}) {
-  const inner = transferCurveEditor({ id });
+  const inner = transferCurveEditor({ id, spline: { id: 'spline', at: splineOutput } });
   return (ctx) => {
     const p = ctx.def.params.find((q) => q.id === id);
     const graph = inner(ctx);
@@ -147,13 +148,16 @@ export function dynamicsProcessingEditor({ id = 'curve' } = {}) {
       ctx.set(id, list);
     } }, icon('minus', 15));
     const resetBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Reset the curve', title: 'Reset the curve', onclick: () => ctx.set(id, structuredClone(p.default)) }, icon('rotate-ccw', 15));
-    const tools = h('div.fx-dp-tools', addBtn, removeBtn, resetBtn);
+    const splineBox = h('input', { type: 'checkbox', checked: Boolean(ctx.values.spline), onchange: () => ctx.set('spline', splineBox.checked) });
+    const splineEl = ctx.def.params.some((q) => q.id === 'spline') ? h('label.check.fx-check', { title: 'Bend the curve smoothly through its points' }, splineBox, 'Spline Curves') : null;
+    const tools = h('div.fx-dp-tools', addBtn, removeBtn, resetBtn, splineEl);
     const body = h('tbody');
     const table = h('table.fx-dp-table', h('thead', h('tr', h('th', 'Segment'), h('th', 'Ratio'), h('th', 'Type'), h('th', 'Threshold'))), body);
     const update = (values) => {
       const segs = curveSegments(values[id]);
       body.replaceChildren(...segs.map((s, i) => h('tr', h('td', String(i + 1)), h('td', ratioText(s.ratio)), h('td', s.type), h('td', s.threshold))));
       removeBtn.disabled = (values[id] || []).length <= 2;
+      splineBox.checked = Boolean(values.spline);
     };
     ctx.subscribe(update);
     update(ctx.values);

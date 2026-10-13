@@ -9,6 +9,9 @@
 import { registerEffect } from '../registry.js';
 import { offloaded } from '../offline-fx.js';
 import { num, db, hz, ms, pct, bool, choice, section, preset, checkAbort, pause, dataId } from './util.js';
+import { curveOutput, splineOutput } from './transfer-curve.js';
+
+export { curveOutput, splineOutput };
 
 const AMP = 'Amplitude and Compression';
 
@@ -181,24 +184,14 @@ registerEffect({
 /** Transfer curve points from [input dB, output dB] pairs. */
 const curvePts = (list) => list.map(([x, y]) => ({ x, y }));
 
-/**
- * Output level (dB) of a drawn transfer curve at input level `x`: linear
- * between points, the first point's gain below it and the last segment's
- * slope above it (as wasm/dsp/src/fx/dynamics/curve.rs evaluates it).
- */
-export function curveOutput(points, x) {
-  const pts = [...(points || [])].sort((a, b) => a.x - b.x);
-  if (!pts.length) return x;
-  if (pts.length === 1 || x <= pts[0].x) return x + pts[0].y - pts[0].x;
-  for (let k = 1; k < pts.length; k++) {
-    const b = pts[k];
-    if (x <= b.x || k === pts.length - 1) {
-      const a = pts[k - 1];
-      const w = b.x - a.x;
-      return w > 1e-6 ? a.y + ((b.y - a.y) * (x - a.x)) / w : b.y;
-    }
-  }
-  return x;
+/** The transfer curve as the processor gets it: the points, or the spline sampled every 0.5 dB. */
+export function transferPoints(values) {
+  const pts = [...(values.curve || COMP_3)].sort((a, b) => a.x - b.x);
+  if (!values.spline || pts.length < 3) return pts;
+  const out = [];
+  for (let x = pts[0].x; x < pts[pts.length - 1].x; x += 0.5) out.push({ x, y: splineOutput(pts, x) });
+  out.push(pts[pts.length - 1]);
+  return out;
 }
 
 const COMP_3 = curvePts([[-100, -100], [-20, -20], [0, -13.3]]);
@@ -223,6 +216,7 @@ registerEffect({
     hz('lowCut', 'Low Cut', 20, 20000, 100, { section: 'Detector Band', enabledIf: (v) => v.bandLimit }),
     hz('highCut', 'High Cut', 20, 20000, 10000, { section: 'Detector Band', enabledIf: (v) => v.bandLimit }),
     db('makeup', 'Make-up Gain', -30, 30, 0, { section: 'Output' }),
+    bool('spline', 'Spline Curves', false, { hidden: true }),
   ],
   presets: [
     preset('Compressor 3:1', { curve: COMP_3, detection: 0, attack: 2, release: 120, lookahead: 2, bandLimit: false, makeup: 0 }),
@@ -235,9 +229,9 @@ registerEffect({
     preset('Broadcast Squash', { curve: curvePts([[-100, -100], [-60, -60], [-30, -24], [-12, -12], [0, -8]]), detection: 1, attack: 5, release: 150, lookahead: 4, bandLimit: true, lowCut: 80, highCut: 12000, makeup: 4 }),
   ],
   latency: (v, rate) => msFrames(Math.min(20, Math.max(0, v.lookahead)), rate),
-  transfer: (v, inDb) => curveOutput(v.curve, inDb) + v.makeup,
+  transfer: (v, inDb) => (v.spline ? splineOutput(v.curve, inDb) : curveOutput(v.curve, inDb)) + v.makeup,
   data(values) {
-    const pts = [...(values.curve || COMP_3)].sort((a, b) => a.x - b.x);
+    const pts = transferPoints(values);
     return [{ slot: 0, id: dataId(pts), values: Float32Array.from(pts.flatMap((p) => [p.x, p.y])) }];
   },
 });
