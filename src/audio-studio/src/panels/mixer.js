@@ -1,7 +1,9 @@
 // Mixer panel: a channel strip per audio and bus track plus the master, with
-// routing, the effects chain, sends to buses (one shown at a time, picked
-// from a list of eight), the track EQ, pan, mute/solo/arm/monitor, a dB fader
-// and a peak meter with hold. Strips scroll horizontally; the master stays put.
+// polarity and routing, the effects chain, sends to buses (one shown at a
+// time, picked from a list of eight), the track EQ, pan, automation mode,
+// mute/solo/arm/monitor, a dB fader and a peak meter with hold. Strips scroll
+// horizontally; the master stays put. A gutter on the left collapses the
+// routing, effects, sends and EQ sections of every strip at once.
 // Parameter changes go through the session's TrackControls (undo and
 // automation writing behave as in the track headers).
 
@@ -9,10 +11,10 @@ import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
 import { knob, hotNumber } from '../ui/controls.js';
 import { getEffect } from '../effects/registry.js';
-import { allTracks, wouldCycle, SILENT_DB, MAX_DB } from '../model/session-edits.js';
-import { SendControls, EqControls } from '../multitrack/send-eq.js';
+import { allTracks, wouldCycle, SILENT_DB, MAX_DB, AUTOMATION_MODES } from '../model/session-edits.js';
+import { SendControls, EqControls, toggleTrackEffect } from '../multitrack/send-eq.js';
 import { dbToFader, faderToDb, formatGain, formatGainShort, formatPan, parseGain } from '../multitrack/levels.js';
-import { MeterBar } from '../multitrack/meter.js';
+import { MeterBar, METER_RANGE } from '../multitrack/meter.js';
 
 const SCALE = [15, 10, 5, 0, -5, -10, -20, -30, -40, -60];
 
@@ -103,6 +105,9 @@ class Strip {
     this.output = h('select.select.mx-select', { 'aria-label': 'Output', title: 'Output', disabled: isMaster });
     this.output.addEventListener('change', () => app.commands.run('mt.setTrackOutput', { id: this.id, output: this.output.value }));
     this.fxRows = h('div.mx-fx', { role: 'group', 'aria-label': 'Effects' });
+    this.invert = h('button.mt-tb.mt-tb-invert', { type: 'button', 'aria-label': 'Invert polarity', title: 'Invert Polarity', 'aria-pressed': 'false', onclick: () => c().toggle(this.id, 'invert') }, icon('polarity', 12));
+    this.mode = h('select.select.mx-select.mx-mode', { 'aria-label': 'Automation mode', title: 'Automation Mode' }, AUTOMATION_MODES.map((m) => h('option', { value: m.id }, m.label)));
+    this.mode.addEventListener('change', () => app.commands.run('mt.setAutomationMode', { id: this.id, mode: this.mode.value }));
     this.fxPower = h('button.mt-tb.mt-tb-fx', { type: 'button', 'aria-label': 'Effects power', title: 'Effects Power', 'aria-pressed': 'true', onclick: () => c().toggle(this.id, 'fxPower') }, icon('power', 12));
     this.fxEdit = h('button.icon-btn.sm', { type: 'button', 'aria-label': 'Edit effects', title: 'Edit Effects', onclick: () => app.commands.run('mt.trackEffects', { id: this.id }) }, icon('fx', 13));
     this.pan = isMaster ? null : knob({ value: 0, min: -100, max: 100, step: 1, defaultValue: 0, bipolar: true, label: 'Pan', format: formatPan, size: 26, onInput: (v) => c().set(this.id, 'pan', v, 'input'), onChange: (v) => c().set(this.id, 'pan', v, 'change') });
@@ -118,17 +123,21 @@ class Strip {
     this.sends = isMaster ? null : new SendControls(app, doc, track.id);
     this.eq = new EqControls(app, doc, track.id);
     const scale = h('div.mx-scale', { 'aria-hidden': 'true' }, SCALE.map((db) => h('span', { style: { bottom: `calc(${(dbToFader(db) * 100).toFixed(2)}% - ${(dbToFader(db) * 18 - 9).toFixed(1)}px)` } }, db > 0 ? `+${db}` : String(db))));
+    // Meter scale: dBFS every 12 dB beside the meter.
+    const mscale = h('div.mx-mscale', { 'aria-hidden': 'true' }, [0, -12, -24, -36, -48, -60].map((db) => h('span', { style: { bottom: `${((METER_RANGE + db) / METER_RANGE) * 100}%` } }, String(db))));
     this.el = h(
       `div.mx-strip${isMaster ? '.master' : ''}${track.type === 'bus' ? '.bus' : ''}`,
       { role: 'group', dataset: { id: this.id }, onpointerdown: () => doc.selectTrack(this.id) },
-      h('div.mx-io', this.input ? h('label.mx-io-row', icon('log-in', 12), this.input) : h('div.mx-io-row.placeholder', { 'aria-hidden': 'true' }), h('label.mx-io-row', icon('log-out', 12), this.output)),
-      h('div.mx-fx-head', h('span', 'Effects'), h('div.spacer'), this.fxPower, this.fxEdit),
-      this.fxRows,
-      this.sends?.el,
-      this.eq.el,
+      // Sections the gutter can collapse (data-sec); the master keeps empty
+      // ones so its controls line up with the tracks'.
+      h('div.mx-sec', { dataset: { sec: 'io' } }, h('div.mx-io', h('div.mx-io-top', this.invert), this.input ? h('label.mx-io-row', icon('log-in', 12), this.input) : h('div.mx-io-row.placeholder', { 'aria-hidden': 'true' }), h('label.mx-io-row', icon('log-out', 12), this.output))),
+      h('div.mx-sec', { dataset: { sec: 'fx' } }, h('div.mx-fx-head', h('span', 'Effects'), h('div.spacer'), this.fxPower, this.fxEdit), this.fxRows),
+      h('div.mx-sec', { dataset: { sec: 'sends' } }, this.sends?.el),
+      h('div.mx-sec', { dataset: { sec: 'eq' } }, this.eq.el),
       h('div.mx-panrow', this.pan, this.pan ? this.panText : null),
+      this.mode,
       h('div.mx-btns', this.mute, this.solo, this.arm, this.monitor),
-      h('div.mx-level', scale, this.fader, this.meter.el),
+      h('div.mx-level', scale, this.fader, this.meter.el, mscale),
       h('div.mx-db', this.dbNum),
       this.name,
     );
@@ -143,28 +152,30 @@ class Strip {
     this.el.setAttribute('aria-label', `${track.type === 'master' ? 'Master' : track.name} channel strip`);
     this.name.textContent = track.name;
     this.name.title = track.name;
-    for (const [b, k] of [[this.mute, 'mute'], [this.solo, 'solo'], [this.arm, 'arm'], [this.monitor, 'monitor']]) b?.setAttribute('aria-pressed', String(Boolean(track[k])));
+    for (const [b, k] of [[this.mute, 'mute'], [this.solo, 'solo'], [this.arm, 'arm'], [this.monitor, 'monitor'], [this.invert, 'invert']]) b?.setAttribute('aria-pressed', String(Boolean(track[k])));
+    this.mode.value = track.mode;
     this.fxPower.setAttribute('aria-pressed', String(track.fxPower));
     if (this.input) {
-      this.input.replaceChildren(h('option', { value: 'none' }, 'None'), h('option', { value: 'default' }, 'Default Input'));
+      this.input.replaceChildren(h('option', { value: 'none' }, 'None'), h('option', { value: 'default' }, track.channels === 1 ? 'Default Mono Input' : 'Default Stereo Input'));
       this.input.value = track.input;
     }
     const outs = [h('option', { value: 'master' }, track.type === 'master' ? 'Default Output' : 'Mix')];
     if (track.type !== 'master') for (const b of state.tracks) if (b.type === 'bus' && b.id !== track.id && !wouldCycle(state, track.id, b.id)) outs.push(h('option', { value: b.id }, b.name));
     this.output.replaceChildren(...outs);
     this.output.value = track.output || 'master';
-    const rows = [];
-    for (let i = 0; i < 4; i++) {
-      const s = track.fx.filter(Boolean)[i];
-      const def = s && getEffect(s.effect);
-      rows.push(
-        h(
-          `button.mx-fx-slot${s ? '' : '.empty'}${s && s.enabled === false ? '.off' : ''}`,
-          { type: 'button', 'aria-label': s ? `${def?.name || 'Effect'}${s.enabled === false ? ' (off)' : ''}, edit effects` : `Empty effect slot ${i + 1}, add an effect`, onclick: () => this.app.commands.run('mt.trackEffects', { id: this.id }) },
-          s ? def?.name || 'Effect' : '',
-        ),
+    // Every effect (the list scrolls past four), each with its own power, then empty slots up to four.
+    const edit = () => this.app.commands.run('mt.trackEffects', { id: this.id });
+    const filled = track.fx.map((s, i) => [s, i]).filter(([s]) => s);
+    const rows = filled.map(([s, i]) => {
+      const name = getEffect(s.effect)?.name || 'Effect';
+      const on = s.enabled !== false;
+      return h(
+        `div.mx-fx-slot${on ? '' : '.off'}`,
+        h('button.mx-fx-power', { type: 'button', 'aria-pressed': String(on), 'aria-label': `${name} power`, title: on ? 'Bypass this effect' : 'Turn this effect on', onclick: () => toggleTrackEffect(this.doc, this.id, i) }, icon('power', 10)),
+        h('button.mx-fx-name', { type: 'button', 'aria-label': `${name}${on ? '' : ' (off)'}, edit effects`, onclick: edit }, name),
       );
-    }
+    });
+    for (let i = rows.length; i < 4; i++) rows.push(h('button.mx-fx-slot.empty', { type: 'button', 'aria-label': `Empty effect slot ${i + 1}, add an effect`, onclick: edit }));
     this.fxRows.replaceChildren(...rows);
     this.fader.setAttribute('aria-label', `${track.name} volume`);
     this.sends?.update(track);
@@ -197,7 +208,36 @@ export function mixerPanel(app) {
     h('p', 'The Mixer shows the tracks of a multitrack session.'),
     h('button.btn', { type: 'button', onclick: () => app.commands.run(app.documents.some((d) => d.kind === 'session') ? 'view.multitrack' : 'file.newSession') }, icon('mode-multitrack', 14), 'Open Multitrack Session'),
   );
-  const el = h('div.mixer-panel', scroller, masterBox, empty);
+  // Gutter: a toggle per collapsible section, lined up with the strips.
+  const SECTIONS = [
+    { id: 'io', label: 'Inputs and Outputs', glyph: 'track-io' },
+    { id: 'fx', label: 'Effects', glyph: 'fx' },
+    { id: 'sends', label: 'Sends', glyph: 'corner-down-right' },
+    { id: 'eq', label: 'EQ', glyph: 'sliders-horizontal' },
+  ];
+  const collapsed = () => new Set(app.prefs.get('mixerCollapsed') || []);
+  const secBtns = SECTIONS.map((sec) =>
+    h(
+      'button.mx-gutter-btn',
+      {
+        type: 'button',
+        dataset: { sec: sec.id },
+        'aria-expanded': 'true',
+        'aria-label': sec.label,
+        title: `Show or hide ${sec.label}`,
+        onclick: () => {
+          const set = collapsed();
+          if (set.has(sec.id)) set.delete(sec.id);
+          else set.add(sec.id);
+          app.prefs.set('mixerCollapsed', [...set]);
+        },
+      },
+      icon('chevron-down', 11),
+      icon(sec.glyph, 12),
+    ),
+  );
+  const gutter = h('div.mx-gutter', { role: 'group', 'aria-label': 'Mixer sections' }, secBtns);
+  const el = h('div.mixer-panel', gutter, scroller, masterBox, empty);
   let visible = false;
   let raf = 0;
   let doc = null;
@@ -245,7 +285,29 @@ export function mixerPanel(app) {
     }
     const cur = [...scroller.children];
     if (cur.length !== order.length || cur.some((x, i) => x !== order[i])) scroller.replaceChildren(...order);
+    layoutSections();
   };
+
+  /** Applies the collapsed sections and lines the gutter and the master up with the first strip. */
+  function layoutSections() {
+    const hidden = collapsed();
+    for (const b of secBtns) {
+      const on = hidden.has(b.dataset.sec);
+      b.setAttribute('aria-expanded', String(!on));
+      el.classList.toggle(`mx-hide-${b.dataset.sec}`, on);
+    }
+    if (!doc || !visible) return;
+    const first = scroller.firstElementChild;
+    const master = masterBox.firstElementChild;
+    const masterSends = master?.querySelector(".mx-sec[data-sec='sends']");
+    if (masterSends) masterSends.style.minHeight = '';
+    for (const b of secBtns) {
+      const sec = first?.querySelector(`.mx-sec[data-sec='${b.dataset.sec}']`);
+      b.hidden = !sec;
+      if (sec) b.style.top = `${sec.offsetTop}px`;
+      if (sec && b.dataset.sec === 'sends' && masterSends) masterSends.style.minHeight = `${sec.offsetHeight}px`;
+    }
+  }
 
   const tick = () => {
     raf = 0;
@@ -275,6 +337,7 @@ export function mixerPanel(app) {
   });
   app.on('transport', schedule);
   app.on('prefs', (key) => key === 'visibilityInMixer' && render());
+  app.on('prefs', (key) => key === 'mixerCollapsed' && layoutSections());
   render();
   return {
     el,

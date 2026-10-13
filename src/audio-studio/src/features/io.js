@@ -66,6 +66,13 @@ export function installIo(app) {
       run: () => toggleRecord(app),
     },
     {
+      id: 'transport.punchRoll',
+      label: 'Punch and Roll',
+      // Waveform editor: rolls in from before the playhead (or selection) and records over what follows.
+      enabled: (a) => Boolean(audio(a)) && !a.recording,
+      run: () => punchAndRoll(app),
+    },
+    {
       id: 'transport.meterInput',
       label: 'Meter Input Signal',
       checked: (a) => Boolean(a.inputMetering),
@@ -201,6 +208,24 @@ async function toggleRecord(app) {
   return app.recorder.start({ doc, replace, at: doc.cursor });
 }
 
+/**
+ * Punch and Roll: plays the pre-roll (Preferences > Playback and Recording,
+ * at least two seconds) before the punch-in point, then records from there:
+ * over the selection, or over everything after the playhead.
+ */
+async function punchAndRoll(app) {
+  const doc = audio(app);
+  if (!doc || app.recorder.active) return;
+  if (prerolling) return prerolling.cancel();
+  const at = doc.hasSelection ? doc.selection.start : Math.round(app.playhead);
+  if (app.engine.playing) app.stop();
+  doc.setCursor(at);
+  const replace = doc.hasSelection ? [doc.selection.start, doc.selection.end] : [at, Infinity];
+  const secs = Math.max(2, Number(app.prefs.get('prerollSeconds')) || 0);
+  if (at > 0 && !(await preroll(app, doc, at, secs))) return;
+  return app.recorder.start({ doc, replace, at });
+}
+
 // ----------------------------------------------------------------- pre-roll
 
 let prerolling = null;
@@ -289,6 +314,9 @@ async function toggleInputMeter(app) {
 function audioHardwarePrefs(app) {
   const p = app.prefs;
   const input = h('select.select', { 'aria-label': 'Default input device' }, h('option', { value: '' }, 'System Default'));
+  // Output choice needs AudioContext.setSinkId (not in every browser).
+  const canPickOutput = typeof AudioContext !== 'undefined' && typeof AudioContext.prototype.setSinkId === 'function';
+  const output = h('select.select', { 'aria-label': 'Default output device' }, h('option', { value: '' }, 'System Default'));
   const allow = h('button.btn', { type: 'button', hidden: true }, 'Show Device Names');
   const latency = h('span.muted.tabular');
   const fill = async () => {
@@ -301,6 +329,9 @@ function audioHardwarePrefs(app) {
     const inputs = devices.filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default');
     input.replaceChildren(h('option', { value: '' }, 'System Default'), ...inputs.map((d, i) => h('option', { value: d.deviceId }, d.label || `Input ${i + 1}`)));
     input.value = inputs.some((d) => d.deviceId === p.get('inputDevice')) ? p.get('inputDevice') : '';
+    const outputs = devices.filter((d) => d.kind === 'audiooutput' && d.deviceId !== 'default');
+    output.replaceChildren(h('option', { value: '' }, 'System Default'), ...outputs.map((d, i) => h('option', { value: d.deviceId }, d.label || `Output ${i + 1}`)));
+    output.value = outputs.some((d) => d.deviceId === p.get('outputDevice')) ? p.get('outputDevice') : '';
     allow.hidden = !inputs.length || inputs.some((d) => d.label);
     const e = app.engine;
     latency.textContent = e.ctx ? `${((e.outputLatencyFrames / e.rate) * 1000).toFixed(1)} ms at ${e.rate} Hz` : 'Measured when playback or recording starts';
@@ -315,6 +346,7 @@ function audioHardwarePrefs(app) {
       }
     }
   });
+  output.addEventListener('change', () => p.set('outputDevice', output.value));
   allow.addEventListener('click', async () => {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -325,7 +357,17 @@ function audioHardwarePrefs(app) {
     fill();
   });
   fill();
-  return [h('div.form-grid', h('label', 'Default Input:'), h('div.io-row', input, allow), h('label', 'Output Latency:'), latency)];
+  return [
+    h(
+      'div.form-grid',
+      h('label', 'Default Input:'),
+      h('div.io-row', input, allow),
+      canPickOutput ? h('label', 'Default Output:') : null,
+      canPickOutput ? output : null,
+      h('label', 'Output Latency:'),
+      latency,
+    ),
+  ];
 }
 
 // ----------------------------------------------------------------- markers

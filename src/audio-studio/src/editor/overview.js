@@ -3,7 +3,8 @@
 // it to centre the view there, double-click to zoom out fully. Keyboard:
 // Left/Right scroll, +/- zoom.
 //   host.timeline() -> { rate, length, view, cursor, selection }
-//   host.setView(start, end), host.overviewPeaks(columns) -> Float32Array(min,max pairs) | null
+//   host.setView(start, end), host.overviewPeaks(columns) -> Float32Array(min,max pairs),
+//   or an array of them (one strip per channel), or null
 
 import { h } from '../lib/dom.js';
 import { cssVar } from '../ui/theme.js';
@@ -148,18 +149,29 @@ export class Overview {
       this.peaks = this.host.overviewPeaks?.(cols, total) || null;
       this.peaksFor = { content, cols, total };
     }
-    const mid = this.canvas.height / 2;
-    const half = this.canvas.height / 2 - 2 * dpr;
     if (this.peaks) {
-      ctx.fillStyle = cssVar('--wave-dim');
-      for (let c = 0; c < cols; c++) {
-        const lo = this.peaks[2 * c];
-        if (Number.isNaN(lo)) continue;
-        const hi = this.peaks[2 * c + 1];
-        const y0 = mid - Math.min(1, hi) * half;
-        const y1 = mid - Math.max(-1, lo) * half;
-        ctx.fillRect(c, y0, 1, Math.max(1, y1 - y0));
-      }
+      // One strip per channel; inside the view frame in the full waveform color.
+      const strips = Array.isArray(this.peaks) ? this.peaks : [this.peaks];
+      const H = this.canvas.height;
+      const pad = 2 * dpr;
+      const lh = (H - pad * 2) / strips.length;
+      const fx0 = Math.max(0, Math.floor(this.#x(t.view.start) * dpr));
+      const fx1 = Math.min(cols, Math.ceil(this.#x(t.view.end) * dpr));
+      const dim = cssVar('--wave-dim');
+      const bright = cssVar('--wave');
+      strips.forEach((peaks, i) => {
+        const mid = pad + lh * (i + 0.5);
+        const half = lh / 2 - dpr * 0.5;
+        for (let c = 0; c < cols; c++) {
+          const lo = peaks[2 * c];
+          if (Number.isNaN(lo)) continue;
+          const hi = peaks[2 * c + 1];
+          const y0 = mid - Math.min(1, hi) * half;
+          const y1 = mid - Math.max(-1, lo) * half;
+          ctx.fillStyle = c >= fx0 && c < fx1 ? bright : dim;
+          ctx.fillRect(c, y0, 1, Math.max(1, y1 - y0));
+        }
+      });
     }
     const sel = t.selection;
     if (sel && sel.end > sel.start) {

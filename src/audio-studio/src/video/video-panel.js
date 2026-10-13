@@ -3,6 +3,8 @@
 // engine (small drift is closed by nudging its speed, large drift by seeking);
 // while stopped or scrubbing it seeks to the playhead. Zoom is Best Fit or a
 // percentage of the video's own size (View > Video Display or the panel menu).
+// Preferences > Video sets the timecode overlay (size, background, position,
+// session or file time) and double-click for full screen.
 
 import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
@@ -78,7 +80,7 @@ export function videoPanel(app) {
     if (!session || !src?.blob) return;
     const t = target();
     frame.classList.toggle('outside', t === null);
-    timecode.textContent = app.prefs.get('videoTimecode') ? app.formatTime(app.active === session ? app.playhead : session.cursor, session.sampleRate) : '';
+    timecode.textContent = app.prefs.get('videoTimecode') ? timecodeText(t) : '';
     if (t === null) {
       if (!video.paused) video.pause();
       return;
@@ -105,6 +107,29 @@ export function videoPanel(app) {
     if (step.seek !== undefined) seek(step.seek);
     if (step.rate && Math.abs(video.playbackRate - step.rate) > 0.001) video.playbackRate = step.rate;
   };
+
+  /** Overlay text: session time at the playhead, or the time within the video file. */
+  const timecodeText = (t) => {
+    if (app.prefs.get('videoTcReference') === 'source') return t === null ? '' : app.formatTime(Math.round(t * session.sampleRate), session.sampleRate);
+    return app.formatTime(app.active === session ? app.playhead : session.cursor, session.sampleRate);
+  };
+
+  const styleTimecode = () => {
+    const p = app.prefs;
+    const pos = String(p.get('videoTcPosition') || 'bc');
+    timecode.dataset.pos = /^[tmb][lcr]$/.test(pos) ? pos : 'bc';
+    const size = Math.max(10, Math.min(100, Number(p.get('videoTcSize')) || 30));
+    const opacity = Math.max(0, Math.min(100, Number(p.get('videoTcOpacity') ?? 65)));
+    timecode.style.setProperty('--tc-size', String(size / 100));
+    timecode.style.setProperty('--tc-bg', `rgba(0, 0, 0, ${opacity / 100})`);
+  };
+  styleTimecode();
+
+  stage.addEventListener('dblclick', () => {
+    if (!app.prefs.get('videoFullscreen') || !src?.blob) return;
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+    else stage.requestFullscreen?.().catch(() => {});
+  });
 
   const layout = () => {
     const zoom = videoZoom(app);
@@ -175,7 +200,8 @@ export function videoPanel(app) {
   });
   app.on('prefs', (key) => {
     if (key === 'videoZoom') layout();
-    if (key === 'videoTimecode') sync(true);
+    if (key === 'videoTimecode' || key === 'videoTcReference') sync(true);
+    if (key === 'videoTcSize' || key === 'videoTcOpacity' || key === 'videoTcPosition') styleTimecode();
   });
   update();
 

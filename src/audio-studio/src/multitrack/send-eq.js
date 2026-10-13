@@ -10,8 +10,19 @@ import { getEffect } from '../effects/registry.js';
 import { openEffectDialog } from '../effects/dialog.js';
 import { normalizeValues } from '../effects/params.js';
 import { cssVar } from '../ui/theme.js';
-import { setSend, updateTrack, wouldCycle, MAX_SENDS, SILENT_DB } from '../model/session-edits.js';
+import { setSend, updateTrack, findTrack, wouldCycle, MAX_SENDS, SILENT_DB } from '../model/session-edits.js';
 import { formatGainShort, formatPan, parseGain } from './levels.js';
+
+/** Switches one effect of a track's chain on or off as an undo step (Mixer strips, track headers). */
+export function toggleTrackEffect(doc, trackId, index) {
+  const track = findTrack(doc.state, trackId);
+  const slot = track?.fx[index];
+  if (!slot) return;
+  const fx = track.fx.slice();
+  fx[index] = { ...slot, enabled: slot.enabled === false };
+  doc.endGesture();
+  doc.apply(slot.enabled === false ? 'Effect On' : 'Effect Off', updateTrack(doc.state, trackId, { fx }));
+}
 
 /** Controls for the sends of one track. `compact` lays them out on one row (track headers). */
 export class SendControls {

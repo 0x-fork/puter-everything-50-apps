@@ -15,7 +15,7 @@
 .mt-ruler-row,
 .mt-main {
   display: grid;
-  grid-template-columns: var(--mt-header-w) 4px minmax(0, 1fr) 12px;
+  grid-template-columns: var(--mt-header-w) 4px minmax(0, 1fr) 14px;
   min-width: 0;
   min-height: 0;
 }
@@ -115,14 +115,43 @@
   pointer-events: none;
 }
 
-.mt-vscroll {
-  overflow-x: hidden;
-  overflow-y: auto;
+.mt-vnav {
+  position: relative;
   min-height: 0;
+  margin: 0 2px 0 3px;
+  touch-action: none;
+  cursor: default;
 }
 
-.mt-vscroll-inner {
-  width: 1px;
+.mt-vnav-segs {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--bg-input);
+}
+
+.mt-vnav-seg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-bottom: 1px solid var(--bg-panel);
+  background: color-mix(in srgb, var(--track-color) 45%, var(--bg-input));
+}
+
+.mt-vnav-thumb {
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  min-height: 10px;
+  border: 1px solid var(--text-dim);
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-panel) 60%, transparent);
+  pointer-events: none;
+}
+
+.mt-vnav:hover .mt-vnav-thumb {
+  border-color: var(--text-strong);
 }
 
 /* ------------------------------------------------------- track header */
@@ -244,6 +273,12 @@
   color: var(--text-strong);
 }
 
+/* Buttons set their own display; keep [hidden] hiding them. */
+.mt-th [hidden],
+.mx-strip [hidden] {
+  display: none;
+}
+
 .mt-tb-mute[aria-pressed='true'] {
   background: var(--warning);
   border-color: var(--warning);
@@ -260,6 +295,12 @@
   background: var(--record);
   border-color: var(--record);
   color: #fff;
+}
+
+.mt-tb-invert[aria-pressed='true'] {
+  background: var(--warning);
+  border-color: var(--warning);
+  color: #111;
 }
 
 .mt-tb-monitor[aria-pressed='true'],
@@ -319,7 +360,10 @@
 }
 
 .mt-th-fxname {
-  padding: 1px 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 4px 1px 2px;
   border: 1px solid var(--divider);
   border-radius: 3px;
   color: var(--text);
@@ -329,9 +373,29 @@
   max-width: 100%;
 }
 
-.mt-th-fxname.off {
+.mt-th-fxname.off .mt-th-fxlabel {
   color: var(--text-faint);
   text-decoration: line-through;
+}
+
+.mt-th-fxlabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mt-th-fxpower {
+  display: inline-flex;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.mt-th-fxpower[aria-pressed='false'] {
+  color: var(--text-faint);
 }
 
 .mt-th-fxname.empty {
@@ -479,8 +543,84 @@
   border-left: 2px solid var(--border);
 }
 
+.mx-gutter {
+  position: relative;
+  flex: none;
+  width: 20px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel-alt);
+}
+
+.mixer-panel.no-session .mx-gutter {
+  display: none;
+}
+
+.mx-gutter-btn {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 1px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.mx-gutter-btn:hover {
+  color: var(--text-strong);
+}
+
+.mx-gutter-btn[hidden] {
+  display: none;
+}
+
+.mx-gutter-btn .icon:first-child {
+  transition: transform 120ms var(--ease);
+}
+
+.mx-gutter-btn[aria-expanded='false'] .icon:first-child {
+  transform: rotate(-90deg);
+}
+
+.mx-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* A collapsed section leaves a thin bar so the strips keep their rhythm. */
+.mixer-panel.mx-hide-io .mx-sec[data-sec='io'] > *,
+.mixer-panel.mx-hide-fx .mx-sec[data-sec='fx'] > *,
+.mixer-panel.mx-hide-sends .mx-sec[data-sec='sends'] > *,
+.mixer-panel.mx-hide-eq .mx-sec[data-sec='eq'] > * {
+  display: none;
+}
+
+.mixer-panel.mx-hide-io .mx-sec[data-sec='io'],
+.mixer-panel.mx-hide-fx .mx-sec[data-sec='fx'],
+.mixer-panel.mx-hide-sends .mx-sec[data-sec='sends'],
+.mixer-panel.mx-hide-eq .mx-sec[data-sec='eq'] {
+  min-height: 26px !important;
+  border-bottom: 1px solid var(--divider);
+}
+
+.mx-io-top {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.mx-strip .mx-mode {
+  flex: none;
+}
+
 .mx-strip {
   --track-color: var(--accent);
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -534,16 +674,53 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  max-height: 71px;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .mx-fx-slot {
-  height: 16px;
-  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  flex: none;
+  height: 17px;
+  padding: 0;
   border: 1px solid var(--divider);
   border-radius: 2px;
   background: var(--bg-input);
   color: var(--text);
   font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.mx-fx-power {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--divider);
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.mx-fx-power[aria-pressed='false'] {
+  color: var(--text-faint);
+}
+
+.mx-fx-name {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
@@ -553,7 +730,7 @@
 
 .mx-fx-slot.empty {
   border-style: dashed;
-  border-color: var(--border-soft);
+  border-color: var(--divider);
   background: transparent;
 }
 
@@ -589,7 +766,7 @@
 .mx-level {
   position: relative;
   display: grid;
-  grid-template-columns: 26px 22px 12px;
+  grid-template-columns: 22px 22px 12px 16px;
   justify-content: center;
   gap: 3px;
   flex: 1;
@@ -602,6 +779,20 @@
   color: var(--text-faint);
   font-size: 9px;
   font-variant-numeric: tabular-nums;
+}
+
+.mx-mscale {
+  position: relative;
+  color: var(--text-faint);
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mx-mscale span {
+  position: absolute;
+  left: 0;
+  line-height: 1;
+  transform: translateY(50%);
 }
 
 .mx-scale span {
@@ -645,9 +836,10 @@
   left: 0;
   right: 0;
   height: 18px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--track-color);
   border-radius: 3px;
   background: var(--bg-raised);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--track-color) 35%, transparent);
 }
 
 .mx-thumb::after {
@@ -673,6 +865,7 @@
   margin: 0 -5px;
   padding: 4px 4px 5px;
   border-top: 3px solid var(--track-color);
+  background: color-mix(in srgb, var(--track-color) 22%, transparent);
   color: var(--text-strong);
   text-align: center;
   white-space: nowrap;

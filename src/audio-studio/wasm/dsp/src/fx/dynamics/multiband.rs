@@ -9,6 +9,8 @@
 //!   35 limiter release ms, 36 brickwall (lookahead) limiting, 37 link channels.
 //! The limiter boosts by (margin - threshold) and caps peaks at the margin.
 //! Latency: 5 ms lookahead minus one frame when the limiter is on and brickwall.
+//! Readout (9 values): per band its input peak dB and deepest gain reduction
+//! dB since the last read, then the output peak dB.
 //!
 //! Band gains are computed at a control rate of one update per K frames (the
 //! detectors still see every sample) and interpolated per sample, which keeps
@@ -96,6 +98,11 @@ pub struct Multiband {
     brickwall: bool,
     link: bool,
     any_solo: bool,
+    /// Meters since the last readout: band input peaks (linear), band gain
+    /// reductions (dB, <= 0) and the output peak (linear).
+    meter_in: [f32; BANDS],
+    meter_gr: [f32; BANDS],
+    meter_out: f32,
 }
 
 /// Default parameter values (also the JS defaults).
@@ -125,6 +132,9 @@ impl Multiband {
             brickwall: true,
             link: true,
             any_solo: false,
+            meter_in: [0.0; BANDS],
+            meter_gr: [0.0; BANDS],
+            meter_out: 0.0,
         };
         m.update();
         m.reset();
@@ -248,6 +258,8 @@ impl Effect for Multiband {
                         level = level.max(band.det[0].next(x));
                     }
                     let g = Self::band_gain(band, 0, level) * g_band;
+                    self.meter_in[b] = self.meter_in[b].max(level);
+                    self.meter_gr[b] = self.meter_gr[b].min(band.gr[0].db);
                     for c in 0..2 {
                         g0[b][c] = band.last[c];
                         g1[b][c] = g;
@@ -260,6 +272,8 @@ impl Effect for Multiband {
                             level = level.max(band.det[c].next(split[c][j][b].abs()));
                         }
                         let g = Self::band_gain(band, c, level) * g_band;
+                        self.meter_in[b] = self.meter_in[b].max(level);
+                        self.meter_gr[b] = self.meter_gr[b].min(band.gr[c].db);
                         g0[b][c] = band.last[c];
                         g1[b][c] = g;
                         band.last[c] = g;
@@ -299,6 +313,7 @@ impl Effect for Multiband {
                         r *= self.fast_env;
                     }
                 }
+                self.meter_out = self.meter_out.max(l.abs().max(if channels == 2 { r.abs() } else { 0.0 }));
                 buf[at + j] = l;
                 if channels == 2 {
                     buf[frames + at + j] = r;
@@ -339,6 +354,21 @@ impl Effect for Multiband {
         } else {
             0
         }
+    }
+
+    fn readout(&mut self, out: &mut [f32]) -> usize {
+        if out.len() < 2 * BANDS + 1 {
+            return 0;
+        }
+        for b in 0..BANDS {
+            out[2 * b] = lin_db(self.meter_in[b] + 1e-10).max(-120.0);
+            out[2 * b + 1] = self.meter_gr[b];
+            self.meter_in[b] = 0.0;
+            self.meter_gr[b] = 0.0;
+        }
+        out[2 * BANDS] = lin_db(self.meter_out + 1e-10).max(-120.0);
+        self.meter_out = 0.0;
+        2 * BANDS + 1
     }
 }
 

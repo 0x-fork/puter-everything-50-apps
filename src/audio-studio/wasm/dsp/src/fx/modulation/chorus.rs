@@ -3,7 +3,10 @@
 //!
 //! Params: 0 voices (2..8), 1 delay ms, 2 delay rate Hz, 3 feedback %,
 //! 4 spread ms (extra delay across voices), 5 modulation depth dB,
-//! 6 modulation rate Hz, 7 stereo width %, 8 dry %, 9 wet %, 10 highest quality.
+//! 6 modulation rate Hz, 7 stereo width %, 8 dry % (0..200), 9 wet % (0..200),
+//! 10 highest quality, 11 average left and right input (the voices all hear
+//! the mono sum), 12 binaural cues (a voice panned to one side reaches the
+//! other ear up to ITD_MS later and quieter, as sound around a head does).
 
 use super::fsin;
 use crate::fx::delay::feedback_tail;
@@ -15,6 +18,8 @@ const MAX_DELAY_MS: f32 = 50.0;
 const MAX_SPREAD_MS: f32 = 50.0;
 /// Frames between LFO evaluations.
 const CTRL: usize = 16;
+/// Largest interaural time difference for binaural cues, in ms.
+const ITD_MS: f32 = 0.65;
 
 pub struct Chorus {
     rate: f32,
@@ -32,6 +37,8 @@ pub struct Chorus {
     dry: Smooth,
     wet: Smooth,
     hq: bool,
+    average: bool,
+    binaural: bool,
     phase: [f32; MAX_VOICES],
     amp_phase: [f32; MAX_VOICES],
     last: [f32; 2],
@@ -40,7 +47,7 @@ pub struct Chorus {
 
 impl Chorus {
     pub fn new(rate: f32, _channels: usize) -> Chorus {
-        let max = ((MAX_DELAY_MS * 1.3 + MAX_SPREAD_MS + 2.0) * rate / 1000.0) as usize + 8;
+        let max = ((MAX_DELAY_MS * 1.3 + MAX_SPREAD_MS + ITD_MS + 2.0) * rate / 1000.0) as usize + 8;
         let mut phase = [0.0; MAX_VOICES];
         let mut amp_phase = [0.0; MAX_VOICES];
         for i in 0..MAX_VOICES {
@@ -63,6 +70,8 @@ impl Chorus {
             dry: Smooth::new(0.7, rate, 20.0),
             wet: Smooth::new(0.5, rate, 20.0),
             hq: true,
+            average: false,
+            binaural: false,
             phase,
             amp_phase,
             last: [0.0; 2],
@@ -93,9 +102,11 @@ impl Effect for Chorus {
             5 => self.depth_db = v.clamp(0.0, 24.0),
             6 => self.mod_rate = v.clamp(0.0, 20.0),
             7 => self.width = (v * 0.01).clamp(0.0, 1.0),
-            8 => self.dry.target = (v * 0.01).clamp(0.0, 1.0),
-            9 => self.wet.target = (v * 0.01).clamp(0.0, 1.0),
+            8 => self.dry.target = (v * 0.01).clamp(0.0, 2.0),
+            9 => self.wet.target = (v * 0.01).clamp(0.0, 2.0),
             10 => self.hq = v >= 0.5,
+            11 => self.average = v >= 0.5,
+            12 => self.binaural = v >= 0.5,
             _ => {}
         }
     }
@@ -114,11 +125,26 @@ impl Effect for Chorus {
         let mut inc = [0.0f32; MAX_VOICES];
         let mut ainc = [0.0f32; MAX_VOICES];
         let mut pan = [[1.0f32; 2]; MAX_VOICES];
+        // Extra delay (frames) per voice and channel for binaural cues.
+        let mut itd = [[0.0f32; 2]; MAX_VOICES];
         for i in 0..v {
             inc[i] = self.delay_rate * (1.0 + 0.11 * i as f32) / self.rate;
             ainc[i] = self.mod_rate * (1.0 + 0.07 * i as f32) / self.rate;
             let p = if ch == 2 { self.width * (2.0 * i as f32 / (v - 1) as f32 - 1.0) } else { 0.0 };
             pan[i] = [1.0 - p.max(0.0), 1.0 + p.min(0.0)];
+            if self.binaural && ch == 2 {
+                // The far ear hears the voice later and shadowed by the head
+                // instead of not at all.
+                let lag = p.abs() * ITD_MS * fpm;
+                let far = 1.0 - 0.5 * p.abs();
+                if p > 0.0 {
+                    itd[i] = [lag, 0.0];
+                    pan[i] = [far, 1.0];
+                } else {
+                    itd[i] = [0.0, lag];
+                    pan[i] = [1.0, far];
+                }
+            }
         }
         let floor = 10f32.powf(-self.depth_db / 20.0);
         let norm = 1.0 / (v as f32).sqrt();
@@ -157,15 +183,18 @@ impl Effect for Chorus {
                 let mut acc = [0.0f32; 2];
                 for k in 0..v {
                     for c in 0..ch {
-                        let t = if self.hq { self.lines[c].tap_cubic(d[k]) } else { self.lines[c].tap_linear(d[k]) };
+                        let at = d[k] + itd[k][c];
+                        let t = if self.hq { self.lines[c].tap_cubic(at) } else { self.lines[c].tap_linear(at) };
                         acc[c] += t * g[k] * pan[k][c];
                     }
                     d[k] += dd[k];
                     g[k] += dg[k];
                 }
+                let mono = if self.average && ch == 2 { 0.5 * (buf[j] + buf[frames + j]) } else { 0.0 };
                 for c in 0..ch {
                     let x = buf[c * frames + j];
-                    self.lines[c].push(x + self.fb * self.last[c]);
+                    let input = if self.average && ch == 2 { mono } else { x };
+                    self.lines[c].push(input + self.fb * self.last[c]);
                     self.last[c] = acc[c];
                     buf[c * frames + j] = x * dry + acc[c] * wet;
                 }
@@ -181,7 +210,8 @@ impl Effect for Chorus {
     }
 
     fn tail(&self) -> u32 {
-        let ms = Chorus::max_delay_ms(self.delay_ms, self.spread_ms) as f64;
+        let itd = if self.binaural { ITD_MS } else { 0.0 };
+        let ms = (Chorus::max_delay_ms(self.delay_ms, self.spread_ms) + itd) as f64;
         feedback_tail(ms * self.rate as f64 / 1000.0, self.fb as f64, self.rate)
     }
 }
@@ -189,6 +219,30 @@ impl Effect for Chorus {
 #[cfg(test)]
 mod tests {
     use crate::fx::testutil::*;
+
+    #[test]
+    fn average_input_feeds_both_sides_and_binaural_cues_delay_the_far_ear() {
+        let rate = 48000.0;
+        let x = sine(700.0, rate, 24000, 0.5);
+        let silent = vec![0.0; 24000];
+        let run = |params: &[(u32, f32)]| {
+            let mut fx = make(70, rate, 2);
+            for &(i, v) in [(0, 2.0), (7, 0.0), (8, 0.0), (9, 100.0)].iter().chain(params) {
+                fx.set_param(i, v);
+            }
+            run_stereo(fx.as_mut(), &x, &silent)
+        };
+        let (_, r_off) = run(&[]);
+        let (_, r_on) = run(&[(11, 1.0)]);
+        assert!(rms(&r_off[12000..]) < 1e-4);
+        assert!(rms(&r_on[12000..]) > 0.05);
+        // Binaural cues change the stereo image of panned voices.
+        let (l0, r0) = run(&[(7, 100.0), (11, 1.0)]);
+        let (l1, r1) = run(&[(7, 100.0), (11, 1.0), (12, 1.0)]);
+        let diff: f32 = l0.iter().zip(&l1).chain(r0.iter().zip(&r1)).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 1.0, "{diff}");
+        assert!(l1.iter().chain(&r1).all(|v| v.is_finite()));
+    }
 
     #[test]
     fn wet_voices_are_delayed_and_modulated() {

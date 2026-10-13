@@ -12,6 +12,9 @@ import { statusParts } from './status-fields.js';
 import { tabNames } from './workspace-manager.js';
 import { TOOLS } from './tools.js';
 
+/** Actions offered by the menu beside the current workspace tab. */
+const WORKSPACE_ACTIONS = ['workspace.reset', 'workspace.saveChanges', 'workspace.saveAs', '-', 'workspace.edit'];
+
 export function createShell(app, root) {
   const menubar = createMenubar(app, MENUS);
   const appMenuBtn = h(
@@ -47,7 +50,7 @@ export function createShell(app, root) {
   const workspaceMore = h('button.icon-btn', { type: 'button', 'aria-label': 'All workspaces', title: 'Workspaces', 'aria-haspopup': 'menu' }, icon('chevrons-right', 16));
   workspaceMore.addEventListener('click', () => {
     const r = workspaceMore.getBoundingClientRect();
-    app.openMenu(app.workspaceMenuItems(), { x: r.left - 160, y: r.bottom + 2, anchor: workspaceMore, label: 'Workspaces' });
+    app.openMenu(app.workspaceMenuItems({ overflow: true }), { x: r.left - 160, y: r.bottom + 2, anchor: workspaceMore, label: 'Workspaces' });
   });
   const search = h('input.input.command-search', { type: 'search', placeholder: 'Search commands', 'aria-label': 'Search commands', autocomplete: 'off' });
   const searchWrap = h('div.command-search-wrap', icon('search', 14), search);
@@ -85,9 +88,17 @@ export function createShell(app, root) {
     const current = app.prefs.get('workspace');
     if (!names.includes(current)) names.push(current);
     workspaceTabs.replaceChildren(
-      ...names.map((n) =>
-        h('button.workspace-tab', { type: 'button', role: 'tab', 'aria-selected': String(n === current), onclick: () => app.setWorkspace(n) }, n),
-      ),
+      ...names.flatMap((n) => {
+        const tab = h('button.workspace-tab', { type: 'button', role: 'tab', 'aria-selected': String(n === current), onclick: () => app.setWorkspace(n) }, n);
+        if (n !== current) return [tab];
+        // The current workspace carries a menu to reset, save or edit workspaces.
+        const menuBtn = h('button.icon-btn.workspace-menu-btn', { type: 'button', 'aria-label': `${n} workspace menu`, title: 'Workspace menu', 'aria-haspopup': 'menu' }, icon('menu', 14));
+        menuBtn.addEventListener('click', () => {
+          const r = menuBtn.getBoundingClientRect();
+          openMenu(app, resolveItems(app, WORKSPACE_ACTIONS), { x: r.left, y: r.bottom + 2, anchor: menuBtn, label: `${n} workspace` });
+        });
+        return [tab, menuBtn];
+      }),
     );
     workspaceTabs.hidden = app.layoutMode !== 'desktop';
     workspaceMore.hidden = app.layoutMode !== 'desktop';
@@ -96,10 +107,6 @@ export function createShell(app, root) {
     status.textContent = app.statusMessage || '';
     const doc = app.active;
     statusbar.hidden = !app.prefs.get('statusBar');
-    if (!doc) {
-      statusInfo.replaceChildren();
-      return;
-    }
     const parts = statusParts(app, doc, app.statusLive || {});
     statusInfo.replaceChildren(...parts.map((p) => h('span.status-cell', p)));
   };
@@ -133,6 +140,7 @@ export function createShell(app, root) {
   dock.setLayout(app.currentLayout());
 
   // Keyboard -----------------------------------------------------------------
+  const NAV_WIDGETS = '[role=menu], [role=listbox], [role=grid], [role=tree], [role=treegrid], [role=tablist], [role=slider], [role=radiogroup], [role=spinbutton], [role=separator], input[type=range], [data-own-keys]';
   window.addEventListener('keydown', (e) => {
     if (e.defaultPrevented || e.isComposing) return;
     const t = e.target;
@@ -144,7 +152,10 @@ export function createShell(app, root) {
     // Plain keys (Space, letters) should still activate focused buttons and menus.
     const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
     if (plain && (e.key === ' ' || e.key === 'Enter') && t instanceof HTMLElement && t.closest('button, [role=menuitem], [role=tab], [role=option], a, summary')) return;
-    if (plain && t instanceof HTMLElement && t.closest('[role=menu], [role=listbox], [role=grid]') && /^(Delete|Backspace|Home|End)$/.test(e.key)) return;
+    // Navigation keys stay with focused widgets that move with them (lists, tabs, sliders).
+    const nav = /^(Delete|Backspace|Home|End|PageUp|PageDown|Arrow(Up|Down|Left|Right))$/.test(e.key);
+    if (plain && nav && t instanceof HTMLElement && t.closest(NAV_WIDGETS)) return;
+    if (plain && nav && !app.commands.isEnabled(id)) return;
     if (typing && plain) return;
     e.preventDefault();
     app.commands.run(id);

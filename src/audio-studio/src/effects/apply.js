@@ -9,6 +9,7 @@ import { Channel } from '../audio/channel.js';
 import { lengthOf, replaceRange } from '../model/edits.js';
 import { slotSpec } from './registry.js';
 import { normalizeValues } from './params.js';
+import { routeInputs, routeOutputs, routeMask } from './routing.js';
 import { createMarker, sortMarkers, nextMarkerName } from '../model/markers.js';
 import { UserError } from '../lib/errors.js';
 
@@ -85,16 +86,20 @@ export function writeResult(state, start, end, outs, mask, { tail = 0 } = {}) {
  * Renders one effect over [start, end) of `state` and returns
  * { state, length } where length is the processed range's new length.
  */
-export async function renderEffect({ def, values, state, start, end, mask = null, signal, onProgress, doc, app, applyChain = lazyApplyChain }) {
+export async function renderEffect({ def, values, state, start, end, mask = null, route = null, signal, onProgress, doc, app, applyChain = lazyApplyChain }) {
   values = normalizeValues(def, values);
+  // A channel route (the dialog's channel map) decides which channels are written.
+  if (route) mask = routeMask(route, state.channels.length, mask);
   const rate = state.sampleRate;
   if (end <= start) throw new UserError('There is no audio to process.');
   if (def.process) {
-    const channels = state.channels.map((c) => c.toArray(start, end));
+    const dry = state.channels.map((c) => c.toArray(start, end));
+    const channels = routeInputs(dry, route);
     const result = await def.process({ channels, rate, values, signal, onProgress, doc, app, mask, start, end });
     if (signal?.aborted) throw abortError();
-    const outs = Array.isArray(result) ? result : result?.channels;
+    let outs = Array.isArray(result) ? result : result?.channels;
     if (!Array.isArray(outs) || !outs.length) throw new Error(`${def.name} did not return audio.`);
+    if (route && outs[0].length === end - start) outs = routeOutputs(outs, dry, route);
     let next = writeResult(state, start, end, outs, mask);
     if (!Array.isArray(result)) next = addMarkers(next, start, result.markers);
     return { state: next, length: outs[0].length };
@@ -102,7 +107,7 @@ export async function renderEffect({ def, values, state, start, end, mask = null
   if (!isRealtime(def)) throw new UserError(`${def.name} cannot be applied yet.`);
   const tail = tailFrames(def, values, rate);
   const latency = latencyFrames(def, values, rate);
-  const spec = slotSpec(def, values, { key: 'apply', doc, rate });
+  const spec = slotSpec(def, values, { key: 'apply', doc, rate, route: state.channels.length === 2 ? route : null });
   const outs = await applyChain(state.channels, rate, [spec], { start, end, tail, latency, onProgress, signal });
   if (signal?.aborted) throw abortError();
   return { state: writeResult(state, start, end, outs, mask, { tail }), length: end - start };

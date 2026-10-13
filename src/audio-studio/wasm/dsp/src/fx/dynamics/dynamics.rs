@@ -6,7 +6,9 @@
 //!          9 expander on, 10 expander threshold dB, 11 expander ratio,
 //!          12 limiter on, 13 limiter threshold dB,
 //!          14 attack ms, 15 release ms, 16 detection (0 peak, 1 RMS), 17 link channels,
-//!          18 make-up gain dB.
+//!          18 make-up gain dB, 19 limiter release ms.
+//! Readout: [lowest gate gain 0..1, deepest compressor, expander and limiter
+//!          gain changes in dB] since the last read.
 
 use super::common::{db_lin, frame_peak, lin_db, Detector, GainSmoother};
 use crate::fx::util::{compress_db, expand_db, ms_coef, ms_frames, sanitize};
@@ -15,7 +17,6 @@ use super::common::Ramp;
 
 const GATE_HYSTERESIS_DB: f32 = 3.0;
 const EXP_KNEE_DB: f32 = 3.0;
-const LIMIT_RELEASE_MS: f32 = 60.0;
 const RMS_MS: f32 = 10.0;
 
 #[derive(Clone, Copy, Default)]
@@ -26,6 +27,10 @@ struct Side {
     gate: f32,
     open: bool,
     hold_left: usize,
+    m_gate: f32,
+    m_comp: f32,
+    m_exp: f32,
+    m_lim: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -48,7 +53,7 @@ struct Settings {
 
 pub struct Dynamics {
     rate: f32,
-    p: [f32; 19],
+    p: [f32; 20],
     s: Settings,
     rms: bool,
     link: bool,
@@ -64,6 +69,7 @@ impl Dynamics {
             0.0, -45.0, 2.0, // expander
             0.0, -1.0, // limiter
             5.0, 150.0, 0.0, 1.0, 0.0, // detection, make-up
+            60.0, // limiter release
         ];
         let mut d = Dynamics {
             rate,
@@ -87,7 +93,7 @@ impl Dynamics {
             rms: false,
             link: true,
             makeup: Ramp::new(1.0, rate, 20.0),
-            side: [Side { gate: 1.0, open: true, ..Side::default() }; 2],
+            side: [Side { gate: 1.0, open: true, m_gate: 1.0, ..Side::default() }; 2],
         };
         d.update();
         d.makeup.settle();
@@ -123,7 +129,7 @@ impl Dynamics {
                 s.det.set(r, 0.0, 10.0, false);
             }
             s.gain.set(r, p[14], p[15].max(1.0));
-            s.lim.set(r, 0.0, LIMIT_RELEASE_MS);
+            s.lim.set(r, 0.0, p[19].max(1.0));
         }
     }
 
@@ -131,18 +137,16 @@ impl Dynamics {
     #[inline]
     fn gain(s: &Settings, side: &mut Side, x: f32, makeup_db: f32) -> f32 {
         let level = lin_db(side.det.next(x) + 1e-10);
-        let mut target = 0.0;
-        if s.comp_on {
-            target += compress_db(level, s.comp_thr, s.comp_ratio, s.comp_knee);
-        }
-        if s.exp_on {
-            target += expand_db(level, s.exp_thr, s.exp_ratio, EXP_KNEE_DB);
-        }
-        let g = side.gain.next(target);
+        let comp = if s.comp_on { compress_db(level, s.comp_thr, s.comp_ratio, s.comp_knee) } else { 0.0 };
+        let exp = if s.exp_on { expand_db(level, s.exp_thr, s.exp_ratio, EXP_KNEE_DB) } else { 0.0 };
+        let g = side.gain.next(comp + exp);
         let mut lim = 0.0;
         if s.lim_on {
             lim = side.lim.next((s.lim_thr - (level + g + makeup_db)).min(0.0));
         }
+        side.m_comp = side.m_comp.min(comp);
+        side.m_exp = side.m_exp.min(exp);
+        side.m_lim = side.m_lim.min(lim);
         let mut gate = 1.0;
         if s.gate_on {
             if level > s.gate_thr {
@@ -159,6 +163,7 @@ impl Dynamics {
             let c = if t > side.gate { s.gate_att } else { s.gate_rel };
             side.gate = t + (side.gate - t) * c;
             gate = side.gate;
+            side.m_gate = side.m_gate.min(gate);
         }
         gate * db_lin(g + lim)
     }
@@ -198,11 +203,28 @@ impl Effect for Dynamics {
     fn reset(&mut self) {
         self.makeup.settle();
         for side in &mut self.side {
-            *side = Side { det: side.det, gain: side.gain, lim: side.lim, gate: 1.0, open: true, hold_left: 0 };
+            *side = Side { det: side.det, gain: side.gain, lim: side.lim, gate: 1.0, open: true, hold_left: 0, m_gate: 1.0, m_comp: 0.0, m_exp: 0.0, m_lim: 0.0 };
             side.det.reset();
             side.gain.reset();
             side.lim.reset();
         }
+    }
+    fn readout(&mut self, out: &mut [f32]) -> usize {
+        if out.len() < 4 {
+            return 0;
+        }
+        let [a, b] = &mut self.side;
+        out[0] = a.m_gate.min(b.m_gate);
+        out[1] = a.m_comp.min(b.m_comp);
+        out[2] = a.m_exp.min(b.m_exp);
+        out[3] = a.m_lim.min(b.m_lim);
+        for side in [a, b] {
+            side.m_gate = 1.0;
+            side.m_comp = 0.0;
+            side.m_exp = 0.0;
+            side.m_lim = 0.0;
+        }
+        4
     }
 }
 

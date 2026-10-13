@@ -4,6 +4,8 @@
 //! 4 output gain dB, 5 knee dB, 6 detection (0 peak, 1 RMS), 7 link channels.
 //! Tube params: 0 threshold dB, 1 ratio, 2 attack ms, 3 release ms,
 //! 4 output gain dB, 5 drive dB, 6 character % (asymmetry of the saturation).
+//! Tube readout: [input peak dB, deepest gain reduction dB, output peak dB]
+//! since the last read.
 //!
 //! Detection is instantaneous (peak) or a 10 ms RMS; the gain change from the
 //! static soft-knee curve is smoothed in dB with the attack and release times.
@@ -145,6 +147,9 @@ pub struct TubeCompressor {
     side: Side,
     dc: [Biquad; 2],
     drive_db: f32,
+    meter_in: f32,
+    meter_gr: f32,
+    meter_out: f32,
 }
 
 /// Derivative of soft_tanh at x (|x| < 3).
@@ -169,6 +174,9 @@ impl TubeCompressor {
             side: Side::default(),
             dc: [Biquad::new(Coefs::highpass1(rate, 8.0)); 2],
             drive_db: 6.0,
+            meter_in: 0.0,
+            meter_gr: 0.0,
+            meter_out: 0.0,
         };
         t.set_param(6, 30.0);
         t.set_param(5, 6.0);
@@ -205,8 +213,12 @@ impl Effect for TubeCompressor {
         let curve = self.curve;
         let (bias, bias_out, norm) = (self.bias, self.bias_out, self.norm);
         for i in 0..frames {
-            let level = self.side.det.next(frame_peak(buf, channels, frames, i));
-            let g = db_lin(self.side.gain.next(curve.gain_db(level, floor)));
+            let pk = frame_peak(buf, channels, frames, i);
+            let level = self.side.det.next(pk);
+            let gr = self.side.gain.next(curve.gain_db(level, floor));
+            self.meter_in = self.meter_in.max(pk);
+            self.meter_gr = self.meter_gr.min(gr);
+            let g = db_lin(gr);
             let d = self.drive.next();
             let o = self.out.next();
             // Saturation normalised to unity small-signal gain, so drive adds
@@ -216,6 +228,7 @@ impl Effect for TubeCompressor {
                 let x = &mut buf[c * frames + i];
                 let y = (soft_tanh(*x * g * d + bias) - bias_out) * k;
                 *x = self.dc[c].process(y) * o;
+                self.meter_out = self.meter_out.max(x.abs());
             }
         }
         for b in &mut self.dc {
@@ -231,6 +244,18 @@ impl Effect for TubeCompressor {
         for b in &mut self.dc {
             b.reset();
         }
+    }
+    fn readout(&mut self, out: &mut [f32]) -> usize {
+        if out.len() < 3 {
+            return 0;
+        }
+        out[0] = lin_db(self.meter_in + 1e-10).max(-120.0);
+        out[1] = self.meter_gr;
+        out[2] = lin_db(self.meter_out + 1e-10).max(-120.0);
+        self.meter_in = 0.0;
+        self.meter_gr = 0.0;
+        self.meter_out = 0.0;
+        3
     }
 }
 

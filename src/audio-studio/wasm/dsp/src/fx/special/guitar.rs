@@ -4,10 +4,12 @@
 //! Params: 0 compressor %, 1 distortion type, 2 distortion amount %,
 //! 3 amp model, 4 amp amount %, 5 filter type (0 off, 1 low pass,
 //! 2 high pass, 3 band pass), 6 filter Hz, 7 resonance %, 8 mix %,
-//! 9 output dB. Latency: the distortion oversampler's (dry path aligned).
+//! 9 output dB, 10..13 bypass compressor, distortion, amplifier, filter
+//! (0/1; a bypassed module passes audio unchanged, keeping its settings).
+//! Latency: the distortion oversampler's (dry path aligned).
 
 use super::distortion::{PostFilter, FACTOR};
-use super::shaper::{Oversampler, Shape, Shaper, DIODE, FOLD, HARD, SOFT, TUBE};
+use super::shaper::{Oversampler, Shape, Shaper, DIODE, FOLD, HARD, LINEAR, SOFT, TUBE};
 use crate::fx::util::{compress_db, db_to_gain, gain_to_db, Biquad, Coefs, DelayLine, Envelope};
 use crate::fx::{Effect, Smooth};
 
@@ -72,7 +74,9 @@ pub struct GuitarSuite {
     cab: [[Biquad; 5]; 2],
     // Filter, mix, output
     filter: PostFilter,
+    filter_kind: u32,
     res: f32,
+    bypass: [bool; 4],
     mix: Smooth,
     out: Smooth,
     dry: Vec<DelayLine>,
@@ -103,7 +107,9 @@ impl GuitarSuite {
             amp_mix: Smooth::new(1.0, rate, 20.0),
             cab: [[Biquad::default(); 5]; 2],
             filter: PostFilter::new(rate, 1500.0),
+            filter_kind: 0,
             res: 20.0,
+            bypass: [false; 4],
             mix: Smooth::new(1.0, rate, 20.0),
             out: Smooth::new(1.0, rate, 20.0),
             dry: (0..channels).map(|_| DelayLine::new(Oversampler::latency(FACTOR) + 1)).collect(),
@@ -126,11 +132,12 @@ impl GuitarSuite {
 
     fn update_dist(&mut self) {
         let t = &DIST[self.dist_type.min(DIST.len() - 1)];
-        self.shape.pos = t.pos;
-        self.shape.neg = t.neg;
-        self.drive.target = db_to_gain(self.dist_amt * t.max_db);
-        let pre = Coefs::highpass1(self.rate, t.pre_hp);
-        let post = Coefs::lowpass(self.rate, t.post_lp, 0.707);
+        let off = self.bypass[1];
+        self.shape.pos = if off { LINEAR } else { t.pos };
+        self.shape.neg = if off { LINEAR } else { t.neg };
+        self.drive.target = if off { 1.0 } else { db_to_gain(self.dist_amt * t.max_db) };
+        let pre = if off { Coefs::IDENTITY } else { Coefs::highpass1(self.rate, t.pre_hp) };
+        let post = if off { Coefs::IDENTITY } else { Coefs::lowpass(self.rate, t.post_lp, 0.707) };
         for c in 0..2 {
             self.pre[c].c = pre;
             self.post[c].c = post;
@@ -140,7 +147,7 @@ impl GuitarSuite {
     fn update_amp(&mut self) {
         for ch in &mut self.cab {
             for (i, b) in ch.iter_mut().enumerate() {
-                b.c = if self.amp == 0 {
+                b.c = if self.amp == 0 || self.bypass[2] {
                     Coefs::IDENTITY
                 } else {
                     let a = &AMPS[(self.amp - 1).min(AMPS.len() - 1)];
@@ -155,6 +162,12 @@ impl GuitarSuite {
                 };
             }
         }
+    }
+
+    fn update_filter(&mut self) {
+        self.filter.on = self.filter_kind > 0 && !self.bypass[3];
+        self.filter.kind = self.filter_kind.saturating_sub(1);
+        self.filter.touch();
     }
 
     fn update_filter_q(&mut self) {
@@ -184,10 +197,8 @@ impl Effect for GuitarSuite {
             }
             4 => self.amp_mix.target = (v / 100.0).clamp(0.0, 1.0),
             5 => {
-                let k = v as u32;
-                self.filter.on = k > 0;
-                self.filter.kind = k.saturating_sub(1);
-                self.filter.touch();
+                self.filter_kind = v as u32;
+                self.update_filter();
             }
             6 => self.filter.set_freq(v),
             7 => {
@@ -196,6 +207,15 @@ impl Effect for GuitarSuite {
             }
             8 => self.mix.target = (v / 100.0).clamp(0.0, 1.0),
             9 => self.out.target = db_to_gain(v),
+            10..=13 => {
+                self.bypass[(idx - 10) as usize] = v >= 0.5;
+                match idx {
+                    11 => self.update_dist(),
+                    12 => self.update_amp(),
+                    13 => self.update_filter(),
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -204,7 +224,7 @@ impl Effect for GuitarSuite {
         const SUB: usize = 32;
         let channels = channels.min(self.channels);
         let lat = Oversampler::latency(FACTOR);
-        let comp_on = self.comp_pct > 0.0;
+        let comp_on = self.comp_pct > 0.0 && !self.bypass[0];
         let (mut gain, mut drives, mut amp) = ([0.0f32; SUB], [0.0f32; SUB], [0.0f32; SUB]);
         let (mut mix, mut out, mut tmp) = ([0.0f32; SUB], [0.0f32; SUB], [0.0f32; SUB]);
         let mut at = 0;
@@ -329,6 +349,20 @@ mod tests {
         let rate = 48000.0;
         let db = sine_gain_db(91, &[(2, 100.0), (8, 0.0)], 1000.0, rate);
         assert!(db.abs() < 0.1, "{db}");
+    }
+
+    #[test]
+    fn bypassed_modules_pass_audio() {
+        let rate = 48000.0;
+        // Fuzz at full drive into a cabinet, all bypassed: the sine comes through untouched.
+        let all = [(0u32, 100.0f32), (1, 3.0), (2, 100.0), (3, 2.0), (5, 1.0), (6, 300.0), (10, 1.0), (11, 1.0), (12, 1.0), (13, 1.0)];
+        for f in [200.0, 1000.0, 8000.0] {
+            let db = sine_gain_db(91, &all, f, rate);
+            assert!(db.abs() < 0.3, "{f} Hz: {db}");
+        }
+        // Only the distortion bypassed: the cabinet still rolls off the highs.
+        let some = [(1u32, 3.0f32), (2, 100.0), (3, 2.0), (11, 1.0)];
+        assert!(sine_gain_db(91, &some, 12000.0, rate) < sine_gain_db(91, &some, 500.0, rate) - 20.0);
     }
 
     #[test]

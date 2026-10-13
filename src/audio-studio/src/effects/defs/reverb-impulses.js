@@ -124,3 +124,68 @@ export function generateImpulse(values, rate) {
   for (let i = 1; i < out.length; i++) out[i] *= scale;
   return out;
 }
+
+// ------------------------------------------------------- loaded impulses
+
+/** Impulse responses loaded from audio files this session, by name: { rate, channels: Float32Array[] }. */
+const LOADED = new Map();
+
+/** Keeps a loaded impulse (at most a few; each can be megabytes). */
+export function setLoadedImpulse(name, impulse) {
+  LOADED.delete(name);
+  LOADED.set(name, impulse);
+  while (LOADED.size > 4) LOADED.delete(LOADED.keys().next().value);
+}
+
+export const loadedImpulse = (name) => LOADED.get(name) || null;
+
+/** Longest loaded impulse kept (s); the Rust side accepts up to 8 s. */
+export const MAX_LOADED_SECONDS = 8;
+
+/**
+ * Shapes a loaded impulse like the built-in ones: room size stretches or
+ * shrinks it in time, LF and HF damping make the lows and highs die away
+ * sooner, and the result is energy normalised in the data slot layout
+ * [channels, ...planar samples] at `rate`.
+ */
+export function shapeLoadedImpulse(impulse, values, rate) {
+  const size = clamp(values.roomSize ?? 100, 10, 400) / 100;
+  const src = impulse.channels.slice(0, 2);
+  const step = impulse.rate / rate / size;
+  const n = Math.max(1, Math.min(Math.round(MAX_LOADED_SECONDS * rate), Math.floor((src[0].length - 1) / step)));
+  const k = src.length;
+  const out = new Float32Array(1 + k * n);
+  out[0] = k;
+  const lfDamp = clamp(values.dampLF ?? 0, 0, 100) / 100;
+  const hfDamp = clamp(values.dampHF ?? 0, 0, 100) / 100;
+  // Damping: the low and high bands decay to -60 dB over a time that shrinks with the damping.
+  const len = n / rate;
+  const kLow = lfDamp > 0 ? 10 ** (-3 / (Math.max(0.05, len * (1 - 0.9 * lfDamp)) * rate)) : 1;
+  const kHigh = hfDamp > 0 ? 10 ** (-3 / (Math.max(0.03, len * (1 - 0.95 * hfDamp)) * rate)) : 1;
+  const aLow = Math.exp((-2 * Math.PI * 250) / rate);
+  const aHigh = Math.exp((-2 * Math.PI * 4000) / rate);
+  let energy = 0;
+  for (let c = 0; c < k; c++) {
+    const x = src[c];
+    const ch = out.subarray(1 + c * n, 1 + (c + 1) * n);
+    let lp1 = 0;
+    let lp2 = 0;
+    let gLow = 1;
+    let gHigh = 1;
+    for (let i = 0; i < n; i++) {
+      const at = i * step;
+      const j = Math.floor(at);
+      const f = at - j;
+      const v = x[j] + ((x[j + 1] ?? x[j]) - x[j]) * f;
+      lp1 = v + (lp1 - v) * aLow;
+      lp2 = v + (lp2 - v) * aHigh;
+      ch[i] = lp1 * gLow + (lp2 - lp1) + (v - lp2) * gHigh;
+      gLow *= kLow;
+      gHigh *= kHigh;
+      energy += ch[i] * ch[i];
+    }
+  }
+  const scale = 1 / Math.sqrt(Math.max(1e-12, energy / k));
+  for (let i = 1; i < out.length; i++) out[i] *= scale;
+  return out;
+}

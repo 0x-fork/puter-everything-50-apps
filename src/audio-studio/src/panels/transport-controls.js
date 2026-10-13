@@ -5,16 +5,17 @@
 
 import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
+import '../editor/editor-icons.js';
 
 /** [command, icon, label] for the transport buttons, in display order. */
 export const TRANSPORT_BUTTONS = [
   ['transport.stop', 'transport-stop', 'Stop'],
   ['transport.play', 'transport-play', 'Play (Space)'],
   ['transport.pause', 'transport-pause', 'Pause'],
-  ['transport.previous', 'transport-start', 'Move Playhead to Previous (Home)'],
+  ['transport.previous', 'transport-start', 'Move Playhead to Previous'],
   ['transport.rewind', 'transport-rewind', 'Rewind'],
   ['transport.forward', 'transport-forward', 'Fast Forward'],
-  ['transport.next', 'transport-end', 'Move Playhead to Next (End)'],
+  ['transport.next', 'transport-end', 'Move Playhead to Next'],
   ['transport.record', 'transport-record', 'Record (Shift+Space)'],
   ['transport.loop', 'transport-loop', 'Loop Playback'],
   ['transport.skipSelection', 'transport-skip-selection', 'Skip Selection'],
@@ -30,6 +31,8 @@ export const ZOOM_BUTTONS = [
   ['view.zoomInPoint', 'zoom-in-point', 'Zoom In at In Point'],
   ['view.zoomOutPoint', 'zoom-out-point', 'Zoom In at Out Point'],
   ['view.zoomSelection', 'zoom-selection', 'Zoom to Selection'],
+  ['view.zoomResetTime', 'zoom-reset', 'Zoom Reset (Time)'],
+  ['view.zoomInTrack', 'zoom-in-track', 'Zoom In Full (Selected Track)'],
 ];
 
 /** An icon button that runs `cmd`. */

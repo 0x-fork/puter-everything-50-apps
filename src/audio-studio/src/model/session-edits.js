@@ -9,7 +9,9 @@
 //     markers: Marker[] }
 // Track: { id, type: 'audio'|'bus'|'master', name, color, channels, volume (dB),
 //   pan (-100..100), mute, solo, arm, monitor, input, output ('master' or a bus
-//   id), fx: Effects Rack slots { id, effect, values, enabled } (nulls allowed), fxPower, mode ('off'|'read'|'write'|'latch'|'touch'),
+//   id), fx: Effects Rack slots { id, effect, values, enabled } (nulls allowed), fxPower,
+//   fxIn/fxOut (rack input/output gain, dB), fxMix (rack dry/wet, 0..1), invert
+//   (polarity), mode ('off'|'read'|'write'|'latch'|'touch'),
 //   automation: { volume: [{t, v dB}], pan: [{t, v}] }, showAutomation,
 //   autoParam, height, minimized, hidden }
 // Clip: { id, trackId, sourceId, name, color, start, offset, length, gain (dB),
@@ -68,6 +70,10 @@ export function createTrack(o = {}) {
     output: type === 'master' ? null : o.output || 'master',
     fx: o.fx ? o.fx.map((s) => (s ? { ...s, values: { ...(s.values || {}) } } : null)) : [],
     fxPower: o.fxPower ?? true,
+    fxIn: o.fxIn ?? 0,
+    fxOut: o.fxOut ?? 0,
+    fxMix: o.fxMix ?? 1,
+    invert: Boolean(o.invert),
     mode: o.mode || 'read',
     automation: { volume: (o.automation?.volume || []).slice(), pan: (o.automation?.pan || []).slice() },
     showAutomation: Boolean(o.showAutomation),
@@ -122,8 +128,8 @@ export function createClip(o = {}) {
   };
 }
 
-/** A new session state with `tracks` stereo audio tracks and a stereo master. */
-export function createSessionState({ sampleRate = 48000, bitDepth = 32, tracks = 6, template, autoCrossfade = true } = {}) {
+/** A new session state with `tracks` stereo audio tracks and a stereo (or mono) master. */
+export function createSessionState({ sampleRate = 48000, bitDepth = 32, tracks = 6, template, autoCrossfade = true, masterChannels = 2 } = {}) {
   let list;
   if (Array.isArray(template)) list = template.map((t, i) => createTrack({ color: TRACK_COLORS[i % TRACK_COLORS.length], ...t }));
   else list = Array.from({ length: tracks }, (_, i) => createTrack({ name: `Track ${i + 1}`, color: TRACK_COLORS[i % TRACK_COLORS.length] }));
@@ -142,7 +148,7 @@ export function createSessionState({ sampleRate = 48000, bitDepth = 32, tracks =
     metronome: false,
     autoCrossfade,
     tracks: list,
-    master: createTrack({ type: 'master', name: 'Mix', color: '#7a8a99' }),
+    master: createTrack({ type: 'master', name: 'Mix', color: '#7a8a99', channels: masterChannels === 1 ? 1 : 2 }),
     clips: [],
     markers: [],
   };

@@ -57,7 +57,7 @@ export function plot(className, label, draw) {
 }
 
 /** Drag helper for a handle: calls onMove(fx, fy) with fractions of the plot box. */
-function draggable(handle, box, onMove, onEnd) {
+export function draggable(handle, box, onMove, onEnd) {
   handle.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -253,7 +253,10 @@ export function eqEditor(opts = {}) {
       if (handles.length !== bands.length) {
         view.layer.replaceChildren();
         handles = bands.map((b, i) => {
-          const btn = h('button.fx-handle', { type: 'button', role: 'slider', 'aria-label': `Band ${i + 1}` }, h('span', String(i + 1)));
+          // Band tables name their columns (HP, L, 1..5, H, LP); handles use the same names.
+          const sec = b.ids.freq && param(b.ids.freq)?.section;
+          const name = def.layout?.table?.columns.find((c) => c.section === sec)?.label || String(i + 1);
+          const btn = h('button.fx-handle', { type: 'button', role: 'slider', 'aria-label': sec || `Band ${i + 1}` }, h('span', name));
           draggable(btn, view.el, (fx, fy) => {
             const band = getBands(ctx.values)[i];
             if (band.ids.freq) {
@@ -561,7 +564,7 @@ export function formatPoint(param, v) {
 }
 
 /** Frequency curve editor for a param of type 'curve' ([{ f, g }], f in Hz on a log axis, g in dB). */
-export function curveControl({ param, value, onChange }) {
+export function curveControl({ param, value, onChange, smooth = () => false }) {
   const fMin = 20;
   const fMax = 20000;
   const toT = (f) => clamp(Math.log(Math.max(fMin, f) / fMin) / Math.log(fMax / fMin), 0, 1);
@@ -576,6 +579,7 @@ export function curveControl({ param, value, onChange }) {
     xLabel: (t) => fText(toF(t)),
     xTicks: ticks.map(toT),
     xTickLabels: ['100', '1k', '10k'],
+    smooth,
   });
   const set = el.setPoints;
   el.setPoints = (pts) => set(conv(pts));
@@ -690,12 +694,25 @@ function overviewPeaks(doc, start, end, columns) {
 
 // ------------------------------------------------------------ selection
 
+const CUSTOM = new Map();
+
+/**
+ * Registers the dialog editor for an effect id. Definitions stay free of DOM
+ * code (they also load in the effect worker), so UI modules register their
+ * editors here (fx-views.js). `editor.hides` lists the param ids the editor
+ * draws itself, or true when it lays out every param.
+ */
+export function registerEditor(id, editor) {
+  CUSTOM.set(id, editor);
+}
+
 const EQ_IDS = /eq|equali[sz]er|filter/i;
 const DYN_IDS = /dynamics|compressor|limiter|maximizer|leveler/i;
 
 /** The built-in editor that suits a definition without its own `editor`, or null. */
 export function autoEditor(def) {
   if (def.editor) return def.editor;
+  if (CUSTOM.has(def.id)) return CUSTOM.get(def.id);
   if (def.display === 'loudness') return loudnessMeterEditor();
   const transfer = def.params.find((p) => p.type === 'transfer');
   if (transfer) return transferCurveEditor({ id: transfer.id });

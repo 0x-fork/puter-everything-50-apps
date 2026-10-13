@@ -6,7 +6,11 @@
 //! Params: 0 decay ms, 1 pre-delay ms, 2 diffusion %, 3 perception %,
 //! 4 room size m^3, 5 dimension (width / depth), 6 high pass cutoff Hz,
 //! 7 low shelf Hz, 8 low shelf dB, 9 mid Hz, 10 mid dB, 11 mid Q,
-//! 12 high shelf Hz, 13 high shelf dB, 14 dry %, 15 reverb %, 16 early %.
+//! 12 high shelf Hz, 13 high shelf dB, 14 dry %, 15 reverb %, 16 early %,
+//! 17 left/right location % (-100 left wall .. 100 right wall), 18 include
+//! direct (0/1: the direct path joins the early reflections, so the source's
+//! position is heard), 19 sum inputs (0/1: both channels feed the room as one
+//! mono source).
 //!
 //! Perception: low values give a smooth, regular space; high values add
 //! irregular reflection timing and more modulation for a livelier room.
@@ -32,7 +36,7 @@ pub struct FullReverb {
     pre_frames: usize,
     hp: [Biquad; 2],
     eq: [[Biquad; 3]; 2],
-    p: [f32; 17],
+    p: [f32; 20],
     dry: Smooth,
     rev: Smooth,
     early: Smooth,
@@ -52,7 +56,7 @@ impl FullReverb {
             pre_frames: 0,
             hp: [Biquad::default(); 2],
             eq: [[Biquad::default(); 3]; 2],
-            p: [1800.0, 12.0, 85.0, 40.0, 450.0, 1.5, 60.0, 180.0, 0.0, 1200.0, 0.0, 1.0, 5000.0, -3.0, 90.0, 30.0, 25.0],
+            p: [1800.0, 12.0, 85.0, 40.0, 450.0, 1.5, 60.0, 180.0, 0.0, 1200.0, 0.0, 1.0, 5000.0, -3.0, 90.0, 30.0, 25.0, 0.0, 0.0, 0.0],
             dry: Smooth::new(0.9, rate, 20.0),
             rev: Smooth::new(0.3, rate, 20.0),
             early: Smooth::new(0.25, rate, 20.0),
@@ -82,8 +86,10 @@ impl FullReverb {
 
         // Early reflections from image sources.
         let (w, d, h) = FullReverb::room(volume, p[5].clamp(0.1, 10.0));
-        let src = [0.5 * w, 0.3 * d, (h * 0.5).min(1.6)];
+        let loc = (p[17] * 0.01).clamp(-1.0, 1.0);
+        let src = [w * (0.5 + 0.42 * loc), 0.3 * d, (h * 0.5).min(1.6)];
         let spacing = (0.25 * w).min(0.6);
+        let direct = p[18] >= 0.5;
         let mut images = [[0.0f32; 4]; 12]; // x, y, z, order
         let (sx, sy, sz) = (src[0], src[1], src[2]);
         let list = [
@@ -101,13 +107,23 @@ impl FullReverb {
             [sx, 2.0 * d - sy, 2.0 * h - sz, 2.0],
         ];
         images.copy_from_slice(&list);
+        let ear_at = |c: usize| [0.5 * w + if c == 0 { -spacing } else { spacing }, 0.7 * d, sz];
+        let dist_to = |e: [f32; 3], q: &[f32]| ((q[0] - e[0]).powi(2) + (q[1] - e[1]).powi(2) + (q[2] - e[2]).powi(2)).sqrt();
+        // Times count from the direct sound at the nearer ear, so the far ear hears everything a little later.
+        let near = dist_to(ear_at(0), &src).min(dist_to(ear_at(1), &src)).max(0.5);
         for c in 0..2 {
-            let ear = [0.5 * w + if c == 0 { -spacing } else { spacing }, 0.7 * d, sz];
-            let dist = |q: &[f32]| ((q[0] - ear[0]).powi(2) + (q[1] - ear[1]).powi(2) + (q[2] - ear[2]).powi(2)).sqrt();
-            let r0 = dist(&src).max(0.5);
+            let ear = ear_at(c);
+            let dist = |q: &[f32]| dist_to(ear, q);
+            let r0 = near;
             let er = &mut self.er[c];
             let max = er.max_frames();
             er.count = images.len();
+            if direct {
+                let rd = dist(&src).max(0.5);
+                er.times[images.len()] = (((rd - r0) / SPEED_OF_SOUND * r) as usize).min(max);
+                er.gains[images.len()] = r0 / rd;
+                er.count += 1;
+            }
             for (k, img) in images.iter().enumerate() {
                 let ri = dist(img).max(r0);
                 let jitter = 1.0 + perception * 0.2 * JITTER[(k + 5 * c) % JITTER.len()];
@@ -158,13 +174,17 @@ impl Effect for FullReverb {
             }
         }
         let stereo = channels >= 2;
+        let sum = self.p[19] >= 0.5;
         for i in 0..frames {
             let x = [buf[i], if stereo { buf[frames + i] } else { buf[i] }];
+            // The room's input: each side, or both summed to one source.
+            let m = 0.5 * (x[0] + x[1]);
+            let send = if sum { [m, m] } else { x };
             let (dry, rev, early) = (self.dry.next(), self.rev.next(), self.early.next());
             let mut e = [0.0f32; 2];
             let mut d = [0.0f32; 2];
             for c in 0..2 {
-                self.pre[c].push(x[c]);
+                self.pre[c].push(send[c]);
                 let p = self.pre[c].tap(self.pre_frames);
                 e[c] = self.er[c].process(p);
                 d[c] = self.diff.process(c, p) + 0.35 * e[c];
@@ -253,6 +273,26 @@ mod tests {
             s.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum::<f32>() / s.iter().map(|v| v * v).sum::<f32>()
         };
         assert!(hf(-12.0) < hf(6.0) * 0.6);
+    }
+
+    #[test]
+    fn location_and_direct_path_place_the_source() {
+        let rate = 48000.0;
+        // Early reflections only, direct path included, source at the left wall.
+        let energy = |loc: f32| {
+            let mut fx = make(82, rate, 2);
+            for (i, v) in [(1, 0.0), (14, 0.0), (15, 0.0), (16, 100.0), (6, 10.0), (17, loc), (18, 1.0), (19, 1.0)] {
+                fx.set_param(i, v);
+            }
+            let (l, r) = impulse_response(fx.as_mut(), 0.2, rate);
+            // The first arrival: which ear hears the direct sound first.
+            let first = |x: &[f32]| x.iter().position(|v| v.abs() > 1e-3).unwrap_or(usize::MAX);
+            (first(&l), first(&r))
+        };
+        let (l, r) = energy(-100.0);
+        assert!(l < r, "left wall: {l} {r}");
+        let (l, r) = energy(100.0);
+        assert!(r < l, "right wall: {l} {r}");
     }
 
     #[test]

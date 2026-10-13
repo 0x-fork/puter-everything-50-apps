@@ -313,7 +313,7 @@ describe('bypassed effects during playback', () => {
 describe('preferences dialog', () => {
   it('lists every category and keeps keys per page for Reset', () => {
     const ids = CATEGORIES.map((c) => c.id);
-    expect(ids).toEqual(['general', 'appearance', 'audioHardware', 'autoSave', 'controlSurface', 'data', 'effects', 'markers', 'multitrack', 'clips', 'playback', 'spectral', 'time']);
+    expect(ids).toEqual(['general', 'appearance', 'channelMap', 'audioHardware', 'autoSave', 'controlSurface', 'data', 'effects', 'cache', 'memory', 'markers', 'multitrack', 'clips', 'playback', 'spectral', 'time', 'video']);
     const keys = pageKeys(CATEGORIES.find((c) => c.id === 'data'));
     expect(keys).toEqual(['smoothDelete', 'smoothDeleteMs', 'smoothEdits', 'smoothEditsMs']);
     // Every declared key has a default (no option without a stored setting).
@@ -324,7 +324,7 @@ describe('preferences dialog', () => {
   it('places extension sections on the category they name', () => {
     const app = { preferenceSections: [{ category: 'audioHardware', title: 'Devices', build: () => [] }, () => []] };
     const pages = preferencePages(app);
-    expect(pages.find((p) => p.id === 'audioHardware').sections.map((s) => s.title)).toEqual(['Devices']);
+    expect(pages.find((p) => p.id === 'audioHardware').sections.map((s) => s.title)).toEqual(['Devices', undefined]);
     expect(pages.find((p) => p.id === 'general').sections.length).toBe(CATEGORIES[0].sections.length + 1);
   });
 
@@ -338,13 +338,13 @@ describe('preferences dialog', () => {
 
   it('opens on the last page, navigates by keyboard, filters by search and resets a page', async () => {
     const app = await makeApp();
-    app.prefs.set('prefsCategory', 'effects');
+    app.prefs.set('prefsCategory', 'memory');
     const done = app.commands.run('edit.preferences');
     const dialog = document.querySelector('.prefs-window');
     expect(dialog).toBeTruthy();
     const selected = () => dialog.querySelector('.prefs-tab[aria-selected="true"]').dataset.page;
-    expect(selected()).toBe('effects');
-    expect(document.activeElement.dataset.page).toBe('effects');
+    expect(selected()).toBe('memory');
+    expect(document.activeElement.dataset.page).toBe('memory');
     // Arrow keys move through the list.
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     expect(selected()).toBe('markers');

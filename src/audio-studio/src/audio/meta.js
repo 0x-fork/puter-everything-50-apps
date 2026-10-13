@@ -1,9 +1,11 @@
-// File metadata (title, artist, album, year, genre, comment): readers for the
-// tag formats audio files carry and writers for the ones exports produce.
-//   RIFF INFO list (WAV), ID3v2 (MP3, and the AIFF "ID3 " chunk),
-//   Vorbis comments (FLAC, Ogg Opus/Vorbis), AIFF text chunks, MP4 ilst atoms.
+// File metadata (title, artist, album, year, genre, comment and more): readers
+// for the tag formats audio files carry and writers for the ones exports produce.
+//   RIFF INFO list (WAV), broadcast extension "bext" and radio "cart" chunks
+//   (WAV), ID3v2 (MP3, and the AIFF "ID3 " chunk), Vorbis comments (FLAC, Ogg
+//   Opus/Vorbis), AIFF text chunks, MP4 ilst atoms.
 // Documents keep metadata in state.meta as plain strings keyed by field id.
 
+/** The general fields every tag format carries. */
 export const META_FIELDS = [
   { id: 'title', label: 'Title' },
   { id: 'artist', label: 'Artist' },
@@ -13,7 +15,46 @@ export const META_FIELDS = [
   { id: 'comment', label: 'Comment', multiline: true },
 ];
 
-const IDS = META_FIELDS.map((f) => f.id);
+/**
+ * Every field, with limits where a format fixes the size. `kind` hints the
+ * input: 'date' (YYYY-MM-DD), 'time' (HH:MM:SS), 'int' (whole number).
+ */
+export const ALL_META_FIELDS = [
+  ...META_FIELDS,
+  { id: 'track', label: 'Track Number' },
+  { id: 'albumArtist', label: 'Album Artist' },
+  { id: 'composer', label: 'Composer' },
+  { id: 'copyright', label: 'Copyright' },
+  { id: 'bpm', label: 'Tempo (BPM)', kind: 'int' },
+  { id: 'key', label: 'Key' },
+  { id: 'engineer', label: 'Engineer' },
+  { id: 'technician', label: 'Technician' },
+  { id: 'software', label: 'Software' },
+  { id: 'subject', label: 'Subject' },
+  { id: 'keywords', label: 'Keywords' },
+  { id: 'source', label: 'Source' },
+  { id: 'bextDescription', label: 'Description', max: 256, multiline: true },
+  { id: 'bextOriginator', label: 'Originator', max: 32 },
+  { id: 'bextOriginatorRef', label: 'Originator Reference', max: 32 },
+  { id: 'bextDate', label: 'Origination Date', max: 10, kind: 'date' },
+  { id: 'bextTime', label: 'Origination Time', max: 8, kind: 'time' },
+  { id: 'bextTimeRef', label: 'Time Reference (samples)', kind: 'int' },
+  { id: 'bextCodingHistory', label: 'Coding History', multiline: true },
+  { id: 'cartCutId', label: 'Cut ID', max: 64 },
+  { id: 'cartClientId', label: 'Client ID', max: 64 },
+  { id: 'cartCategory', label: 'Category', max: 64 },
+  { id: 'cartClassification', label: 'Classification', max: 64 },
+  { id: 'cartOutCue', label: 'Out Cue', max: 64 },
+  { id: 'cartStartDate', label: 'Start Date', max: 10, kind: 'date' },
+  { id: 'cartStartTime', label: 'Start Time', max: 8, kind: 'time' },
+  { id: 'cartEndDate', label: 'End Date', max: 10, kind: 'date' },
+  { id: 'cartEndTime', label: 'End Time', max: 8, kind: 'time' },
+  { id: 'cartUserDef', label: 'User Defined', max: 64 },
+  { id: 'cartUrl', label: 'URL', max: 1024 },
+  { id: 'cartTagText', label: 'Tag Text', multiline: true },
+];
+
+const IDS = ALL_META_FIELDS.map((f) => f.id);
 
 /** Only known, non-empty, trimmed fields. */
 export function cleanMeta(meta = {}) {
@@ -53,6 +94,12 @@ function concat(parts) {
   return out;
 }
 
+/** Chunks joined into one byte array, skipping nulls; null when there are none. */
+export function concatChunks(chunks) {
+  const list = chunks.filter(Boolean);
+  return list.length ? concat(list) : null;
+}
+
 function u32le(v) {
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, v, true);
@@ -69,7 +116,22 @@ const ascii4 = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0));
 
 // ------------------------------------------------------------------ RIFF INFO
 
-const RIFF_KEYS = { title: 'INAM', artist: 'IART', album: 'IPRD', year: 'ICRD', genre: 'IGNR', comment: 'ICMT' };
+const RIFF_KEYS = {
+  title: 'INAM',
+  artist: 'IART',
+  album: 'IPRD',
+  year: 'ICRD',
+  genre: 'IGNR',
+  comment: 'ICMT',
+  copyright: 'ICOP',
+  engineer: 'IENG',
+  technician: 'ITCH',
+  software: 'ISFT',
+  subject: 'ISBJ',
+  keywords: 'IKEY',
+  source: 'ISRC',
+  track: 'ITRK',
+};
 
 /** LIST/INFO chunk (with header) for a WAV file, or null without metadata. */
 export function riffInfoChunk(meta) {
@@ -101,9 +163,119 @@ export function parseRiffInfo(bytes) {
   return cleanMeta(out);
 }
 
+// ------------------------------------------------------------ bext and cart
+
+/** UTF-8 bytes of `s` cut to at most `len` bytes on a character boundary, zero padded. */
+function fixedText(s, len) {
+  const out = new Uint8Array(len);
+  let b = enc.encode(s || '');
+  if (b.length > len) {
+    let n = len;
+    while (n > 0 && (b[n] & 0xc0) === 0x80) n--;
+    b = b.subarray(0, n);
+  }
+  out.set(b);
+  return out;
+}
+
+const readFixed = (bytes, at, len) => strip(utf8.decode(bytes.subarray(at, Math.min(bytes.length, at + len))));
+
+const BEXT_FIXED = 602;
+
+/** "bext" chunk (with header) from the bext* fields, or null when none is set. */
+export function bextChunk(meta) {
+  const m = cleanMeta(meta);
+  if (!Object.keys(m).some((k) => k.startsWith('bext'))) return null;
+  const history = m.bextCodingHistory ? enc.encode(`${m.bextCodingHistory.replace(/\r?\n/g, '\r\n')}\r\n`) : new Uint8Array(0);
+  const body = new Uint8Array(BEXT_FIXED + history.length);
+  const dv = new DataView(body.buffer);
+  body.set(fixedText(m.bextDescription, 256), 0);
+  body.set(fixedText(m.bextOriginator, 32), 256);
+  body.set(fixedText(m.bextOriginatorRef, 32), 288);
+  body.set(fixedText(m.bextDate, 10), 320);
+  body.set(fixedText(m.bextTime, 8), 330);
+  const ref = Math.max(0, Math.floor(Number(m.bextTimeRef) || 0));
+  dv.setUint32(338, ref % 2 ** 32, true);
+  dv.setUint32(342, Math.floor(ref / 2 ** 32), true);
+  dv.setUint16(346, 1, true); // version 1: UMID present (zero), no loudness fields
+  body.set(history, BEXT_FIXED);
+  const pad = body.length & 1;
+  return concat([ascii4('bext'), u32le(body.length), body, new Uint8Array(pad)]);
+}
+
+/** bext* fields from the body of a "bext" chunk. */
+export function parseBext(bytes) {
+  if (bytes.length < 346) return {};
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const ref = dv.getUint32(338, true) + dv.getUint32(342, true) * 2 ** 32;
+  return cleanMeta({
+    bextDescription: readFixed(bytes, 0, 256),
+    bextOriginator: readFixed(bytes, 256, 32),
+    bextOriginatorRef: readFixed(bytes, 288, 32),
+    bextDate: readFixed(bytes, 320, 10),
+    bextTime: readFixed(bytes, 330, 8),
+    bextTimeRef: ref ? String(ref) : '',
+    bextCodingHistory: bytes.length > BEXT_FIXED ? utf8.decode(bytes.subarray(BEXT_FIXED)).replace(/\0+$/, '').replace(/\r\n/g, '\n').trim() : '',
+  });
+}
+
+// Cart chunk text fields in file order (after the 4-byte version), with sizes.
+const CART_TEXT = [
+  ['title', 64],
+  ['artist', 64],
+  ['cartCutId', 64],
+  ['cartClientId', 64],
+  ['cartCategory', 64],
+  ['cartClassification', 64],
+  ['cartOutCue', 64],
+  ['cartStartDate', 10],
+  ['cartStartTime', 8],
+  ['cartEndDate', 10],
+  ['cartEndTime', 8],
+  ['producerAppId', 64],
+  ['producerAppVersion', 64],
+  ['cartUserDef', 64],
+];
+const CART_FIXED = 2048;
+const CART_URL_AT = CART_FIXED - 1024;
+
+/** "cart" chunk (with header) when any cart* field is set (title and artist are shared), else null. */
+export function cartChunk(meta) {
+  const m = cleanMeta(meta);
+  if (!Object.keys(m).some((k) => k.startsWith('cart'))) return null;
+  const tag = m.cartTagText ? enc.encode(`${m.cartTagText.replace(/\r?\n/g, '\r\n')}\r\n`) : new Uint8Array(0);
+  const body = new Uint8Array(CART_FIXED + tag.length);
+  body.set(ascii4('0101'), 0);
+  const values = { ...m, producerAppId: 'Audio Studio', producerAppVersion: '1.0' };
+  let at = 4;
+  for (const [id, len] of CART_TEXT) {
+    body.set(fixedText(values[id], len), at);
+    at += len;
+  }
+  // Level reference (int32) and eight post timers stay zero; then reserved bytes.
+  body.set(fixedText(m.cartUrl, 1024), CART_URL_AT);
+  body.set(tag, CART_FIXED);
+  const pad = body.length & 1;
+  return concat([ascii4('cart'), u32le(body.length), body, new Uint8Array(pad)]);
+}
+
+/** Fields from the body of a "cart" chunk (title and artist only when present). */
+export function parseCart(bytes) {
+  if (bytes.length < CART_URL_AT) return {};
+  const out = {};
+  let at = 4;
+  for (const [id, len] of CART_TEXT) {
+    if (!id.startsWith('producer')) out[id] = readFixed(bytes, at, len);
+    at += len;
+  }
+  out.cartUrl = readFixed(bytes, CART_URL_AT, 1024);
+  if (bytes.length > CART_FIXED) out.cartTagText = utf8.decode(bytes.subarray(CART_FIXED)).replace(/\0+$/, '').replace(/\r\n/g, '\n').trim();
+  return cleanMeta(out);
+}
+
 // --------------------------------------------------------------------- ID3v2
 
-const ID3_FRAMES = { title: 'TIT2', artist: 'TPE1', album: 'TALB', year: 'TYER', genre: 'TCON' };
+const ID3_FRAMES = { title: 'TIT2', artist: 'TPE1', album: 'TALB', year: 'TYER', genre: 'TCON', track: 'TRCK', albumArtist: 'TPE2', composer: 'TCOM', copyright: 'TCOP', bpm: 'TBPM', key: 'TKEY' };
 
 function id3Text(s) {
   // ISO-8859-1 when possible, else UTF-16 with a byte order mark (both v2.3-safe).
@@ -179,8 +351,8 @@ export function parseId3v2(bytes) {
   }
   const map =
     version === 2
-      ? { TT2: 'title', TP1: 'artist', TAL: 'album', TYE: 'year', TCO: 'genre', COM: 'comment' }
-      : { TIT2: 'title', TPE1: 'artist', TALB: 'album', TYER: 'year', TDRC: 'year', TCON: 'genre', COMM: 'comment' };
+      ? { TT2: 'title', TP1: 'artist', TAL: 'album', TYE: 'year', TCO: 'genre', COM: 'comment', TRK: 'track', TP2: 'albumArtist', TCM: 'composer', TCR: 'copyright', TBP: 'bpm', TKE: 'key' }
+      : { TIT2: 'title', TPE1: 'artist', TALB: 'album', TYER: 'year', TDRC: 'year', TCON: 'genre', COMM: 'comment', TRCK: 'track', TPE2: 'albumArtist', TCOM: 'composer', TCOP: 'copyright', TBPM: 'bpm', TKEY: 'key' };
   const idLen = version === 2 ? 3 : 4;
   const headLen = version === 2 ? 6 : 10;
   const out = {};
@@ -222,7 +394,7 @@ export function parseId3v2(bytes) {
 
 // ------------------------------------------------------------ Vorbis comments
 
-const VORBIS_KEYS = { title: 'TITLE', artist: 'ARTIST', album: 'ALBUM', year: 'DATE', genre: 'GENRE', comment: 'COMMENT' };
+const VORBIS_KEYS = { title: 'TITLE', artist: 'ARTIST', album: 'ALBUM', year: 'DATE', genre: 'GENRE', comment: 'COMMENT', track: 'TRACKNUMBER', albumArtist: 'ALBUMARTIST', composer: 'COMPOSER', copyright: 'COPYRIGHT', bpm: 'BPM', key: 'KEY' };
 
 /** Vorbis comment structure (vendor string plus KEY=value list), little-endian lengths. */
 export function vorbisComment(meta, vendor = 'Audio Studio') {

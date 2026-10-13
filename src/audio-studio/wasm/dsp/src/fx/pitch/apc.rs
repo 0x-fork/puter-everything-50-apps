@@ -5,6 +5,8 @@
 //! 2 attack (1 slow .. 10 fast), 3 sensitivity (1..100), 4 reference channel
 //! (0 left, 1 right), 5 FFT size (0 1024, 1 2048, 2 4096 at 48 kHz),
 //! 6 calibration A4 in Hz (410..470).
+//! Readout: [correction cents now, detected Hz (0 unvoiced), target note
+//! (MIDI number, 0 unvoiced)].
 
 use super::core::{fft_size, Yin};
 use super::shifter::ShiftEngine;
@@ -40,6 +42,8 @@ pub struct AutoPitch {
     a4: f32,
     /// Last detected frequency (0 when unvoiced), for tests and metering.
     pub detected: f32,
+    /// Note the detected pitch is pulled to (MIDI number, 0 when unvoiced).
+    note: f32,
 }
 
 impl AutoPitch {
@@ -70,6 +74,7 @@ impl AutoPitch {
             size: 1,
             a4: 440.0,
             detected: 0.0,
+            note: 0.0,
         };
         a.update_glide();
         a
@@ -117,9 +122,11 @@ impl AutoPitch {
             self.detected = pitch.freq;
             let midi = 69.0 + 12.0 * (pitch.freq / self.a4).log2();
             let target = self.target_note(midi);
+            self.note = target;
             self.engine.target = 2f32.powf((target - midi) / 12.0);
         } else {
             self.detected = 0.0;
+            self.note = 0.0;
             self.engine.target = 1.0;
         }
     }
@@ -185,6 +192,16 @@ impl Effect for AutoPitch {
         }
     }
 
+    fn readout(&mut self, out: &mut [f32]) -> usize {
+        if out.len() < 3 {
+            return 0;
+        }
+        out[0] = 1200.0 * self.engine.ratio.max(1e-6).log2();
+        out[1] = self.detected;
+        out[2] = self.note;
+        3
+    }
+
     fn reset(&mut self) {
         self.ring.iter_mut().for_each(|v| *v = 0.0);
         self.since = 0;
@@ -195,6 +212,7 @@ impl Effect for AutoPitch {
         self.engine.target = 1.0;
         self.engine.reset();
         self.detected = 0.0;
+        self.note = 0.0;
     }
 
     fn latency(&self) -> u32 {
@@ -232,6 +250,22 @@ mod tests {
         // D major has C#: 270 Hz (between C4 and C#4, nearer C#) goes to C#4.
         let f = corrected(272.0, 0.0, 2.0);
         assert!((f / 277.18 - 1.0).abs() < 0.004, "{f}");
+    }
+
+    #[test]
+    fn reports_the_correction() {
+        let rate = 48000.0;
+        let mut a = AutoPitch::new(rate, 1);
+        a.set_param(0, 2.0);
+        a.set_param(2, 9.0);
+        // 452 Hz is A4 plus 47 cents: the correction pulls it down by about that.
+        let x = sine(452.0, rate, 24000, 0.5);
+        run_mono(&mut a, &x);
+        let mut out = [0.0f32; 4];
+        assert_eq!(a.readout(&mut out), 3);
+        assert!((out[0] + 47.0).abs() < 4.0, "{}", out[0]);
+        assert!((out[1] - 452.0).abs() < 3.0, "{}", out[1]);
+        assert_eq!(out[2], 69.0);
     }
 
     #[test]

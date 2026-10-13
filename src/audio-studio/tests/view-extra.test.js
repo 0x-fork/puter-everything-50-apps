@@ -28,7 +28,7 @@ describe('status bar fields', () => {
   const doc = { kind: 'audio', sampleRate: 48000, channelCount: 2, length: 48000 * 10, info: { bitDepth: 24 }, dirty: true, source: { type: 'local' } };
 
   it('lists the default fields', () => {
-    expect(statusParts(app, doc, { cursor: null, freeBytes: null })).toEqual(['48000 Hz • 24-bit • Stereo', '3.66 MB', '10.0s']);
+    expect(statusParts(app, doc, { cursor: null, freeBytes: null })).toEqual(['48000 Hz • 24-bit • Stereo', '2.75 MB', '10.0s']);
   });
 
   it('adds the enabled optional fields', () => {
@@ -38,7 +38,7 @@ describe('status bar fields', () => {
     expect(parts).toContain('Modified');
     expect(parts).toContain('2 min free');
     expect(parts).toContain('3 dropped');
-    expect(parts).not.toContain('3.66 MB');
+    expect(parts).not.toContain('2.75 MB');
     expect(statusFieldsOn(app.prefs).cursor).toBe(true);
   });
 

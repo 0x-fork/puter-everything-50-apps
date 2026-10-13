@@ -8,7 +8,7 @@
 
 import { registerEffect, getEffect, paramArray } from '../registry.js';
 import { offloaded } from '../offline-fx.js';
-import { num, db, hz, pct, bool, choice, preset, pause, checkAbort } from './util.js';
+import { num, db, hz, pct, bool, choice, preset, pause, checkAbort, dataId, biquadDb } from './util.js';
 import { detectionWindow, levelsDb, findSilence, removeSilence, audioMarkers } from './special-silence.js';
 
 const SPECIAL = 'Special';
@@ -19,7 +19,41 @@ const OS4_LATENCY = 27;
 
 // ------------------------------------------------------------- Distortion
 
-const CURVES = ['Clean', 'Soft Saturate', 'Hard Clip', 'Tube Warmth', 'Diode Knee', 'Wave Fold', 'Cut Off'];
+const CURVES = ['Clean', 'Soft Saturate', 'Hard Clip', 'Tube Warmth', 'Diode Knee', 'Wave Fold', 'Cut Off', 'Drawn Curve'];
+
+/** Curve choice whose shape comes from the drawn points (fx/special/distortion.rs DRAWN). */
+export const DRAWN = 7;
+/** Input range of a drawn distortion curve in dB (points run from here to 0 dBFS). */
+export const DRAWN_FLOOR = -60;
+const UNITY = [{ x: DRAWN_FLOOR, y: DRAWN_FLOOR }, { x: 0, y: 0 }];
+
+/**
+ * Lookup table for a drawn curve ([{ x: in dB, y: out dB }]): output
+ * magnitudes sampled evenly over input magnitudes 0..1, as the shaper reads
+ * it (shaper.rs TABLE_POS). Below the first point the curve keeps that
+ * point's gain; between points it is straight in dB.
+ */
+export function drawnCurveTable(points, n = 2049) {
+  const pts = [...(points?.length ? points : UNITY)].sort((a, b) => a.x - b.x);
+  const out = new Float32Array(n);
+  let k = 0;
+  for (let i = 1; i < n; i++) {
+    const d = 20 * Math.log10(i / (n - 1));
+    let y;
+    if (d <= pts[0].x) y = d + (pts[0].y - pts[0].x);
+    else if (d >= pts[pts.length - 1].x) y = pts[pts.length - 1].y;
+    else {
+      while (k < pts.length - 2 && d > pts[k + 1].x) k++;
+      const a = pts[k];
+      const b = pts[k + 1];
+      y = a.y + ((b.y - a.y) * (d - a.x)) / (b.x - a.x || 1);
+    }
+    out[i] = 10 ** (y / 20);
+  }
+  return out;
+}
+
+const drawnParam = (id, label) => ({ id, label, type: 'transfer', default: UNITY, min: DRAWN_FLOOR, max: 0, unit: 'dB', hidden: true });
 
 registerEffect({
   id: 'distortion',
@@ -39,10 +73,18 @@ registerEffect({
     num('filterQ', 'Q', 0.1, 10, 0.707, '', { step: 0.01, scale: 'log', section: 'Post Filter' }),
     pct('mix', 'Mix', 100),
     db('output', 'Output Gain', -24, 12, 0),
+    drawnParam('posCurve', 'Positive Drawn Curve'),
+    drawnParam('negCurve', 'Negative Drawn Curve'),
   ],
   latency: () => OS4_LATENCY,
+  data: (v) => [
+    { slot: 0, id: dataId(v.posCurve), values: drawnCurveTable(v.posCurve) },
+    { slot: 1, id: dataId(v.negCurve), values: drawnCurveTable(v.negCurve) },
+  ],
   presets: [
     preset('Default', {}),
+    preset('Gentle Expander Knee', { drive: 0, positive: DRAWN, symmetric: true, posCurve: [{ x: -60, y: -60 }, { x: -24, y: -24 }, { x: -12, y: -9 }, { x: -6, y: -5 }, { x: 0, y: -3 }] }),
+    preset('Gated Fuzz', { drive: 6, positive: DRAWN, symmetric: true, posCurve: [{ x: -60, y: -60 }, { x: -36, y: -60 }, { x: -30, y: -12 }, { x: -12, y: -4 }, { x: 0, y: -2 }], output: -2 }),
     preset('Warm Saturation', { drive: 6, positive: 3, negative: 1, symmetric: false, curveSmoothing: 30 }),
     preset('Gritty Edge', { drive: 18, positive: 4, symmetric: true, output: -4 }),
     preset('Square Fuzz', { drive: 36, positive: 2, symmetric: true, filter: true, filterType: 0, filterFreq: 5000, output: -6 }),
@@ -71,6 +113,10 @@ registerEffect({
     pct('resonance', 'Resonance', 20, { section: 'Filter' }),
     pct('mix', 'Mix', 100),
     db('output', 'Output Gain', -24, 12, 0),
+    bool('compBypass', 'Bypass Compressor', false, { section: 'Compressor' }),
+    bool('distBypass', 'Bypass Distortion', false, { section: 'Distortion' }),
+    bool('ampBypass', 'Bypass Amplifier', false, { section: 'Amplifier' }),
+    bool('filterBypass', 'Bypass Filter', false, { section: 'Filter' }),
   ],
   latency: () => OS4_LATENCY,
   presets: [
@@ -104,33 +150,6 @@ registerEffect({
 
 // -------------------------------------------------------------- Mastering
 
-/** RBJ biquad magnitude in dB at frequency f. */
-function biquadDb(type, f0, gainDb, q, f, rate) {
-  const w0 = (2 * Math.PI * Math.min(f0, rate * 0.4999)) / rate;
-  const cw = Math.cos(w0);
-  const alpha = Math.sin(w0) / (2 * q);
-  const A = 10 ** (gainDb / 40);
-  let b0, b1, b2, a0, a1, a2;
-  if (type === 'peak') {
-    [b0, b1, b2, a0, a1, a2] = [1 + alpha * A, -2 * cw, 1 - alpha * A, 1 + alpha / A, -2 * cw, 1 - alpha / A];
-  } else {
-    const sa = 2 * Math.sqrt(A) * alpha;
-    const s = type === 'low' ? 1 : -1;
-    b0 = A * (A + 1 - s * (A - 1) * cw + sa);
-    b1 = s * 2 * A * (A - 1 - s * (A + 1) * cw);
-    b2 = A * (A + 1 - s * (A - 1) * cw - sa);
-    a0 = A + 1 + s * (A - 1) * cw + sa;
-    a1 = -s * 2 * (A - 1 + s * (A + 1) * cw);
-    a2 = A + 1 + s * (A - 1) * cw - sa;
-  }
-  const w = (2 * Math.PI * f) / rate;
-  const re = (c0, c1, c2) => c0 + c1 * Math.cos(w) + c2 * Math.cos(2 * w);
-  const im = (c1, c2) => -c1 * Math.sin(w) - c2 * Math.sin(2 * w);
-  const num2 = re(b0, b1, b2) ** 2 + im(b1, b2) ** 2;
-  const den2 = re(a0, a1, a2) ** 2 + im(a1, a2) ** 2;
-  return 10 * Math.log10(num2 / den2);
-}
-
 registerEffect({
   id: 'mastering',
   name: 'Mastering',
@@ -153,6 +172,8 @@ registerEffect({
     num('width', 'Widener', -100, 100, 0, '%', { step: 1, section: 'Widener' }),
     pct('loudness', 'Loudness Maximizer', 0, { section: 'Loudness Maximizer' }),
     db('output', 'Output Gain', -18, 18, 0),
+    num('lowShelfQ', 'Low Shelf Q', 0.1, 10, 0.71, '', { step: 0.01, scale: 'log', section: 'Equalizer' }),
+    num('highShelfQ', 'High Shelf Q', 0.1, 10, 0.71, '', { step: 0.01, scale: 'log', section: 'Equalizer' }),
   ],
   latency: (v, rate) => OS2_LATENCY + Math.max(1, Math.round(rate / 200)) - 1,
   tail: (v, rate) => (v.reverb > 0 ? Math.round(rate * 2) : 0),
@@ -160,9 +181,9 @@ registerEffect({
     const out = new Float32Array(freqs.length);
     freqs.forEach((f, i) => {
       let d = 0;
-      if (v.lowShelfOn) d += biquadDb('low', v.lowShelfFreq, v.lowShelfGain, Math.SQRT1_2, f, rate);
+      if (v.lowShelfOn) d += biquadDb('low', v.lowShelfFreq, v.lowShelfGain, v.lowShelfQ ?? Math.SQRT1_2, f, rate);
       if (v.peakOn) d += biquadDb('peak', v.peakFreq, v.peakGain, v.peakQ, f, rate);
-      if (v.highShelfOn) d += biquadDb('high', v.highShelfFreq, v.highShelfGain, Math.SQRT1_2, f, rate);
+      if (v.highShelfOn) d += biquadDb('high', v.highShelfFreq, v.highShelfGain, v.highShelfQ ?? Math.SQRT1_2, f, rate);
       out[i] = d;
     });
     return out;

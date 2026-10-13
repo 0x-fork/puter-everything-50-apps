@@ -5,15 +5,34 @@
 // Handles: bus routing and sends, track EQ, solo/mute, track volume/pan automation (Off/Read and
 // the recording modes), clip gain, fades, crossfades on overlaps (or the
 // front clip hiding the rear one when automatic crossfades are off), clip
-// volume/pan envelopes, looped clips, effect chains (track, master and
+// volume/pan envelopes, looped clips, polarity inversion, effect chains
+// (track and master racks with input/output gain and dry/wet mix, and
 // per-clip Sound Assistant chains in clip.fx) and the metronome.
 
 import { sourceKey } from '../engine/engine.js';
 import { activeCrossfades, frontOrder, clipEnd, SILENT_DB } from './session-edits.js';
-import { slotSpecs, rackTiming } from '../effects/rack.js';
+import { slotSpecs, rackTiming, gainSpec } from '../effects/rack.js';
 import { clickSound, DEFAULT_METRONOME_SOUND } from '../multitrack/metronome-sounds.js';
 
 export const dbToGain = (db) => (db <= SILENT_DB ? 0 : Math.pow(10, db / 20));
+
+/**
+ * A track's effects rack for the graph: { fx } plus, with a dry/wet mix
+ * below 100%, { fxMix, fxWet, fxDry } (see mixcore runChain). Input and
+ * output gain only apply while the rack has effects to run.
+ */
+export function trackRackSpecs(t, rateDoc) {
+  if (!t.fxPower) return { fx: [] };
+  const slots = slotSpecs(t.fx, `trk:${t.id}`, rateDoc);
+  if (!slots.length) return { fx: [] };
+  const inGain = t.fxIn ? gainSpec(`trk:${t.id}:in`, t.fxIn) : null;
+  const wet = inGain ? [inGain, ...slots] : slots;
+  const out = t.fxOut ? gainSpec(`trk:${t.id}:out`, t.fxOut) : null;
+  const r = { fx: out ? [...wet, out] : wet };
+  const mix = Math.max(0, Math.min(1, t.fxMix ?? 1));
+  if (mix < 1) Object.assign(r, { fxMix: mix, fxWet: wet.length, fxDry: dbToGain(t.fxIn || 0) });
+  return r;
+}
 
 /**
  * Converts a dB envelope to linear breakpoints, subdividing large steps so
@@ -156,9 +175,10 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
       pan: panPts.length ? 0 : (o.pan ?? t.pan) / 100,
       mute: t.mute,
       solo: t.solo,
-      fx: t.fxPower ? slotSpecs(t.fx, `trk:${t.id}`, rateDoc) : [],
+      ...trackRackSpecs(t, rateDoc),
       clips: [],
     };
+    if (t.invert) gt.invert = true;
     if (volPts.length) gt.volumeEnv = dbEnvelopeToGain(volPts);
     if (panPts.length) gt.panEnv = panEnvelope(panPts);
     if (t.type === 'bus') {
@@ -229,12 +249,15 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
   }
   const m = state.master;
   const mo = overrides[m.id] || {};
-  const master = { gain: dbToGain(mo.volume ?? m.volume), fx: m.fxPower ? slotSpecs(m.fx, `trk:${m.id}`, rateDoc) : [] };
+  const master = { gain: dbToGain(mo.volume ?? m.volume), ...trackRackSpecs(m, rateDoc) };
+  if (m.invert) master.invert = true;
   if (m.eq?.on) master.fx = [...master.fx, ...slotSpecs([{ id: 'eq', effect: 'parametricEq', values: m.eq.values, enabled: true }], `eq:${m.id}`, rateDoc)];
   if (m.mode !== 'off' && mo.volume === undefined && m.automation.volume.length) {
     master.gain = 1;
     master.volumeEnv = dbEnvelopeToGain(m.automation.volume);
   }
+  // A mono master folds the mix to mono (both outputs carry it).
+  if (m.channels === 1) master.mono = true;
   const graph = { rate: state.sampleRate, tracks, master };
   if (panLaw && panLaw.mode === 'equalPower') graph.panLaw = { mode: 'equalPower', centerDb: panLaw.centerDb };
   return { graph, sources };

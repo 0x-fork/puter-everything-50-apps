@@ -8,6 +8,33 @@
 import { h } from '../lib/dom.js';
 import { rulerStep, rulerLabel, formatTime, musicalStep } from '../lib/time.js';
 import { cssVar, CANVAS_FONT } from '../ui/theme.js';
+import { markerColor } from '../ui/appearance.js';
+
+/** Short unit caption drawn at the ruler's left edge for a time format. */
+export function rulerUnit(format) {
+  if (format === 'samples') return 'smpl';
+  if (format === 'bars') return 'bars';
+  if (format === 'frames' || format?.startsWith('smpte')) return 'hmsf';
+  return 'hms';
+}
+
+/** Minor tick spacing for a labelled step: halves, thirds (15 s, 30 s), fifths (5, 0.5), quarters past a minute. */
+export function minorStep(step) {
+  if (step >= 60) return step / 4;
+  const digits = String(step).replace(/^0\.0*/, '');
+  if (digits.startsWith('5')) return step / 5;
+  if (step >= 1 && step % 3 === 0) return step / 3;
+  return step / 2;
+}
+
+/** Labelled tick positions (seconds) for the view: { step, minor, ticks: [seconds...] }. */
+export function rulerTicks(t0, t1, width, minPx = 70) {
+  if (!(t1 > t0) || width <= 0) return { step: 1, minor: 0.5, ticks: [] };
+  const step = rulerStep((t1 - t0) / width, minPx);
+  const ticks = [];
+  for (let s = Math.ceil(t0 / step - 1e-9) * step; s <= t1 + 1e-9; s += step) ticks.push(s || 0);
+  return { step, minor: minorStep(step), ticks };
+}
 
 export class TimeRuler {
   constructor(app, host) {
@@ -102,7 +129,7 @@ export class TimeRuler {
   }
 
   /** Bars-and-beats ruler: ticks on the beat grid (Time Display tempo, meter and subdivisions). */
-  #drawMusical(t, W, H, textColor, tickColor) {
+  #drawMusical(t, W, H, textColor, tickColor, unitRight = 0) {
     const ctx = this.ctx;
     const rate = t.rate;
     const fpp = (t.view.end - t.view.start) / W;
@@ -116,8 +143,12 @@ export class TimeRuler {
       const x = Math.round(xOf(f)) + 0.5;
       ctx.fillStyle = tickColor;
       ctx.fillRect(x, H - 9, 1, 9);
+      const label = formatTime(Math.round(f), rate, 'bars', music);
+      const lw = ctx.measureText(label).width;
+      const lx = Math.min(W - lw - 1, x - lw / 2);
+      if (lx < unitRight) continue;
       ctx.fillStyle = textColor;
-      ctx.fillText(formatTime(Math.round(f), rate, 'bars', music), x + 3, 3);
+      ctx.fillText(label, lx, 3);
     }
   }
 
@@ -134,9 +165,6 @@ export class TimeRuler {
     const rate = t.rate;
     const span = t.view.end - t.view.start;
     if (span <= 0 || W <= 0) return;
-    const secPerPx = span / rate / W;
-    const step = rulerStep(secPerPx, 70);
-    const minor = step / (step >= 1 && step % 3 === 0 ? 3 : step >= 60 ? 4 : 5);
     const textColor = cssVar('--text-dim');
     const tickColor = cssVar('--text-faint');
     ctx.font = CANVAS_FONT;
@@ -144,26 +172,36 @@ export class TimeRuler {
     const t0 = t.view.start / rate;
     const t1 = t.view.end / rate;
     const format = this.app.prefs.get('timeFormat');
+    // The unit caption sits at the left edge; labels that would run into it are left out.
+    const unit = rulerUnit(format);
+    const unitRight = 3 + ctx.measureText(unit).width + 6;
     if (format === 'bars') {
-      this.#drawMusical(t, W, H, textColor, tickColor);
+      this.#drawMusical(t, W, H, textColor, tickColor, unitRight);
     } else {
+      const { step, minor, ticks } = rulerTicks(t0, t1, W);
       ctx.fillStyle = tickColor;
-      for (let s = Math.ceil(t0 / minor) * minor; s <= t1; s += minor) {
+      for (let s = Math.ceil(t0 / minor - 1e-9) * minor; s <= t1; s += minor) {
         const x = Math.round(((s - t0) / (t1 - t0)) * W) + 0.5;
         ctx.fillRect(x, H - 4, 1, 4);
       }
+      for (const s of ticks) {
+        const x = Math.round(((s - t0) / (t1 - t0)) * W) + 0.5;
+        ctx.fillStyle = tickColor;
+        ctx.fillRect(x, H - 9, 1, 9);
+        const label =
+          format === 'decimal' || format === 'compact'
+            ? rulerLabel(Math.max(0, s), step)
+            : formatTime(Math.round(s * rate), rate, format, this.app.timeOptions?.() || {});
+        // Labels centre on their tick, kept inside the ruler.
+        const lw = ctx.measureText(label).width;
+        const lx = Math.min(W - lw - 1, x - lw / 2);
+        if (lx < unitRight) continue;
+        ctx.fillStyle = textColor;
+        ctx.fillText(label, lx, 3);
+      }
     }
-    for (let s = Math.ceil(t0 / step - 1e-9) * step; format !== 'bars' && s <= t1 + 1e-9; s += step) {
-      const x = Math.round(((s - t0) / (t1 - t0)) * W) + 0.5;
-      ctx.fillStyle = tickColor;
-      ctx.fillRect(x, H - 9, 1, 9);
-      ctx.fillStyle = textColor;
-      const label =
-        format === 'decimal' || format === 'compact'
-          ? rulerLabel(Math.max(0, s), step)
-          : formatTime(Math.round(s * rate), rate, format, this.app.timeOptions?.() || {});
-      ctx.fillText(label, x + 3, 3);
-    }
+    ctx.fillStyle = textColor;
+    ctx.fillText(unit, 3, 3);
     // Selection band.
     const sel = t.selection;
     if (sel && sel.end > sel.start) {
@@ -175,12 +213,11 @@ export class TimeRuler {
       }
     }
     // Markers.
-    const markerColor = cssVar('--marker');
     for (const m of t.markers || []) {
       const x = Math.round(this.xOf(m.start)) + 0.5;
       const x2 = m.duration ? this.xOf(m.start + m.duration) : x;
       if (x2 < -10 || x > W + 10) continue;
-      ctx.fillStyle = m.selected ? cssVar('--text-strong') : markerColor;
+      ctx.fillStyle = m.selected ? cssVar('--text-strong') : markerColor(m.type);
       if (m.duration) {
         ctx.globalAlpha = 0.35;
         ctx.fillRect(x, H - 12, x2 - x, 5);

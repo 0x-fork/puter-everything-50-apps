@@ -25,7 +25,7 @@ export class Session extends Emitter {
    * @param {object} [o.state] initial session state (see session-edits.js)
    * @param {object} [o.source] { type: 'puter'|'local'|'new', path }
    */
-  constructor({ name = 'Untitled Session.asesx', sampleRate = 48000, bitDepth = 32, state, tracks, template, autoCrossfade, source = { type: 'new' } } = {}) {
+  constructor({ name = 'Untitled Session.asesx', sampleRate = 48000, bitDepth = 32, state, tracks, template, autoCrossfade, masterChannels, source = { type: 'new' } } = {}) {
     super();
     this.id = `s${nextId++}`;
     this.kind = 'session';
@@ -33,7 +33,7 @@ export class Session extends Emitter {
     this.source = source;
     this.info = { bitDepth, format: 'asesx' };
     this.pool = new Map();
-    this.history = new History(state || createSessionState({ sampleRate, bitDepth, tracks, template, autoCrossfade }), { label: 'New Session' });
+    this.history = new History(state || createSessionState({ sampleRate, bitDepth, tracks, template, autoCrossfade, masterChannels }), { label: 'New Session' });
     this.savedState = this.history.state;
     this.history.on('change', () => {
       this.previewState = null;

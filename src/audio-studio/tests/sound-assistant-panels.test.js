@@ -156,7 +156,7 @@ describe('Diagnostics panel', () => {
     const sel = panel.el.querySelector('.diag-effect');
     sel.value = 'markAudio';
     sel.dispatchEvent(new Event('change'));
-    expect([...panel.el.querySelectorAll('.diag-actions .btn')].map((b) => b.textContent)).toEqual(['Mark Selected', 'Mark All']);
+    expect([...panel.el.querySelectorAll('.diag-actions .btn')].filter((b) => !b.hidden).map((b) => b.textContent)).toEqual(['Mark Selected', 'Mark All']);
     expect(app.prefs.get('diagnostics').effect).toBe('markAudio');
     expect(panel.el.querySelector('.diag-settings').textContent).toMatch(/Marker Padding/);
   });
@@ -172,7 +172,10 @@ describe('Batch Process panel', () => {
     expect(panel.el.querySelector('.batch-run').disabled).toBe(true);
     panel.el.querySelector('.batch-toolbar .btn').click();
     let rows = panel.el.querySelectorAll('tbody tr');
-    expect([...rows].map((r) => r.textContent)).toEqual(['a.wavReady', 'b.wavReady', 'c.wavReady']);
+    const nameAndStatus = (r) => r.querySelector('.batch-name').textContent + r.querySelector('.batch-status').textContent;
+    expect([...rows].map(nameAndStatus)).toEqual(['a.wavReady', 'b.wavReady', 'c.wavReady']);
+    expect(rows[0].querySelector('.batch-type').textContent).toMatch(new RegExp(`^${RATE} Hz, .*Mono$`));
+    expect(rows[0].querySelector('.batch-out').textContent).toMatch(/^a\.\w+$/);
     expect(panel.el.querySelector('.batch-summary').textContent).toBe('3 files ready');
     rows[0].click();
     rows = panel.el.querySelectorAll('tbody tr');
@@ -180,7 +183,7 @@ describe('Batch Process panel', () => {
     rows = panel.el.querySelectorAll('tbody tr');
     expect([...rows].map((r) => r.getAttribute('aria-selected'))).toEqual(['true', 'true', 'false']);
     rows[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
-    expect([...panel.el.querySelectorAll('tbody tr')].map((r) => r.textContent)).toEqual(['c.wavReady']);
+    expect([...panel.el.querySelectorAll('tbody tr')].map(nameAndStatus)).toEqual(['c.wavReady']);
     // Adding again skips files already listed.
     panel.el.querySelector('.batch-toolbar .btn').click();
     expect(panel.el.querySelectorAll('tbody tr')).toHaveLength(3);

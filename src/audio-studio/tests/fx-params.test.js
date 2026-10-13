@@ -78,6 +78,6 @@ describe('linked params', () => {
   });
   it('clamps the linked partner at its range', () => {
     const def = getEffect('amplify');
-    expect(setLinked(def, { left: 20, right: 28, linked: true }, 'left', 25).right).toBe(30);
+    expect(setLinked(def, { left: 40, right: 46, linked: true }, 'left', 45).right).toBe(48);
   });
 });

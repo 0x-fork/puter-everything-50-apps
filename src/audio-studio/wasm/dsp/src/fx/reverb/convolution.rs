@@ -14,7 +14,11 @@
 //! mix stays aligned.
 //!
 //! Params: 0 impulse (JS side), 1 mix %, 2 room size (JS), 3 LF damping (JS),
-//! 4 HF damping (JS), 5 pre-delay ms, 6 width %, 7 gain dB.
+//! 4 HF damping (JS), 5 pre-delay ms, 6 width %, 7 gain dB,
+//! 8 centre send % (how much of the centre of a stereo input reaches the
+//! room; 100 all), 9 centre wet % (level of the centre of the reverb, 50
+//! unity), 10 balance % (-100 left .. 100 right, on the reverb). Surround
+//! Reverb uses all eleven; Convolution Reverb leaves 8..10 at their defaults.
 
 use super::fastfft::FastRealFft as RealFft;
 use crate::fx::util::{db_to_gain, DelayLine};
@@ -232,6 +236,9 @@ pub struct ConvolutionReverb {
     mix: Smooth,
     width: Smooth,
     gain: Smooth,
+    centre_send: Smooth,
+    centre_wet: Smooth,
+    balance: Smooth,
     fresh: bool,
 }
 
@@ -254,6 +261,9 @@ impl ConvolutionReverb {
             mix: Smooth::new(0.35, rate, 20.0),
             width: Smooth::new(1.0, rate, 20.0),
             gain: Smooth::new(1.0, rate, 20.0),
+            centre_send: Smooth::new(1.0, rate, 20.0),
+            centre_wet: Smooth::new(1.0, rate, 20.0),
+            balance: Smooth::new(0.0, rate, 20.0),
             fresh: true,
         }
     }
@@ -309,6 +319,9 @@ impl Effect for ConvolutionReverb {
             }
             6 => self.width.target = (v * 0.01).clamp(0.0, 2.0),
             7 => self.gain.target = db_to_gain(v.clamp(-60.0, 24.0)),
+            8 => self.centre_send.target = (v * 0.01).clamp(0.0, 1.0),
+            9 => self.centre_wet.target = (v * 0.02).clamp(0.0, 2.0),
+            10 => self.balance.target = (v * 0.01).clamp(-1.0, 1.0),
             _ => {}
         }
     }
@@ -350,16 +363,29 @@ impl Effect for ConvolutionReverb {
             self.mix.settle();
             self.width.settle();
             self.gain.settle();
+            self.centre_send.settle();
+            self.centre_wet.settle();
+            self.balance.settle();
         }
         for i in 0..frames {
             let (mix, width, gain) = (self.mix.next(), self.width.next(), self.gain.next());
+            let (csend, cwet, bal) = (self.centre_send.next(), self.centre_wet.next(), self.balance.next());
             let read = (self.n.wrapping_sub(B1 as u64) as usize) & (RING - 1);
             let at = (self.n as usize) & (HISTORY - 1);
             let mut wet = [0.0f32; 2];
             let mut dry = [0.0f32; 2];
+            // The room hears the input with its centre (mid) scaled by the centre send.
+            let mut send = [0.0f32; 2];
+            for c in 0..ch {
+                send[c] = buf[c * frames + i];
+            }
+            if ch == 2 && csend < 1.0 {
+                let cut = (1.0 - csend) * 0.5 * (send[0] + send[1]);
+                send = [send[0] - cut, send[1] - cut];
+            }
             for c in 0..ch {
                 let x = buf[c * frames + i];
-                self.pre[c].push(x);
+                self.pre[c].push(send[c]);
                 self.hist[c][at] = self.pre[c].tap(self.pre_frames);
                 self.dry_line[c].push(x);
                 dry[c] = self.dry_line[c].tap(B1);
@@ -367,9 +393,9 @@ impl Effect for ConvolutionReverb {
                 self.ring[c][read] = 0.0;
             }
             if ch == 2 {
-                let mid = 0.5 * (wet[0] + wet[1]);
+                let mid = 0.5 * (wet[0] + wet[1]) * cwet;
                 let side = 0.5 * (wet[0] - wet[1]) * width;
-                wet = [mid + side, mid - side];
+                wet = [(mid + side) * (1.0 - bal).min(1.0), (mid - side) * (1.0 + bal).min(1.0)];
             }
             for c in 0..ch {
                 buf[c * frames + i] = dry[c] * (1.0 - mix) + wet[c] * mix;
@@ -397,6 +423,9 @@ impl Effect for ConvolutionReverb {
         self.mix.settle();
         self.width.settle();
         self.gain.settle();
+        self.centre_send.settle();
+        self.centre_wet.settle();
+        self.balance.settle();
     }
 
     fn latency(&self) -> u32 {
@@ -504,6 +533,36 @@ mod tests {
         // Opposite polarity impulses on the two sides.
         let wet_corr: f32 = l1[20000..].iter().zip(&r1[20000..]).map(|(a, b)| a * b).sum();
         assert!(wet_corr < 0.0);
+    }
+
+    #[test]
+    fn centre_send_and_balance_shape_the_wet_signal() {
+        let rate = 48000.0;
+        let run = |params: &[(u32, f32)]| {
+            let mut fx = make(83, rate, 2);
+            let mut ir = vec![0.0f32; 512];
+            ir[0] = 1.0;
+            load(fx.as_mut(), &[ir.clone(), ir]);
+            fx.set_param(1, 100.0);
+            for &(i, v) in params {
+                fx.set_param(i, v);
+            }
+            fx.reset();
+            let x = sine(500.0, rate, 9600, 0.5);
+            let (l, r) = run_stereo(fx.as_mut(), &x, &x);
+            (rms(&l[4800..]), rms(&r[4800..]))
+        };
+        let (l, r) = run(&[]);
+        assert!((l - r).abs() < 1e-3 && l > 0.3, "{l} {r}");
+        // A centred input with no centre send leaves the room silent.
+        let (l, _) = run(&[(8, 0.0)]);
+        assert!(l < 1e-3, "{l}");
+        // Balance hard right silences the left of the reverb.
+        let (l, r) = run(&[(10, 100.0)]);
+        assert!(l < 1e-3 && r > 0.3, "{l} {r}");
+        // Centre wet at 25 % halves a centred reverb.
+        let (l, _) = run(&[(9, 25.0)]);
+        assert!((l / 0.3535 - 0.5).abs() < 0.05, "{l}");
     }
 
     #[test]

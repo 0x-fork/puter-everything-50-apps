@@ -1,5 +1,5 @@
 // Match Loudness panel: measures open files with ITU-R BS.1770-4 (integrated
-// loudness, loudness range, true peak) and matches them to a target with a
+// loudness, loudness range, true peak, plus sample peak and total RMS) and matches them to a target with a
 // true-peak ceiling, applying gain (and a look-ahead limiter when the gain
 // would push peaks over the ceiling) as one undo step per file. While audio
 // plays it also shows live momentary and short-term loudness.
@@ -46,10 +46,22 @@ export async function measureLoudness(state, onProgress) {
   const chans = state.channels;
   const len = chans[0]?.length || 0;
   const session = await analysisPool().session('loudness', { rate: state.sampleRate, channels: chans.length });
+  let peak = 0;
+  let sq = 0;
   try {
     for (let at = 0; at < len; at += CHUNK) {
       const n = Math.min(CHUNK, len - at);
-      await session.push(chans.map((c) => c.toArray(at, at + n)));
+      const block = chans.map((c) => c.toArray(at, at + n));
+      // Sample peak and power here; the buffers move to the worker next.
+      for (const x of block) {
+        for (let i = 0; i < x.length; i++) {
+          const v = x[i];
+          sq += v * v;
+          if (v > peak) peak = v;
+          else if (-v > peak) peak = -v;
+        }
+      }
+      await session.push(block);
       onProgress?.((at + n) / len);
     }
   } catch (err) {
@@ -57,7 +69,8 @@ export async function measureLoudness(state, onProgress) {
     throw err;
   }
   const { loudness } = await session.close();
-  return { ...loudness, truePeakDb: gainToDb(Math.max(0, ...loudness.truePeak)) };
+  const rms = len && chans.length ? Math.sqrt(sq / (len * chans.length)) : 0;
+  return { ...loudness, truePeakDb: gainToDb(Math.max(0, ...loudness.truePeak)), peakDb: gainToDb(peak), rmsDb: gainToDb(rms) };
 }
 
 /** Applies gain (and the limiter) in a worker; returns the new state. */
@@ -167,7 +180,7 @@ export function loudnessPanel(app) {
   const table = h(
     'table.data-table.match-table',
     { role: 'grid', 'aria-label': 'Files to match' },
-    h('thead', h('tr', ['File', 'Loudness', 'True Peak', 'LRA', 'Status'].map((c, i) => h(`th${i && i < 4 ? '.num' : ''}`, { scope: 'col' }, c)))),
+    h('thead', h('tr', ['File', 'Loudness', 'Total RMS', 'Peak', 'True Peak', 'LRA', 'Status'].map((c, i) => h(`th${i && i < 6 ? '.num' : ''}`, { scope: 'col' }, c)))),
     body,
   );
   const liveMeter = h('div.loudness-live', { 'aria-live': 'off' });
@@ -197,7 +210,7 @@ export function loudnessPanel(app) {
     addAll.disabled = busy;
     body.replaceChildren();
     if (!entries.length) {
-      body.append(h('tr', h('td.empty-row', { colspan: '5' }, h('span.empty-text', 'Add open files to measure their loudness and match them to a target.'))));
+      body.append(h('tr', h('td.empty-row', { colspan: '7' }, h('span.empty-text', 'Add open files to measure their loudness and match them to a target.'))));
       return;
     }
     for (const e of entries) {
@@ -231,6 +244,8 @@ export function loudnessPanel(app) {
         },
         h('td', e.doc.name),
         h('td.num', m ? `${fmtDb(m.integrated, 1)} LUFS` : ''),
+        h('td.num', m && m.rmsDb !== undefined ? `${fmtDb(m.rmsDb, 1)} dB` : ''),
+        h('td.num', m && m.peakDb !== undefined ? `${fmtDb(m.peakDb, 1)} dB` : ''),
         h('td.num', m ? `${fmtDb(m.truePeakDb, 1)} dBTP` : ''),
         h('td.num', m ? `${m.range.toFixed(1)} LU` : ''),
         h('td', e.state !== e.doc.state && e.measure ? 'Changed since scan' : e.status),

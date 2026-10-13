@@ -325,7 +325,30 @@
 }
 
 .batch-table .batch-status-col {
-  width: 45%;
+  width: 34%;
+}
+
+.batch-type,
+.batch-out {
+  max-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow frames keep just the file and its status. */
+@container (max-width: 420px) {
+  .batch-table .batch-type-col,
+  .batch-table .batch-out-col,
+  .batch-type,
+  .batch-out {
+    display: none;
+  }
+
+  .batch-table .batch-status-col {
+    width: 45%;
+  }
 }
 
 .batch-name {
@@ -624,7 +647,7 @@
     gap: 0 8px;
   }
 
-  .diag-settings .fx-row > .fx-slider {
+  .diag-settings .fx-row > .fx-scale {
     grid-column: 1 / -1;
     grid-row: 2;
   }

@@ -5,14 +5,20 @@
 //! Params: 0 drive dB, 1 positive curve, 2 negative curve, 3 symmetric (0/1),
 //! 4 curve smoothing %, 5 time smoothing %, 6 post filter on (0/1),
 //! 7 filter type (0 low pass, 1 high pass, 2 band pass), 8 filter Hz,
-//! 9 filter Q, 10 mix %, 11 output dB.
+//! 9 filter Q, 10 mix %, 11 output dB. Curve 7 is a drawn curve: data slot
+//! 0 (positive) and 1 (negative) hold its table of output magnitudes
+//! sampled evenly over input magnitudes 0..1 (see shaper::TABLE_POS).
 //! Latency: `Oversampler::latency(4)` frames (the dry path is aligned).
 
-use super::shaper::{Oversampler, Shape, Shaper, SOFT};
+use super::shaper::{Oversampler, Shape, Shaper, SOFT, TABLE_NEG, TABLE_POS};
 use crate::fx::util::{db_to_gain, Biquad, Coefs, DelayLine};
 use crate::fx::{Effect, Smooth};
 
 pub const FACTOR: usize = 4;
+/// Curve choice for a drawn curve (params 1 and 2).
+const DRAWN: u32 = 7;
+/// Longest drawn curve table accepted.
+const MAX_TABLE: usize = 8193;
 const SUB: usize = 32;
 
 /// Time smoothing % to a gain smoothing coefficient at the oversampled rate.
@@ -127,8 +133,10 @@ impl Distortion {
     }
 
     fn update_shape(&mut self) {
-        self.shape.pos = self.pos;
-        self.shape.neg = if self.symmetric { self.pos } else { self.neg };
+        let drawn = |k: u32, table: u32| if k == DRAWN { table } else { k };
+        self.shape.pos = drawn(self.pos, TABLE_POS);
+        // A symmetric drawn curve mirrors the positive table.
+        self.shape.neg = if self.symmetric { self.shape.pos } else { drawn(self.neg, TABLE_NEG) };
     }
 }
 
@@ -156,6 +164,12 @@ impl Effect for Distortion {
             _ => {}
         }
         self.update_shape();
+    }
+
+    fn set_data(&mut self, slot: u32, data: &[f32]) {
+        if slot < 2 {
+            self.shape.tables[slot as usize] = data[..data.len().min(MAX_TABLE)].to_vec();
+        }
     }
 
     fn process(&mut self, buf: &mut [f32], channels: usize, frames: usize) {
@@ -267,6 +281,34 @@ mod tests {
         let maxv = tail.iter().cloned().fold(f32::MIN, f32::max);
         let minv = tail.iter().cloned().fold(f32::MAX, f32::min);
         assert!(maxv > 2.0 * -minv, "max {maxv} min {minv}");
+    }
+
+    #[test]
+    fn drawn_curve_shapes_both_halves() {
+        let rate = 48000.0;
+        let mut fx = make(90, rate, 1);
+        // Output = input / 2 below 1.0 (a table of 3 points).
+        fx.set_data(0, &[0.0, 0.25, 0.5]);
+        fx.set_data(1, &[0.0, 0.5, 1.0]);
+        fx.set_param(0, 0.0);
+        fx.set_param(1, 7.0);
+        fx.set_param(2, 7.0);
+        fx.set_param(3, 0.0);
+        fx.reset();
+        let x = sine(1000.0, rate, 24000, 0.5);
+        let y = run_mono(fx.as_mut(), &x);
+        let tail = &y[12000..];
+        let maxv = tail.iter().cloned().fold(f32::MIN, f32::max);
+        let minv = tail.iter().cloned().fold(f32::MAX, f32::min);
+        // The positive half is halved (0.25), the negative left alone (0.5);
+        // the DC blocker re-centres the wave but keeps its height.
+        assert!(maxv < -minv && (maxv - minv - 0.75).abs() < 0.05, "max {maxv} min {minv}");
+        // Symmetric: the negative half mirrors the positive table.
+        fx.set_param(3, 1.0);
+        fx.reset();
+        let y = run_mono(fx.as_mut(), &x);
+        let p = peak(&y[12000..]);
+        assert!((p - 0.25).abs() < 0.03, "peak {p}");
     }
 
     #[test]

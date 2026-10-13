@@ -440,7 +440,12 @@ impl Limiter {
     /// read back the first.
     #[inline]
     pub fn process(&mut self, l: f32, r: f32) -> (f32, f32) {
-        let peak = l.abs().max(r.abs());
+        self.process_peak(l, r, l.abs().max(r.abs()))
+    }
+
+    /// As `process`, with the frame's detected peak given (true-peak detection).
+    #[inline]
+    pub fn process_peak(&mut self, l: f32, r: f32, peak: f32) -> (f32, f32) {
         let need = if peak > self.ceiling { self.ceiling / peak } else { 1.0 };
         let cap = self.dq_idx.len();
         // Sliding minimum over the last `look` frames.

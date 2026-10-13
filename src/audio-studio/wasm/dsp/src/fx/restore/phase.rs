@@ -6,7 +6,10 @@
 //!
 //! Params: 0 global time shift (0/1), 1 auto align bands (0/1), 2 channel
 //! (0 adjust left, 1 adjust right, 2 centre: split between both),
-//! 3 time resolution ms (smoothing of the estimate), 4 analysis size (FFT).
+//! 3 time resolution ms (smoothing of the estimate), 4 analysis size (FFT),
+//! 5 left channel shift us, 6 right channel shift us (manual delays, used
+//! while the global time shift is off; positive delays that channel),
+//! 7 auto centre panning (0/1: evens out the levels of the two channels).
 
 use super::noise_reduction::fft_size;
 use super::spectral::smooth_bins;
@@ -33,6 +36,10 @@ pub struct AutoPhaseCorrection {
     corr: Vec<f32>,
     prefix: Vec<f64>,
     lag: f32,
+    shift_us: [f32; 2],
+    centre: bool,
+    /// Smoothed channel energies for auto centre panning.
+    energy: [f32; 2],
 }
 
 impl AutoPhaseCorrection {
@@ -56,6 +63,9 @@ impl AutoPhaseCorrection {
             corr: Vec::new(),
             prefix: Vec::new(),
             lag: 0.0,
+            shift_us: [0.0; 2],
+            centre: false,
+            energy: [0.0; 2],
         };
         a.rebuild();
         a
@@ -105,6 +115,8 @@ impl Effect for AutoPhaseCorrection {
                     self.rebuild();
                 }
             }
+            5 | 6 => self.shift_us[(idx - 5) as usize] = v.clamp(-5000.0, 5000.0),
+            7 => self.centre = v >= 0.5,
             _ => {}
         }
     }
@@ -119,8 +131,47 @@ impl Effect for AutoPhaseCorrection {
         let (cs_re, cs_im, t_re, t_im, corr, prefix, ifft) = (&mut self.cs_re, &mut self.cs_im, &mut self.t_re, &mut self.t_im, &mut self.corr, &mut self.prefix, &mut self.ifft);
         let (sm_re, sm_im) = (&mut self.sm_re, &mut self.sm_im);
         let lag = &mut self.lag;
+        // Manual shifts in samples (only while the automatic time shift is off).
+        let manual = if global { [0.0f32; 2] } else { self.shift_us.map(|u| u * 1e-6 * self.rate) };
+        let centre = self.centre;
+        let energy = &mut self.energy;
         self.stft.process(buf, frames, |re, im| {
-            if re.len() < 2 || !(global || bands) {
+            if re.len() < 2 || !(global || bands || centre || manual[0] != 0.0 || manual[1] != 0.0) {
+                return;
+            }
+            let w = TAU / n as f32;
+            for c in 0..2 {
+                if manual[c] == 0.0 {
+                    continue;
+                }
+                // Delay by d samples: rotate bin k by -w k d.
+                let (ss, sc) = ((-w * manual[c]) as f64).sin_cos();
+                let (mut pr, mut pi) = (1.0f64, 0.0f64);
+                for k in 0..bins {
+                    mul(&mut re[c][k], &mut im[c][k], pr as f32, pi as f32);
+                    let npr = pr * sc - pi * ss;
+                    pi = pr * ss + pi * sc;
+                    pr = npr;
+                }
+            }
+            if centre {
+                for c in 0..2 {
+                    let e: f32 = (0..bins).map(|k| re[c][k] * re[c][k] + im[c][k] * im[c][k]).sum();
+                    energy[c] = a * energy[c] + (1.0 - a) * e;
+                }
+                let mean = 0.5 * (energy[0] + energy[1]);
+                if mean > 1e-12 {
+                    for c in 0..2 {
+                        // Within +-12 dB, so a near-silent side is not boosted wildly.
+                        let g = (mean / energy[c].max(1e-12)).sqrt().clamp(0.25, 4.0);
+                        for k in 0..bins {
+                            re[c][k] *= g;
+                            im[c][k] *= g;
+                        }
+                    }
+                }
+            }
+            if !(global || bands) {
                 return;
             }
             for k in 0..bins {
@@ -130,7 +181,6 @@ impl Effect for AutoPhaseCorrection {
                 cs_re[k] = a * cs_re[k] + (1.0 - a) * cr;
                 cs_im[k] = a * cs_im[k] + (1.0 - a) * ci;
             }
-            let w = TAU / n as f32;
             if global {
                 // GCC-PHAT: whitened cross spectrum back to the lag domain.
                 for k in 0..bins {
@@ -219,6 +269,7 @@ impl Effect for AutoPhaseCorrection {
         self.cs_re.iter_mut().for_each(|v| *v = 0.0);
         self.cs_im.iter_mut().for_each(|v| *v = 0.0);
         self.lag = 0.0;
+        self.energy = [0.0; 2];
     }
 
     fn latency(&self) -> u32 {
@@ -236,6 +287,27 @@ mod tests {
         let aa: f32 = a.iter().map(|x| x * x).sum();
         let bb: f32 = b.iter().map(|x| x * x).sum();
         ab / (aa * bb).sqrt()
+    }
+
+    #[test]
+    fn manual_shift_and_centre_panning() {
+        let rate = 48000.0;
+        let n = 48000;
+        let src = noise(n + 64, 0.3, 5);
+        let l: Vec<f32> = src[64..].to_vec();
+        let r: Vec<f32> = src[64 - 10..n + 64 - 10].iter().map(|v| v * 0.5).collect(); // 10 samples late, 6 dB down
+        let mut fx = AutoPhaseCorrection::new(rate, 2);
+        fx.set_param(0, 0.0);
+        // Delay the left by 10 samples (208.3 us) to line it up with the right.
+        fx.set_param(5, 10.0 / rate * 1e6);
+        fx.set_param(7, 1.0);
+        fx.set_param(3, 50.0);
+        let (ol, or) = run_stereo(&mut fx, &l, &r);
+        let c = corr0(&ol[24000..], &or[24000..]);
+        assert!(c > 0.95, "aligned correlation {c}");
+        let el: f32 = ol[24000..].iter().map(|v| v * v).sum();
+        let er: f32 = or[24000..].iter().map(|v| v * v).sum();
+        assert!((10.0 * (el / er).log10()).abs() < 1.0, "levels {el} {er}");
     }
 
     #[test]

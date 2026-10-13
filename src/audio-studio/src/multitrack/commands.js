@@ -12,7 +12,8 @@ import { AudioFile } from '../model/audio-file.js';
 import { Channel } from '../audio/channel.js';
 import { createMarker, sortMarkers, MARKER_TYPES } from '../model/markers.js';
 import { pickLocalFiles, saveDocument, downloadBlob } from '../storage/files.js';
-import { AUDIO_ACCEPT, baseName } from '../audio/decode.js';
+import { AUDIO_ACCEPT, VIDEO_EXTENSIONS, baseName } from '../audio/decode.js';
+import { videoClip } from '../model/session-video.js';
 import * as puter from '../storage/puter.js';
 import { insertDocs, insertFiles, linkSource, newTrack, channelsAtRate, placementOptions, freeTrackShift } from './insert.js';
 import { renderSession, renderedDoc, clipsRange } from './render.js';
@@ -93,10 +94,11 @@ async function newSessionDialog(app) {
   fillTemplates();
   const rate = h('select.select', { 'aria-label': 'Sample rate' }, [22050, 32000, 44100, 48000, 88200, 96000, 192000].map((r) => h('option', { value: r, selected: r === (app.prefs.get('defaultRate') || 48000) }, `${r} Hz`)));
   const bits = h('select.select', { 'aria-label': 'Bit depth' }, [16, 24, 32].map((b) => h('option', { value: b, selected: b === 32 }, b === 32 ? '32 (float)' : String(b))));
-  const master = h('select.select', { 'aria-label': 'Master', disabled: true }, h('option', { value: 'stereo' }, 'Stereo'));
+  const master = h('select.select', { 'aria-label': 'Mix' }, h('option', { value: '2' }, 'Stereo'), h('option', { value: '1' }, 'Mono'));
+  master.value = String(app.prefs.get('newSessionMix') === 1 ? 1 : 2);
   const r = await openDialog({
     title: 'New Multitrack Session',
-    body: h('div.form-grid', h('label', 'Session Name:'), name, h('label', 'Template:'), h('div.row', template, delTemplate), h('label', 'Sample Rate:'), rate, h('label', 'Bit Depth:'), bits, h('label', 'Master:'), master),
+    body: h('div.form-grid', h('label', 'Session Name:'), name, h('label', 'Template:'), h('div.row', template, delTemplate), h('label', 'Sample Rate:'), rate, h('label', 'Bit Depth:'), bits, h('label', 'Mix:'), master),
     buttons: [
       { label: 'Cancel', value: null },
       { label: 'OK', value: 'ok', primary: true },
@@ -104,7 +106,8 @@ async function newSessionDialog(app) {
   });
   if (r !== 'ok') return null;
   const chosen = TEMPLATES.find((t) => t.id === template.value) || userTemplates(app.prefs).find((t) => t.id === template.value);
-  return { name: `${name.value.trim() || 'Untitled Session'}.asesx`, template: chosen, sampleRate: Number(rate.value), bitDepth: Number(bits.value) };
+  app.prefs.set('newSessionMix', Number(master.value));
+  return { name: `${name.value.trim() || 'Untitled Session'}.asesx`, template: chosen, sampleRate: Number(rate.value), bitDepth: Number(bits.value), masterChannels: Number(master.value) };
 }
 
 async function addTracksDialog(app) {
@@ -254,7 +257,7 @@ async function stretchDialog(app, doc, clips) {
   const semis = h('input.input.num', { type: 'number', min: -24, max: 24, step: 1, value: s.semitones, 'aria-label': 'Pitch shift in semitones' });
   const formants = h('input', { type: 'checkbox', checked: s.formants });
   const toOn = () => {
-    if (mode.value === 'off') mode.value = 'realtime';
+    if (mode.value === 'off') mode.value = app.prefs.get('clipStretchMode') === 'rendered' ? 'rendered' : 'realtime';
   };
   pct.addEventListener('input', () => {
     dur.value = ((origSeconds * (Number(pct.value) || 100)) / 100).toFixed(3);
@@ -381,8 +384,9 @@ function newSession(app, o) {
   const autoCrossfade = app.prefs.get('autoCrossfade') !== false;
   const name = app.uniqueName(sessionBaseName(o.name), '.asesx');
   // Saved templates also carry master settings, tempo and meter.
-  const state = o.template?.master ? stateFromTemplate(o.template, { sampleRate: o.sampleRate, bitDepth: o.bitDepth, autoCrossfade }) : undefined;
-  const doc = new Session({ name, sampleRate: o.sampleRate, bitDepth: o.bitDepth, state, template: state ? undefined : tracks || undefined, tracks: tracks ? undefined : 6, autoCrossfade });
+  let state = o.template?.master ? stateFromTemplate(o.template, { sampleRate: o.sampleRate, bitDepth: o.bitDepth, autoCrossfade }) : undefined;
+  if (state && o.masterChannels) state = { ...state, master: { ...state.master, channels: o.masterChannels === 1 ? 1 : 2 } };
+  const doc = new Session({ name, sampleRate: o.sampleRate, bitDepth: o.bitDepth, state, template: state ? undefined : tracks || undefined, tracks: tracks ? undefined : 6, autoCrossfade, masterChannels: o.masterChannels });
   app.addDocument(doc);
   return doc;
 }
@@ -647,7 +651,8 @@ export function installMultitrackCommands(app) {
     const { data } = await rendered('Mixing down', o);
     // Preferences > Markers & Metadata: session markers in the range go into the mixdown.
     const markers = app.prefs.get('markersInMixdowns') ? markersInRange(doc.state.markers, o.start, o.end).map((m) => createMarker(m)) : [];
-    return renderedDoc(app, doc, data, `${sessionBaseName(doc.name)}_mixdown`, markers);
+    // A mono master mixes down to a mono file.
+    return renderedDoc(app, doc, doc.state.master.channels === 1 ? data.slice(0, 1) : data, `${sessionBaseName(doc.name)}_mixdown`, markers);
   };
   const bounce = async (scope) => {
     const doc = session(app);
@@ -725,10 +730,22 @@ export function installMultitrackCommands(app) {
     { id: 'export.mixdownClips', label: 'Selected Clips...', enabled: hasClips, run: async () => saveDocument(app, await mixdown('clips'), { copy: true }) },
 
     // ------------------------------------------------------ Multitrack
-    { id: 'mt.addMono', label: 'Add Mono Track', enabled: hasSession, run: addTrack('audio', 1) },
-    { id: 'mt.addStereo', label: 'Add Stereo Track', shortcut: 'Alt+A', enabled: hasSession, run: addTrack('audio', 2) },
+    { id: 'mt.addMono', label: 'Add Mono Audio Track', enabled: hasSession, run: addTrack('audio', 1) },
+    { id: 'mt.addStereo', label: 'Add Stereo Audio Track', shortcut: 'Alt+A', enabled: hasSession, run: addTrack('audio', 2) },
     { id: 'mt.addMonoBus', label: 'Add Mono Bus Track', enabled: hasSession, run: addTrack('bus', 1) },
     { id: 'mt.addBus', label: 'Add Stereo Bus Track', shortcut: 'Alt+B', enabled: hasSession, run: addTrack('bus', 2) },
+    {
+      // A session has one video track: picking a video fills it (and puts the video's audio on a track).
+      id: 'mt.addVideoTrack',
+      label: 'Add Video Track...',
+      enabled: (a) => hasSession(a) && !videoClip(session(a).state),
+      run: async () => {
+        const doc = session(app);
+        const accept = `${VIDEO_EXTENSIONS.map((e) => `.${e}`).join(',')},video/*`;
+        const items = puter.sdk() && puter.isSignedIn() ? await puter.pickFiles({ multiple: false, accept }) : await pickLocalFiles({ accept });
+        if (items?.length) await insertFiles(app, doc, items.slice(0, 1), { at: doc.cursor });
+      },
+    },
     {
       id: 'mt.addTracks',
       label: 'Add Tracks...',
@@ -1228,6 +1245,8 @@ export function installMultitrackCommands(app) {
     },
     { id: 'clip.nudgeLeft', label: 'Nudge Left', shortcut: 'Alt+,', enabled: hasClips, run: nudge(-1, 0) },
     { id: 'clip.nudgeRight', label: 'Nudge Right', shortcut: 'Alt+.', enabled: hasClips, run: nudge(1, 0) },
+    { id: 'clip.nudgeLeft5', label: 'Nudge Left 5 Steps', enabled: hasClips, run: nudge(-5, 0) },
+    { id: 'clip.nudgeRight5', label: 'Nudge Right 5 Steps', enabled: hasClips, run: nudge(5, 0) },
     { id: 'clip.nudgeUp', label: 'Nudge Up', shortcut: 'Alt+ArrowUp', enabled: hasClips, run: nudge(0, -1) },
     { id: 'clip.nudgeDown', label: 'Nudge Down', shortcut: 'Alt+ArrowDown', enabled: hasClips, run: nudge(0, 1) },
 

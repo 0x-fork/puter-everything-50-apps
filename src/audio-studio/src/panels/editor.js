@@ -123,6 +123,7 @@ function buildTransport(app) {
         time.textContent = text;
         lastText = text;
       }
+      time.classList.toggle('idle', !app.active);
     },
     update() {
       buttons.update();
