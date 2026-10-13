@@ -1,7 +1,7 @@
 // Docked panels: Phase Analysis and Phase Meter, Frequency Analysis holds and
 // display, Amplitude Statistics tabs, Metadata tabs, Properties sections,
 // Level Meters orientation and the Files panel columns.
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { App } from '../src/app.js';
 import { installCore } from '../src/features/core.js';
 import { installAnalysis } from '../src/analysis/install.js';
@@ -17,6 +17,8 @@ import { WavWriter } from '../src/export/pcm.js';
 import { makeCollapsible } from '../src/panels/properties.js';
 import { meterHorizontal } from '../src/panels/levels.js';
 import { visibleFiles } from '../src/panels/files.js';
+import { favoriteSettings } from '../src/effects/favorites.js';
+import '../src/effects/defs/amplitude.js';
 import { parseWav } from '../src/audio/wav.js';
 import { META_TABS, normalizeMetaValue, metadataPanel } from '../src/panels/metadata.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
@@ -108,6 +110,8 @@ describe('Frequency Analysis', () => {
   });
 
   it('switches display and enables Scan for audio files', () => {
+    // The spectrum itself needs the analysis workers, which tests do not run.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const app = makeApp();
     const p = create(app, 'frequency');
     const scan = [...p.el.querySelectorAll('button')].find((b) => b.textContent === 'Scan');
@@ -349,5 +353,18 @@ describe('History panel menu', () => {
     expect(doc.history.canRedo).toBe(false);
     expect(p.menu().find((i) => i.label === 'Delete Later States').enabled).toBe(false);
     expect(p.menu().some((i) => /Undo/.test(i.label || ''))).toBe(true);
+  });
+});
+
+describe('Favorites details', () => {
+  it('lists the settings a favorite applies', () => {
+    const app = makeApp();
+    const cmd = { name: 'Normalize', action: { type: 'command', command: 'fx.normalizePeak', args: { peak: -3 } } };
+    expect(favoriteSettings(app, cmd)).toEqual([['Peak', '-3 dB']]);
+    expect(favoriteSettings(app, { name: 'x', action: { type: 'command', command: 'fx.fadeIn' } })).toEqual([]);
+    const eff = { name: 'Limit', action: { type: 'effect', effect: 'hardLimiter', values: { ceiling: -0.1, inputBoost: 0 } } };
+    const rows = favoriteSettings(app, eff);
+    expect(rows[0]).toEqual(['Maximum Amplitude', '-0.1 dB']);
+    expect(rows.find((r) => r[0] === 'Link Channels')[1]).toBe('On');
   });
 });
