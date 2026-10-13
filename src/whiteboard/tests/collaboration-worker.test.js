@@ -1769,3 +1769,56 @@ test("the worker tells which account owns the browser sessions that added object
     env.service.call(guest, { op: "creators", room: b.id, clients: [bob] }),
   );
 });
+
+test("a busy board is checkpointed once across instances, at most every five minutes", async () => {
+  const { BoardService } = await import("../worker/service.js");
+  const now = Date.UTC(2026, 9, 13, 12);
+  const minute = 60_000;
+  const records = (from, count) =>
+    new Map(
+      Array.from({ length: count }, (_, n) => [
+        `wb:room:log:${n}`,
+        from + n * 10,
+      ]),
+    );
+  const due = (entry, stored = null) =>
+    BoardService.prototype.checkpointDue.call(
+      { kv: { get: async () => stored } },
+      "room",
+      entry,
+      now,
+    );
+  // A board without a checkpoint gets one.
+  assert.equal(await due({ seen: records(now - minute, 1) }), true);
+  // 300 records past this instance's checkpoint, but another instance
+  // checkpointed after 200 of them: its checkpoint is taken up instead.
+  const entry = {
+    checkpoint: { at: now - 10 * minute, path: "old" },
+    seen: records(now - 6 * minute, 300),
+  };
+  const stored = { at: now - 6 * minute + 1995, path: "newer" };
+  assert.equal(await due(entry, stored), false);
+  assert.equal(entry.checkpoint, stored);
+  assert.equal(entry.seen.size, 100);
+  // 256 records within five minutes of the last checkpoint wait for it.
+  const recent = {
+    checkpoint: { at: now - 2 * minute, path: "recent" },
+    seen: records(now - 2 * minute + 1, 300),
+  };
+  assert.equal(await due(recent, recent.checkpoint), false);
+  // Five minutes on, or with far more records, one is written.
+  assert.equal(
+    await due({
+      checkpoint: { at: now - 6 * minute, path: "older" },
+      seen: records(now - 6 * minute + 1, 300),
+    }),
+    true,
+  );
+  assert.equal(
+    await due({
+      checkpoint: { at: now - 2 * minute, path: "recent" },
+      seen: records(now - 2 * minute + 1, 5000),
+    }),
+    true,
+  );
+});

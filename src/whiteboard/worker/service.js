@@ -106,6 +106,9 @@ const boardFeatures = (policy) => ({
 const LOG_OVERLAP = 120_000;
 // Refreshing a cached state reads a shorter overlap.
 const REFRESH_OVERLAP = 15_000;
+// A busy board is checkpointed at most this often, unless records build up
+// far past the usual count; each checkpoint is a copy of the whole board.
+const CHECKPOINT_GAP = 5 * 60_000;
 // How long a cached board state is used without checking for new records.
 const FRESH = 1500;
 // How long after a save's record is written a listing surely shows it, and
@@ -774,7 +777,8 @@ export class BoardService {
       return cached.loading;
     const entry = {
       snapshot: meta.snapshot,
-      seen: new Set(),
+      // Records read past the checkpoint, with the time each was saved.
+      seen: new Map(),
       recent: new Set(reload && cached?.recent ? cached.recent : []),
       signal: reload ? cached?.signal : undefined,
       checkpoint: undefined,
@@ -829,7 +833,7 @@ export class BoardService {
       if (!entry.checkpoint)
         for (const { key, value } of await this.list(`wb:${room}:op:`)) {
           await this.applyRecord(doc, value);
-          entry.seen.add(key);
+          entry.seen.set(key, 0);
         }
       since = entry.checkpoint ? entry.checkpoint.at - LOG_OVERLAP : 0;
     }
@@ -846,7 +850,8 @@ export class BoardService {
     )) {
       records.push(await this.recordUpdate(value));
       newest = Math.max(newest, value.at || 0);
-      if (value.at > covered && entry.seen.size < 100_000) entry.seen.add(key);
+      if (value.at > covered && entry.seen.size < 100_000)
+        entry.seen.set(key, value.at);
       recent(entry, key.slice(key.lastIndexOf(":") + 1));
     }
     if (doc) {
@@ -874,13 +879,7 @@ export class BoardService {
       DOCS.delete(key);
       if (value === entry) DOCS.set(key, value);
     }
-    // A checkpoint over a week old makes each load read the whole log, so
-    // a quiet board's checkpoint is renewed too.
-    if (
-      entry.seen.size >= 256 ||
-      (entry.seen.size && (!entry.checkpoint || started - covered > DAY)) ||
-      (entry.checkpoint && started - covered > 6 * DAY)
-    )
+    if (await this.checkpointDue(room, entry, started))
       // The copy holds the records just read and the edits saved through
       // this instance while they were read, so the checkpoint is stamped no
       // earlier than the newest of them: a version as of a moment before
@@ -892,10 +891,38 @@ export class BoardService {
       )
         .then((checkpoint) => {
           entry.checkpoint = checkpoint;
+          entry.checkpointAfter = checkpoint.at + CHECKPOINT_GAP;
           entry.seen.clear();
         })
         .catch(() => {});
     return { entry, rows: records.length };
+  }
+  // Whether to save this copy as the board's checkpoint, once 256 records
+  // were read past the last one, or a day has passed (a checkpoint over a
+  // week old makes each load read the whole log, so a quiet board's is
+  // renewed too). Each instance counts what it read past the checkpoint it
+  // knows, so one another instance wrote since is taken up first: otherwise
+  // every instance of a busy board saved its own copy of the whole board,
+  // and none is ever removed. A busy board is checkpointed at most every
+  // five minutes, unless far more records build up, and the latest
+  // checkpoint is read only when one could be due.
+  async checkpointDue(room, entry, started) {
+    const covered = () => entry.checkpoint?.at || 0;
+    const due = () =>
+      entry.seen.size >= 256 ||
+      (entry.seen.size && (!entry.checkpoint || started - covered() > DAY)) ||
+      (entry.checkpoint && started - covered() > 6 * DAY);
+    const crowded = () => entry.seen.size >= 4096;
+    if (!due() || (started < (entry.checkpointAfter || 0) && !crowded()))
+      return false;
+    const stored = await this.kv.get(`wb:${room}:cp`).catch(() => null);
+    if (stored?.at > covered()) {
+      entry.checkpoint = stored;
+      for (const [key, at] of entry.seen)
+        if (!(at > stored.at)) entry.seen.delete(key);
+    }
+    if (entry.checkpoint) entry.checkpointAfter = covered() + CHECKPOINT_GAP;
+    return !!due() && (started >= (entry.checkpointAfter || 0) || crowded());
   }
   // What a caller with this state vector lacks of the board's saved state,
   // from the loaded document unless it holds a commit not yet saved.
