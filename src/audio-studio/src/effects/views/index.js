@@ -2,5 +2,6 @@
 // layouts) with the dialog editor registry. Imported by the effects feature.
 
 import './restoration.js';
+import './noise-print.js';
 import './special.js';
 import './distortion.js';

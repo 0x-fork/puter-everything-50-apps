@@ -5,7 +5,7 @@
 
 import { registerEffect, getEffect, paramArray } from '../registry.js';
 import { offloaded, runTask } from '../offline-fx.js';
-import { num, db, hz, ms, pct, bool, choice, preset, pause, checkAbort } from './util.js';
+import { num, db, hz, ms, pct, bool, choice, preset, pause, checkAbort, dataId } from './util.js';
 
 const GROUP = 'Noise Reduction / Restoration';
 
@@ -169,20 +169,65 @@ registerEffect({
 let nextPrintId = 1;
 const packed = new WeakMap();
 
+/** Flat threshold adjustment (no change to the noise print). */
+export const FLAT_CURVE = [{ f: 20, g: 0 }, { f: 20000, g: 0 }];
+const isFlat = (curve) => !curve?.length || curve.every((p) => !p.g);
+
+/** Adjustment in dB at frequency f: straight lines between points on a log-frequency axis. */
+export function curveGainAt(curve, f) {
+  const pts = [...(curve || [])].sort((a, b) => a.f - b.f);
+  if (!pts.length) return 0;
+  if (f <= pts[0].f) return pts[0].g;
+  for (let i = 1; i < pts.length; i++) {
+    if (f <= pts[i].f) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const t = Math.log(f / a.f) / Math.log(b.f / a.f || 2);
+      return a.g + (b.g - a.g) * (Number.isFinite(t) ? t : 0);
+    }
+  }
+  return pts[pts.length - 1].g;
+}
+
 /**
  * Packs a noise print for WASM data slot 0 of kind 135:
  * [fftSize, channels, rate, bins, channel 0 bins..., channel 1 bins...].
+ * `curve` ([{ f, g }], dB) raises or lowers the print per frequency: the
+ * level above which audio counts as signal rather than noise, so a raised
+ * region is reduced harder and a lowered one is left more alone.
  */
-export function packNoisePrint(print) {
+export function packNoisePrint(print, curve = null) {
   if (!print?.channels?.length) return null;
-  let out = packed.get(print);
-  if (out) return out;
+  const flat = isFlat(curve);
+  const key = flat ? '' : JSON.stringify(curve);
+  const cached = packed.get(print);
+  if (cached?.key === key) return cached.out;
   const bins = print.channels[0].length;
-  out = new Float32Array(4 + print.channels.length * bins);
+  const out = new Float32Array(4 + print.channels.length * bins);
   out.set([print.fftSize, print.channels.length, print.rate, bins], 0);
-  print.channels.forEach((c, i) => out.set(c, 4 + i * bins));
-  packed.set(print, out);
+  const scale = new Float32Array(bins).fill(1);
+  if (!flat) for (let k = 0; k < bins; k++) scale[k] = 10 ** (curveGainAt(curve, Math.max(1, (k * print.rate) / print.fftSize)) / 10);
+  print.channels.forEach((c, i) => {
+    for (let k = 0; k < bins; k++) out[4 + i * bins + k] = c[k] * scale[k];
+  });
+  packed.set(print, { key, out });
   return out;
+}
+
+/** A noise print as plain JSON (Save Noise Print). */
+export function serializeNoisePrint(print) {
+  return { type: 'audio-studio-noise-print', version: 1, rate: print.rate, fftSize: print.fftSize, frames: print.frames, seconds: print.seconds, channels: print.channels.map((c) => Array.from(c, (v) => Number(v.toPrecision(6)))) };
+}
+
+/** Reads a saved noise print (throws on anything else). */
+export function parseNoisePrint(json) {
+  const o = typeof json === 'string' ? JSON.parse(json) : json;
+  const ok = o?.type === 'audio-studio-noise-print' && Number(o.fftSize) >= 256 && Number(o.rate) > 0 && Array.isArray(o.channels) && o.channels.length > 0;
+  const bins = ok ? Number(o.fftSize) / 2 + 1 : 0;
+  if (!ok || o.channels.some((c) => !Array.isArray(c) || c.length !== bins || c.some((v) => !Number.isFinite(v) || v < 0))) {
+    throw new Error('This file is not a noise print saved by Audio Studio.');
+  }
+  return { id: nextPrintId++, rate: Number(o.rate), fftSize: Number(o.fftSize), frames: Number(o.frames) || 0, seconds: Number(o.seconds) || 0, channels: o.channels.map((c) => Float32Array.from(c)) };
 }
 
 /**
@@ -245,6 +290,7 @@ registerEffect({
     db('transition', 'Transition Width', 0, 40, 8),
     fftChoice('fftSize', 'FFT Size', [512, 1024, 2048, 4096, 8192, 16384], 4096),
     bool('noiseOnly', 'Output Noise Only', false),
+    { id: 'curve', label: 'Threshold Adjustment', type: 'curve', default: FLAT_CURVE, min: -30, max: 30, unit: 'dB', hidden: true },
   ],
   presets: [
     preset('Gentle Cleanup', { reduction: 50, reduceBy: 12, decay: 70, smoothing: 2, precision: 7, transition: 10, fftSize: 4096, noiseOnly: false }),
@@ -255,11 +301,11 @@ registerEffect({
   ],
   latency: (v) => pow2(v.fftSize, 256, 16384),
   data(values, { doc } = {}) {
-    const print = packNoisePrint(doc?.noisePrint);
-    return print ? [{ slot: 0, id: `np${doc.noisePrint.id ?? 0}`, values: print }] : [];
+    const print = packNoisePrint(doc?.noisePrint, values.curve);
+    return print ? [{ slot: 0, id: `np${doc.noisePrint.id ?? 0}${isFlat(values.curve) ? '' : `:${dataId(values.curve)}`}`, values: print }] : [];
   },
   run: async ({ channels, rate, values, extra, dsp, onProgress, signal }) => {
-    const print = packNoisePrint(extra?.noisePrint);
+    const print = packNoisePrint(extra?.noisePrint, values.curve);
     if (!print) throw new Error('Capture a noise print first: select noise only and choose Capture Noise Print (Shift+P).');
     const def = getEffect('noiseReduction');
     checkAbort(signal);

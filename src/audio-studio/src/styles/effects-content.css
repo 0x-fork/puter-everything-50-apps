@@ -418,3 +418,51 @@ input[type='range'].slider.fx-vslider::-moz-range-track {
   width: 100%;
   margin: 0 auto;
 }
+
+/* Noise Reduction: print tools, graph and legend. */
+.nr-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.nr-status {
+  margin-left: 6px;
+  color: var(--text-dim);
+}
+
+.nr-graph {
+  height: 240px;
+  cursor: copy;
+}
+
+.nr-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+
+.nr-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-left: 8px;
+}
+
+.nr-print {
+  background: var(--wave);
+}
+
+.nr-threshold {
+  background: var(--hot);
+}
+
+.fx-split.rs-focus {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.fx-spectrum {
+  height: 170px;
+}

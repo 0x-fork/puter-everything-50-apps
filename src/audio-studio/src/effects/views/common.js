@@ -115,3 +115,83 @@ export function responseEditor({ label = 'Frequency response', span = [-24, 24],
     return view.el;
   };
 }
+
+/**
+ * Live spectrum of the file at the playhead while audio plays (input to the
+ * effect), on a log frequency axis. Idle, it shows a hint instead.
+ */
+export function spectrumMonitor(ctx, { label = 'Spectrum at the playhead', size = 4096 } = {}) {
+  const { app, doc } = ctx;
+  const rate = doc?.sampleRate || 48000;
+  const fMax = rate / 2;
+  const bins = size / 2;
+  const levels = new Float32Array(bins + 1).fill(-120);
+  const re = new Float64Array(size);
+  const im = new Float64Array(size);
+  const buf = new Float32Array(size);
+  const win = Float64Array.from({ length: size }, (_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / size));
+  const norm = 4 / size;
+  let live = false;
+  const xOf = (f, W) => (Math.log(f / 20) / Math.log(fMax / 20)) * W;
+  const yOf = (d, H) => 4 + (-d / 100) * (H - 18);
+  const view = plot('fx-spectrum', label, (g, W, H) => {
+    const ticks = freqTicks(fMax);
+    gridLines(g, W, H, ticks.map(([f]) => xOf(f, W)), [-20, -40, -60, -80].map((d) => yOf(d, H)));
+    ticks.forEach(([f, text]) => text && labelText(g, text, xOf(f, W) + 3, H - 14));
+    [-20, -40, -60, -80].forEach((d) => labelText(g, `${d}`, 3, yOf(d, H) + 2));
+    if (!live) {
+      labelText(g, 'Press Preview to see the spectrum of the audio', 8, 8);
+      return;
+    }
+    g.strokeStyle = cssVar('--wave');
+    g.lineWidth = 1.5;
+    g.beginPath();
+    let started = false;
+    for (let k = 1; k <= bins; k++) {
+      const f = (k * rate) / size;
+      if (f < 20) continue;
+      const x = xOf(f, W);
+      const y = clamp(yOf(levels[k], H), 0, H);
+      if (started) g.lineTo(x, y);
+      else g.moveTo(x, y);
+      started = true;
+    }
+    g.stroke();
+  });
+  let raf = 0;
+  let fftFn = null;
+  import('../../multitrack/align.js').then((m) => (fftFn = m.fft));
+  const frame = () => {
+    raf = 0;
+    if (!live || !doc || !fftFn) return;
+    const at = Math.floor(app.engine.position);
+    const chans = doc.state.channels.slice(0, 2);
+    re.fill(0);
+    for (const c of chans) {
+      c.read(Math.max(0, at - size), buf);
+      for (let i = 0; i < size; i++) re[i] += (buf[i] * win[i]) / chans.length;
+    }
+    im.fill(0);
+    fftFn(re, im);
+    for (let k = 0; k <= bins; k++) {
+      const d = 10 * Math.log10((re[k] * re[k] + im[k] * im[k]) * norm * norm + 1e-14);
+      // Fast rise, slow fall, like a meter.
+      levels[k] = d > levels[k] ? d : levels[k] - 1.5;
+    }
+    view.redraw();
+    raf = requestAnimationFrame(frame);
+  };
+  const off = app?.on?.('transport', (s) => {
+    live = s === 'playing';
+    if (live && !raf) raf = requestAnimationFrame(frame);
+    if (!live) {
+      levels.fill(-120);
+      view.redraw();
+    }
+  });
+  ctx.onClose?.(() => {
+    off?.();
+    cancelAnimationFrame(raf);
+  });
+  return view.el;
+}
