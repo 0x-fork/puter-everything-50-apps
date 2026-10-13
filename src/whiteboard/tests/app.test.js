@@ -3407,6 +3407,108 @@ test("an edit to one object writes only its button in the outline again", async 
   }
 });
 
+test("adding, deleting and reordering objects writes only their buttons in the outline, as a whole list would read", async () => {
+  const app = await setup();
+  const { doc, w, click, tick } = app;
+  try {
+    const frame = item("frame", 0, 0, { text: "Plan", w: 1000, h: 500 });
+    const held = Array.from({ length: 4 }, (_, n) =>
+      item("note", 20 + n * 220, 60, { text: `Held ${n}`, parentId: frame.id }),
+    );
+    const loose = Array.from({ length: 30 }, (_, n) =>
+      item("note", (n % 6) * 220, 700 + Math.floor(n / 6) * 220, {
+        text: `Loose ${n}`,
+      }),
+    );
+    await rotationFixture(app, [frame, ...held, ...loose]);
+    const outline = () => doc.querySelector("#board-outline");
+    const buttons = () => [...outline().querySelectorAll("button")];
+    // What a screen reader reads: each button, in order, with the
+    // description it points to right after it.
+    const reading = () =>
+      buttons().map((b) => {
+        const id = b.getAttribute("aria-describedby");
+        if (id) assert.equal(b.nextElementSibling.id, id);
+        return [
+          b.textContent,
+          b.hasAttribute("data-frame"),
+          id ? doc.getElementById(id).textContent : null,
+        ];
+      });
+    const stops = () => buttons().filter((b) => b.tabIndex === 0);
+    const named = (text) => buttons().find((b) => b.textContent.endsWith(text));
+    assert.equal(buttons().length, 35);
+    // Deleting one object keeps every other button but its frame's, whose
+    // count of what it holds changed.
+    let before = buttons();
+    await click(`#board-outline [data-id="${named("Held 2").dataset.id}"]`);
+    await click('[data-action="delete"]');
+    let after = buttons();
+    assert.equal(after.length, 34);
+    assert.deepEqual(
+      after.filter((b) => !before.includes(b)).map((b) => b.textContent),
+      ["Frame: Plan"],
+    );
+    assert.equal(
+      outline().children.length,
+      34 + after.filter((b) => b.hasAttribute("aria-describedby")).length,
+    );
+    assert.equal(stops().length, 1);
+    // Undone, it is written again at its place.
+    before = after;
+    await click('[data-action="undo"]');
+    after = buttons();
+    assert.equal(after.length, 35);
+    assert.equal(after[3].textContent, "Sticky note: Held 2");
+    assert.equal(after.filter((b) => !before.includes(b)).length, 2);
+    // Brought to the front, an object moves to the end of the list alone.
+    before = after;
+    await click(`#board-outline [data-id="${named("Loose 3").dataset.id}"]`);
+    await click('[data-action="front"]');
+    after = buttons();
+    assert.equal(after.at(-1).textContent, "Sticky note: Loose 3");
+    assert.equal(after.at(-1).getAttribute("aria-pressed"), "true");
+    assert.equal(after.filter((b) => !before.includes(b)).length, 1);
+    assert.equal(
+      buttons().filter((b) => b.getAttribute("aria-pressed") === "true").length,
+      1,
+    );
+    // The keyboard keeps its place in the list when an edit moves an object
+    // before the one it is on, as when the whole list is written.
+    const focused = buttons()[20];
+    focused.focus();
+    const ctrl = (key, shiftKey = false) =>
+      doc.activeElement.dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key,
+          ctrlKey: true,
+          shiftKey,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    ctrl("z");
+    await tick();
+    assert.equal(focused.textContent, "Sticky note: Loose 16");
+    assert.equal(buttons()[20].textContent, "Sticky note: Loose 15");
+    assert.equal(doc.activeElement, buttons()[20]);
+    ctrl("z", true);
+    await tick();
+    assert.equal(doc.activeElement, buttons()[20]);
+    assert.deepEqual(stops(), [doc.activeElement]);
+    const edited = reading();
+    // Opened again, the whole list is written at once and reads the same.
+    await click('[data-action="home"]');
+    await click("[data-open]");
+    await tick();
+    assert.deepEqual(reading(), edited);
+    const ids = buttons().map((b) => b.getAttribute("aria-describedby"));
+    assert.equal(new Set(ids.filter(Boolean)).size, ids.filter(Boolean).length);
+  } finally {
+    await app.close();
+  }
+});
+
 test("a language change keeps the chosen tool, its hint and its cursor", async () => {
   const app = await setup();
   const { w, doc, click } = app;

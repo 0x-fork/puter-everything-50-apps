@@ -4647,81 +4647,134 @@ function writeOutline(outline, outlined) {
     !outline.contains(document.activeElement)
   )
     return writeOutlineLater(outline, outlined, relationships);
-  const parts = outlined.map((i, n) =>
-    outlineButton(i, relationships.get(i.id), n),
-  );
-  // Compare with the buttons last written: most edits change few of them,
-  // and only those are written again, so one edit on a large board neither
+  const parts = outlined.map((i) => outlineButton(i, relationships.get(i.id)));
+  // Compare with the buttons last written, object by object: most edits,
+  // adding or deleting one among thousands too, change few of them, and
+  // only those are written again, so one edit on a large board neither
   // parses nor lays out its whole list again.
-  const written = outline.renderedParts;
-  const changed =
-    written?.length === parts.length
-      ? parts.flatMap((part, n) => (part === written[n] ? [] : [n]))
-      : null;
-  if (
-    changed?.length <= 50 &&
-    rewriteOutline(outline, outlined, parts, changed)
-  )
-    return;
-  if (changed?.length !== 0) {
-    // The keyboard keeps its place in the list when the button it was on
-    // is replaced, as after deleting that object.
-    const focused = outline.contains(document.activeElement)
-      ? [...outline.querySelectorAll("button")].indexOf(document.activeElement)
-      : -1;
-    outline.renderedParts = parts;
-    outline.renderedIds = outlined.map((i) => i.id);
-    outline.innerHTML = parts.join("");
-    outline.finish = null;
-    outline.removeAttribute("aria-busy");
-    outline.removeAttribute("tabindex");
-    outline.stop = null;
-    outline.buttons = new Map();
-    outline.pressed = new Set();
-    for (const b of outline.querySelectorAll("button"))
-      outline.buttons.set(b.dataset.id, b);
-    if (focused >= 0) {
-      const buttons = outline.querySelectorAll("button");
-      (
-        buttons[Math.min(focused, buttons.length - 1)] ||
-        document.querySelector("#canvas")
-      )?.focus({ preventScroll: true });
-    }
-  }
-}
-// Writes again the buttons at the given places in the outline, each with
-// its description. Says whether it could, which it cannot when the list
-// does not hold the buttons it last wrote.
-function rewriteOutline(outline, outlined, parts, changed) {
-  const replaced = changed.map((n) =>
-    outline.buttons.get(outline.renderedIds[n]),
-  );
-  if (replaced.some((b) => !b?.isConnected)) return false;
-  const template = document.createElement("template");
-  const written = changed.map((n, k) => {
-    const old = replaced[k],
-      description =
-        old.nextElementSibling?.tagName === "SPAN"
-          ? old.nextElementSibling
-          : null,
-      focused = document.activeElement === old;
-    template.innerHTML = parts[n];
-    const button = template.content.firstElementChild;
-    old.replaceWith(template.content);
-    description?.remove();
-    if (focused) button.focus({ preventScroll: true });
-    return button;
-  });
-  // Two objects that swapped places replace each other's buttons, so every
-  // old button is let go before the new ones are kept.
-  for (const old of replaced) {
-    outline.buttons.delete(old.dataset.id);
-    outline.pressed.delete(old.dataset.id);
-  }
-  for (const button of written) outline.buttons.set(button.dataset.id, button);
+  if (outline.renderedParts && patchOutline(outline, outlined, parts)) return;
+  // The keyboard keeps its place in the list when the button it was on
+  // is replaced, as after deleting that object.
+  const focused = outline.contains(document.activeElement)
+    ? [...outline.querySelectorAll("button")].indexOf(document.activeElement)
+    : -1;
   outline.renderedParts = parts;
   outline.renderedIds = outlined.map((i) => i.id);
+  outline.innerHTML = parts.join("");
+  outline.finish = null;
+  outline.removeAttribute("aria-busy");
+  outline.removeAttribute("tabindex");
+  outline.stop = null;
+  outline.buttons = new Map();
+  outline.pressed = new Set();
+  for (const b of outline.querySelectorAll("button"))
+    outline.buttons.set(b.dataset.id, b);
+  if (focused >= 0) {
+    const buttons = outline.querySelectorAll("button");
+    (
+      buttons[Math.min(focused, buttons.length - 1)] ||
+      document.querySelector("#canvas")
+    )?.focus({ preventScroll: true });
+  }
+}
+// Brings the outline from the buttons last written to these, removing the
+// buttons of objects gone or changed and writing those of objects new or
+// changed in their places, while every other button stays as it is. An
+// object that moved in the list is written again at its new place, unless
+// the others moved around it instead. Says whether it did, which it does
+// not when so much changed that writing the whole list is quicker, or when
+// the list does not hold the buttons it last wrote.
+function patchOutline(outline, outlined, parts) {
+  const ids = outlined.map((i) => i.id),
+    oldIds = outline.renderedIds,
+    oldParts = outline.renderedParts,
+    place = new Map(ids.map((id, n) => [id, n]));
+  // Where each button that could stay is now, in the order it was written.
+  const reused = [];
+  for (let n = 0; n < oldIds.length; n++) {
+    const m = place.get(oldIds[n]);
+    if (m !== undefined && parts[m] === oldParts[n]) reused.push(m);
+  }
+  const staying = longestRise(reused);
+  if (ids.length + oldIds.length - 2 * staying.size > 100) return false;
+  if (ids.length === oldIds.length && staying.size === ids.length) return true;
+  const removed = [];
+  for (const id of oldIds)
+    if (!staying.has(place.get(id))) {
+      const button = outline.buttons.get(id);
+      if (!button?.isConnected) return false;
+      removed.push(button);
+    }
+  for (const n of staying)
+    if (!outline.buttons.get(ids[n])?.isConnected) return false;
+  // The keyboard keeps its place in the list, by position, as when the
+  // whole list is written: on the next object after deleting the one it
+  // was on.
+  const active = document.activeElement,
+    focused = outline.contains(active) ? oldIds.indexOf(active.dataset.id) : -1;
+  for (const button of removed) {
+    const description =
+      button.nextElementSibling?.tagName === "SPAN"
+        ? button.nextElementSibling
+        : null;
+    button.remove();
+    description?.remove();
+    outline.buttons.delete(button.dataset.id);
+    outline.pressed.delete(button.dataset.id);
+  }
+  // From the end, each run of new buttons goes in before the button that
+  // stays after it, or last.
+  const template = document.createElement("template");
+  let anchor = null;
+  for (let n = ids.length - 1; n >= 0;) {
+    if (staying.has(n)) {
+      anchor = outline.buttons.get(ids[n--]);
+      continue;
+    }
+    const last = n;
+    while (n >= 0 && !staying.has(n)) n--;
+    template.innerHTML = parts.slice(n + 1, last + 1).join("");
+    for (const b of template.content.querySelectorAll("button"))
+      outline.buttons.set(b.dataset.id, b);
+    outline.insertBefore(template.content, anchor);
+  }
+  // A change in how many objects the board shows sends the Tab stop back
+  // to the selection, or else the first object, as writing the whole list
+  // does.
+  if (ids.length !== oldIds.length) {
+    outline.buttons.get(outline.stop)?.setAttribute("tabindex", "-1");
+    outline.stop = null;
+  }
+  outline.renderedParts = parts;
+  outline.renderedIds = ids;
+  if (focused >= 0) {
+    const target =
+      outline.buttons.get(ids[Math.min(focused, ids.length - 1)]) ||
+      document.querySelector("#canvas");
+    if (target !== document.activeElement)
+      target?.focus({ preventScroll: true });
+  }
   return true;
+}
+// The places in the longest run of the given numbers that only rises, kept
+// in their order: the buttons that can stay while the others move.
+function longestRise(values) {
+  const tails = [],
+    previous = new Array(values.length);
+  for (let n = 0; n < values.length; n++) {
+    let low = 0,
+      high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (values[tails[middle]] < values[n]) low = middle + 1;
+      else high = middle;
+    }
+    previous[n] = low ? tails[low - 1] : -1;
+    tails[low] = n;
+  }
+  const rise = new Set();
+  for (let n = tails.at(-1) ?? -1; n >= 0; n = previous[n]) rise.add(values[n]);
+  return rise;
 }
 // Writes the outline in parts between other work, marked busy for screen
 // readers until it is whole. It is a Tab stop meanwhile: reaching it from
@@ -4748,7 +4801,7 @@ function writeOutlineLater(outline, outlined, relationships) {
         n++
       )
         html.push(
-          outlineButton(outlined[n], relationships.get(outlined[n].id), n),
+          outlineButton(outlined[n], relationships.get(outlined[n].id)),
         );
       parts.push(...html);
       const last = outline.lastElementChild;
@@ -5002,7 +5055,7 @@ function followEditedByOthers() {
   };
   return true;
 }
-function outlineButton(i, relationship, index) {
+function outlineButton(i, relationship) {
   relationship = objectDescription(i, relationship);
   const key = [
     i.id,
@@ -5017,11 +5070,18 @@ function outlineButton(i, relationship, index) {
     i.lang,
     i.textRuns,
     relationship,
-    index,
   ];
   const cached = outlineButtons.get(i);
   if (cached?.key.every((value, n) => value === key[n])) return cached.html;
-  const description = `outline-relationship-${index}`;
+  // Named after the object rather than its place, so a button stays the
+  // same when objects before it come or go. An object's id may hold spaces,
+  // which would split the reference in two, so they are written as codes.
+  const description = `outline-relationship-${escape(
+    i.id.replace(
+      /[%\t\n\f\r ]/g,
+      (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+    ),
+  )}`;
   const html = `<button data-id="${escape(i.id)}"${i.type === "frame" ? " data-frame" : ""} tabindex="-1" aria-pressed="false"${relationship ? ` aria-describedby="${description}"` : ""}>${objectNameHTML(i)}</button>${relationship ? `<span class="sr-only" id="${description}">${relationship}</span>` : ""}`;
   outlineButtons.set(i, { key, html });
   return html;
