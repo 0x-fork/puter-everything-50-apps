@@ -4,7 +4,7 @@
 // unit is a preference shared by every delay dialog.
 
 import { h } from '../lib/dom.js';
-import { select } from '../ui/controls.js';
+import { select, hotNumber } from '../ui/controls.js';
 import { paramControls } from './dialog.js';
 import { beatSeconds } from '../lib/time.js';
 
@@ -96,4 +96,35 @@ export function timeUnits(ctx) {
   }
 
   return { unit: () => unit, select: selectRow, rows };
+}
+
+/** Beats per cycle of a modulation rate (Hz) at the tempo, and back. */
+export const beatsPerCycle = (hz, s) => 1000 / (Math.max(1e-6, hz) * s.beatMs);
+export const rateForBeats = (beats, s) => 1000 / (Math.max(1e-6, beats) * s.beatMs);
+
+/**
+ * A modulation rate restated as beats per sweep at the tempo: a scrubbable
+ * value that sets the rate in Hz (Flanger tempo sync).
+ */
+export function beatsField(ctx, id) {
+  const p = ctx.def.params.find((q) => q.id === id);
+  const scale = () => timeScale(ctx);
+  const lim = (hz) => Number(beatsPerCycle(hz, scale()).toFixed(3));
+  const hot = hotNumber({
+    value: lim(ctx.values[id]),
+    min: lim(p.max),
+    max: lim(p.min),
+    step: 0.001,
+    label: `${p.label} in beats`,
+    pixelsPerStep: 0.05,
+    format: (v) => `${v.toFixed(3)} beats`,
+    parts: (v) => [v.toFixed(3), 'beats'],
+    editText: (v) => v.toFixed(3),
+    parse: (t) => parseFloat(t),
+    onInput: (v) => ctx.set(id, rateForBeats(v, scale())),
+    onChange: (v) => ctx.set(id, rateForBeats(v, scale())),
+  });
+  ctx.subscribe((values) => hot.setValue(lim(values[id])));
+  const note = h('span.faint.fx-tempo-note', `per sweep at ${Number(scale().tempo.toFixed(2))} BPM`);
+  return h('div.fx-row.fx-beats-row', h('span.fx-label', 'Tempo Sync:'), h('div.fx-beats', hot, note));
 }

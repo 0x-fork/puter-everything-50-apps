@@ -73,3 +73,23 @@ describe('delay time units', () => {
     await analog.close();
   });
 });
+
+describe('flanger tempo sync', () => {
+  it('reads the modulation rate as beats per sweep and sets it from beats', async () => {
+    const { beatsPerCycle, rateForBeats } = await import('../src/effects/time-units.js');
+    expect(beatsPerCycle(0.5, { beatMs: 500 })).toBe(4);
+    expect(rateForBeats(4, { beatMs: 500 })).toBe(0.5);
+    const { dlg, close, last } = open('flanger', { tempo: 120 });
+    const hot = dlg.querySelector('.fx-beats-row .hot');
+    // 0.3 Hz at 120 BPM: 6.667 beats per sweep.
+    expect(hot.textContent).toMatch(/6\.667/);
+    expect(dlg.querySelector('.fx-beats-row .fx-tempo-note').textContent).toMatch(/120 BPM/);
+    hot.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const input = dlg.querySelector('.fx-beats-row input');
+    input.value = '8';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(last().rate).toBeCloseTo(0.25, 3);
+    expect(dlg.querySelector('.fx-beats-row .hot').textContent).toMatch(/8\.000/);
+    await close();
+  });
+});

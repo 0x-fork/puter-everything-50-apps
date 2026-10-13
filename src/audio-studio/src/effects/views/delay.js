@@ -1,11 +1,11 @@
 // Dialog views for Delay and Echo: Delay, Echo and Analog Delay show their
 // delay times in the chosen Delay Time Units (milliseconds, beats or
-// samples, time-units.js).
+// samples, time-units.js); the Flanger shows its sweep in beats.
 
 import { h } from '../../lib/dom.js';
 import { registerEditor } from '../editors.js';
 import { controlsFor, groupBox, checkbox, sectionControls } from '../layout.js';
-import { timeUnits } from '../time-units.js';
+import { timeUnits, beatsField } from '../time-units.js';
 
 function delayView(ctx) {
   const t = timeUnits(ctx);
@@ -33,6 +33,18 @@ function analogDelayView(ctx) {
 }
 analogDelayView.hides = true;
 
+// Flanger: the modulation rate can also be read and set as beats per sweep.
+function flangerView(ctx) {
+  return h(
+    'div.fx-stack',
+    groupBox('Characteristics', controlsFor(ctx, ['initialDelay', 'finalDelay', 'phasing', 'feedback', 'rate']), beatsField(ctx, 'rate')),
+    groupBox('Mode', controlsFor(ctx, ['inverted', 'special', 'sinusoidal'])),
+    controlsFor(ctx, ['mix', 'gain']),
+  );
+}
+flangerView.hides = true;
+
 registerEditor('delay', delayView);
+registerEditor('flanger', flangerView);
 registerEditor('echo', echoView);
 registerEditor('analogDelay', analogDelayView);

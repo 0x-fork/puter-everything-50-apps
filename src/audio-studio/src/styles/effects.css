@@ -1934,3 +1934,17 @@ input[type='range'].fx-slider:disabled {
 .echo-split {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
 }
+
+.fx-beats-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.fx-beats {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}

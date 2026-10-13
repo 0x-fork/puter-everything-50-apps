@@ -57,7 +57,7 @@ registerEffect({
     ms('finalDelay', 'Final Delay Time', 0, 20, 5, { section: 'Characteristics' }),
     num('phasing', 'Stereo Phasing', 0, 360, 90, '°', { step: 1, section: 'Characteristics' }),
     pct('feedback', 'Feedback', 50, { max: 95, section: 'Characteristics' }),
-    hzRate('rate', 'Modulation Rate', 0.01, 10, 0.3, { section: 'Characteristics' }),
+    hzRate('rate', 'Modulation Rate', 0.01, 10, 0.3, { step: 0.001, section: 'Characteristics' }),
     bool('inverted', 'Inverted', false, { section: 'Mode' }),
     bool('special', 'Special Effects', false, { section: 'Mode' }),
     bool('sinusoidal', 'Sinusoidal', true, { section: 'Mode' }),
