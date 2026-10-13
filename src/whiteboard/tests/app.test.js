@@ -28895,6 +28895,63 @@ test("a shared board whose server cannot be reached says it is retrying and why 
   }
 });
 
+test("reopening a shared board whose waiting edits cannot be saved yet keeps it editable and says why", async () => {
+  const notes = [
+    item("note", 0, 0, { text: "A" }),
+    item("note", 300, 0, { text: "B" }),
+  ];
+  const shared = await sharedEditors("first-upload-fails", notes, 1);
+  const [a] = shared.apps;
+  // The board's server is up but refuses to save edits for a while.
+  const call = shared.env.service.call.bind(shared.env.service);
+  let busy = true;
+  shared.env.service.call = (identity, input) =>
+    busy && input.op === "commit"
+      ? Promise.reject(Object.assign(Error("Worker busy"), { status: 503 }))
+      : call(identity, input);
+  const state = () => a.doc.querySelector("#save-state")?.textContent;
+  try {
+    await a.click(`#board-outline [data-id="${notes[0].id}"]`);
+    await a.click('[data-action="delete"]');
+    await shared.until(
+      () => state() === "Offline · changes saved on this device",
+      "The edit waits on this device",
+    );
+    await a.click('[data-action="home"]');
+    for (let n = 0; n < 20; n++) await a.tick();
+    a.doc.querySelector("[data-open]").click();
+    await shared.until(
+      () => a.doc.querySelector(`#board-outline [data-id="${notes[1].id}"]`),
+      "The board opens",
+    );
+    for (let n = 0; n < 40; n++) await a.tick();
+    assert.equal(state(), "Offline · changes saved on this device");
+    assert.notEqual(a.doc.querySelector("#toast").textContent, "Worker busy");
+    // Still editable: another deletion is taken.
+    await a.click(`#board-outline [data-id="${notes[1].id}"]`);
+    await a.click('[data-action="delete"]');
+    assert.equal(
+      a.doc.querySelector(`#board-outline [data-id="${notes[1].id}"]`),
+      null,
+    );
+    busy = false;
+    await shared.until(
+      () => /live/.test(state()),
+      "The waiting edits are saved once the server takes them",
+    );
+    await shared.until(async () => {
+      const { doc } = await shared.env.service.load("first-upload-fails");
+      try {
+        return doc.snapshot().items.length === 0;
+      } finally {
+        doc.destroy();
+      }
+    }, "Both deletions reach the board");
+  } finally {
+    await shared.close();
+  }
+});
+
 test("reopening a shared board while it connects leaves one live session", async () => {
   const room = "reopen-while-connecting";
   const shared = await sharedEditors(

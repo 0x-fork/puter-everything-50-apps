@@ -10480,7 +10480,13 @@ async function startCollaboration(target, token, localTimer) {
     });
     boardMembers = [];
     boardColleagues = [];
-    await session.start(token);
+    await session.start(token).catch((error) => {
+      // Joined and running, a session whose first upload of edits kept on
+      // this device failed shows that and retries by itself; the board is
+      // open and editable, so the rest of opening it goes on.
+      if (!session.connected || session.closed) throw error;
+      session.failure(error);
+    });
     if (collaboration !== session) return;
     refreshBoardMembers();
     if (localTimer?.state === "running" && target.timer?.id === localTimer.id) {
@@ -10492,7 +10498,7 @@ async function startCollaboration(target, token, localTimer) {
       });
       await session.publish();
       await session.queue;
-      await session.flush();
+      await session.flush().catch((error) => session.failure(error));
     }
     if (collaboration !== session || current !== target) return;
     collaborationBusy = false;
