@@ -25,3 +25,20 @@ function plain(value) {
     typeof value.toJSON !== "function"
   );
 }
+// Whether two plain data values hold the same data, whatever order their
+// keys are in, without serializing them.
+export function sameData(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length)
+      return false;
+    for (let n = 0; n < a.length; n++) if (!sameData(a[n], b[n])) return false;
+    return true;
+  }
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const key of keys)
+    if (!Object.hasOwn(b, key) || !sameData(a[key], b[key])) return false;
+  return true;
+}

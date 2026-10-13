@@ -28,7 +28,7 @@ import {
 } from "../rich-text.js";
 import * as Y from "yjs";
 import { validateBoard, sharedCopy } from "../model.js";
-import { sameJSON } from "../same-json.js";
+import { sameData, sameJSON } from "../same-json.js";
 import { normalizeEmbed } from "../content/providers.js";
 import {
   commitPlanning,
@@ -485,9 +485,12 @@ export class SharedDocument {
   // a commenter's save leaves the board's content untouched, including values
   // the snapshot projects differently from how they are stored.
   commit(board, { content = true } = {}) {
+    // Read before the change, while the stacking order kept between changes
+    // still holds; objects the change removes are left out of it.
+    const stacked = content ? this.layered() : null;
     this.doc.transact(() => {
       this.setWorkshop(board.workshop);
-      if (content) this.commitContent(board);
+      if (content) this.commitContent(board, stacked);
       for (const thread of updateCommentAnchors(board.comments, board.items)) {
         let entry = this.comments.get(thread.id);
         if (!entry) {
@@ -1187,7 +1190,8 @@ export class SharedDocument {
     this.undo.destroy();
     this.doc.destroy();
   }
-  commitContent(board) {
+  // `stacked` is the stacking order as it stood before the change.
+  commitContent(board, stacked = this.layered()) {
     const automaticChildren = autoMindChildren(board.items);
     this.doc.transact(() => {
       this.setTimer(board.timer);
@@ -1214,9 +1218,7 @@ export class SharedDocument {
         }
       // The stored order is all that is compared, so the board is not
       // projected again for it.
-      const oldOrder = this.layered()
-        .map(([id]) => id)
-        .filter((id) => ids.has(id));
+      const oldOrder = stacked.map(([id]) => id).filter((id) => ids.has(id));
       const nextOrder = board.items.map((i) => i.id);
       const reordered = !equal(
         oldOrder,
@@ -1277,6 +1279,19 @@ export class SharedDocument {
         }
         const z = crowded ? index : ranks[index];
         if (entry.get("z") !== z) entry.set("z", z);
+        // An object exactly as last read from the document, which nothing has
+        // changed since, has nothing to write; comparing it is far cheaper
+        // than writing it, so a large board's unchanged objects cost little.
+        // Tables and images write more than they read back.
+        const read = !fresh && this.deep && this.read.get(item.id);
+        if (
+          read &&
+          item.type !== "table" &&
+          item.src === undefined &&
+          !entry.has("src") &&
+          sameData(read, item)
+        )
+          return;
         this.writeItem(entry, item, automaticChildren.has(item.id));
       });
     }, LOCAL);

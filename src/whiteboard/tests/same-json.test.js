@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sameJSON } from "../src/same-json.js";
+import { sameData, sameJSON } from "../src/same-json.js";
 
 test("sameJSON agrees with comparing serialized JSON", () => {
   const shared = { x: 1 };
@@ -41,4 +41,18 @@ test("sameJSON agrees with comparing serialized JSON", () => {
       JSON.stringify(a) === JSON.stringify(b),
       `${JSON.stringify(a)} vs ${JSON.stringify(b)}`,
     );
+});
+
+test("sameData compares plain data whatever its key order", () => {
+  assert.equal(
+    sameData({ a: 1, b: [1, { c: 2 }] }, { b: [1, { c: 2 }], a: 1 }),
+    true,
+  );
+  assert.equal(sameData({ a: 1 }, { a: 1, b: undefined }), false);
+  assert.equal(sameData({ a: [1, 2] }, { a: [1, 2, 3] }), false);
+  assert.equal(sameData([1, 2], { 0: 1, 1: 2 }), false);
+  assert.equal(sameData({ a: NaN }, { a: NaN }), false);
+  assert.equal(sameData({ a: "1" }, { a: 1 }), false);
+  assert.equal(sameData(null, {}), false);
+  assert.equal(sameData("x", "x"), true);
 });
