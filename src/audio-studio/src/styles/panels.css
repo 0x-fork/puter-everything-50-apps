@@ -421,6 +421,115 @@
   flex: 1;
 }
 
+/* Frequency Band Splitter */
+.bands {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(680px, 86vw);
+}
+
+.bands-plot-wrap {
+  padding: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-editor);
+}
+
+.bands-plot {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+  user-select: none;
+}
+
+.bands-grid {
+  stroke: var(--grid-strong);
+}
+
+.bands-frame {
+  fill: none;
+  stroke: var(--divider);
+}
+
+.bands-tick {
+  fill: var(--text-dim);
+  font-size: 10px;
+}
+
+.bands-xover {
+  cursor: ew-resize;
+  outline: none;
+}
+
+.bands-handle {
+  fill: var(--text-strong);
+  stroke: var(--bg-editor);
+}
+
+.bands-xover.active .bands-handle,
+.bands-xover:focus-visible .bands-handle {
+  fill: var(--accent);
+  stroke: var(--text-strong);
+}
+
+.bands-count {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+}
+
+.bands-n {
+  min-width: 30px;
+  padding: 3px 0 4px;
+  border: 1px solid var(--divider);
+  border-bottom: 3px solid var(--band);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.bands-n[aria-pressed='true'] {
+  color: var(--text-strong);
+  background: var(--bg-input);
+}
+
+.bands-n:disabled {
+  cursor: default;
+}
+
+.bands-table {
+  display: grid;
+  grid-template-columns: max-content repeat(var(--cols, 2), minmax(0, 1fr));
+  align-items: center;
+  gap: 6px 10px;
+  font-variant-numeric: tabular-nums;
+  overflow-x: auto;
+}
+
+.bands-table .input.num {
+  width: 72px;
+}
+
+.bands-rowhead {
+  color: var(--text-dim);
+}
+
+.bands-swatch {
+  border-bottom: 3px solid var(--band);
+  text-align: center;
+}
+
+.bands-opts > label {
+  color: var(--text-dim);
+}
+
+.bands-io {
+  font-size: var(--fs-sm);
+}
+
 @media (max-width: 600px) {
   .mixpaste-cols {
     grid-template-columns: minmax(0, 1fr);
