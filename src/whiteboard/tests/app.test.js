@@ -34,6 +34,8 @@ async function setup(
     url = "https://whiteboard.test",
     indexedDB,
     preferences = {},
+    // Called with the window just before the app runs in it.
+    prepare,
   } = {},
 ) {
   const dom = new JSDOM('<div id="app"></div><div id="toast"></div>', {
@@ -112,6 +114,7 @@ async function setup(
     if (asyncDialogClose) w.setTimeout(close, 0);
     else close();
   };
+  prepare?.(w);
   await w.eval(`(async()=>{${code}\n})()`);
   const tick = () => new Promise((r) => setTimeout(r, 25));
   const click = async (selector) => {
@@ -4877,6 +4880,44 @@ test("Frames and navigation copies a link to each frame from its row", async () 
         selectedClipboard(reopened)[0].id,
         selected[1].id,
         "The link opens the board at that frame",
+      );
+    } finally {
+      await reopened.close();
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("a board opened by its address leaves the library under it unpainted until the library shows", async () => {
+  const app = await setup();
+  try {
+    await app.click('[data-action="new"]');
+    await app.click('[data-action="add-note"]');
+    const painted = [];
+    const reopened = await setup(undefined, {
+      url: app.w.location.href,
+      indexedDB: app.w.indexedDB,
+      prepare(w) {
+        const getContext = w.HTMLCanvasElement.prototype.getContext;
+        w.HTMLCanvasElement.prototype.getContext = function (...args) {
+          if (this.dataset.preview) painted.push(this.dataset.preview);
+          return getContext.apply(this, args);
+        };
+      },
+    });
+    try {
+      assert.ok(reopened.doc.querySelector("#canvas"), "The board opened");
+      await reopened.tick();
+      assert.deepEqual(painted, [], "No preview was painted unseen");
+      await reopened.click('[data-action="home"]');
+      const previews = [
+        ...reopened.doc.querySelectorAll("canvas[data-preview]"),
+      ];
+      assert.ok(previews.length > 1, "The board and templates have previews");
+      assert.ok(
+        previews.every((canvas) => canvas.dataset.painted),
+        "Every preview is painted once the library shows",
       );
     } finally {
       await reopened.close();

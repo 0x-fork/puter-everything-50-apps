@@ -494,6 +494,7 @@ import { bindText } from "./collaboration/text-binding.js";
 import {
   paint,
   paintPreviews,
+  holdPreviews,
   refreshTextLayouts,
   exportPNG,
   preview,
@@ -3259,7 +3260,13 @@ function showBoardTitle(title) {
   const heading = document.querySelector("#board-heading");
   if (heading && heading.textContent !== title) heading.textContent = title;
 }
-async function home({ keepAddress = false, push = false } = {}) {
+// Without `previews`, the library's previews wait until holdPreviews(false),
+// as when the board the page's address names opens over it.
+async function home({
+  keepAddress = false,
+  push = false,
+  previews = true,
+} = {}) {
   const left = current?.id;
   flushNudgeSave();
   onboarding.close(false);
@@ -3293,6 +3300,7 @@ async function home({ keepAddress = false, push = false } = {}) {
   // Signing out or leaving the organization takes its boards list away, so
   // the library goes back to all boards.
   if (filter === "organization" && !organization.info) filter = "all";
+  holdPreviews(!previews);
   document.title = t("Your boards") + " · Whiteboard";
   // Board previews already painted move into the new cards instead of
   // being painted again, as they do when a search redraws the cards.
@@ -13576,14 +13584,16 @@ try {
     if (!usable) console.warn("Skipping an unreadable board record", b?.id);
     return usable;
   });
-  await home({ keepAddress: true });
+  // A board the address names opens over the library, whose previews are
+  // painted only once it is clear that the library shows.
+  const arrival = boardDestination(location.href, location.href);
+  await home({ keepAddress: true, previews: !arrival });
   account.refresh().catch(() => {});
   loadCloudIndex();
   // A shared board already on this device opens directly for a signed-in
   // account, as it does when the address changes while the page is open:
   // reloading it asks nothing. Otherwise, as for an invitation, the dialog's
   // button lets Puter's sign-in window open from a press.
-  const arrival = boardDestination(location.href, location.href);
   const known =
     arrival?.room &&
     !arrival.token &&
@@ -13599,6 +13609,7 @@ try {
   else if (readOrganizationLink(location.href))
     organizationHome.joinDialog(location.href);
   else await followBoardAddress(location.href);
+  holdPreviews(false);
   reconnectOrganization().catch(() => {});
 } catch (error) {
   console.error("Whiteboard initialization failed", error);

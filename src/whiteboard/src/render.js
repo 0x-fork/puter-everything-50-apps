@@ -1327,7 +1327,17 @@ function paintPreview(canvas, rect = canvas.getBoundingClientRect()) {
   );
   canvas.dataset.painted = painted;
 }
+// A board named in the page's address opens over the library at once; the
+// library's previews wait meanwhile, unseen, rather than taking a second
+// or more of a library of large boards before the board shows.
+let previewsHeld = false;
+export function holdPreviews(held) {
+  const released = previewsHeld && !held;
+  previewsHeld = held;
+  if (released) paintPreviews();
+}
 export function paintPreviews() {
+  if (previewsHeld) return;
   const active = new Set();
   const Observer = window.IntersectionObserver;
   // Cards replaced since the last pass are let go.
