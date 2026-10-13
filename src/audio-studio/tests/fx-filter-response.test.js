@@ -59,17 +59,18 @@ describe('filter response curves match the processors', () => {
 describe('filter definitions', () => {
   it('lay out parametric EQ parameters in the order the processor reads them', () => {
     const ids = getEffect('parametricEq').params.map((p) => p.id);
-    expect(ids.length).toBe(36);
+    expect(ids.length).toBe(38);
+    expect(ids.slice(36)).toEqual(['ultraQuiet', 'range']);
     expect(ids.slice(0, 9)).toEqual(['gain', 'qMode', 'hpOn', 'hpFreq', 'hpSlope', 'lsOn', 'lsFreq', 'lsGain', 'lsQ']);
     expect(ids.slice(9, 13)).toEqual(['band1On', 'band1Freq', 'band1Gain', 'band1Q']);
-    expect(ids.slice(29)).toEqual(['hsOn', 'hsFreq', 'hsGain', 'hsQ', 'lpOn', 'lpFreq', 'lpSlope']);
+    expect(ids.slice(29, 36)).toEqual(['hsOn', 'hsFreq', 'hsGain', 'hsQ', 'lpOn', 'lpFreq', 'lpSlope']);
   });
 
   it('use ISO centre frequencies for the graphic equalizers', () => {
     expect(getEffect('graphicEq10').bands).toEqual([31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]);
     expect(getEffect('graphicEq20').bands.length).toBe(20);
     expect(getEffect('graphicEq30').bands.length).toBe(30);
-    expect(getEffect('graphicEq30').params.length).toBe(32);
+    expect(getEffect('graphicEq30').params.length).toBe(33);
   });
 
   it('send curves to WASM as data and report STFT latency', () => {

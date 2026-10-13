@@ -24,6 +24,14 @@ export class CommandRegistry {
     this.byShortcut = new Map();
     /** User remappings: id -> shortcut strings (an empty list removes the shortcut). */
     this.overrides = new Map(Object.entries(app?.prefs?.get?.('shortcuts') || {}));
+    /** Observers told before and after each command runs ({ before(id, args), after(id, args) }). */
+    this.watchers = new Set();
+  }
+
+  /** Watches command runs (favorite recording); returns a function that stops watching. */
+  watch(w) {
+    this.watchers.add(w);
+    return () => this.watchers.delete(w);
   }
 
   register(def) {
@@ -127,7 +135,9 @@ export class CommandRegistry {
     }
     if (!this.isEnabled(id, args)) return undefined;
     try {
+      for (const w of this.watchers) w.before?.(id, args);
       const result = await c.run(this.app, args);
+      for (const w of this.watchers) w.after?.(id, args);
       if (c.repeatable) this.app.lastCommand = { id, args };
       return result;
     } catch (err) {

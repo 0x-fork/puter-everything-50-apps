@@ -8,6 +8,7 @@ import { installEffectCommands } from '../effects/commands.js';
 import { effectsRackPanel, extendFileGraph, addToRack, applyRack, rackFor, setRack, installRackCommands } from '../effects/rack-panel.js';
 import { installFavorites } from '../effects/favorites.js';
 import { installGenerators } from '../effects/generate-ui.js';
+import { restoreImpulses } from '../storage/impulses.js';
 import '../effects/views/index.js';
 
 export function installEffects(app) {
@@ -24,6 +25,8 @@ export function installEffects(app) {
   installRackCommands(app);
   installGenerators(app);
   installFavorites(app);
+  // Impulses loaded into the reverbs in earlier visits; playing slots pick them up.
+  restoreImpulses().then((names) => names.length && app.syncGraph?.());
   app.extendFileGraph = extendFileGraph;
   app.addToRack = (id, values) => addToRack(app, id, values);
   app.applyRack = () => applyRack(app);

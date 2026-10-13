@@ -214,6 +214,16 @@
   color: var(--text-strong);
 }
 
+.io-backup-list > li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.io-backup-list > li > .check {
+  padding-left: 12px;
+}
+
 /* ------------------------------------------------------------ media browser */
 
 .media-panel {

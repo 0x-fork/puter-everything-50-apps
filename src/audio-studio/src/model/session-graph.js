@@ -7,7 +7,9 @@
 // front clip hiding the rear one when automatic crossfades are off), clip
 // volume/pan envelopes, looped clips, polarity inversion, effect chains
 // (track and master racks with input/output gain and dry/wet mix, and
-// per-clip Sound Assistant chains in clip.fx) and the metronome.
+// per-clip Sound Assistant chains in clip.fx), the metronome and 5.1
+// sessions (a 5.1 master makes a surround graph: 5.1 tracks and buses carry
+// six channels and the others are placed by their surround panner).
 
 import { sourceKey } from '../engine/engine.js';
 import { activeCrossfades, frontOrder, clipEnd, SILENT_DB } from './session-edits.js';
@@ -21,9 +23,9 @@ export const dbToGain = (db) => (db <= SILENT_DB ? 0 : Math.pow(10, db / 20));
  * below 100%, { fxMix, fxWet, fxDry } (see mixcore runChain). Input and
  * output gain only apply while the rack has effects to run.
  */
-export function trackRackSpecs(t, rateDoc) {
+export function trackRackSpecs(t, rateDoc, channels = 2) {
   if (!t.fxPower) return { fx: [] };
-  const slots = slotSpecs(t.fx, `trk:${t.id}`, rateDoc);
+  const slots = slotSpecs(t.fx, `trk:${t.id}`, rateDoc, channels);
   if (!slots.length) return { fx: [] };
   const inGain = t.fxIn ? gainSpec(`trk:${t.id}:in`, t.fxIn) : null;
   const wet = inGain ? [inGain, ...slots] : slots;
@@ -163,6 +165,7 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
   const plan = clipPlan(state);
   const rateDoc = { sampleRate: state.sampleRate };
   const busIds = new Set(state.tracks.filter((t) => t.type === 'bus').map((t) => t.id));
+  const surround = state.master.channels === 6;
   const tracks = [];
   for (const t of state.tracks) {
     const o = overrides[t.id] || {};
@@ -175,10 +178,17 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
       pan: panPts.length ? 0 : (o.pan ?? t.pan) / 100,
       mute: t.mute,
       solo: t.solo,
-      ...trackRackSpecs(t, rateDoc),
+      ...trackRackSpecs(t, rateDoc, surround && t.channels === 6 ? 6 : 2),
       clips: [],
     };
     if (t.invert) gt.invert = true;
+    if (surround) {
+      if (t.channels === 6) gt.six = true;
+      else {
+        gt.surround = { ...(t.surround || {}) };
+        if (t.channels === 1) gt.monoIn = true;
+      }
+    }
     if (volPts.length) gt.volumeEnv = dbEnvelopeToGain(volPts);
     if (panPts.length) gt.panEnv = panEnvelope(panPts);
     if (t.type === 'bus') {
@@ -249,7 +259,7 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
   }
   const m = state.master;
   const mo = overrides[m.id] || {};
-  const master = { gain: dbToGain(mo.volume ?? m.volume), ...trackRackSpecs(m, rateDoc) };
+  const master = { gain: dbToGain(mo.volume ?? m.volume), ...trackRackSpecs(m, rateDoc, surround ? 6 : 2) };
   if (m.invert) master.invert = true;
   if (m.eq?.on) master.fx = [...master.fx, ...slotSpecs([{ id: 'eq', effect: 'parametricEq', values: m.eq.values, enabled: true }], `eq:${m.id}`, rateDoc)];
   if (m.mode !== 'off' && mo.volume === undefined && m.automation.volume.length) {
@@ -259,6 +269,7 @@ export function buildSessionGraph(state, pool, { clipIds = null, overrides = {},
   // A mono master folds the mix to mono (both outputs carry it).
   if (m.channels === 1) master.mono = true;
   const graph = { rate: state.sampleRate, tracks, master };
+  if (surround) graph.surround = true;
   if (panLaw && panLaw.mode === 'equalPower') graph.panLaw = { mode: 'equalPower', centerDb: panLaw.centerDb };
   return { graph, sources };
 }

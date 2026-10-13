@@ -5,7 +5,7 @@
 
 import { registerEffect, getEffect, paramArray } from '../registry.js';
 import { offloaded, runTask } from '../offline-fx.js';
-import { num, db, hz, ms, pct, bool, choice, preset, pause, checkAbort, dataId } from './util.js';
+import { num, db, hz, ms, pct, bool, choice, preset, pause, checkAbort, dataId, packCurve } from './util.js';
 
 const GROUP = 'Noise Reduction / Restoration';
 
@@ -17,7 +17,7 @@ function pow2(v, lo, hi) {
   return Math.min(hi, Math.max(lo, n));
 }
 
-const FOCUS = ['All frequencies', 'Low frequencies', 'Mid frequencies', 'High frequencies'];
+const FOCUS = ['All frequencies', 'Low frequencies', 'Mid frequencies', 'High frequencies', 'Low and high frequencies'];
 
 // ------------------------------------------------------------------- DeHummer
 
@@ -76,6 +76,53 @@ registerEffect({
 
 // ------------------------------------------------------------ Hiss Reduction
 
+/** Level range of the hiss noise floor graph (dB of per-bin power). */
+export const FLOOR_DB = [-140, 0];
+
+/**
+ * Noise floor level at `f` from floor points ([{ f, g }] sorted by f):
+ * linear in frequency from a point at or below 1 Hz (the 0 Hz end), linear
+ * in log frequency elsewhere, flat beyond the ends (hiss.rs floor_at).
+ */
+export function floorAt(points, f) {
+  if (!points?.length) return FLOOR_DB[0];
+  if (f <= points[0].f) return points[0].g;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (f <= b.f) {
+      const t = a.f <= 1 ? (f - a.f) / Math.max(1e-6, b.f - a.f) : Math.log(f / a.f) / Math.max(1e-9, Math.log(b.f / a.f));
+      return a.g + (b.g - a.g) * Math.min(1, Math.max(0, t));
+    }
+  }
+  return points[points.length - 1].g;
+}
+
+/**
+ * Editable floor points from a captured mean power spectrum (`spectrum`,
+ * fftSize / 2 + 1 bins): a 0 Hz end, a few points through the low end, then
+ * `count` points evenly spaced up to Nyquist (where hiss lives, and so they
+ * stay apart on both the linear and the log axis), each the mean power within
+ * a sixth of an octave around it, in dB.
+ */
+export function floorPoints(spectrum, fftSize, rate, count = 20) {
+  const bins = spectrum.length;
+  const nyq = rate / 2;
+  const level = (lo, hi) => {
+    const a = Math.max(1, Math.floor((lo * fftSize) / rate));
+    const b = Math.min(bins - 1, Math.max(a, Math.ceil((hi * fftSize) / rate)));
+    let sum = 0;
+    for (let k = a; k <= b; k++) sum += spectrum[k];
+    const db = 10 * Math.log10(sum / (b - a + 1) + 1e-30);
+    return Math.round(Math.min(FLOOR_DB[1], Math.max(FLOOR_DB[0], db)) * 10) / 10;
+  };
+  const band = 2 ** (1 / 12);
+  const top = nyq / 12;
+  const freqs = [200, 500, 1000].filter((f) => f < top * 0.8);
+  for (let i = 0; i < count; i++) freqs.push(top + ((nyq - top) * i) / (count - 1));
+  return [{ f: 1, g: level(20, freqs[0] / band) }, ...freqs.map((f) => ({ f: Math.round(f * 10) / 10, g: level(f / band, Math.min(nyq, f * band)) }))];
+}
+
 registerEffect({
   id: 'hissReduction',
   name: 'Hiss Reduction',
@@ -83,12 +130,18 @@ registerEffect({
   kind: 131,
   params: [
     db('noiseFloor', 'Noise Floor', -40, 40, 0),
-    db('reduceBy', 'Reduce By', 0, 80, 18),
+    db('reduceBy', 'Reduce By', 0, 100, 18),
     pct('decay', 'Spectral Decay Rate', 60),
     num('precision', 'Precision Factor', 1, 20, 7, '', { step: 1 }),
     db('transition', 'Transition Width', 0, 40, 6),
     fftChoice('fftSize', 'FFT Size', [512, 1024, 2048, 4096, 8192], 2048),
     bool('hissOnly', 'Output Hiss Only', false),
+    // The noise floor graph's frequency axis (a view setting kept with the values).
+    choice('floorScale', 'Scale', ['Linear', 'Logarithmic'], 0, { hidden: true }),
+    // Captured or drawn noise floors per channel ([{ f, g }], dB of per-bin
+    // power); empty = the floor is tracked from the audio as it plays.
+    { id: 'floorLeft', label: 'Left Noise Floor', type: 'curve', default: [], min: FLOOR_DB[0], max: FLOOR_DB[1], unit: 'dB', hidden: true },
+    { id: 'floorRight', label: 'Right Noise Floor', type: 'curve', default: [], min: FLOOR_DB[0], max: FLOOR_DB[1], unit: 'dB', hidden: true },
   ],
   presets: [
     preset('Light Tape Hiss', { noiseFloor: 0, reduceBy: 12, decay: 60, precision: 7, transition: 6, fftSize: 2048, hissOnly: false }),
@@ -97,6 +150,8 @@ registerEffect({
     preset('Fast and Transparent', { noiseFloor: -3, reduceBy: 10, decay: 40, precision: 5, transition: 4, fftSize: 1024, hissOnly: false }),
   ],
   latency: (v) => pow2(v.fftSize, 256, 16384),
+  // An empty floor still sends one value (no pairs), so the processor drops an old one.
+  data: (v) => ['floorLeft', 'floorRight'].map((id, slot) => ({ slot, id: dataId(v[id] || []), values: v[id]?.length ? packCurve(v[id]) : new Float32Array([-1]) })),
 });
 
 // -------------------------------------------------------------------- DeNoise
@@ -151,11 +206,13 @@ registerEffect({
     db('reduceBy', 'Reduce Noise By', 0, 60, 12),
     pct('noisiness', 'Noisiness', 20),
     db('noiseFloor', 'Fine Tune Noise Floor', -20, 20, 0),
-    db('threshold', 'Signal Threshold', -10, 30, 3),
+    db('threshold', 'Signal Threshold', -20, 30, 3),
     num('decay', 'Spectral Decay Rate', 0, 2000, 150, 'ms', { step: 10 }),
     num('broadband', 'Broadband Preservation', 0, 500, 100, 'Hz', { step: 5 }),
     fftChoice('fftSize', 'FFT Size', [256, 512, 1024, 2048, 4096, 8192], 1024),
+    bool('highQuality', 'High Quality Mode (slower)', false),
   ],
+  about: 'Learns the noise floor as it plays and keeps reducing whatever stays near it, so it needs no noise print. High Quality Mode overlaps more analysis frames and smooths the reduction, leaving less watery residue for about twice the processing.',
   presets: [
     preset('Light Background Noise', { reduceBy: 8, noisiness: 15, noiseFloor: 0, threshold: 3, decay: 150, broadband: 100, fftSize: 1024 }),
     preset('Heavy Background Noise', { reduceBy: 24, noisiness: 40, noiseFloor: 2, threshold: 2, decay: 250, broadband: 150, fftSize: 2048 }),
@@ -369,16 +426,16 @@ let nextModelId = 1;
 /**
  * NMF settings from Sound Remover values: FFT size, sound bases (model
  * complexity), free bases for everything else (content complexity) and the
- * iteration counts the refinement passes buy for learning and removal.
+ * iteration counts the sound and content refinement passes buy for learning
+ * and removal.
  */
 export function soundSettings(v) {
-  const passes = Math.max(1, Math.round(v.passes));
   return {
     fft: pow2(v.fftSize, 512, 8192),
     k: Math.max(1, Math.round(v.complexity)),
     kFree: Math.max(1, Math.round(v.contentComplexity)),
-    learnIters: 40 + 20 * passes,
-    removeIters: 10 + 10 * passes,
+    learnIters: 20 + 2 * Math.max(1, Math.round(v.passes)),
+    removeIters: Math.max(1, Math.round(v.contentPasses ?? 40)),
   };
 }
 
@@ -446,7 +503,7 @@ export async function removeSound(dsp, channels, rate, w, values, { onProgress, 
       const buf = dsp.floats(nch * n);
       const v = buf.view();
       for (let c = 0; c < nch; c++) v.set(channels[c].subarray(a, b), c * n);
-      dsp.x.rs_sound_remove(buf.ptr, nch, n, s.fft, model.ptr, s.k, s.kFree, s.removeIters, values.strength / 100, -values.reduceBy, alpha, values.speech ? 1 : 0, rate);
+      dsp.x.rs_sound_remove(buf.ptr, nch, n, s.fft, model.ptr, s.k, s.kFree, s.removeIters, values.strength / 100, -values.reduceBy, alpha, values.speech ? 1 : 0, rate, values.enhanced ? values.suppression / 100 : 0);
       const r = buf.view();
       for (let c = 0; c < nch; c++) {
         const dst = out[c];
@@ -477,22 +534,27 @@ registerEffect({
   kind: null,
   needsSoundModel: true,
   params: [
-    num('complexity', 'Sound Model Complexity', 1, 30, 8, '', { step: 1 }),
-    num('passes', 'Sound Refinement Passes', 1, 10, 3, '', { step: 1 }),
-    num('contentComplexity', 'Content Complexity', 2, 64, 16, '', { step: 1 }),
+    num('complexity', 'Sound Model Complexity', 1, 100, 8, '', { step: 1 }),
+    num('passes', 'Sound Refinement Passes', 1, 150, 40, '', { step: 1 }),
+    num('contentComplexity', 'Content Complexity', 1, 100, 16, '', { step: 1 }),
     pct('strength', 'Reduction Strength', 100),
     db('reduceBy', 'Maximum Reduction', 0, 80, 40),
     num('sensitivity', 'Sensitivity', 1, 10, 5, '', { step: 0.5 }),
     fftChoice('fftSize', 'FFT Size', [512, 1024, 2048, 4096, 8192], 2048),
     bool('speech', 'Enhance for Speech', false),
+    // Iterations fitting the content around the sound during removal.
+    num('contentPasses', 'Content Refinement Passes', 1, 150, 40, '', { step: 1 }),
+    // A harder mask that clears cells the sound dominates more completely.
+    bool('enhanced', 'Enhanced Suppression', false),
+    pct('suppression', 'Suppression Strength', 50, { enabledIf: (v) => v.enhanced }),
   ],
   presets: [
     preset('Default', {}),
-    preset('Remove Beeps and Tones', { complexity: 4, passes: 3, contentComplexity: 24, strength: 100, reduceBy: 60, sensitivity: 6, fftSize: 4096, speech: false }),
-    preset('Remove Background Hum or Whine', { complexity: 6, passes: 4, contentComplexity: 20, strength: 100, reduceBy: 40, sensitivity: 5, fftSize: 8192, speech: false }),
-    preset('Remove Sound Under Dialogue', { complexity: 10, passes: 4, contentComplexity: 16, strength: 90, reduceBy: 30, sensitivity: 5, fftSize: 2048, speech: true }),
-    preset('Gentle Reduction', { complexity: 8, passes: 2, contentComplexity: 24, strength: 60, reduceBy: 15, sensitivity: 4, fftSize: 2048, speech: false }),
-    preset('Aggressive Removal', { complexity: 16, passes: 6, contentComplexity: 12, strength: 100, reduceBy: 70, sensitivity: 8, fftSize: 2048, speech: false }),
+    preset('Remove Beeps and Tones', { complexity: 4, passes: 40, contentPasses: 40, contentComplexity: 24, strength: 100, reduceBy: 60, sensitivity: 6, fftSize: 4096, speech: false }),
+    preset('Remove Background Hum or Whine', { complexity: 6, passes: 50, contentPasses: 50, contentComplexity: 20, strength: 100, reduceBy: 40, sensitivity: 5, fftSize: 8192, speech: false }),
+    preset('Remove Sound Under Dialogue', { complexity: 10, passes: 50, contentPasses: 50, contentComplexity: 16, strength: 90, reduceBy: 30, sensitivity: 5, fftSize: 2048, speech: true }),
+    preset('Gentle Reduction', { complexity: 8, passes: 30, contentPasses: 30, contentComplexity: 24, strength: 60, reduceBy: 15, sensitivity: 4, fftSize: 2048, speech: false }),
+    preset('Aggressive Removal', { complexity: 16, passes: 70, contentPasses: 70, contentComplexity: 12, strength: 100, reduceBy: 70, sensitivity: 8, fftSize: 2048, speech: false, enhanced: true, suppression: 60 }),
   ],
   run: async ({ channels, rate, values, extra, dsp, onProgress, signal }) => {
     const model = extra?.soundModel;

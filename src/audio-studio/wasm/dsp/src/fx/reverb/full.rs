@@ -132,7 +132,7 @@ impl FullReverb {
                 er.gains[k] = 0.78f32.powf(img[3]) * r0 / ri * if k % 4 == 3 { -1.0 } else { 1.0 };
             }
         }
-        let hp = Coefs::highpass(r, p[6].clamp(5.0, 2000.0), 0.7071);
+        let hp = Coefs::highpass(r, p[6].clamp(5.0, 20000.0), 0.7071);
         let eq = [
             Coefs::low_shelf(r, p[7], 0.7071, p[8]),
             Coefs::peaking(r, p[9], p[11].max(0.1), p[10]),
@@ -154,14 +154,14 @@ impl Effect for FullReverb {
             return;
         }
         self.p[i] = match i {
-            0 => v.clamp(50.0, 30000.0),
+            0 => v.clamp(20.0, 30000.0),
             1 => v.clamp(0.0, MAX_PREDELAY_MS),
             _ => v,
         };
         match i {
-            14 => self.dry.target = (v * 0.01).clamp(0.0, 1.0),
-            15 => self.rev.target = (v * 0.01).clamp(0.0, 1.0),
-            16 => self.early.target = (v * 0.01).clamp(0.0, 1.0),
+            14 => self.dry.target = (v * 0.01).clamp(0.0, 2.0),
+            15 => self.rev.target = (v * 0.01).clamp(0.0, 5.0),
+            16 => self.early.target = (v * 0.01).clamp(0.0, 2.0),
             _ => self.update(),
         }
     }

@@ -2,6 +2,7 @@
 // inserted at the playhead or replaces the selection in the active file; with
 // no audio file open, a new file is created. Tones and Noise dialogs reuse the
 // effect parameter controls and preset storage (ids gen.tones / gen.noise).
+// Each dialog can play what it would generate before it is inserted.
 
 import { h, announce } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
@@ -22,6 +23,7 @@ import * as puter from '../storage/puter.js';
 import { decodeAudio } from '../audio/decode.js';
 import { dsp } from '../audio/dsp.js';
 import { UserError } from '../lib/errors.js';
+import { encodeWav } from '../audio/wav.js';
 
 const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
 
@@ -36,12 +38,12 @@ export const TONES_DEF = {
   body: (ctx) => tonesBody(ctx),
   params: [
     { id: 'sweep', label: 'Sweep Frequencies', type: 'bool', default: false },
-    { id: 'base', label: 'Base Frequency', min: 20, max: 22000, step: 1, default: 440, unit: 'Hz', scale: 'log' },
-    { id: 'modulateBy', label: 'Modulation Depth', min: 0, max: 2000, step: 1, default: 0, unit: 'Hz' },
-    { id: 'modFreq', label: 'Modulation Rate', min: 0.1, max: 200, step: 0.1, default: 1, unit: 'Hz', scale: 'log' },
-    { id: 'endBase', label: 'Base Frequency', min: 20, max: 22000, step: 1, default: 880, unit: 'Hz', scale: 'log', section: 'Sweep End' },
-    { id: 'endModulateBy', label: 'Modulation Depth', min: 0, max: 2000, step: 1, default: 0, unit: 'Hz', section: 'Sweep End' },
-    { id: 'endModFreq', label: 'Modulation Rate', min: 0.1, max: 200, step: 0.1, default: 1, unit: 'Hz', scale: 'log', section: 'Sweep End' },
+    { id: 'base', label: 'Base Frequency', min: 1, max: 22000, step: 1, default: 440, unit: 'Hz', scale: 'log' },
+    { id: 'modulateBy', label: 'Modulation Depth', min: 0, max: 20000, step: 1, default: 0, unit: 'Hz' },
+    { id: 'modFreq', label: 'Modulation Rate', min: 0.1, max: 20000, step: 0.1, default: 1, unit: 'Hz', scale: 'log' },
+    { id: 'endBase', label: 'Base Frequency', min: 1, max: 22000, step: 1, default: 880, unit: 'Hz', scale: 'log', section: 'Sweep End' },
+    { id: 'endModulateBy', label: 'Modulation Depth', min: 0, max: 20000, step: 1, default: 0, unit: 'Hz', section: 'Sweep End' },
+    { id: 'endModFreq', label: 'Modulation Rate', min: 0.1, max: 20000, step: 0.1, default: 1, unit: 'Hz', scale: 'log', section: 'Sweep End' },
     { id: 'sweepCurve', label: 'Sweep Curve', type: 'choice', options: [{ value: 'log', label: 'Logarithmic' }, { value: 'linear', label: 'Linear' }], default: 'log', section: 'Sweep End' },
     { id: 'waveform', label: 'Shape', type: 'choice', options: WAVEFORMS, default: 'sine', section: 'Waveform' },
     { id: 'symmetry', label: 'Symmetry', min: 1, max: 99, step: 1, default: 50, unit: '%', section: 'Waveform' },
@@ -50,7 +52,7 @@ export const TONES_DEF = {
       { id: `amp${k}`, label: `Component ${k} Amplitude`, min: -120, max: 0, step: 0.1, default: k === 1 ? 0 : Math.round(-20 * Math.log10(k) * 10) / 10, unit: 'dB', section: 'Frequency Components' },
       { id: `mul${k}`, label: `Component ${k} Multiplier`, min: 0.01, max: 64, step: 0.01, default: k, unit: '', section: 'Frequency Components' },
     ]),
-    { id: 'volume', label: 'Volume', min: -96, max: 0, step: 0.1, default: -6, unit: 'dB', section: 'Output' },
+    { id: 'volume', label: 'Volume', min: -120, max: 0, step: 0.1, default: -6, unit: 'dB', section: 'Output' },
     { id: 'duration', label: 'Duration', min: 0.01, max: 3600, step: 0.01, default: 5, unit: 's', scale: 'log', section: 'Output' },
     { id: 'startPhase', label: 'Start Phase', min: 0, max: 360, step: 1, default: 0, unit: 'deg', section: 'Advanced' },
     { id: 'phaseOffset', label: 'Right Channel Phase Offset', min: -180, max: 180, step: 1, default: 0, unit: 'deg', section: 'Advanced' },
@@ -180,8 +182,100 @@ export function generatorContext(def, initial) {
   return ctx;
 }
 
+/** Longest stretch a generator preview renders (s); longer durations preview their start. */
+export const PREVIEW_SECONDS = 20;
+
+/**
+ * Play/stop and loop buttons that preview generated audio in a dialog.
+ * render() returns (or resolves) { outs: Float32Array[], rate } or null.
+ * While playing, refresh() renders again and carries on from the same spot,
+ * so changes are heard as they are made. Returns { el, play, stop, refresh,
+ * dispose, playing() }.
+ */
+export function previewPlayer(app, render, { label = 'Preview' } = {}) {
+  const audio = typeof Audio !== 'undefined' ? new Audio() : null;
+  let url = null;
+  let on = false;
+  let token = 0;
+  let timer = 0;
+  const status = h('span.gen-preview-status.faint', { 'aria-live': 'polite' });
+  const playBtn = h('button.icon-btn.fx-play', { type: 'button', 'aria-label': label, title: 'Play what will be generated', onclick: () => (on ? stop() : play()) }, icon('transport-play', 15));
+  const loopOn = () => app.prefs?.get?.('genPreviewLoop') === true;
+  const loopBtn = h('button.icon-btn.fx-loop', { type: 'button', 'aria-pressed': String(loopOn()), 'aria-label': 'Loop preview', title: 'Loop the preview', onclick: () => {
+    const next = loopBtn.getAttribute('aria-pressed') !== 'true';
+    loopBtn.setAttribute('aria-pressed', String(next));
+    app.prefs?.set?.('genPreviewLoop', next);
+    if (audio) audio.loop = next;
+  } }, icon('transport-loop', 15));
+  const show = (playing) => {
+    on = playing;
+    playBtn.replaceChildren(icon(playing ? 'transport-stop' : 'transport-play', 15));
+    playBtn.setAttribute('aria-label', playing ? 'Stop preview' : label);
+    playBtn.classList.toggle('on', playing);
+  };
+  audio?.addEventListener('ended', () => {
+    if (!audio.loop) show(false);
+  });
+  async function play(at = 0) {
+    if (!audio) return;
+    const mine = ++token;
+    show(true);
+    status.textContent = '';
+    let r;
+    try {
+      r = await render();
+    } catch (err) {
+      if (mine === token) {
+        show(false);
+        status.textContent = err?.message || 'The preview could not be made.';
+      }
+      return;
+    }
+    if (mine !== token || !on) return;
+    if (!r?.outs?.length || !r.outs[0].length) {
+      show(false);
+      return;
+    }
+    if (url) URL.revokeObjectURL(url);
+    url = URL.createObjectURL(encodeWav({ sampleRate: r.rate, channels: r.outs.slice(0, 2), bitDepth: 32 }));
+    audio.src = url;
+    audio.loop = loopOn();
+    try {
+      audio.currentTime = Math.min(at, r.outs[0].length / r.rate);
+    } catch {
+      // Not seekable yet: start from the top.
+    }
+    try {
+      await audio.play();
+    } catch (err) {
+      if (mine === token && err?.name !== 'AbortError') {
+        show(false);
+        status.textContent = 'Playback was blocked by the browser.';
+      }
+    }
+  }
+  function stop() {
+    token++;
+    clearTimeout(timer);
+    audio?.pause();
+    show(false);
+  }
+  function refresh() {
+    if (!on) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => play(audio?.currentTime || 0), 150);
+  }
+  function dispose() {
+    stop();
+    if (url) URL.revokeObjectURL(url);
+    url = null;
+  }
+  const el = h('div.fx-footer-tools.gen-preview', playBtn, loopBtn, status);
+  return { el, play, stop, refresh, dispose, playing: () => on, audio };
+}
+
 /** Dialog for a generator pseudo-definition with presets; resolves values or null. */
-async function generatorDialog(app, def, { withPlacement }) {
+async function generatorDialog(app, def, { withPlacement, preview = null }) {
   const fullDef = withPlacement ? { ...def, params: [...def.params, { ...PLACEMENT, section: 'Output' }] } : def;
   const ctx = generatorContext(fullDef, lastValues(app.prefs, fullDef));
   ctx.app = app;
@@ -216,16 +310,20 @@ async function generatorDialog(app, def, { withPlacement }) {
     } });
   } }, icon('save', 15));
   syncPresets();
+  const player = preview ? previewPlayer(app, () => preview(ctx.values)) : null;
+  if (player) ctx.subscribe(() => player.refresh());
   const r = await openDialog({
     title: def.name,
     className: `fx-dialog${def.dialogClass ? `.${def.dialogClass}` : ''}`,
     body: h('div.fx-dialog-body', def.presets.length ? h('div.fx-presetbar', h('label.fx-label', 'Presets:'), presetSel, saveBtn) : null, nameRow, content),
+    footerStart: player?.el,
     buttons: [
       { label: 'Cancel', value: null },
       { label: 'OK', value: 'ok', primary: true },
     ],
     initialFocus: '.fx-params .hot, .fx-params select, .fx-params input',
   });
+  player?.dispose();
   dismiss?.();
   if (r !== 'ok') return null;
   rememberValues(app.prefs, fullDef, ctx.values);
@@ -249,8 +347,12 @@ async function runGenerator(app, label, name, make, placement) {
 const rateFor = (app) => audio(app)?.sampleRate || app.prefs.get('defaultRate') || 48000;
 const channelsFor = (app) => audio(app)?.channelCount || (app.prefs.get('defaultChannels') === 1 ? 1 : 2);
 
+/** The start of the generated audio (at most PREVIEW_SECONDS), for the dialog preview. */
+const previewOf = (v) => ({ ...v, duration: Math.min(v.duration, PREVIEW_SECONDS) });
+
 export async function generateTonesCommand(app) {
-  const v = await generatorDialog(app, TONES_DEF, { withPlacement: Boolean(audio(app)?.hasSelection) });
+  const rate0 = rateFor(app);
+  const v = await generatorDialog(app, TONES_DEF, { withPlacement: Boolean(audio(app)?.hasSelection), preview: (vals) => ({ outs: renderTones(previewOf(vals), rate0, channelsFor(app)), rate: rate0 }) });
   if (!v) return null;
   const rate = rateFor(app);
   return runGenerator(app, 'Generate Tones', 'Tones', () => {
@@ -259,10 +361,11 @@ export async function generateTonesCommand(app) {
 }
 
 export async function generateNoiseCommand(app) {
-  const v = await generatorDialog(app, NOISE_DEF, { withPlacement: Boolean(audio(app)?.hasSelection) });
+  const seed = (Date.now() & 0x7fffffff) | 1;
+  const rate0 = rateFor(app);
+  const v = await generatorDialog(app, NOISE_DEF, { withPlacement: Boolean(audio(app)?.hasSelection), preview: (vals) => ({ outs: renderNoise(previewOf(vals), rate0, channelsFor(app), seed), rate: rate0 }) });
   if (!v) return null;
   const rate = rateFor(app);
-  const seed = (Date.now() & 0x7fffffff) | 1;
   return runGenerator(app, 'Generate Noise', 'Noise', () => ({ outs: renderNoise(v, rate, channelsFor(app), seed), rate }), v.placement);
 }
 
@@ -333,7 +436,7 @@ export async function shapeSpeech(d, channels, rate, { speed = 100, volume = 100
   return out;
 }
 
-async function speechDialog(app) {
+async function speechDialog(app, sdk, targetRate) {
   const saved = app.prefs.get('speechSettings') || {};
   const delivery = generatorContext(SPEECH_DEF, { speed: saved.speed, volume: saved.volume });
   const text = h('textarea.input.speech-text', { rows: 5, 'aria-label': 'Text to speak', placeholder: 'Type the words to speak', maxLength: MAX_SPEECH_CHARS }, saved.text || '');
@@ -360,6 +463,19 @@ async function speechDialog(app) {
   const doc = audio(app);
   const placement = doc?.hasSelection ? h('select.select', { 'aria-label': 'Placement' }, h('option', { value: 'replace' }, 'Replace Selection'), h('option', { value: 'insert' }, 'Insert at Playhead')) : null;
   const error = h('div.fx-name-error', { role: 'alert' });
+  const current = () => ({ text: text.value, language: lang.value, voice: voice.value, neural: neural.checked, speed: delivery.values.speed, volume: delivery.values.volume });
+  // Preview speaks the text now; OK then inserts the same take without asking the service again.
+  const player = previewPlayer(app, async () => {
+    const t = text.value.trim();
+    if (!t) throw new UserError('Type some text to speak.');
+    if (t.length > MAX_SPEECH_CHARS) throw new UserError(`Text must be under ${MAX_SPEECH_CHARS} characters.`);
+    player.el.querySelector('.gen-preview-status').textContent = 'Generating...';
+    const r = await synthesizeSpeech(sdk, current(), targetRate);
+    player.el.querySelector('.gen-preview-status').textContent = '';
+    return r;
+  }, { label: 'Preview speech' });
+  // Delivery changes reshape the cached take; other changes need a new one.
+  delivery.subscribe(() => player.refresh());
   const r = await openDialog({
     title: 'Generate Speech',
     className: 'fx-dialog',
@@ -371,6 +487,7 @@ async function speechDialog(app) {
       controlsFor(delivery, ['speed', 'volume']),
       error,
     ),
+    footerStart: player.el,
     buttons: [
       { label: 'Cancel', value: null },
       { label: 'Generate', value: 'ok', primary: true },
@@ -389,10 +506,45 @@ async function speechDialog(app) {
       return true;
     },
   });
+  player.dispose();
   if (r !== 'ok') return null;
-  const settings = { text: text.value, language: lang.value, voice: voice.value, neural: neural.checked, speed: delivery.values.speed, volume: delivery.values.volume };
+  const settings = current();
   app.prefs.set('speechSettings', settings);
   return { ...settings, placement: placement?.value || 'insert' };
+}
+
+let speechTake = null; // the last synthesized speech: { key, outs, rate }
+
+/**
+ * Speech for the settings at `targetRate`: synthesized by Puter AI, decoded,
+ * resampled and shaped (speaking rate, volume). The last take is kept, so a
+ * preview followed by Generate asks the service once.
+ */
+export async function synthesizeSpeech(sdk, s, targetRate, signal) {
+  const voiceKey = JSON.stringify([s.text.trim(), s.voice, s.language, s.neural, targetRate]);
+  const key = JSON.stringify([voiceKey, s.speed, s.volume]);
+  if (speechTake?.key === key) return speechTake;
+  let raw = speechTake?.voiceKey === voiceKey ? speechTake.raw : null;
+  const d = await dsp();
+  if (!raw) {
+    let el;
+    try {
+      el = await sdk.ai.txt2speech(s.text.trim(), speechOptions(s.voice, s.language, s.neural));
+    } catch (err) {
+      throw new UserError(`Speech could not be generated: ${puterErrorMessage(err)}`);
+    }
+    const decoded = await decodeSpeech(el, signal);
+    raw = decoded.channels;
+    if (decoded.sampleRate !== targetRate) raw = raw.map((c) => d.resample(c, decoded.sampleRate, targetRate));
+  }
+  const outs = await shapeSpeech(d, raw, targetRate, s, { signal });
+  speechTake = { key, voiceKey, raw, outs, rate: targetRate };
+  return speechTake;
+}
+
+/** Forgets the kept speech take (tests). */
+export function clearSpeechTake() {
+  speechTake = null;
 }
 
 /** Fetches the audio behind an <audio> element returned by txt2speech and decodes it. */
@@ -427,27 +579,14 @@ export async function generateSpeechCommand(app) {
       return null;
     }
   }
-  const s = await speechDialog(app);
-  if (!s) return null;
   const targetRate = rateFor(app);
+  const s = await speechDialog(app, sdk, targetRate);
+  if (!s) return null;
   try {
     const { outs, rate } = await withProgress(
       app,
       'Generating Speech',
-      async (signal) => {
-        let el;
-        try {
-          el = await sdk.ai.txt2speech(s.text.trim(), speechOptions(s.voice, s.language, s.neural));
-        } catch (err) {
-          throw new UserError(`Speech could not be generated: ${puterErrorMessage(err)}`);
-        }
-        const decoded = await decodeSpeech(el, signal);
-        let chans = decoded.channels;
-        const d = await dsp();
-        if (decoded.sampleRate !== targetRate) chans = chans.map((c) => d.resample(c, decoded.sampleRate, targetRate));
-        chans = await shapeSpeech(d, chans, targetRate, s, { signal });
-        return { outs: chans, rate: targetRate };
-      },
+      (signal) => synthesizeSpeech(sdk, s, targetRate, signal),
       { indeterminate: true, delay: 0 },
     );
     return placeGenerated(app, outs, rate, { label: 'Generate Speech', name: 'Speech', placement: s.placement });

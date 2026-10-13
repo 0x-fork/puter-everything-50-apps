@@ -6,6 +6,7 @@ import { h } from '../lib/dom.js';
 import { cssVar } from '../ui/theme.js';
 import { plot, gridLines, labelText } from './editors.js';
 import { scientificSections, cascadeDb, cascadePhase, cascadeGroupDelay } from './defs/filter-math.js';
+import { scientificOrderFor, scientificTransition } from './defs/filter.js';
 import { logFrequencies } from './biquad.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -108,7 +109,20 @@ export function scientificEditor() {
       view_.layer.append(btn);
       return { id, btn };
     });
+    // Design by transition bandwidth: keep the order at the lowest that meets it.
+    const design = h('div.fx-sci-design.faint', { 'aria-live': 'polite' });
+    const showDesign = (v) => {
+      if (v.designBy === 1) {
+        const { order, met } = scientificOrderFor(v, rate);
+        if (order !== v.order) ctx.set('order', order);
+        design.textContent = met ? `Order ${order} is down ${v.stopAtten} dB within ${Math.round(v.transition)} Hz` : `Even order ${order}, the steepest, is not down ${v.stopAtten} dB within ${Math.round(v.transition)} Hz`;
+      } else {
+        const w = scientificTransition(v, rate);
+        design.textContent = w == null ? `Order ${Math.round(v.order)} does not reach ${v.stopAtten} dB of attenuation in the audio band` : `Order ${Math.round(v.order)} is down ${v.stopAtten} dB within ${w < 100 ? w.toFixed(1) : Math.round(w)} Hz`;
+      }
+    };
     const update = (v) => {
+      showDesign(v);
       for (const { id, btn } of handles) {
         btn.style.display = id === 'highCutoff' && v.mode < 2 ? 'none' : '';
         btn.style.left = `${(xOf(v[id], 1) * 100).toFixed(3)}%`;
@@ -119,6 +133,6 @@ export function scientificEditor() {
     };
     ctx.subscribe(update);
     update(ctx.values);
-    return h('div.fx-sci-editor', radios, view_.el);
+    return h('div.fx-sci-editor', radios, view_.el, design);
   };
 }

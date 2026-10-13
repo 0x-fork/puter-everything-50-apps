@@ -121,19 +121,69 @@ pub(crate) struct Cascade {
     pub on: Vec<bool>,
     /// [channel][stage] = (z1, z2), transposed direct form II.
     state: Vec<Vec<(f32, f32)>>,
+    /// Ultra-quiet: double-precision state per [channel][stage] while on.
+    wide: Option<Vec<Vec<(f64, f64)>>>,
 }
 
 impl Cascade {
     pub fn new(channels: usize, stages: usize) -> Cascade {
-        Cascade { coefs: vec![Coefs::IDENTITY; stages], on: vec![false; stages], state: vec![vec![(0.0, 0.0); stages]; channels] }
+        Cascade { coefs: vec![Coefs::IDENTITY; stages], on: vec![false; stages], state: vec![vec![(0.0, 0.0); stages]; channels], wide: None }
+    }
+
+    /// Switches double-precision filtering (Ultra-Quiet) on or off; clears the state on a change.
+    pub fn set_precise(&mut self, on: bool) {
+        if on == self.wide.is_some() {
+            return;
+        }
+        self.wide = if on { Some(vec![vec![(0.0, 0.0); self.coefs.len()]; self.state.len()]) } else { None };
+        self.reset();
     }
 
     /// Coefficients are read directly at run time; kept for call-site clarity.
     #[inline]
     pub fn commit(&mut self) {}
 
+    /// Like `run`, with the arithmetic and the filter state in double
+    /// precision (`wide`: [channel][stage] state): a far lower noise floor
+    /// for deep, narrow or very low filters, at about twice the cost.
+    fn run_precise(coefs: &[Coefs], on: &[bool], wide: &mut [Vec<(f64, f64)>], buf: &mut [f32], frames: usize, at: usize, len: usize) {
+        for (c, ch) in wide.iter_mut().enumerate() {
+            if (c + 1) * frames > buf.len() {
+                break;
+            }
+            let x = &mut buf[c * frames + at..c * frames + at + len];
+            let mut acc = [0f64; SUB];
+            for (a, v) in acc.iter_mut().zip(x.iter()) {
+                *a = *v as f64;
+            }
+            for (s, st) in ch.iter_mut().enumerate() {
+                if !on[s] {
+                    continue;
+                }
+                let k = coefs[s];
+                let (b0, b1, b2, a1, a2) = (k.b0 as f64, k.b1 as f64, k.b2 as f64, k.a1 as f64, k.a2 as f64);
+                let (mut z1, mut z2) = *st;
+                for v in acc[..len].iter_mut() {
+                    let i = *v;
+                    let y = b0 * i + z1;
+                    z1 = b1 * i - a1 * y + z2;
+                    z2 = b2 * i - a2 * y;
+                    *v = y;
+                }
+                *st = (if z1.is_finite() { z1 } else { 0.0 }, if z2.is_finite() { z2 } else { 0.0 });
+            }
+            for (v, a) in x.iter_mut().zip(acc.iter()) {
+                *v = *a as f32;
+            }
+        }
+    }
+
     /// Filters frames [at, at + len) of each channel of planar `buf`.
     pub fn run(&mut self, buf: &mut [f32], frames: usize, at: usize, len: usize) {
+        if let Some(w) = &mut self.wide {
+            Self::run_precise(&self.coefs, &self.on, w, buf, frames, at, len);
+            return;
+        }
         for (c, ch) in self.state.iter_mut().enumerate() {
             if (c + 1) * frames > buf.len() {
                 break;
@@ -163,12 +213,20 @@ impl Cascade {
                 *st = (0.0, 0.0);
             }
         }
+        if let Some(w) = &mut self.wide {
+            w.iter_mut().flatten().for_each(|st| *st = (0.0, 0.0));
+        }
     }
 
     /// Resets only the state of stage `s` (when its structure changes).
     pub fn reset_stage(&mut self, s: usize) {
         for ch in &mut self.state {
             ch[s] = (0.0, 0.0);
+        }
+        if let Some(w) = &mut self.wide {
+            for ch in w {
+                ch[s] = (0.0, 0.0);
+            }
         }
     }
 

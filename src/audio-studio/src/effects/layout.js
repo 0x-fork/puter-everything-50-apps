@@ -26,6 +26,18 @@ export function controlsFor(ctx, ids, { className = '', labels = {} } = {}) {
   return c.el;
 }
 
+/** The generated frames of whole sections, laid out by the definition's `layout` (vertical sliders, knobs). */
+export function sectionControls(ctx, sections) {
+  let from = null;
+  const c = paramControls(ctx.def, () => ctx.values, (id, v) => {
+    from = id;
+    ctx.set(id, v);
+    from = null;
+  }, { doc: ctx.doc, range: ctx.range, sections, layout: { ...(ctx.def.layout || {}), columns: undefined, tabs: undefined } });
+  ctx.subscribe((values) => c.refresh(values, from));
+  return c.el;
+}
+
 /** A titled box (a fieldset) around related controls. */
 export function groupBox(title, ...children) {
   return h('fieldset.fx-group', title ? h('legend.fx-group-title', title) : null, ...children);

@@ -136,6 +136,15 @@ export const CATEGORIES = [
           { type: 'custom', label: 'Recover unsaved files', keys: [], keywords: 'restore crash recovery', render: recoverButton },
         ],
       },
+      {
+        title: 'Multitrack Session Backups',
+        items: [
+          check('sessionBackup', 'Back up open multitrack sessions automatically', { keywords: 'backup history versions', help: 'Backups are kept in this browser, with the audio the session uses. A session that closed with unsaved changes is offered for restore the next time Audio Studio starts.' }),
+          number('sessionBackupInterval', 'Back up every', { min: 1, max: 120, step: 1, unit: 'minutes', enabledIf: (p) => p.get('sessionBackup') !== false }),
+          number('sessionBackupMax', 'Backups kept per session', { min: 1, max: 100, step: 1, enabledIf: (p) => p.get('sessionBackup') !== false, help: 'The oldest backup is deleted when a session has more.' }),
+          { type: 'custom', label: 'Session backups', keys: [], keywords: 'restore backup session open', render: restoreBackupButton },
+        ],
+      },
     ],
   },
   {
@@ -152,6 +161,13 @@ export const CATEGORIES = [
         items: [
           { type: 'checkNumber', key: 'smoothDelete', numKey: 'smoothDeleteMs', label: 'Crossfade the join when deleting or cutting audio over', min: 0.5, max: 100, step: 0.5, unit: 'ms', help: 'Blends the audio on both sides of the cut so it does not click.' },
           { type: 'checkNumber', key: 'smoothEdits', numKey: 'smoothEditsMs', label: 'Crossfade the edges of processed audio over', min: 0.5, max: 200, step: 0.5, unit: 'ms', help: 'Applies to effects, the Effects Rack and the amplitude HUD when they process part of a file.' },
+        ],
+      },
+      {
+        title: 'Sample Rate Conversion',
+        items: [
+          slider('srcQuality', 'Quality', { min: 0, max: 100, step: 1, unit: '%', keywords: 'resample resampling src filter length', help: 'Higher quality uses a longer filter: cleaner conversion, slower processing. Used by Convert Sample Type, exports, recording and inserting files at another rate.' }),
+          check('srcFilter', 'Pre/post filter', { keywords: 'resample anti-alias aliasing imaging lowpass', help: 'Rolls off the top of the band just below the new Nyquist frequency so nothing folds back. Off keeps a little more treble but lets some of it alias.' }),
         ],
       },
     ],
@@ -674,6 +690,10 @@ function resetNotices({ app, row }) {
 
 function recoverButton({ app }) {
   return h('button.btn', { type: 'button', disabled: !app.commands.isEnabled('file.recover'), onclick: () => app.commands.run('file.recover') }, 'Recover Unsaved Files...');
+}
+
+function restoreBackupButton({ app }) {
+  return h('button.btn', { type: 'button', disabled: !app.commands.isEnabled('file.restoreBackup'), onclick: () => app.commands.run('file.restoreBackup') }, 'Restore Session Backup...');
 }
 
 // ------------------------------------------------------------- page model

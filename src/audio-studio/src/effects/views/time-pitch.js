@@ -8,7 +8,7 @@ import { cssVar } from '../../ui/theme.js';
 import { hotNumber } from '../../ui/controls.js';
 import { envelopeControl, registerEditor } from '../editors.js';
 import { controlsFor, groupBox, radioChoice, checkbox, readout, enableWhen, showWhen, disclosure, numberField, glyph } from '../layout.js';
-import { pitchRatio, bendRange } from '../defs/time-pitch.js';
+import { pitchRatio, bendRange, pitchFftSize } from '../defs/time-pitch.js';
 
 /** m:ss.mmm (h:mm:ss.mmm past an hour). */
 export function clockText(seconds) {
@@ -73,11 +73,55 @@ stretchView.hides = true;
 
 // ------------------------------------------------------------ Pitch Shifter
 
+/**
+ * The frequency ratio as an editable value: typing or dragging it sets the
+ * nearest semitones and cents (a ratio of 1.5 is +7 st +2 ct).
+ */
+export function ratioField(ctx) {
+  const set = (r) => {
+    const cents = Math.round(1200 * Math.log2(Math.min(4, Math.max(0.25, r)) || 1));
+    const st = Math.min(24, Math.max(-24, Math.round(cents / 100)));
+    ctx.set('semitones', st);
+    ctx.set('cents', Math.min(100, Math.max(-100, cents - st * 100)));
+  };
+  const hot = hotNumber({
+    value: pitchRatio(ctx.values.semitones, ctx.values.cents),
+    min: 0.25,
+    max: 4,
+    step: 0.0001,
+    label: 'Ratio',
+    pixelsPerStep: 0.02,
+    format: (r) => r.toFixed(4),
+    parse: (s) => Number(String(s).replace(/[^\d.]/g, '')),
+    onInput: set,
+    onChange: set,
+    defaultValue: 1,
+  });
+  ctx.subscribe((v) => hot.setValue(pitchRatio(v.semitones, v.cents)));
+  return hot;
+}
+
 function shifterView(ctx) {
+  const rate = ctx.doc?.sampleRate || 48000;
+  // With automatic settings the shifter works on spectral frames; say what they amount to.
+  const auto = showWhen(ctx, readout(ctx, (v) => {
+    const n = pitchFftSize(1024, v.precision, rate);
+    return `Spectral frames of ${n} samples (${(rate / n).toFixed(1)} per second), 75 % overlap`;
+  }, 'faint'), (v) => v.autoSplice);
   return h(
     'div.fx-stack',
-    groupBox('Pitch Transpose', controlsFor(ctx, ['semitones', 'cents']), h('div.sp-ratio', h('span.fx-label', 'Ratio:'), readout(ctx, (v) => pitchRatio(v.semitones, v.cents).toFixed(4)))),
-    h('div.fx-split.fx-split-even', groupBox('Precision', radioChoice(ctx, 'precision', { label: null })), groupBox('Pitch Settings', checkbox(ctx, 'formants'))),
+    groupBox('Pitch Transpose', controlsFor(ctx, ['semitones', 'cents']), h('div.sp-ratio', h('span.fx-label', 'Ratio:'), ratioField(ctx))),
+    h(
+      'div.fx-split.ps-split',
+      groupBox('Precision', enableWhen(ctx, radioChoice(ctx, 'precision', { label: null, className: 'fx-radios-v' }), (v) => v.autoSplice)),
+      groupBox(
+        'Pitch Settings',
+        enableWhen(ctx, controlsFor(ctx, ['splice', 'overlap']), (v) => !v.autoSplice),
+        h('div', checkbox(ctx, 'autoSplice')),
+        h('div.ps-auto', auto),
+        enableWhen(ctx, h('div', checkbox(ctx, 'formants')), (v) => v.autoSplice),
+      ),
+    ),
   );
 }
 shifterView.hides = true;
@@ -133,6 +177,7 @@ function benderView(ctx) {
     'div.fx-stack',
     wrap,
     h('div.nr-bar', checkbox(ctx, 'spline'), h('div.spacer'), reset),
+    controlsFor(ctx, ['quality']),
     radioChoice(ctx, 'rangeMode', { label: 'Range' }),
     semis,
     tempo,

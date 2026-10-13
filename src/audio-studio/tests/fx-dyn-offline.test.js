@@ -34,6 +34,19 @@ describe('normalize', () => {
     expect(peakOf(y)).toBeCloseTo(1, 3);
   });
 
+  it('moves the DC offset to the bias amount, with or without normalizing', async () => {
+    const x = Float32Array.from({ length: 2000 }, (_, i) => 0.3 + 0.2 * Math.sin((2 * Math.PI * i) / 100));
+    const mean = (y) => y.reduce((s, v) => s + v, 0) / y.length;
+    const [a] = await def.process({ channels: [x], rate: 48000, values: { normalizeTo: false, removeDc: true, dcAmount: 5 } });
+    expect(mean(a)).toBeCloseTo(0.05, 3);
+    expect(peakOf(a) - 0.05).toBeCloseTo(0.2, 3); // level unchanged
+    const [b] = await def.process({ channels: [x], rate: 48000, values: { normalizeTo: false, removeDc: false } });
+    expect(Array.from(b)).toEqual(Array.from(x));
+    const [c] = await def.process({ channels: [x], rate: 48000, values: { unit: 1, targetPercent: 50, removeDc: true, dcAmount: -10 } });
+    expect(mean(c)).toBeCloseTo(-0.1, 3);
+    expect(Math.max(...c)).toBeCloseTo(0.4, 3);
+  });
+
   it('leaves silence alone', async () => {
     const [y] = await def.process({ channels: [new Float32Array(10)], rate: 48000, values: {} });
     expect(Array.from(y)).toEqual(Array(10).fill(0));

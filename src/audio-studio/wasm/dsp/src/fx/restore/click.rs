@@ -316,6 +316,21 @@ pub fn declick(x: &mut [f32], s: &DeclickSettings) -> usize {
     total
 }
 
+/// Longest gap `fill_gap` rebuilds (samples).
+pub const MAX_FILL: usize = 4096;
+
+/// Rebuilds `x[s .. s + l]` from its surroundings with an AR model whose
+/// order grows with the gap. Gaps longer than `MAX_FILL` are left alone.
+pub fn fill_gap(x: &mut [f32], s: usize, l: usize) -> bool {
+    if l == 0 || l > MAX_FILL || s + l > x.len() {
+        return false;
+    }
+    let order = (3 * l + 2).clamp(16, 80);
+    let ctx = 512.max(4 * order);
+    let mut lsar = Lsar::new(l, 80, 2 * ctx);
+    lsar.repair(x, s, l, order, ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +391,21 @@ mod tests {
         // Clean audio is left alone.
         let mut c = clean.clone();
         assert_eq!(declick(&mut c, &s), 0);
+    }
+
+    #[test]
+    fn fill_gap_rebuilds_a_damaged_stretch() {
+        let rate = 48000.0;
+        let clean = music(8000, rate);
+        let mut y = clean.clone();
+        for i in 4000..4040 {
+            y[i] = 0.8;
+        }
+        assert!(fill_gap(&mut y, 4000, 40));
+        let err: f32 = (4000..4040).map(|i| (y[i] - clean[i]).abs()).fold(0.0, f32::max);
+        assert!(err < 0.05, "max error {err}");
+        assert!(y[..4000] == clean[..4000] && y[4040..] == clean[4040..]);
+        assert!(!fill_gap(&mut y, 10, MAX_FILL + 1));
     }
 
     #[test]

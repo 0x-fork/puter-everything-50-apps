@@ -45,19 +45,20 @@ function getWorker() {
 }
 
 /**
- * Renders frames [start, end) of a mix graph (see mixcore.js) to stereo.
+ * Renders frames [start, end) of a mix graph (see mixcore.js) to stereo, or to
+ * six channels (L, R, C, LFE, Ls, Rs) for a 5.1 graph.
  * @param {object} graph
  * @param {Map<string, Channel[]>} sources
  * @param {{ start?: number, end: number, onProgress?: (fraction) => void, signal?: AbortSignal,
  *           onData?: (at, channels) => void }} o  onData streams blocks instead of collecting them
- * @returns {Promise<Float32Array[] | null>} [L, R], or null when streaming through onData
+ * @returns {Promise<Float32Array[] | null>} the channels, or null when streaming through onData
  */
 export async function renderGraph(graph, sources, { start = 0, end, onProgress, signal, onData } = {}) {
   const module = await dspModule().catch(() => null);
   const w = getWorker();
   const id = nextId++;
   const total = end - start;
-  const out = onData ? null : [new Float32Array(total), new Float32Array(total)];
+  const out = onData ? null : Array.from({ length: graph.surround ? 6 : 2 }, () => new Float32Array(total));
   await new Promise((resolve, reject) => {
     jobs.set(id, {
       sources,
@@ -66,10 +67,7 @@ export async function renderGraph(graph, sources, { start = 0, end, onProgress, 
       onProgress,
       onData: (at, ch) => {
         if (onData) onData(at, ch);
-        else {
-          out[0].set(ch[0], at);
-          out[1].set(ch[1], at);
-        }
+        else ch.forEach((c, i) => out[i]?.set(c, at));
       },
     });
     signal?.addEventListener('abort', () => w.postMessage({ type: 'cancel', id }), { once: true });

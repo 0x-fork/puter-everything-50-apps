@@ -5,6 +5,9 @@
 //        written as ID3v2 (MP3, AIFF), Vorbis comments (FLAC, Ogg) or MP4 atoms.
 //   RIFF: the WAV INFO list, sharing the general fields with ID3.
 //   Cart: radio traffic fields, written as a WAV cart chunk.
+//   XMP: Dublin Core properties (title, creator, description, rights,
+//        keywords...), written as an XMP packet in WAV, MP3 and AIFF exports
+//        (see audio/xmp.js for where and when).
 // Fields shared between tabs are one value. Edits are undoable ("Edit
 // Metadata") and are written into exports when "Include markers and other
 // metadata" is on.
@@ -43,6 +46,12 @@ export const META_TABS = [
     label: 'Cart',
     note: 'Saved in WAV exports as a cart chunk for broadcast traffic systems.',
     fields: ['title', 'artist', 'cartCutId', 'cartClientId', 'cartCategory', 'cartClassification', 'cartOutCue', 'cartStartDate', 'cartStartTime', 'cartEndDate', 'cartEndTime', 'cartUserDef', 'cartUrl', 'cartTagText'],
+  },
+  {
+    id: 'xmp',
+    label: 'XMP',
+    note: 'Saved as an XMP packet in WAV (_PMX chunk), MP3 and AIFF (ID3 PRIV frame) exports when a field only XMP holds (Description, Publisher, Contributors, Language, Date, Identifier or Relation) is filled in. Separate keywords and other lists with commas, creators with semicolons.',
+    fields: ['title', ['artist', 'Creator'], 'description', ['copyright', 'Rights'], 'keywords', 'publisher', 'contributor', 'language', 'xmpDate', 'identifier', 'source', 'relation'],
   },
 ];
 

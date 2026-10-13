@@ -1,13 +1,15 @@
 // Dialog views for Reverb: Full Reverb (settings and coloration tabs, room
 // readout, output faders), Convolution Reverb and Surround Reverb (impulse
-// choice with loading your own impulse response from an audio file).
+// choice with loading your own impulse response from an audio file, kept on
+// this device across reloads).
 
 import { h, announce } from '../../lib/dom.js';
 import { registerEditor } from '../editors.js';
-import { controlsFor, groupBox, tabPanels, vSlider, checkbox, readout, showWhen } from '../layout.js';
+import { controlsFor, groupBox, tabPanels, vSlider, checkbox, readout } from '../layout.js';
 import { responseEditor } from './common.js';
 import { roomDimensions, decayForRoom, LOADED_IMPULSE } from '../defs/reverb.js';
-import { setLoadedImpulse, loadedImpulse, MAX_LOADED_SECONDS } from '../defs/reverb-impulses.js';
+import { setLoadedImpulse, loadedImpulse, loadedImpulseNames, MAX_LOADED_SECONDS } from '../defs/reverb-impulses.js';
+import { saveImpulse } from '../../storage/impulses.js';
 import { pickLocalFiles } from '../../storage/files.js';
 import { decodeAudio } from '../../audio/decode.js';
 
@@ -71,7 +73,10 @@ async function loadImpulse(ctx) {
   try {
     const r = await decodeAudio(await file.arrayBuffer(), file.name);
     const n = Math.min(r.channels[0].length, Math.round(MAX_LOADED_SECONDS * r.sampleRate));
-    setLoadedImpulse(file.name, { rate: r.sampleRate, channels: r.channels.slice(0, 2).map((c) => c.slice(0, n)) });
+    const impulse = { rate: r.sampleRate, channels: r.channels.slice(0, 2).map((c) => c.slice(0, n)) };
+    setLoadedImpulse(file.name, impulse);
+    // Kept on this device, so reloads and saved settings find it again.
+    saveImpulse(file.name, impulse);
     ctx.set('impulseName', file.name);
     ctx.set('impulse', LOADED_IMPULSE);
     announce(`Impulse ${file.name} loaded`);
@@ -85,9 +90,20 @@ function impulseRow(ctx) {
   const status = readout(ctx, (v) => {
     if (v.impulse !== LOADED_IMPULSE) return '';
     if (!v.impulseName) return 'Load an audio file to use as the impulse.';
-    return loadedImpulse(v.impulseName) ? `Using ${v.impulseName}` : `${v.impulseName} is not loaded in this session; using Large Hall until you load it again.`;
+    return loadedImpulse(v.impulseName) ? '' : `${v.impulseName} is not on this device; using Large Hall until you load it again.`;
   }, 'faint');
-  return h('div.fx-stack', h('div.rv-impulse', controlsFor(ctx, ['impulse']), load), showWhen(ctx, status, (v) => v.impulse === LOADED_IMPULSE));
+  // The impulses kept on this device, to switch between them.
+  const files = h('select.select.rv-impulse-files', { 'aria-label': 'Loaded impulse file', onchange: () => ctx.set('impulseName', files.value) });
+  const showFiles = (v) => {
+    const names = loadedImpulseNames();
+    if (v.impulseName && !names.includes(v.impulseName)) names.unshift(v.impulseName);
+    files.replaceChildren(...names.map((n) => h('option', { value: n }, n)));
+    files.value = v.impulseName;
+    files.hidden = v.impulse !== LOADED_IMPULSE || !names.length;
+  };
+  showFiles(ctx.values);
+  ctx.subscribe(showFiles);
+  return h('div.fx-stack', h('div.rv-impulse', controlsFor(ctx, ['impulse']), load), h('div.rv-impulse-file', files, status));
 }
 
 function convolutionView(ctx) {
@@ -96,13 +112,22 @@ function convolutionView(ctx) {
 convolutionView.hides = true;
 
 function surroundView(ctx) {
-  const input = groupBox('Input', h('div.rv-faders', vSlider(ctx, 'centerSend', { label: 'Center' })));
-  const settings = groupBox('Reverb Settings', impulseRow(ctx), controlsFor(ctx, ['roomSize', 'dampLF', 'dampHF', 'preDelay', 'width']));
+  const input = groupBox('Input', h('div.rv-faders', vSlider(ctx, 'centerSend', { label: 'Center' }), vSlider(ctx, 'lfeSend', { label: 'LFE' })));
+  const settings = groupBox('Reverb Settings', impulseRow(ctx), controlsFor(ctx, ['roomSize', 'dampLF', 'dampHF', 'preDelay', 'width', 'surroundWidth']));
   const output = groupBox(
     'Output',
-    h('div.rv-faders', vSlider(ctx, 'centerWet', { label: 'C Wet' }), vSlider(ctx, 'balance', { label: 'L/R Bal' }), vSlider(ctx, 'mix', { label: 'Mix' }), vSlider(ctx, 'gain', { label: 'Gain' })),
+    h(
+      'div.rv-faders',
+      vSlider(ctx, 'centerWet', { label: 'C Wet' }),
+      vSlider(ctx, 'balance', { label: 'L/R Bal' }),
+      vSlider(ctx, 'fbBalance', { label: 'F/B Bal' }),
+      vSlider(ctx, 'mix', { label: 'Mix' }),
+      vSlider(ctx, 'gain', { label: 'Gain' }),
+    ),
   );
-  return h('div.rv-surround', input, settings, output);
+  // On stereo there is no LFE or rear pair: the LFE send waits for 5.1, and the rear folds into the front as F/B moves back.
+  const note = h('div.faint.rv-note', 'On 5.1 tracks and a 5.1 master the reverb fills all six speakers. On stereo, moving F/B toward the back blends in the delayed rear reverb; the LFE send needs 5.1.');
+  return h('div.fx-stack', h('div.rv-surround', input, settings, output), note);
 }
 surroundView.hides = true;
 surroundView.dialogClass = 'fx-wide';

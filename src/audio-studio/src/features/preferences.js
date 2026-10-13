@@ -16,6 +16,7 @@ import { CATEGORIES, preferencesDialog, openAudioBytes } from '../ui/preferences
 import { formatBytesShort } from '../export/formats.js';
 import { openDialog } from '../ui/dialog.js';
 import { pickLocalFiles, downloadBlob } from '../storage/files.js';
+import { setResampleSettings } from '../audio/dsp.js';
 
 /** Copies preference values into the module options that read them. */
 export function applyModulePrefs(prefs) {
@@ -31,6 +32,7 @@ export function applyModulePrefs(prefs) {
   const warning = Number(prefs.get('meterWarning'));
   meterLevels.caution = Number.isFinite(caution) ? caution : -12;
   meterLevels.warning = Number.isFinite(warning) ? Math.max(meterLevels.caution, warning) : -3;
+  setResampleSettings({ quality: prefs.get('srcQuality'), filter: prefs.get('srcFilter') !== false });
 }
 
 /** Hands device settings to the playback engine. */

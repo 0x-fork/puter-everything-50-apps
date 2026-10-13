@@ -110,6 +110,8 @@ describe('recording favorites', () => {
     expect(app.favorites.recording).toBe(true);
     expect(app.commands.isEnabled('fav.recordStart')).toBe(false);
     await app.runEffect('favFx', { values: { gain: 1.5 } });
+    expect(app.favorites.recordedSteps()).toHaveLength(1);
+    app.commands.run('fav.recordStop');
     await tick();
     const input = document.querySelector('.dialog input');
     expect(input.value).toBe('Fav Effect');

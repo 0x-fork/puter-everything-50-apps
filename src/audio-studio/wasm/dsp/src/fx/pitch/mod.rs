@@ -26,7 +26,8 @@ pub fn create(kind: u32, rate: f32, channels: usize) -> Option<Box<dyn Effect>> 
 ///   `precision` 0..2, flags bit 0 lock channels, bit 1 preserve formants).
 /// - `mode` 1: WSOLA time stretch by `stretch`, then resampling for `pitch`.
 /// - `mode` 2: varispeed resampling at speed `pitch` (input frames per output
-///   frame; length becomes input / speed, `stretch` is ignored).
+///   frame; length becomes input / speed, `stretch` is ignored); `precision`
+///   2..64 is the sinc kernel's zero crossings per side (below 2: 16).
 /// A curve set with `tp_curve` overrides the constant pitch (modes 0 and 2).
 #[no_mangle]
 pub extern "C" fn tp_new(mode: u32, channels: u32, rate: f32, precision: u32, stretch: f64, pitch: f32, flags: u32) -> u32 {
@@ -38,7 +39,7 @@ pub extern "C" fn tp_new(mode: u32, channels: u32, rate: f32, precision: u32, st
             let res = if (p - 1.0).abs() > 1e-6 { Some(Resampler::new(ch, p)) } else { None };
             Job::Wsola(Wsola::new(ch, rate, stretch * p as f64), res)
         }
-        _ => Job::Resample(Resampler::new(ch, pitch)),
+        _ => Job::Resample(if precision >= 2 { Resampler::with_zeros(ch, pitch, precision as usize) } else { Resampler::new(ch, pitch) }),
     };
     Box::into_raw(Box::new((job, ch))) as u32
 }

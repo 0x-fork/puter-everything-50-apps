@@ -30,7 +30,7 @@ export class App extends Emitter {
     this.clipboardIndex = 0;
     this.panels = new Map();
     this.documentKinds = new Map(); // kind -> { view: (app, doc) => view, graph: (app, doc) => {graph, sources} }
-    this.previewFx = null; // effect slot specs auditioned by an open effect dialog
+    this.previewFx = null; // effect slot specs previewed by an open effect dialog
     this.dock = null;
     this.lastCommand = null;
     this.layoutMode = 'desktop';

@@ -85,6 +85,8 @@ pub fn focus_weight(mode: u32, f: f32) -> f32 {
         1 => (0.5 - 0.5 * (lf + 0.5)).clamp(0.15, 1.0),
         2 => (1.0 - 0.3 * (lf - 0.6).abs()).clamp(0.15, 1.0),
         3 => (0.6 + 0.4 * (lf - 0.5)).clamp(0.15, 1.0),
+        // Low and high: strongest at both ends, lightest around 1.5 kHz.
+        4 => (0.3 + 0.35 * (lf - 0.6).abs()).clamp(0.15, 1.0),
         _ => 1.0,
     }
 }

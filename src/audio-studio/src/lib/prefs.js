@@ -67,9 +67,14 @@ export const DEFAULTS = {
   smoothDeleteMs: 2,
   smoothEdits: false,
   smoothEditsMs: 5,
+  srcQuality: 50, // sample-rate conversion quality, 0..100
+  srcFilter: true, // pre/post filter: keep the transition band below Nyquist
   // Auto Save
   autosave: true,
   autosaveInterval: 60, // seconds
+  sessionBackup: true, // periodic backups of open multitrack sessions
+  sessionBackupInterval: 3, // minutes
+  sessionBackupMax: 10, // backups kept per session
   // Effects
   fxOpenOnAdd: false,
   fxProcessBypassed: false,

@@ -70,7 +70,7 @@ registerEffect({
     ...section('Right Channel', 'right', [ms('delay', 'Delay Time', 1, 5000, 300), pct('feedback', 'Feedback', 40), pct('level', 'Echo Level', 60)]).map((p) => ({ ...p, enabledIf: (v) => !v.lock })),
     bool('lock', 'Lock Left and Right', true),
     bool('bounce', 'Echo Bounce', false),
-    ...ECHO_BANDS.map((f, i) => db(`eq${i}`, bandLabel(f), -24, 12, 0, { section: 'Successive Echo Equalizer', short: bandLabel(f).replace(' Hz', '').replace(' kHz', 'k') })),
+    ...ECHO_BANDS.map((f, i) => db(`eq${i}`, bandLabel(f), -24, 15, 0, { section: 'Successive Echo Equalizer', short: bandLabel(f).replace(' Hz', '').replace(' kHz', 'k') })),
     pct('dry', 'Dry Level', 100),
   ],
   about: 'Repeats the sound with each echo quieter than the last. The equalizer shapes every repeat again, so echoes darken or thin out as they fade; Echo Bounce alternates them between the channels.',
@@ -105,8 +105,8 @@ registerEffect({
     choice('mode', 'Mode', ['Tape', 'Tape and Tube', 'Analog'], 0),
     pct('dry', 'Dry Out', 80, { max: 200 }),
     pct('wet', 'Wet Out', 50, { max: 200 }),
-    ms('delay', 'Delay', 5, 4000, 350),
-    pct('feedback', 'Feedback', 45, { max: 120 }),
+    ms('delay', 'Delay', 10, 8000, 350),
+    pct('feedback', 'Feedback', 45, { max: 200 }),
     pct('trash', 'Trash', 0),
     pct('spread', 'Spread', 100, { max: 200 }),
     num('lowCut', 'Low Cut', 10, 2000, 80, 'Hz', { step: 1, scale: 'log' }),
@@ -122,7 +122,7 @@ registerEffect({
   ],
   tail: (v, rate) => {
     const spread = clamp(v.spread / 100, 0, 2);
-    const longest = clamp(v.delay, 5, 4000) * (1 + SPREAD_OFFSET * spread) * 1.003;
-    return feedbackTail((longest / 1000) * rate, clamp(v.feedback / 100, 0, 1.2), rate);
+    const longest = clamp(v.delay, 5, 8000) * (1 + SPREAD_OFFSET * spread) * 1.003;
+    return feedbackTail((longest / 1000) * rate, clamp(v.feedback / 100, 0, 2), rate);
   },
 });

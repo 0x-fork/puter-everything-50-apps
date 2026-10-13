@@ -9,6 +9,9 @@
 import { registerEffect } from '../registry.js';
 import { offloaded } from '../offline-fx.js';
 import { num, db, hz, ms, pct, bool, choice, section, preset, checkAbort, pause, dataId } from './util.js';
+import { curveOutput, splineOutput } from './transfer-curve.js';
+
+export { curveOutput, splineOutput };
 
 const AMP = 'Amplitude and Compression';
 
@@ -22,8 +25,8 @@ function msFrames(msValue, rate) {
 
 /** Latency of util::Limiter with a 10 ms maximum lookahead. */
 function limiterLatency(lookMs, rate) {
-  const max = Math.max(1, msFrames(10, rate));
-  const look = Math.min(Math.max(msFrames(Math.min(Math.max(lookMs, 0.1), 10), rate), 1), max);
+  const max = Math.max(1, msFrames(20, rate));
+  const look = Math.min(Math.max(msFrames(Math.min(Math.max(lookMs, 0.1), 20), rate), 1), max);
   return look - 1;
 }
 
@@ -64,9 +67,9 @@ registerEffect({
   kind: 30,
   about: 'Keeps peaks under a ceiling without audible clipping, looking ahead so it can turn the level down just before each peak. True Peak also catches peaks that fall between samples.',
   params: [
-    db('ceiling', 'Maximum Amplitude', -60, 0, -0.1),
-    db('inputBoost', 'Input Boost', -24, 48, 0),
-    ms('lookahead', 'Look-Ahead Time', 0.5, 10, 5),
+    db('ceiling', 'Maximum Amplitude', -100, 0, -0.1),
+    db('inputBoost', 'Input Boost', -100, 48, 0),
+    ms('lookahead', 'Look-Ahead Time', 0.5, 20, 5),
     release(80, { min: 10, max: 1000 }),
     bool('link', 'Link Channels', true),
     choice('truePeak', 'Detection', ['Peak', 'True Peak'], 0, { order: -1 }),
@@ -181,24 +184,14 @@ registerEffect({
 /** Transfer curve points from [input dB, output dB] pairs. */
 const curvePts = (list) => list.map(([x, y]) => ({ x, y }));
 
-/**
- * Output level (dB) of a drawn transfer curve at input level `x`: linear
- * between points, the first point's gain below it and the last segment's
- * slope above it (as wasm/dsp/src/fx/dynamics/curve.rs evaluates it).
- */
-export function curveOutput(points, x) {
-  const pts = [...(points || [])].sort((a, b) => a.x - b.x);
-  if (!pts.length) return x;
-  if (pts.length === 1 || x <= pts[0].x) return x + pts[0].y - pts[0].x;
-  for (let k = 1; k < pts.length; k++) {
-    const b = pts[k];
-    if (x <= b.x || k === pts.length - 1) {
-      const a = pts[k - 1];
-      const w = b.x - a.x;
-      return w > 1e-6 ? a.y + ((b.y - a.y) * (x - a.x)) / w : b.y;
-    }
-  }
-  return x;
+/** The transfer curve as the processor gets it: the points, or the spline sampled every 0.5 dB. */
+export function transferPoints(values) {
+  const pts = [...(values.curve || COMP_3)].sort((a, b) => a.x - b.x);
+  if (!values.spline || pts.length < 3) return pts;
+  const out = [];
+  for (let x = pts[0].x; x < pts[pts.length - 1].x; x += 0.5) out.push({ x, y: splineOutput(pts, x) });
+  out.push(pts[pts.length - 1]);
+  return out;
 }
 
 const COMP_3 = curvePts([[-100, -100], [-20, -20], [0, -13.3]]);
@@ -223,6 +216,7 @@ registerEffect({
     hz('lowCut', 'Low Cut', 20, 20000, 100, { section: 'Detector Band', enabledIf: (v) => v.bandLimit }),
     hz('highCut', 'High Cut', 20, 20000, 10000, { section: 'Detector Band', enabledIf: (v) => v.bandLimit }),
     db('makeup', 'Make-up Gain', -30, 30, 0, { section: 'Output' }),
+    bool('spline', 'Spline Curves', false, { hidden: true }),
   ],
   presets: [
     preset('Compressor 3:1', { curve: COMP_3, detection: 0, attack: 2, release: 120, lookahead: 2, bandLimit: false, makeup: 0 }),
@@ -235,9 +229,9 @@ registerEffect({
     preset('Broadcast Squash', { curve: curvePts([[-100, -100], [-60, -60], [-30, -24], [-12, -12], [0, -8]]), detection: 1, attack: 5, release: 150, lookahead: 4, bandLimit: true, lowCut: 80, highCut: 12000, makeup: 4 }),
   ],
   latency: (v, rate) => msFrames(Math.min(20, Math.max(0, v.lookahead)), rate),
-  transfer: (v, inDb) => curveOutput(v.curve, inDb) + v.makeup,
+  transfer: (v, inDb) => (v.spline ? splineOutput(v.curve, inDb) : curveOutput(v.curve, inDb)) + v.makeup,
   data(values) {
-    const pts = [...(values.curve || COMP_3)].sort((a, b) => a.x - b.x);
+    const pts = transferPoints(values);
     return [{ slot: 0, id: dataId(pts), values: Float32Array.from(pts.flatMap((p) => [p.x, p.y])) }];
   },
 });
@@ -290,9 +284,15 @@ registerEffect({
     bool('limiter', 'Limiter', true, { section: 'Limiter' }),
     db('limThreshold', 'Threshold', -30, 0, 0, { section: 'Limiter' }),
     db('limMargin', 'Margin', -30, 0, -0.1, { section: 'Limiter' }),
-    ms('limRelease', 'Release', 10, 1000, 100, { scale: 'log', section: 'Limiter' }),
+    ms('limRelease', 'Release', 10, 1000, 100, { scale: 'log', section: 'Limiter', order: 2 }),
     bool('brickwall', 'Brickwall Limiter', true, { section: 'Options', enabledIf: (v) => v.limiter }),
     bool('link', 'Link Channels', true, { section: 'Options' }),
+    // Brickwall: how far the limiter looks ahead; otherwise how fast its gain falls.
+    ms('limAttack', 'Attack', 0.1, 50, 5, { scale: 'log', section: 'Limiter', order: 1 }),
+    // Dialog settings the processor ignores: moving one band's setting moves the others
+    // by the same amount, and the live input spectrum behind the crossover graph.
+    bool('linkBands', 'Link Band Controls', false, { section: 'Options' }),
+    bool('spectrum', 'Spectrum on Input', false, { section: 'Options' }),
   ],
   readout: true,
   display: 'multiband',
@@ -306,7 +306,7 @@ registerEffect({
     preset('Loud Broadcast', bands([[-24, 1, 3], [-24, 0, 3], [-24, 1, 3], [-26, 1, 3]], { limThreshold: -8, limMargin: -1 })),
     preset('Soften Harsh Highs', bands([[-18, 0, 1], [-18, 0, 1], [-26, 0, 3], [-30, -1, 4]], { xover2: 2500, xover3: 7500 })),
   ],
-  latency: (v, rate) => (v.limiter && v.brickwall ? Math.max(1, msFrames(5, rate)) - 1 : 0),
+  latency: (v, rate) => (v.limiter && v.brickwall ? Math.min(Math.max(1, msFrames(Math.min(50, Math.max(0.1, v.limAttack ?? 5)), rate)), Math.max(1, msFrames(50, rate))) - 1 : 0),
 });
 
 // ---------------------------------------------------------- Tube Compressor
@@ -360,7 +360,7 @@ registerEffect({
     choice('mode', 'Mode', ['Broadband', 'Multiband'], 1),
     hz('frequency', 'Center Frequency', 1000, 16000, 6500),
     hz('bandwidth', 'Bandwidth', 100, 10000, 3000),
-    db('threshold', 'Threshold', -60, 0, -30),
+    db('threshold', 'Threshold', -80, 0, -30),
     db('reduction', 'Maximum Reduction', 0, 40, 12),
     bool('sibilanceOnly', 'Output Sibilance Only', false),
   ],
@@ -513,14 +513,16 @@ async function runNormalize({ channels, values, dsp, onProgress, signal }) {
     info.push({ mean, peak: Math.max(Math.abs(max - mean), Math.abs(min - mean)) });
   }
   const loudest = Math.max(0, ...info.map((i) => i.peak));
+  // DC Bias Adjust moves each channel's offset to the bias amount (0 % removes it).
+  const bias = values.removeDc ? (values.dcAmount || 0) / 100 : 0;
   const out = [];
   for (let c = 0; c < channels.length; c++) {
     const { mean, peak } = info[c];
     const p = values.equal ? loudest : peak;
-    const gain = p > 0 ? target / p : 1;
+    const gain = values.normalizeTo === false ? 1 : p > 0 ? target / p : 1;
     const src = channels[c];
     const dst = new Float32Array(src.length);
-    for (let i = 0; i < src.length; i++) dst[i] = (src[i] - mean) * gain;
+    for (let i = 0; i < src.length; i++) dst[i] = (src[i] - mean) * gain + bias;
     out.push(dst);
     onProgress?.((c + 1) / channels.length);
     await pause();
@@ -533,13 +535,16 @@ registerEffect({
   name: 'Normalize',
   group: AMP,
   kind: null,
-  about: 'Scales the selection so its loudest peak reaches the target. Equal normalization keeps the balance between channels; DC bias adjust centers each channel first.',
+  about: 'Scales the selection so its loudest peak reaches the target. Equal normalization keeps the balance between channels. DC bias adjust measures each channel\'s offset and moves it to the amount you set (0 % centers the waveform), with or without normalizing.',
   params: [
-    choice('unit', 'Normalize To', ['dB', '%'], 1),
-    num('targetPercent', 'Target (%)', 1, 200, 100, '%', { step: 0.1, enabledIf: (v) => v.unit === 1 }),
-    db('targetDb', 'Target (dB)', -60, 6, 0, { enabledIf: (v) => v.unit === 0 }),
-    bool('equal', 'Normalize All Channels Equally', true),
+    choice('unit', 'Normalize To', ['dB', '%'], 1, { enabledIf: (v) => v.normalizeTo }),
+    num('targetPercent', 'Target (%)', 1, 200, 100, '%', { step: 0.1, enabledIf: (v) => v.normalizeTo && v.unit === 1 }),
+    db('targetDb', 'Target (dB)', -60, 6, 0, { enabledIf: (v) => v.normalizeTo && v.unit === 0 }),
+    bool('equal', 'Normalize All Channels Equally', true, { enabledIf: (v) => v.normalizeTo }),
     bool('removeDc', 'DC Bias Adjust', false),
+    // Off: no level change, so DC Bias Adjust can run on its own.
+    bool('normalizeTo', 'Normalize To', true, { order: -1 }),
+    num('dcAmount', 'DC Bias', -50, 50, 0, '%', { step: 0.1, enabledIf: (v) => v.removeDc }),
   ],
   presets: [
     preset('Full Scale', { unit: 1, targetPercent: 100, equal: true, removeDc: false }),

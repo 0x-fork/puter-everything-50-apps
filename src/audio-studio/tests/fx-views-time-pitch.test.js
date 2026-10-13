@@ -71,6 +71,66 @@ describe('time and pitch views', () => {
     const p = openEffectDialog(app, getEffect('pitchShifter'), { doc, values: { semitones: 12 } });
     const dlg = document.querySelector('.fx-dialog');
     expect(dlg.querySelector('.sp-ratio').textContent).toContain('2.0000');
+    // Typing a ratio sets the nearest semitones and cents.
+    const hot = dlg.querySelector('.sp-ratio .hot');
+    hot.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const input = dlg.querySelector('.sp-ratio .hot-edit');
+    input.value = '1.5';
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    dlg.querySelector('.btn.primary').click();
+    expect(await p).toMatchObject({ semitones: 7, cents: 2 });
+  });
+  it('pitch shifter switches to manual splicing settings', async () => {
+    const { app, doc } = setup();
+    const p = openEffectDialog(app, getEffect('pitchShifter'), { doc });
+    const dlg = document.querySelector('.fx-dialog');
+    const sliders = () => [...dlg.querySelectorAll('input[type=range]')].filter((i) => /Splicing|Overlapping/.test(i.getAttribute('aria-label')));
+    expect(sliders()).toHaveLength(2);
+    expect(sliders().every((i) => i.disabled)).toBe(true);
+    expect(dlg.textContent).toMatch(/Spectral frames of \d+ samples/);
+    const auto = [...dlg.querySelectorAll('.fx-check input')].find((i) => i.closest('label').textContent.includes('Automatic'));
+    auto.click();
+    expect(sliders().every((i) => !i.disabled)).toBe(true);
+    // Precision and formants belong to the spectral shifter.
+    expect([...dlg.querySelectorAll('.fx-radios input')].every((i) => i.disabled)).toBe(true);
+    dlg.querySelector('.btn.primary').click();
+    expect((await p).autoSplice).toBe(false);
+  });
+  it('pitch shifter reports the latency the processor has', async () => {
+    const { instance } = await import('./fx-wasm.js');
+    const { paramArray, defaults } = await import('../src/effects/registry.js');
+    const { effectLatency } = await import('../src/effects/index.js');
+    const def = getEffect('pitchShifter');
+    for (const extra of [{}, { autoSplice: false }, { autoSplice: false, splice: 37 }, { autoSplice: false, splice: 200 }, { precision: 2 }]) {
+      const values = { ...defaults(def), ...extra };
+      const x = instance();
+      const h = x.fx_new(def.kind, 44100, 2);
+      paramArray(def, values).forEach((v, i) => x.fx_set(h, i, v));
+      expect(effectLatency(def, values, 44100)).toBe(x.fx_latency(h));
+    }
+  });
+  it('pitch bender quality sets the resampling kernel', async () => {
+    const d = await dsp();
+    const def = getEffect('pitchBender');
+    expect(def.params.find((q) => q.id === 'quality').options.map((o) => o.label)).toEqual(['Low', 'Medium', 'High', 'Very High', 'Near Perfect', 'Perfect']);
+    // A tone near Nyquist, lowered a fifth: the short Low kernel smears it more than Perfect.
+    const x = Float32Array.from({ length: 16000 }, (_, i) => 0.5 * Math.sin((2 * Math.PI * 3600 * i) / 8000));
+    const env = [{ t: 0, v: -7 }, { t: 1, v: -7 }];
+    const run = async (quality) => (await def.run({ channels: [x], rate: 8000, values: normalizeValues(def, { envelope: env, range: 12, quality }), dsp: d }))[0];
+    const [low, perfect] = [await run(0), await run(5)];
+    expect(low.length).toBe(perfect.length);
+    const rms = (y) => {
+      let e = 0;
+      for (let i = 2000; i < y.length - 2000; i++) e += y[i] ** 2;
+      return Math.sqrt(e / (y.length - 4000));
+    };
+    // The longer kernel keeps the tone's level; the short one rolls it off.
+    expect(rms(perfect)).toBeCloseTo(0.3536, 1);
+    expect(rms(low)).toBeLessThan(rms(perfect) * 0.9);
+    const { app, doc } = setup();
+    const p = openEffectDialog(app, getEffect('pitchBender'), { doc });
+    const dlg = document.querySelector('.fx-dialog');
+    expect([...dlg.querySelectorAll('select')].some((s) => s.getAttribute('aria-label') === 'Quality' && s.value === '4')).toBe(true);
     dlg.querySelector('.dialog-head .icon-btn').click();
     await p;
   });

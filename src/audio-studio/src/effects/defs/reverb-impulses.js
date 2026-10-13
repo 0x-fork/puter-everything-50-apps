@@ -127,17 +127,27 @@ export function generateImpulse(values, rate) {
 
 // ------------------------------------------------------- loaded impulses
 
-/** Impulse responses loaded from audio files this session, by name: { rate, channels: Float32Array[] }. */
+/**
+ * Impulse responses loaded from audio files, by name: { rate, channels:
+ * Float32Array[] }. storage/impulses.js keeps them on the device and puts
+ * them back here after a reload.
+ */
 const LOADED = new Map();
 
-/** Keeps a loaded impulse (at most a few; each can be megabytes). */
+/** Most loaded impulses kept (each can be megabytes). */
+export const MAX_LOADED_IMPULSES = 4;
+
+/** Keeps a loaded impulse, dropping the least recently loaded beyond the limit. */
 export function setLoadedImpulse(name, impulse) {
   LOADED.delete(name);
   LOADED.set(name, impulse);
-  while (LOADED.size > 4) LOADED.delete(LOADED.keys().next().value);
+  while (LOADED.size > MAX_LOADED_IMPULSES) LOADED.delete(LOADED.keys().next().value);
 }
 
 export const loadedImpulse = (name) => LOADED.get(name) || null;
+
+/** Names of the loaded impulses, most recent first. */
+export const loadedImpulseNames = () => [...LOADED.keys()].reverse();
 
 /** Longest loaded impulse kept (s); the Rust side accepts up to 8 s. */
 export const MAX_LOADED_SECONDS = 8;

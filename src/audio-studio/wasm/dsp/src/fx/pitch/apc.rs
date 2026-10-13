@@ -2,7 +2,7 @@
 //! a phase-vocoder shifter glides the signal towards the nearest note of the
 //! chosen scale.
 //! Params: 0 scale (0 major, 1 minor, 2 chromatic), 1 key (0 C .. 11 B),
-//! 2 attack (1 slow .. 10 fast), 3 sensitivity (1..100), 4 reference channel
+//! 2 attack (1 slow .. 10 fast), 3 sensitivity (1..200), 4 reference channel
 //! (0 left, 1 right), 5 FFT size (0 1024, 1 2048, 2 4096 at 48 kHz),
 //! 6 calibration A4 in Hz (410..470).
 //! Readout: [correction cents now, detected Hz (0 unvoiced), target note
@@ -141,7 +141,7 @@ impl Effect for AutoPitch {
                 self.attack = value.clamp(1.0, 10.0);
                 self.update_glide();
             }
-            3 => self.sensitivity = value.clamp(1.0, 100.0),
+            3 => self.sensitivity = value.clamp(1.0, 200.0),
             4 => self.reference = if value >= 0.5 { 1 } else { 0 },
             5 => {
                 let s = (value.round().max(0.0) as u32).min(2);

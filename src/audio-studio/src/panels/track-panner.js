@@ -4,6 +4,8 @@
 // anywhere on the stage, use the arrow keys, or type a value; double-click
 // resets to centre. Changes go through the session's TrackControls, so they
 // are undoable and write automation exactly like the track header pan knob.
+// In a 5.1 session mono and stereo tracks get the surround panner instead
+// (surround-panner.js); 5.1 tracks play each channel to its own speaker.
 
 import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
@@ -11,6 +13,7 @@ import { hotNumber } from '../ui/controls.js';
 import { findTrack } from '../model/session-edits.js';
 import { formatPan, parsePan } from '../multitrack/levels.js';
 import { formatDb, gainToDb } from '../lib/time.js';
+import { surroundPanner, usesSurround } from './surround-panner.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 // Stage geometry in SVG user units.
@@ -91,7 +94,10 @@ export function trackPannerPanel(app) {
     h('div.panner-field', h('span.prop-label', 'Right'), rightOut),
     reset,
   );
-  const body = h('div.panner-body', h('div.panner-head', trackSelect, auto), pad, fields);
+  const surround = surroundPanner(app, () => target());
+  const sixNote = h('p.muted.panner-note', { hidden: true }, 'This 5.1 track plays each of its channels to the matching speaker. Its volume and the master fader set its level.');
+  surround.el.hidden = true;
+  const body = h('div.panner-body', h('div.panner-head', trackSelect, auto), pad, fields, surround.el, sixNote);
   const empty = h('div.empty-state.panner-empty', h('p', 'Select an audio or bus track in a multitrack session to pan it here.'));
   const el = h('div.track-panner-panel', body, empty);
   let visible = false;
@@ -147,6 +153,17 @@ export function trackPannerPanel(app) {
     }
     if (!tg) return;
     el.style.setProperty('--track-color', tg.track.color);
+    const sur = usesSurround(tg.doc, tg.track);
+    const six = tg.doc.state.master.channels === 6 && tg.track.channels === 6;
+    pad.hidden = fields.hidden = sur || six;
+    surround.el.hidden = !sur;
+    sixNote.hidden = !six;
+    if (sur) {
+      auto.hidden = true;
+      surround.render(tg.track);
+      return;
+    }
+    if (six) return;
     const c = tg.doc.controls;
     const automated = Boolean(c?.automated(tg.track, 'pan'));
     auto.hidden = !automated;

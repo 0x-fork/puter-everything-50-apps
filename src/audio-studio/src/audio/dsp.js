@@ -7,6 +7,18 @@ import wasmUrl from './dsp.wasm?url';
 let modulePromise = null;
 let instancePromise = null;
 
+/** Sample-rate conversion settings (Preferences > Data): quality 0..100 and the pre/post filter. */
+const resampleDefaults = { quality: 50, filter: true };
+
+export function resampleSettings() {
+  return { ...resampleDefaults };
+}
+
+export function setResampleSettings({ quality, filter } = {}) {
+  if (Number.isFinite(Number(quality))) resampleDefaults.quality = Math.max(0, Math.min(100, Number(quality)));
+  if (filter !== undefined) resampleDefaults.filter = Boolean(filter);
+}
+
 /** Compiled module, shared by every context that needs DSP. */
 export function dspModule() {
   if (!modulePromise) {
@@ -124,12 +136,19 @@ export class Dsp {
     };
   }
 
-  /** Band-limited resampling of one channel to `outLength` samples. */
-  resample(samples, from, to, outLength = Math.round((samples.length * to) / from)) {
+  /**
+   * Band-limited resampling of one channel to `outLength` samples, at
+   * `opts.quality` (0..100) with or without `opts.filter` (the pre/post filter);
+   * both default to the Preferences > Data settings.
+   */
+  resample(samples, from, to, outLength = Math.round((samples.length * to) / from), opts = {}) {
     const src = this.floats(samples.length);
     src.view().set(samples);
     const dst = this.floats(outLength);
-    this.x.resample_block(src.ptr, samples.length, from, to, dst.ptr, outLength);
+    const quality = opts.quality ?? resampleDefaults.quality;
+    const filter = opts.filter ?? resampleDefaults.filter;
+    if (this.x.resample_block_q) this.x.resample_block_q(src.ptr, samples.length, from, to, dst.ptr, outLength, quality, filter ? 1 : 0);
+    else this.x.resample_block(src.ptr, samples.length, from, to, dst.ptr, outLength);
     const out = dst.view().slice();
     src.free();
     dst.free();

@@ -15,7 +15,7 @@ use crate::fx::{Effect, Smooth};
 
 pub const MAX_VOICES: usize = 8;
 const MAX_DELAY_MS: f32 = 50.0;
-const MAX_SPREAD_MS: f32 = 50.0;
+const MAX_SPREAD_MS: f32 = 200.0;
 /// Frames between LFO evaluations.
 const CTRL: usize = 16;
 /// Largest interaural time difference for binaural cues, in ms.
@@ -100,7 +100,7 @@ impl Effect for Chorus {
                 self.spread.target = self.spread_ms;
             }
             5 => self.depth_db = v.clamp(0.0, 24.0),
-            6 => self.mod_rate = v.clamp(0.0, 20.0),
+            6 => self.mod_rate = v.clamp(0.0, 30.0),
             7 => self.width = (v * 0.01).clamp(0.0, 1.0),
             8 => self.dry.target = (v * 0.01).clamp(0.0, 2.0),
             9 => self.wet.target = (v * 0.01).clamp(0.0, 2.0),

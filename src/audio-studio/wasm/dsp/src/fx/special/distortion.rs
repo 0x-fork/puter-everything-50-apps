@@ -6,8 +6,8 @@
 //! 4 curve smoothing %, 5 time smoothing %, 6 post filter on (0/1),
 //! 7 filter type (0 low pass, 1 high pass, 2 band pass), 8 filter Hz,
 //! 9 filter Q, 10 mix %, 11 output dB. Curve 7 is a drawn curve: data slot
-//! 0 (positive) and 1 (negative) hold its table of output magnitudes
-//! sampled evenly over input magnitudes 0..1 (see shaper::TABLE_POS).
+//! 0 (positive) and 1 (negative) hold its octave table of output magnitudes
+//! (see shaper::TABLE_POS).
 //! Latency: `Oversampler::latency(4)` frames (the dry path is aligned).
 
 use super::shaper::{Oversampler, Shape, Shaper, SOFT, TABLE_NEG, TABLE_POS};
@@ -287,9 +287,9 @@ mod tests {
     fn drawn_curve_shapes_both_halves() {
         let rate = 48000.0;
         let mut fx = make(90, rate, 1);
-        // Output = input / 2 below 1.0 (a table of 3 points).
-        fx.set_data(0, &[0.0, 0.25, 0.5]);
-        fx.set_data(1, &[0.0, 0.5, 1.0]);
+        // Output = input / 2 below 1.0.
+        fx.set_data(0, &crate::fx::special::shaper::tests::octave_table(|a| a * 0.5));
+        fx.set_data(1, &crate::fx::special::shaper::tests::octave_table(|a| a));
         fx.set_param(0, 0.0);
         fx.set_param(1, 7.0);
         fx.set_param(2, 7.0);

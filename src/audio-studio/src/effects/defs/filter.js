@@ -23,13 +23,17 @@ const qParam = (def, max = 100) => num('q', 'Q', 0.1, max, def, '', { step: 0.01
 const BAND_FREQS = [120, 400, 1000, 3000, 8000];
 
 const parametricParams = [
-  db('gain', 'Master Gain', -24, 24, 0),
+  db('gain', 'Master Gain', -80, 40, 0),
   choice('qMode', 'Constant', ['Q', 'Width'], 0),
   ...section('High Pass', 'hp', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 60), choice('slope', 'Slope', SLOPES, 2)]),
-  ...section('Low Shelf', 'ls', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 100), db('gain', 'Gain', -30, 30, 0), qParam(0.7071, 4)]),
-  ...BAND_FREQS.flatMap((f, i) => section(`Band ${i + 1}`, `band${i + 1}`, [bool('on', 'On', true), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -30, 30, 0), qParam(1)])),
-  ...section('High Shelf', 'hs', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 8000), db('gain', 'Gain', -30, 30, 0), qParam(0.7071, 4)]),
+  ...section('Low Shelf', 'ls', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 100), db('gain', 'Gain', -48, 48, 0), qParam(0.7071, 4)]),
+  ...BAND_FREQS.flatMap((f, i) => section(`Band ${i + 1}`, `band${i + 1}`, [bool('on', 'On', true), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -48, 48, 0), qParam(1)])),
+  ...section('High Shelf', 'hs', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 8000), db('gain', 'Gain', -48, 48, 0), qParam(0.7071, 4)]),
   ...section('Low Pass', 'lp', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 18000), choice('slope', 'Slope', SLOPES, 2)]),
+  // Double-precision filtering: a lower noise floor for deep, narrow or very low bands.
+  bool('ultraQuiet', 'Ultra-Quiet', false),
+  // The graph's span (the processor ignores it): 30 dB shows +/-15 dB, 96 dB shows +/-48 dB.
+  choice('range', 'Range', [{ value: 0, label: '30 dB' }, { value: 1, label: '96 dB' }], 0),
 ];
 
 function parametricSections(v, rate) {
@@ -103,9 +107,11 @@ function shortLabel(f, i, n) {
 function graphicDef(id, name, kind, centres, octaves) {
   const q = F.bandQ(octaves);
   const params = [
-    db('gain', 'Master Gain', -24, 24, 0),
+    db('gain', 'Master Gain', -50, 50, 0),
     choice('accuracy', 'Accuracy', ['Standard', 'High'], 1),
     ...centres.map((f, i) => db(`band${i + 1}`, freqLabel(f), -24, 24, 0, { section: 'Bands', short: shortLabel(f, i, centres.length) })),
+    // The span of the band sliders (a dialog setting the processor ignores): 48 dB is +/-24 dB.
+    num('range', 'Range', 6, 48, 48, 'dB', { step: 1 }),
   ];
   const shape = (fn) => Object.fromEntries(centres.map((f, i) => [`band${i + 1}`, Math.round(fn(f) * 10) / 10]));
   const lg = (f) => Math.log2(f / 1000);
@@ -116,7 +122,7 @@ function graphicDef(id, name, kind, centres, octaves) {
     kind,
     params,
     bands: centres,
-    about: `Boosts or cuts ${centres.length} fixed frequency bands. High accuracy corrects for the overlap between neighbouring bands so the curve follows the sliders.`,
+    about: `Boosts or cuts ${centres.length} fixed frequency bands. High accuracy corrects for the overlap between neighbouring bands so the curve follows the sliders; Range sets how far the sliders reach.`,
     layout: { vertical: ['Bands'], order: ['Bands', null], wide: centres.length > 10 },
     response: (v, freqs, rate) => {
       const want = centres.map((_, i) => v[`band${i + 1}`] ?? 0);
@@ -149,6 +155,8 @@ const notchParams = [
   ...[60, 120, 180, 240, 300, 360].flatMap((f, i) =>
     section(`Notch ${i + 1}`, `band${i + 1}`, [bool('on', 'On', i === 0), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -90, 0, -30, i ? { enabledIf: (v) => !v.fixGains } : {})]),
   ),
+  // Double-precision filtering: a lower noise floor for deep, narrow or very low notches.
+  bool('ultraQuiet', 'Ultra-Quiet', false),
 ];
 
 const notchSet = (freqs, gain, width = 1) => ({
@@ -191,19 +199,76 @@ registerEffect({
 
 // ------------------------------------------------------- Scientific Filter
 
+export const MAX_SCIENTIFIC_ORDER = 8;
+
+/** Stop-band edges of a design: frequencies that must be down by the stop attenuation. */
+function stopEdges(v, width, rate) {
+  const top = rate * 0.4999;
+  const lo = Math.min(v.cutoff, v.highCutoff);
+  const hi = Math.max(v.cutoff, v.highCutoff);
+  if (v.mode === 0) return [Math.min(top, v.cutoff + width)];
+  if (v.mode === 1) return [Math.max(1, v.cutoff - width)];
+  if (v.mode === 2) return [Math.max(1, lo - width), Math.min(top, hi + width)];
+  // Band stop: the inner edges, or the middle when the transitions meet.
+  return lo + width < hi - width ? [lo + width, hi - width] : [Math.sqrt(lo * hi)];
+}
+
+/** Attenuation in dB (positive) of design `v` at frequency f, relative to unity gain. */
+function attenuation(v, f, rate) {
+  return -F.cascadeDb(F.scientificSections(v, rate), [f], rate, 0)[0];
+}
+
+/**
+ * The lowest order (1..8) whose response is down by `stopAtten` dB within
+ * `transition` Hz of the cutoff(s); { order, met } with met false when even
+ * the steepest order falls short.
+ */
+export function scientificOrderFor(v, rate) {
+  const edges = stopEdges(v, Math.max(0.1, v.transition), rate);
+  for (let order = 1; order <= MAX_SCIENTIFIC_ORDER; order++) {
+    const d = { ...v, order };
+    if (edges.every((f) => attenuation(d, f, rate) >= v.stopAtten)) return { order, met: true };
+  }
+  return { order: MAX_SCIENTIFIC_ORDER, met: false };
+}
+
+/**
+ * How far past the cutoff the design reaches the stop attenuation (Hz, the
+ * transition bandwidth of the current order), or null beyond the audio band.
+ */
+export function scientificTransition(v, rate) {
+  let lo = 0.1;
+  let hi = rate / 2;
+  const ok = (w) => stopEdges(v, w, rate).every((f) => attenuation(v, f, rate) >= v.stopAtten);
+  const edge = v.mode === 1 ? v.cutoff : v.mode === 3 ? Math.abs(v.highCutoff - v.cutoff) / 2 : rate / 2;
+  if (!ok(Math.min(hi, edge * 0.999))) return null;
+  hi = Math.min(hi, edge * 0.999);
+  for (let i = 0; i < 40; i++) {
+    const mid = Math.sqrt(lo * hi);
+    if (ok(mid)) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
+
 registerEffect({
   id: 'scientificFilter',
   name: 'Scientific Filter',
   group: GROUP,
   kind: 15,
   params: [
-    choice('type', 'Type', ['Butterworth', 'Chebyshev', 'Bessel'], 0),
-    choice('mode', 'Mode', ['Low Pass', 'High Pass', 'Band Pass', 'Band Stop'], 0),
-    num('order', 'Order', 1, 8, 4, '', { step: 1 }),
-    hz('cutoff', 'Cutoff', 10, 20000, 1000),
-    hz('highCutoff', 'High Cutoff', 10, 20000, 4000, { enabledIf: (v) => v.mode >= 2 }),
-    db('ripple', 'Passband Ripple', 0.01, 6, 1, { step: 0.01, enabledIf: (v) => v.type === 1 }),
-    db('gain', 'Master Gain', -24, 24, 0),
+    choice('type', 'Type', ['Butterworth', 'Chebyshev', 'Bessel'], 0, { order: -2 }),
+    choice('mode', 'Mode', ['Low Pass', 'High Pass', 'Band Pass', 'Band Stop'], 0, { order: -2 }),
+    num('order', 'Order', 1, 8, 4, '', { step: 1, enabledIf: (v) => v.designBy !== 1 }),
+    hz('cutoff', 'Cutoff', 10, 20000, 1000, { order: 1 }),
+    hz('highCutoff', 'High Cutoff', 10, 20000, 4000, { order: 1, enabledIf: (v) => v.mode >= 2 }),
+    db('ripple', 'Passband Ripple', 0.01, 6, 1, { order: 1, step: 0.01, enabledIf: (v) => v.type === 1 }),
+    db('gain', 'Master Gain', -50, 50, 0, { order: 1 }),
+    // Design by order, or by a transition band: the dialog then sets the
+    // lowest order that is down by the stop attenuation within that width.
+    choice('designBy', 'Design By', ['Order', 'Transition Bandwidth'], 0, { control: 'radio', order: -1 }),
+    hz('transition', 'Transition Bandwidth', 1, 10000, 1000, { enabledIf: (v) => v.designBy === 1 }),
+    db('stopAtten', 'Stop Attenuation', 3, 120, 40, { step: 1 }),
   ],
   display: 'scientific',
   about: 'Classic analog filter designs: Butterworth for the flattest passband, Chebyshev for a steeper edge at the cost of ripple, Bessel for the most even delay. Switch the graph to phase or group delay to compare them.',
@@ -250,7 +315,7 @@ registerEffect({
     choice('fftSize', 'FFT Size', FFT_SIZES, 4096, { section: 'Advanced' }),
     choice('scale', 'Scale', ['Logarithmic', 'Linear'], 0),
     db('gain', 'Master Gain', -24, 24, 0, { section: 'Advanced' }),
-    { id: 'curve', label: 'Curve', type: 'curve', default: curve([[20, 0], [20000, 0]]), min: -60, max: 24, unit: 'dB', order: -1 },
+    { id: 'curve', label: 'Curve', type: 'curve', default: curve([[20, 0], [20000, 0]]), min: -100, max: 24, unit: 'dB', order: -1 },
     // Smooths the drawn curve between its points; the processor receives the smoothed curve.
     bool('spline', 'Spline Curves', false),
   ],

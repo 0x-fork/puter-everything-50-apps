@@ -18,11 +18,11 @@ registerEffect({
   params: [
     num('voices', 'Voices', 2, 8, 5, '', { step: 1, control: 'select', section: 'Characteristics' }),
     ms('delay', 'Delay Time', 1, 50, 12, { section: 'Characteristics' }),
-    hzRate('delayRate', 'Delay Rate', 0.02, 10, 0.6, { section: 'Characteristics' }),
+    hzRate('delayRate', 'Delay Rate', 0.02, 12, 0.6, { section: 'Characteristics' }),
     pct('feedback', 'Feedback', 0, { max: 90, section: 'Characteristics' }),
-    ms('spread', 'Spread', 0, 50, 10, { section: 'Characteristics' }),
-    db('depth', 'Modulation Depth', 0, 12, 2, { section: 'Characteristics' }),
-    hzRate('modRate', 'Modulation Rate', 0.02, 10, 1.2, { section: 'Characteristics' }),
+    ms('spread', 'Spread', 0, 200, 10, { scale: 'linear', section: 'Characteristics' }),
+    db('depth', 'Modulation Depth', 0, 15, 2, { section: 'Characteristics' }),
+    hzRate('modRate', 'Modulation Rate', 0.02, 30, 1.2, { section: 'Characteristics' }),
     pct('width', 'Stereo Field', 80, { section: 'Stereo Width', ends: ['Narrow', 'Wide'] }),
     pct('dry', 'Dry', 70, { max: 200, section: 'Output Level' }),
     pct('wet', 'Wet', 50, { max: 200, section: 'Output Level' }),
@@ -42,7 +42,7 @@ registerEffect({
     preset('Seasick Wobble', { voices: 4, delay: 30, delayRate: 3.5, feedback: 35, spread: 15, depth: 6, modRate: 4, width: 100, dry: 50, wet: 70, quality: true }),
   ],
   tail: (v, rate) => {
-    const longest = clamp(v.delay, 1, 50) * 1.3 + clamp(v.spread, 0, 50) + (v.binaural ? CHORUS_ITD_MS : 0);
+    const longest = clamp(v.delay, 1, 50) * 1.3 + clamp(v.spread, 0, 200) + (v.binaural ? CHORUS_ITD_MS : 0);
     return feedbackTail((longest / 1000) * rate, clamp(v.feedback / 100, 0, 0.9), rate);
   },
 });
@@ -57,7 +57,7 @@ registerEffect({
     ms('finalDelay', 'Final Delay Time', 0, 20, 5, { section: 'Characteristics' }),
     num('phasing', 'Stereo Phasing', 0, 360, 90, '°', { step: 1, section: 'Characteristics' }),
     pct('feedback', 'Feedback', 50, { max: 95, section: 'Characteristics' }),
-    hzRate('rate', 'Modulation Rate', 0.01, 10, 0.3, { section: 'Characteristics' }),
+    hzRate('rate', 'Modulation Rate', 0.01, 60, 0.3, { step: 0.001, section: 'Characteristics' }),
     bool('inverted', 'Inverted', false, { section: 'Mode' }),
     bool('special', 'Special Effects', false, { section: 'Mode' }),
     bool('sinusoidal', 'Sinusoidal', true, { section: 'Mode' }),
@@ -90,7 +90,7 @@ registerEffect({
     pct('depth', 'Depth', 70),
     hzRate('rate', 'Modulation Rate', 0.01, 10, 0.4),
     num('phaseDiff', 'Phase Difference', -180, 180, 0, '°', { step: 1 }),
-    num('upperFreq', 'Upper Frequency', 100, 18000, 3000, 'Hz', { step: 1, scale: 'log' }),
+    num('upperFreq', 'Upper Frequency', 20, 20000, 3000, 'Hz', { step: 1, scale: 'log' }),
     pct('feedback', 'Feedback', 30, { min: -90, max: 90 }),
     pct('mix', 'Mix', 50, { ends: ['Dry', 'Wet'] }),
     db('gain', 'Output Gain', -20, 12, 0),

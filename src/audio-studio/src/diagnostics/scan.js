@@ -14,6 +14,7 @@
 
 import { dspModule, dsp } from '../audio/dsp.js';
 import { ops, clickSettings } from './kernels.js';
+import { detectionFloor, maxRunOf, strengthOf, coreLength } from '../effects/defs/click-thresholds.js';
 import { findSilence, audioMarkers, detectionWindow } from '../effects/defs/special-silence.js';
 import { deleteRange } from '../model/edits.js';
 import { addMarkers } from '../effects/apply.js';
@@ -134,6 +135,49 @@ export async function scanProblems({ effect, values, channels, rate, start, end,
       }
       return { problems: mergeRuns(runs, 'click'), info: {} };
     }
+    if (effect === 'clickPop') {
+      // Click/Pop Eliminator: everything above the Detect curve's floor, with
+      // the strength (threshold scale) and the level around each click.
+      const k = detectionFloor(values);
+      const oversample = values.oversample / 100;
+      const runs = [];
+      for (let c = 0; c < nch; c++) {
+        await blocks(channels[c], start, end, async (samples, a, lo, hi) => {
+          const t = await runner.run('clickLevels', { samples, k, maxRun: maxRunOf(values), oversample });
+          for (let i = 0; i < t.length; i += 4) {
+            const at = lo + t[i];
+            if (at < a || at >= hi) continue;
+            runs.push({ start: at, end: Math.min(end, at + t[i + 1]), channel: c, level: strengthOf(t[i + 2]), db: t[i + 3], core: coreLength(t[i + 1], oversample) });
+          }
+        }, { signal, onProgress: prog(c) });
+      }
+      // Merged runs keep the loudest surroundings and the longest core.
+      const merged = mergeRuns(runs, 'click');
+      let r = 0;
+      const sorted = runs.slice().sort((x, y) => x.start - y.start || x.channel - y.channel);
+      for (const p of merged) {
+        p.db = -Infinity;
+        p.core = 0;
+        while (r < sorted.length && sorted[r].start < p.end) {
+          p.db = Math.max(p.db, sorted[r].db);
+          p.core = Math.max(p.core, sorted[r].core);
+          r++;
+        }
+      }
+      return { problems: merged, info: {} };
+    }
+    if (effect === 'levels') {
+      // Window levels for the Click/Pop Eliminator's threshold levels (50 ms windows).
+      const win = Math.max(64, Math.round(rate * 0.05));
+      const dbs = [];
+      for (let c = 0; c < nch; c++) {
+        await blocks(channels[c], start, end, async (samples, a, lo, hi) => {
+          const t = await runner.run('levels', { samples: samples.subarray(a - lo, hi - lo), win });
+          dbs.push(...t);
+        }, { context: 0, signal, onProgress: prog(c) });
+      }
+      return { problems: [], info: { dbs } };
+    }
     if (effect === 'declipper') {
       let peak = 0;
       for (let c = 0; c < nch; c++) {
@@ -236,6 +280,32 @@ export async function repairClicks(state, problems, values, { runner, signal, on
   try {
     const s = clickSettings(values);
     return await repairWindows(state, problems, { op: 'declick', args: { k: s.k, disc: s.disc, maxRun: s.maxRun, oversample: s.oversample, passes: s.passes }, pad: 8, context: 2048, runner, signal, onProgress });
+  } finally {
+    if (own) runner.close();
+  }
+}
+
+/** Rebuilds each problem's range exactly (Click/Pop Eliminator repairs and Fill Single Click). */
+export async function fillProblems(state, problems, { runner, signal, onProgress } = {}) {
+  const own = !runner;
+  runner = runner || (await createRunner());
+  try {
+    let channels = state.channels.slice();
+    const len = channels[0].length;
+    const context = 2048;
+    for (let i = 0; i < problems.length; i++) {
+      if (signal?.aborted) throw cancelled();
+      const p = problems[i];
+      const lo = Math.max(0, p.start - context);
+      const hi = Math.min(len, p.end + context);
+      for (const c of p.channels) {
+        if (c >= channels.length) continue;
+        const fixed = await runner.run('fill', { samples: channels[c].toArray(lo, hi), start: p.start - lo, len: p.end - p.start });
+        channels[c] = channels[c].write(p.start, fixed.subarray(p.start - lo, p.end - lo));
+      }
+      onProgress?.((i + 1) / problems.length);
+    }
+    return { ...state, channels };
   } finally {
     if (own) runner.close();
   }

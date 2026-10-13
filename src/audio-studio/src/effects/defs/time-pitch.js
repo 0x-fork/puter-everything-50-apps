@@ -115,6 +115,16 @@ function envelopeCurve(points, len, map, spline = false) {
   return flat;
 }
 
+/** Latency of the splicing shifter: half a splice plus two frames (shifter.rs, in f32). */
+export function spliceLatency(hz, rate) {
+  const f = Math.fround;
+  const len = Math.max(8, f(f(rate) / f(Math.min(200, Math.max(10, hz)))));
+  return Math.round(f(2 + f(0.5 * len)));
+}
+
+/** Pitch Bender quality: sinc kernel zero crossings per side, Low to Perfect. */
+export const BEND_QUALITY = [2, 4, 8, 12, 16, 32];
+
 registerEffect({
   id: 'pitchShifter',
   name: 'Pitch Shifter',
@@ -123,8 +133,13 @@ registerEffect({
   params: [
     num('semitones', 'Semitones', -24, 24, 0, 'st', { step: 1 }),
     num('cents', 'Cents', -100, 100, 0, 'ct', { step: 1 }),
-    choice('precision', 'Precision', PRECISION, 1),
-    bool('formants', 'Preserve Formants', false),
+    choice('precision', 'Precision', PRECISION, 1, { enabledIf: (v) => v.autoSplice }),
+    bool('formants', 'Preserve Formants', false, { enabledIf: (v) => v.autoSplice }),
+    // On: spectral shifting sized by Precision. Off: time-domain splicing with
+    // the splicing frequency (grains per second) and crossfade overlap below.
+    bool('autoSplice', 'Use Automatic Settings', true),
+    hz('splice', 'Splicing Frequency', 10, 200, 48, { enabledIf: (v) => !v.autoSplice }),
+    num('overlap', 'Overlapping', 1, 50, 30, '%', { step: 0.1, enabledIf: (v) => !v.autoSplice }),
   ],
   presets: [
     preset('Unchanged', { semitones: 0, cents: 0, precision: 1, formants: false }),
@@ -135,7 +150,7 @@ registerEffect({
     preset('Deeper Voice', { semitones: -3, cents: 0, precision: 1, formants: true }),
     preset('Smaller Voice', { semitones: 4, cents: 0, precision: 1, formants: true }),
   ],
-  latency: (v, rate) => pitchFftSize(1024, v.precision, rate),
+  latency: (v, rate) => (v.autoSplice === false ? spliceLatency(v.splice, rate) : pitchFftSize(1024, v.precision, rate)),
   /** Frequency ratio shown next to the semitone and cent controls. */
   ratio: (v) => pitchRatio(v.semitones, v.cents),
 });
@@ -149,7 +164,7 @@ registerEffect({
     choice('scale', 'Scale', ['Major', 'Minor', 'Chromatic'], 2),
     choice('key', 'Key', KEYS, 0),
     num('attack', 'Attack', 1, 10, 7, '', { step: 0.1, description: 'How quickly notes are pulled into tune (1 slow, 10 fast)' }),
-    num('sensitivity', 'Sensitivity', 1, 100, 50, '', { step: 1, description: 'How noisy a note may be and still be corrected' }),
+    num('sensitivity', 'Sensitivity', 1, 200, 50, '', { step: 1, description: 'How noisy a note may be and still be corrected' }),
     choice('reference', 'Reference Channel', ['Left', 'Right'], 0),
     choice('fftSize', 'FFT Size', ['1024', '2048', '4096'], 1),
     hz('calibration', 'A4 Calibration', 410, 470, 440, { scale: 'linear', step: 0.1 }),
@@ -174,7 +189,7 @@ registerEffect({
   params: [
     choice('algorithm', 'Algorithm', ['Spectral (music)', 'Waveform (speech)', 'Varispeed (tape)'], 0),
     num('stretch', 'Stretch', 10, 1000, 100, '%', { step: 0.1, scale: 'log', description: 'New duration as a percentage of the original' }),
-    num('semitones', 'Pitch Shift', -24, 24, 0, 'st', { step: 1 }),
+    num('semitones', 'Pitch Shift', -36, 36, 0, 'st', { step: 1 }),
     num('cents', 'Cents', -100, 100, 0, 'ct', { step: 1 }),
     choice('precision', 'Precision', PRECISION, 1),
     bool('lockChannels', 'Lock Stereo Channels', true),
@@ -218,6 +233,7 @@ registerEffect({
     num('bpmRange', 'Tempo Range', 1, 200, 40, 'BPM', { step: 1 }),
     num('tempo', 'At a Tempo Of', 20, 300, 90, 'BPM', { step: 1 }),
     bool('spline', 'Spline Curves', false),
+    choice('quality', 'Quality', ['Low', 'Medium', 'High', 'Very High', 'Near Perfect', 'Perfect'], 4, { control: 'select' }),
   ],
   presets: [
     preset('Flat', { envelope: [{ t: 0, v: 0 }, { t: 1, v: 0 }], range: 2 }),
@@ -231,7 +247,7 @@ registerEffect({
   run: async ({ channels, rate, values: v, dsp, onProgress, signal }) => {
     const range = bendRange(v);
     const curve = envelopeCurve(v.envelope, channels[0].length, (semis) => 2 ** (Math.max(-range, Math.min(range, semis)) / 12), v.spline);
-    return runTimePitch(dsp, channels, rate, { mode: 2, pitch: 1, curve }, { onProgress, signal });
+    return runTimePitch(dsp, channels, rate, { mode: 2, precision: BEND_QUALITY[v.quality] ?? 16, pitch: 1, curve }, { onProgress, signal });
   },
   process: offloaded('pitchBender'),
 });

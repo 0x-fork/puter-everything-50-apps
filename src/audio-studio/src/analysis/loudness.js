@@ -1,8 +1,10 @@
 // Match Loudness panel: measures open files with ITU-R BS.1770-4 (integrated
 // loudness, loudness range, true peak, plus sample peak and total RMS) and matches them to a target with a
 // true-peak ceiling, applying gain (and a look-ahead limiter when the gain
-// would push peaks over the ceiling) as one undo step per file. While audio
-// plays it also shows live momentary and short-term loudness.
+// would push peaks over the ceiling) as one undo step per file, or, with
+// Export on, writing matched copies with the chosen export settings and
+// leaving the open files as they are. While audio plays it also shows live
+// momentary and short-term loudness.
 
 import { h, announce } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
@@ -12,6 +14,9 @@ import { dsp } from '../audio/dsp.js';
 import { analysisPool } from './pool.js';
 import { loudnessMeter } from './dsp-ext.js';
 import { fmtDb, gainToDb, masterTap } from './common.js';
+import { exportAudio } from '../export/export.js';
+import { batchSettings, exportOptionsFor, outputName, describeBatch } from '../batch/queue.js';
+import { exportSettingsDialog, outputWriter, locationText } from '../batch/export-settings.js';
 
 const CHUNK = 1 << 18;
 
@@ -24,7 +29,23 @@ export const LOUDNESS_PRESETS = [
   { id: 'custom', label: 'Custom' },
 ];
 
-export const MATCH_DEFAULTS = { preset: 'ebu', target: -23, tolerance: 0.5, peak: -1, limit: true, lookMs: 12, releaseMs: 200 };
+export const MATCH_DEFAULTS = { preset: 'ebu', target: -23, tolerance: 0.5, peak: -1, limit: true, lookMs: 12, releaseMs: 200, export: false };
+
+/** Export settings for matched copies (Batch Process fields; see batch/queue.js). */
+export const MATCH_EXPORT_DEFAULTS = { suffix: ' (matched)' };
+export const matchExportSettings = (saved) => batchSettings({ ...MATCH_EXPORT_DEFAULTS, ...(saved || {}) });
+
+/**
+ * Writes a matched copy of `doc`: its audio with the plan applied (unchanged
+ * when the plan skips) encoded with `exportSettings`. Resolves the file name written.
+ */
+export async function exportMatched(doc, plan, s, exportSettings, { write, apply = applyMatch, encode = exportAudio, onProgress } = {}) {
+  let state = doc.state;
+  if (plan.action !== 'skip') state = (await apply(state, plan, s, (f) => onProgress?.(f * 0.5))).state;
+  const options = exportOptionsFor(exportSettings, { sampleRate: state.sampleRate, channels: state.channels.length });
+  const blob = await encode({ channels: state.channels, sampleRate: state.sampleRate, markers: state.markers || [], meta: state.meta || {} }, options, { onProgress: (f) => onProgress?.(0.5 + f * 0.5) });
+  return write(outputName(doc.name, exportSettings), blob);
+}
 
 /**
  * What matching a measurement to the settings requires:
@@ -152,6 +173,11 @@ export function loudnessPanel(app) {
     limitBox.checked = s.limit;
     look.setValue(s.lookMs);
     rel.setValue(s.releaseMs);
+    exportBox.checked = Boolean(s.export);
+    exportBtn.disabled = !s.export;
+    const x = exportSettings();
+    exportNote.textContent = s.export ? `${describeBatch(x)}; ${locationText(x)}` : 'Off: Run changes the open files (one undo step each).';
+    runBtn.textContent = s.export ? 'Export' : 'Run';
   };
   const settingsGrid = h(
     'div.match-settings',
@@ -185,7 +211,20 @@ export function loudnessPanel(app) {
   );
   const liveMeter = h('div.loudness-live', { 'aria-live': 'off' });
   const status = h('div.analysis-caption', { 'aria-live': 'polite' });
-  const el = h('div.analysis-panel.loudness-panel', toolbar, settingsGrid, h('div.table-scroll', table), h('div.analysis-foot', status, liveMeter));
+  // Export: write matched copies instead of changing the open files.
+  const exportSettings = () => matchExportSettings(app.prefs.get('matchLoudnessExport'));
+  const exportBox = h('input', { type: 'checkbox', checked: p.export, onchange: () => set({ export: exportBox.checked }, false) });
+  const exportBtn = h('button.btn', {
+    type: 'button',
+    onclick: async () => {
+      const patch = await exportSettingsDialog(app, exportSettings(), { title: 'Match Loudness Export Settings', example: 'Interview' });
+      if (patch) app.prefs.set('matchLoudnessExport', { ...exportSettings(), ...patch });
+      syncControls();
+    },
+  }, 'Export Settings...');
+  const exportNote = h('span.match-export-note.faint');
+  const exportBar = h('div.match-export', h('label.check', exportBox, h('span', 'Export')), exportBtn, exportNote);
+  const el = h('div.analysis-panel.loudness-panel', toolbar, settingsGrid, h('div.table-scroll', table), exportBar, h('div.analysis-foot', status, liveMeter));
 
   const addDocs = (docs) => {
     for (const d of docs) {
@@ -285,6 +324,7 @@ export function loudnessPanel(app) {
 
   const runAll = async () => {
     if (running) return;
+    if (prefs().export) return exportAll();
     running = true;
     const s = prefs();
     let changed = 0;
@@ -314,6 +354,42 @@ export function loudnessPanel(app) {
       announce(status.textContent);
     } catch (err) {
       status.textContent = `Matching failed: ${err.message}`;
+    } finally {
+      running = false;
+      renderRows();
+    }
+  };
+
+  const exportAll = async () => {
+    const s = prefs();
+    const x = exportSettings();
+    const out = await outputWriter(app, x);
+    if (!out) return;
+    running = true;
+    let written = 0;
+    try {
+      for (const e of entries) {
+        if (!app.documents.includes(e.doc)) continue;
+        const m = e.state === e.doc.state && e.measure ? e.measure : await scanOne(e);
+        const plan = planMatch(m, s);
+        e.status = 'Exporting...';
+        renderRows();
+        const name = await exportMatched(e.doc, plan, s, x, {
+          write: (n, blob) => out.write(n, blob),
+          onProgress: (f) => {
+            e.status = `Exporting ${Math.round(f * 100)}%`;
+            renderRows();
+          },
+        });
+        written++;
+        e.status = `Exported ${name}${plan.action === 'skip' ? ' (unchanged)' : ` (${plan.gainDb >= 0 ? '+' : ''}${plan.gainDb.toFixed(1)} dB)`}`;
+        renderRows();
+      }
+      await out.finish('Match Loudness.zip');
+      status.textContent = `Exported ${written} matched file${written === 1 ? '' : 's'}${out.dir ? ` to ${out.dir}` : ''}.`;
+      announce(status.textContent);
+    } catch (err) {
+      status.textContent = `Export failed: ${err.message}`;
     } finally {
       running = false;
       renderRows();
@@ -355,6 +431,8 @@ export function loudnessPanel(app) {
   });
   app.on('doc-change', (doc, e) => (e.kind === 'edit' || e.kind === 'history') && entries.some((x) => x.doc === doc) && renderRows());
   app.matchLoudnessAdd = (doc) => addDocs([doc]);
+  app.prefs.on?.('change', (key) => key === 'matchLoudnessExport' && syncControls());
+  syncControls();
   renderRows();
 
   return {

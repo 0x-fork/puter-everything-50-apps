@@ -64,7 +64,8 @@ pub struct Slot {
 
 /// Creates an effect of `kind` for `channels` channels at `rate` Hz.
 fn create(kind: u32, rate: f32, channels: usize) -> Option<Box<dyn Effect>> {
-    let channels = channels.clamp(1, 2);
+    // The convolution reverb also runs on 5.1 (Surround Reverb on 6-channel tracks).
+    let channels = if kind == 83 && channels >= 6 { 6 } else { channels.clamp(1, 2) };
     match kind {
         1 => Some(Box::new(gain::Gain::new(rate, channels))),
         10..=29 => filter::create(kind, rate, channels),
@@ -82,6 +83,8 @@ fn create(kind: u32, rate: f32, channels: usize) -> Option<Box<dyn Effect>> {
 
 #[no_mangle]
 pub extern "C" fn fx_new(kind: u32, rate: f32, channels: u32) -> u32 {
+    // The block holds 1, 2 or (5.1) 6 planar channels.
+    let channels = if channels >= 6 { 6 } else { channels.clamp(1, 2) };
     match create(kind, rate, channels as usize) {
         Some(fx) => Box::into_raw(Box::new(Slot { fx, channels: channels as usize })) as u32,
         None => 0,

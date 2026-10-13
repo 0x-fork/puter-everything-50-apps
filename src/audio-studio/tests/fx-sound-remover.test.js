@@ -33,7 +33,9 @@ const energy = (x, a = 0, b = x.length) => {
 describe('sound model', () => {
   it('maps settings to NMF sizes and iteration counts', () => {
     expect(soundSettings(defaults(def))).toEqual({ fft: 2048, k: 8, kFree: 16, learnIters: 100, removeIters: 40 });
-    expect(soundSettings({ ...defaults(def), passes: 1, fftSize: 8192, complexity: 3 })).toMatchObject({ fft: 8192, k: 3, learnIters: 60, removeIters: 20 });
+    expect(soundSettings({ ...defaults(def), passes: 20, contentPasses: 150, fftSize: 8192, complexity: 3 })).toMatchObject({ fft: 8192, k: 3, learnIters: 60, removeIters: 150 });
+    // Ranges as wide as the reference layout: up to 100 bases and 150 passes.
+    expect(['complexity', 'passes', 'contentComplexity', 'contentPasses'].map((id) => def.params.find((p) => p.id === id).max)).toEqual([100, 150, 100, 150]);
   });
 
   it('keeps a capped mono example and its unit-sum bases', async () => {
@@ -73,6 +75,25 @@ describe('Sound Remover (process)', () => {
     for (let i = a; i < b; i++) err += (out[i] - keep[i]) ** 2;
     expect(err).toBeLessThan(energy(sound, a, b) * 0.02);
     expect(err).toBeLessThan(energy(keep, a, b) * 0.02);
+  });
+
+  it('removes more with Enhanced Suppression and greys its strength out while off', async () => {
+    const d = await dsp();
+    const model = buildSoundModel(d, [beeps(RATE / 2, 0.4)], RATE, { ...defaults(def), complexity: 6 });
+    const n = RATE;
+    const keep = tone(n);
+    const sound = beeps(n);
+    const mix = keep.map((v, i) => v + sound[i]);
+    const err = async (extra) => {
+      const [out] = await def.process({ channels: [mix], rate: RATE, values: { ...defaults(def), complexity: 6, sensitivity: 1, ...extra }, doc: { soundModel: model } });
+      let e = 0;
+      for (let i = 4800; i < n - 4800; i++) e += (out[i] - keep[i]) ** 2;
+      return e;
+    };
+    expect(await err({ enhanced: true, suppression: 100 })).toBeLessThan(await err({}));
+    const supp = def.params.find((p) => p.id === 'suppression');
+    expect(supp.enabledIf({ enhanced: false })).toBe(false);
+    expect(supp.enabledIf({ enhanced: true })).toBe(true);
   });
 
   it('joins chunks of long files seamlessly', async () => {

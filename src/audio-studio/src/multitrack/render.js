@@ -7,7 +7,7 @@ import { Channel } from '../audio/channel.js';
 import * as S from '../model/session-edits.js';
 
 /**
- * Renders [start, end) of a session to stereo Float32Arrays.
+ * Renders [start, end) of a session to stereo Float32Arrays (six channels for a 5.1 mix).
  * @param {object} o
  * @param {object} [o.state] state to render (defaults to the current one)
  * @param {Set<string>} [o.clipIds] only these clips
@@ -33,6 +33,8 @@ export async function renderSession(app, session, { state = session.state, start
     }
     graph.tracks = graph.tracks.filter((t) => keep.has(t.id)).map((t) => (t.id === trackId ? { ...t, output: undefined, mute: false, solo: false } : { ...t, solo: false }));
     graph.master = { gain: 1 };
+    // A bounce keeps the track's own width: six channels only for a 5.1 track.
+    if (!graph.tracks.find((t) => t.id === trackId)?.six) delete graph.surround;
   }
   app.setStatus(`${label}...`);
   // Loaded on first use, like the effect renders, so the render worker code stays out of the startup bundle.

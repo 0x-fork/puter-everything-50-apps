@@ -83,6 +83,8 @@ export function createTrack(o = {}) {
     hidden: Boolean(o.hidden),
     sends: type === 'master' ? [] : (o.sends || []).map(createSend),
     eq: { on: Boolean(o.eq?.on), values: { ...(o.eq?.values || {}) } },
+    // Surround panner settings for 5.1 sessions (see engine/surround.js); null = defaults.
+    surround: o.surround ? { ...o.surround } : null,
   };
 }
 
@@ -148,7 +150,7 @@ export function createSessionState({ sampleRate = 48000, bitDepth = 32, tracks =
     metronome: false,
     autoCrossfade,
     tracks: list,
-    master: createTrack({ type: 'master', name: 'Mix', color: '#7a8a99', channels: masterChannels === 1 ? 1 : 2 }),
+    master: createTrack({ type: 'master', name: 'Mix', color: '#7a8a99', channels: masterChannels === 1 ? 1 : masterChannels === 6 ? 6 : 2 }),
     clips: [],
     markers: [],
   };
