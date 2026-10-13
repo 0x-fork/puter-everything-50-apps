@@ -39,8 +39,31 @@ describe('Filter and EQ dialogs', () => {
     // Graph handles are named like the table columns.
     expect([...dlg.querySelectorAll('.fx-eq .fx-handle span')].map((s) => s.textContent)).toEqual(['HP', 'L', '1', '2', '3', '4', '5', 'H', 'LP']);
     expect(dlg.querySelector('[data-section="Band 1"]:not(.fx-table-cell)')).toBeNull();
-    expect([...dlg.querySelectorAll('.fx-radios label')].map((l) => l.textContent)).toEqual(['Q', 'Width']);
+    expect([...dlg.querySelectorAll('.fx-radios label')].map((l) => l.textContent)).toEqual(['Q', 'Width', '30 dB', '96 dB']);
     await close();
+  });
+
+  it('Parametric Equalizer Range rescales the graph and Ultra-Quiet reaches the processor', async () => {
+    const app = fakeApp();
+    const doc = new AudioFile({ name: 'a.wav', sampleRate: RATE, channels: [Channel.fromSamples(filled(4800, 0.1))] });
+    const p = openEffectDialog(app, getEffect('parametricEq'), { doc, values: { band3Gain: 12 } });
+    const dlg = document.querySelector('.fx-dialog');
+    const handle = () => [...dlg.querySelectorAll('.fx-eq .fx-handle')].find((b) => b.textContent === '3');
+    const top30 = handle().style.top;
+    const radio96 = [...dlg.querySelectorAll('.fx-radios input')].find((i) => i.parentElement.textContent === '96 dB');
+    radio96.checked = true;
+    radio96.dispatchEvent(new Event('change'));
+    // +12 dB sits higher on a +/-15 dB graph than on a +/-48 dB one.
+    expect(parseFloat(top30.match(/calc\(([\d.-]+)%/)[1])).toBeLessThan(parseFloat(handle().style.top.match(/calc\(([\d.-]+)%/)[1]));
+    const box = [...dlg.querySelectorAll('.peq-bottom input[type=checkbox]')][0];
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    expect(dlg.querySelector('.peq-top .fx-vrange')).not.toBeNull();
+    dlg.querySelector('.btn.primary').click();
+    const values = await p;
+    expect(values).toMatchObject({ range: 1, ultraQuiet: true });
+    const { paramArray } = await import('../src/effects/registry.js');
+    expect(paramArray(getEffect('parametricEq'), values)[36]).toBe(1);
   });
 
   it('Graphic Equalizers draw a vertical slider per band with short labels', async () => {

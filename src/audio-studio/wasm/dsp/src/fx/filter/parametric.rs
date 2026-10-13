@@ -8,6 +8,8 @@
 //!   9 + 4b .. band b (0..4): on, freq, gain dB, Q
 //!   29 HS on  30 HS freq  31 HS gain dB  32 HS Q
 //!   33 LP on  34 LP freq  35 LP order
+//!   36 ultra-quiet (0/1): double-precision filtering (37 is the dialog's
+//!      graph range, not used here)
 //!
 //! Constant Q keeps a band's width the same whether it boosts or cuts (a cut
 //! mirrors the matching boost); proportional Q narrows as the gain grows, like
@@ -33,6 +35,9 @@ pub struct ParametricEq {
     cascade: Cascade,
     master: Smooth,
     orders: [usize; 2],
+    /// Ultra-quiet: double-precision filter state per [channel][stage] while on.
+    wide: Option<Vec<Vec<(f64, f64)>>>,
+    channels: usize,
 }
 
 fn spec() -> Vec<(f32, Glide)> {
@@ -49,7 +54,7 @@ fn spec() -> Vec<(f32, Glide)> {
 
 impl ParametricEq {
     pub fn new(rate: f32, channels: usize) -> ParametricEq {
-        ParametricEq { rate, p: SmoothParams::new(rate, &spec()), cascade: Cascade::new(channels, STAGES), master: Smooth::new(1.0, rate, 20.0), orders: [2, 2] }
+        ParametricEq { rate, p: SmoothParams::new(rate, &spec()), cascade: Cascade::new(channels, STAGES), master: Smooth::new(1.0, rate, 20.0), orders: [2, 2], wide: None, channels }
     }
 
     fn design(&mut self) {
@@ -90,6 +95,14 @@ impl ParametricEq {
 
 impl Effect for ParametricEq {
     fn set_param(&mut self, idx: u32, value: f32) {
+        if idx == 36 {
+            let on = value >= 0.5;
+            if on != self.wide.is_some() {
+                self.wide = if on { Some(vec![vec![(0.0, 0.0); STAGES]; self.channels]) } else { None };
+                self.cascade.reset();
+            }
+            return;
+        }
         self.p.set(idx as usize, value);
     }
 
@@ -100,7 +113,10 @@ impl Effect for ParametricEq {
             if self.p.advance() {
                 self.design();
             }
-            self.cascade.run(buf, frames, at, len);
+            match &mut self.wide {
+                Some(w) => self.cascade.run_precise(w, buf, frames, at, len),
+                None => self.cascade.run(buf, frames, at, len),
+            }
             at += len;
         }
         // Master gain, smoothed per sample.
@@ -123,6 +139,9 @@ impl Effect for ParametricEq {
         self.design();
         self.master.settle();
         self.cascade.reset();
+        if let Some(w) = &mut self.wide {
+            w.iter_mut().flatten().for_each(|st| *st = (0.0, 0.0));
+        }
     }
 }
 
@@ -159,6 +178,34 @@ mod tests {
         assert!((eq(&[(33, 1.0), (34, 2000.0)], 2000.0) + 3.0).abs() < 0.3);
         // Master gain.
         assert!((eq(&[(0, -6.0)], 1000.0) + 6.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn ultra_quiet_filters_with_less_rounding_noise() {
+        // A narrow 30 Hz boost and the matching constant-Q cut cancel exactly
+        // in exact arithmetic, so what is left of the input is rounding noise.
+        let params = [(9u32, 1.0f32), (10, 30.0), (11, 18.0), (12, 8.0), (13, 1.0), (14, 30.0), (15, -18.0), (16, 8.0)];
+        let x: Vec<f32> = sine(1000.0, 48000.0, 96000, 0.5).iter().zip(noise(96000, 0.1, 3)).map(|(a, b)| a + b).collect();
+        let err = |quiet: bool| {
+            let mut fx = make(10, 48000.0, 1);
+            for &(i, v) in &params {
+                fx.set_param(i, v);
+            }
+            fx.set_param(36, if quiet { 1.0 } else { 0.0 });
+            fx.reset();
+            let y = run_mono(fx.as_mut(), &x);
+            let d: Vec<f32> = y.iter().zip(&x).map(|(a, b)| a - b).collect();
+            rms(&d[48000..]) / rms(&x[48000..])
+        };
+        let (plain, quiet) = (err(false), err(true));
+        assert!(quiet < plain * 0.2, "plain {plain} quiet {quiet}");
+    }
+
+    #[test]
+    fn ultra_quiet_keeps_the_response() {
+        let quiet = [(19u32, 9.0f32), (36, 1.0)];
+        assert!((eq(&quiet, 1000.0) - 9.0).abs() < 0.2);
+        assert!(eq(&[(36, 1.0)], 5000.0).abs() < 0.05);
     }
 
     #[test]

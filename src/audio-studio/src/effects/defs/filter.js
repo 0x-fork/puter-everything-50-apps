@@ -26,10 +26,14 @@ const parametricParams = [
   db('gain', 'Master Gain', -24, 24, 0),
   choice('qMode', 'Constant', ['Q', 'Width'], 0),
   ...section('High Pass', 'hp', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 60), choice('slope', 'Slope', SLOPES, 2)]),
-  ...section('Low Shelf', 'ls', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 100), db('gain', 'Gain', -30, 30, 0), qParam(0.7071, 4)]),
-  ...BAND_FREQS.flatMap((f, i) => section(`Band ${i + 1}`, `band${i + 1}`, [bool('on', 'On', true), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -30, 30, 0), qParam(1)])),
-  ...section('High Shelf', 'hs', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 8000), db('gain', 'Gain', -30, 30, 0), qParam(0.7071, 4)]),
+  ...section('Low Shelf', 'ls', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 100), db('gain', 'Gain', -48, 48, 0), qParam(0.7071, 4)]),
+  ...BAND_FREQS.flatMap((f, i) => section(`Band ${i + 1}`, `band${i + 1}`, [bool('on', 'On', true), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -48, 48, 0), qParam(1)])),
+  ...section('High Shelf', 'hs', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 8000), db('gain', 'Gain', -48, 48, 0), qParam(0.7071, 4)]),
   ...section('Low Pass', 'lp', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 18000), choice('slope', 'Slope', SLOPES, 2)]),
+  // Double-precision filtering: a lower noise floor for deep, narrow or very low bands.
+  bool('ultraQuiet', 'Ultra-Quiet', false),
+  // The graph's span (the processor ignores it): 30 dB shows +/-15 dB, 96 dB shows +/-48 dB.
+  choice('range', 'Range', [{ value: 0, label: '30 dB' }, { value: 1, label: '96 dB' }], 0),
 ];
 
 function parametricSections(v, rate) {

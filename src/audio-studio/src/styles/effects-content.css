@@ -629,3 +629,25 @@ input[type='range'].slider.fx-vrange::-moz-range-track {
   width: min(1000px, 100%);
   max-width: min(1000px, 100%);
 }
+
+/* Parametric Equalizer: master gain fader beside the curve, options under the bands. */
+.peq-top {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.peq-top .fx-vrange {
+  height: 200px;
+}
+
+.peq-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}

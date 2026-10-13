@@ -327,10 +327,11 @@ export function paramControls(def, getValues, onSet, { doc = null, range = null,
 
   // Band table: one column per section, one row per param role.
   let table = null;
-  if (layout.table) {
+  if (layout.table && layout.table.columns.some((c) => params.some((p) => p.section === c.section && !p.hidden))) {
     const t = layout.table;
-    const cols = t.columns.filter((c) => !sections || sections.includes(c.section));
-    const inSection = (sec) => params.filter((p) => p.section === sec);
+    // Params a custom view lays out itself are hidden; a table of none is left out.
+    const inSection = (sec) => params.filter((p) => p.section === sec && !p.hidden);
+    const cols = t.columns.filter((c) => (!sections || sections.includes(c.section)) && inSection(c.section).length);
     const cells = [h('span.fx-table-corner')];
     for (const c of cols) cells.push(h('span.fx-table-head', c.label));
     for (const row of t.rows) {

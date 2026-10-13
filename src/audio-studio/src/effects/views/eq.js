@@ -1,4 +1,6 @@
-// Dialog view for the Graphic Equalizers: the response curve, a vertical
+// Dialog views for the equalizers. Parametric: master gain fader beside the
+// curve (whose span follows Range), the band table, and Constant, Ultra-Quiet
+// and Range along the bottom. Graphic: the response curve, a vertical
 // slider per band whose span follows Range (6 to 48 dB, centred on 0), and
 // Range, Accuracy and Master Gain underneath. Shrinking Range pulls bands
 // that fall outside it back to its edge.
@@ -6,7 +8,7 @@
 import { h } from '../../lib/dom.js';
 import { registerEditor, eqEditor } from '../editors.js';
 import { paramControls } from '../dialog.js';
-import { controlsFor, groupBox, numberField } from '../layout.js';
+import { controlsFor, groupBox, numberField, sectionControls, vSlider, radioChoice, checkbox } from '../layout.js';
 
 /** Band params with their slider span set by Range. */
 export function bandsInRange(def, range) {
@@ -52,3 +54,20 @@ function graphicView(ctx) {
 graphicView.hides = true;
 
 for (const id of ['graphicEq10', 'graphicEq20', 'graphicEq30']) registerEditor(id, Object.assign((ctx) => graphicView(ctx), { hides: true, dialogClass: id === 'graphicEq10' ? '' : 'fx-wide' }));
+
+/** Graph span in dB either side of 0 for the Parametric Equalizer's Range. */
+export const parametricSpan = (values) => (values.range === 1 ? 48 : 15);
+
+function parametricView(ctx) {
+  const graph = eqEditor({ range: parametricSpan })(ctx);
+  const sections = [...new Set(ctx.def.params.map((p) => p.section).filter(Boolean))];
+  return h(
+    'div.fx-stack',
+    h('div.peq-top', vSlider(ctx, 'gain', { label: 'Gain' }), graph),
+    sectionControls(ctx, sections),
+    h('div.peq-bottom', radioChoice(ctx, 'qMode'), checkbox(ctx, 'ultraQuiet'), radioChoice(ctx, 'range')),
+  );
+}
+parametricView.hides = true;
+parametricView.dialogClass = 'fx-wide';
+registerEditor('parametricEq', parametricView);

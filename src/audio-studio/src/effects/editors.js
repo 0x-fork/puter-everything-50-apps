@@ -200,7 +200,7 @@ function bandsFromLayout(def, layout, values) {
 
 /**
  * EQ curve editor. Options: bands(values) to describe bands yourself (each
- * with ids for the params a handle drags), range (dB, default from params),
+ * with ids for the params a handle drags), range (dB, or fn(values); default from params),
  * offset(values) for a master gain in dB.
  */
 export function eqEditor(opts = {}) {
@@ -210,7 +210,10 @@ export function eqEditor(opts = {}) {
     const getBands = (values) => (opts.bands ? opts.bands(values) : layout ? bandsFromLayout(def, layout, values) : []);
     const offset = (values) => (opts.offset ? opts.offset(values) : layout?.offsetId ? Number(values[layout.offsetId]) || 0 : 0);
     const gainParams = def.params.filter((p) => p.unit === 'dB');
-    const range = opts.range || Math.min(48, Math.max(12, ...gainParams.map((p) => Math.max(Math.abs(p.min ?? 0), Math.abs(p.max ?? 0)))));
+    const fixedRange = Math.min(48, Math.max(12, ...gainParams.map((p) => Math.max(Math.abs(p.min ?? 0), Math.abs(p.max ?? 0)))));
+    // opts.range: a span in dB, or fn(values) for a span the dialog switches (Parametric EQ Range).
+    const rangeNow = () => (typeof opts.range === 'function' ? opts.range(ctx.values) : opts.range || fixedRange);
+    let range = rangeNow();
     const rate = ctx.doc?.sampleRate || 48000;
     const fMin = 20;
     const fMax = Math.min(20000, rate / 2);
@@ -220,10 +223,11 @@ export function eqEditor(opts = {}) {
     const param = (id) => def.params.find((p) => p.id === id);
 
     const view = plot('fx-eq', 'Equalizer curve', (g, W, H) => {
+      range = rangeNow();
       const xs = [50, 100, 200, 500, 1000, 2000, 5000, 10000].filter((f) => f < fMax).map((f) => xOf(f, W));
-      const step = range > 24 ? 12 : 6;
+      const step = range > 24 ? 12 : range % 6 ? 5 : 6;
       const ys = [];
-      for (let d = -range; d <= range; d += step) ys.push(yOf(d, H));
+      for (let d = Math.ceil(-range / step) * step; d <= range; d += step) ys.push(yOf(d, H));
       gridLines(g, W, H, xs, ys);
       g.strokeStyle = cssVar('--grid-strong');
       g.beginPath();
@@ -231,7 +235,7 @@ export function eqEditor(opts = {}) {
       g.lineTo(W, Math.round(yOf(0, H)) + 0.5);
       g.stroke();
       for (const f of [100, 1000, 10000]) if (f < fMax) labelText(g, f >= 1000 ? `${f / 1000}k` : String(f), xOf(f, W) + 3, H - 14);
-      for (const d of [range, range / 2, -range / 2]) labelText(g, `${d > 0 ? '+' : ''}${Math.round(d)}`, 3, yOf(d, H) + 2);
+      for (const d of range % 6 ? [range, 10, 5, -5, -10] : [range, range / 2, -range / 2]) labelText(g, `${d > 0 ? '+' : ''}${Math.round(d)}`, 3, yOf(d, H) + 2);
       const values = ctx.values;
       // A definition's own response (exact for its filter design) wins over the biquad model.
       const resp = def.response && !opts.bands ? def.response(values, freqs, rate) : combinedResponse(getBands(values), freqs, rate, offset(values));
@@ -305,6 +309,7 @@ export function eqEditor(opts = {}) {
       });
     };
     const update = () => {
+      range = rangeNow();
       placeHandles();
       view.redraw();
     };

@@ -59,10 +59,11 @@ describe('filter response curves match the processors', () => {
 describe('filter definitions', () => {
   it('lay out parametric EQ parameters in the order the processor reads them', () => {
     const ids = getEffect('parametricEq').params.map((p) => p.id);
-    expect(ids.length).toBe(36);
+    expect(ids.length).toBe(38);
+    expect(ids.slice(36)).toEqual(['ultraQuiet', 'range']);
     expect(ids.slice(0, 9)).toEqual(['gain', 'qMode', 'hpOn', 'hpFreq', 'hpSlope', 'lsOn', 'lsFreq', 'lsGain', 'lsQ']);
     expect(ids.slice(9, 13)).toEqual(['band1On', 'band1Freq', 'band1Gain', 'band1Q']);
-    expect(ids.slice(29)).toEqual(['hsOn', 'hsFreq', 'hsGain', 'hsQ', 'lpOn', 'lpFreq', 'lpSlope']);
+    expect(ids.slice(29, 36)).toEqual(['hsOn', 'hsFreq', 'hsGain', 'hsQ', 'lpOn', 'lpFreq', 'lpSlope']);
   });
 
   it('use ISO centre frequencies for the graphic equalizers', () => {
