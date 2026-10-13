@@ -8,7 +8,7 @@ import { cssVar } from '../../ui/theme.js';
 import { hotNumber } from '../../ui/controls.js';
 import { envelopeControl, registerEditor } from '../editors.js';
 import { controlsFor, groupBox, radioChoice, checkbox, readout, enableWhen, showWhen, disclosure, numberField, glyph } from '../layout.js';
-import { pitchRatio, bendRange } from '../defs/time-pitch.js';
+import { pitchRatio, bendRange, pitchFftSize } from '../defs/time-pitch.js';
 
 /** m:ss.mmm (h:mm:ss.mmm past an hour). */
 export function clockText(seconds) {
@@ -74,10 +74,20 @@ stretchView.hides = true;
 // ------------------------------------------------------------ Pitch Shifter
 
 function shifterView(ctx) {
+  const rate = ctx.doc?.sampleRate || 48000;
+  // With automatic settings the shifter works on spectral frames; say what they amount to.
+  const auto = showWhen(ctx, readout(ctx, (v) => {
+    const n = pitchFftSize(1024, v.precision, rate);
+    return `Spectral frames of ${n} samples (${(rate / n).toFixed(1)} per second), 75 % overlap`;
+  }, 'faint'), (v) => v.autoSplice);
   return h(
     'div.fx-stack',
     groupBox('Pitch Transpose', controlsFor(ctx, ['semitones', 'cents']), h('div.sp-ratio', h('span.fx-label', 'Ratio:'), readout(ctx, (v) => pitchRatio(v.semitones, v.cents).toFixed(4)))),
-    h('div.fx-split.fx-split-even', groupBox('Precision', radioChoice(ctx, 'precision', { label: null })), groupBox('Pitch Settings', checkbox(ctx, 'formants'))),
+    h(
+      'div.fx-split.fx-split-even',
+      groupBox('Precision', enableWhen(ctx, radioChoice(ctx, 'precision', { label: null }), (v) => v.autoSplice)),
+      groupBox('Pitch Settings', enableWhen(ctx, controlsFor(ctx, ['splice', 'overlap']), (v) => !v.autoSplice), checkbox(ctx, 'autoSplice'), auto, enableWhen(ctx, checkbox(ctx, 'formants'), (v) => v.autoSplice)),
+    ),
   );
 }
 shifterView.hides = true;
@@ -133,6 +143,7 @@ function benderView(ctx) {
     'div.fx-stack',
     wrap,
     h('div.nr-bar', checkbox(ctx, 'spline'), h('div.spacer'), reset),
+    controlsFor(ctx, ['quality']),
     radioChoice(ctx, 'rangeMode', { label: 'Range' }),
     semis,
     tempo,

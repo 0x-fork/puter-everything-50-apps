@@ -422,7 +422,13 @@ pub struct Resampler {
 impl Resampler {
     /// `speed` is input frames consumed per output frame (2 = an octave up, half length).
     pub fn new(ch: usize, speed: f32) -> Resampler {
-        Resampler { ch, table: SincTable::new(16, 512), input: Input::new(ch), out: Output { data: vec![Vec::new(); ch] }, pos: 0.0, speed: Curve::new(speed) }
+        Resampler::with_zeros(ch, speed, 16)
+    }
+
+    /// As `new`, with a kernel of `zeros` zero crossings each side (quality:
+    /// longer kernels pass more of the band and alias less, at more cost).
+    pub fn with_zeros(ch: usize, speed: f32, zeros: usize) -> Resampler {
+        Resampler { ch, table: SincTable::new(zeros.clamp(2, 64), 512), input: Input::new(ch), out: Output { data: vec![Vec::new(); ch] }, pos: 0.0, speed: Curve::new(speed) }
     }
 
     pub fn run(&mut self) {
@@ -676,6 +682,23 @@ mod tests {
         let mut job = Job::Resample(Resampler::new(1, 2.0));
         let y = run_job(&mut job, &x, 4096);
         assert!(rms(&y[0][2000..22000]) < 0.01, "{}", rms(&y[0][2000..22000]));
+    }
+
+    #[test]
+    fn longer_kernels_resample_more_cleanly() {
+        let rate = 48000.0;
+        // A 15 kHz tone slowed by a fifth: short kernels leave more error near the band edge.
+        let x = vec![sine(15000.0, rate, 48000, 0.5)];
+        let speed = 2f32.powf(-7.0 / 12.0);
+        let err = |zeros: usize| {
+            let mut job = Job::Resample(Resampler::with_zeros(1, speed, zeros));
+            let y = run_job(&mut job, &x, 4096);
+            let want = sine(15000.0 * speed, rate, y[0].len(), 0.5);
+            let d: Vec<f32> = (8000..60000).map(|i| y[0][i] - want[i]).collect();
+            rms(&d)
+        };
+        let (low, high, perfect) = (err(2), err(8), err(32));
+        assert!(low > high * 2.0 && high > perfect, "{low} {high} {perfect}");
     }
 
     #[test]
