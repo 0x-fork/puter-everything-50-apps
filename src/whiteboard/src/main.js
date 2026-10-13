@@ -2903,6 +2903,7 @@ function notice(el, text, kind = "") {
 // save that failed by its own notification.
 const DISRUPTIONS = {
   "Offline · changes saved on this device": ["warning", "connection"],
+  "Uploading images · waiting for the board's server": ["warning"],
   "Cannot reach the shared board · retrying · view only": [
     "warning",
     "connection",

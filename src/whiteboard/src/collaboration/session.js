@@ -689,37 +689,53 @@ export class CollaborationSession {
       }
     return copy;
   }
+  // Images and files are uploaded a few at a time, as they are downloaded,
+  // so a deck of pictures added at once does not wait on each in turn.
   async uploadAssets() {
-    for (const asset of this.pendingAssets) {
-      try {
-        await this.request("asset.put", {
-          asset,
-          data: this.assets.get(asset),
+    const queue = [...this.pendingAssets];
+    let failed = null;
+    const next = async () => {
+      while (queue.length && !failed && !this.closed)
+        await this.uploadAsset(queue.shift()).catch((error) => {
+          failed ??= error;
         });
-      } catch (error) {
-        // A file the worker refuses for what it is, such as one too large,
-        // would be refused on every retry and hold back every later edit.
-        // It is given up: the worker then refuses the edit that added it,
-        // which is recovered from like any other refused edit.
-        if (![400, 413, 422].includes(error.status)) throw error;
-        this.pendingAssets.delete(asset);
-        await this.store.collaborationDelete(`${this.scope}|asset:${asset}`);
-        continue;
-      }
-      // Uploaded, the file is safe whether or not this device can record
-      // that; a row left pending is only uploaded again after a reload.
-      await this.store
-        .collaborationPut({
-          id: `${this.scope}|asset:${asset}`,
-          scope: this.scope,
-          kind: "asset",
-          asset,
-          data: this.assets.get(asset),
-          pending: false,
-        })
-        .catch(() => {});
+    };
+    await Promise.all(Array.from({ length: 4 }, next));
+    if (failed?.status === 429)
+      // A person may add only so many files to a board a minute. Nothing is
+      // wrong with the connection; the rest go up when the worker allows.
+      failed.uploadsWait = true;
+    if (failed) throw failed;
+  }
+  async uploadAsset(asset) {
+    try {
+      await this.request("asset.put", {
+        asset,
+        data: this.assets.get(asset),
+      });
+    } catch (error) {
+      // A file the worker refuses for what it is, such as one too large,
+      // would be refused on every retry and hold back every later edit.
+      // It is given up: the worker then refuses the edit that added it,
+      // which is recovered from like any other refused edit.
+      if (![400, 413, 422].includes(error.status)) throw error;
       this.pendingAssets.delete(asset);
+      await this.store.collaborationDelete(`${this.scope}|asset:${asset}`);
+      return;
     }
+    // Uploaded, the file is safe whether or not this device can record
+    // that; a row left pending is only uploaded again after a reload.
+    await this.store
+      .collaborationPut({
+        id: `${this.scope}|asset:${asset}`,
+        scope: this.scope,
+        kind: "asset",
+        asset,
+        data: this.assets.get(asset),
+        pending: false,
+      })
+      .catch(() => {});
+    this.pendingAssets.delete(asset);
   }
   // The board as it stood at an earlier version, with shared media hydrated.
   async versionBoard(at) {
@@ -1960,6 +1976,10 @@ export class CollaborationSession {
     if (roomFull(error)) {
       this.full = true;
       if (!this.pending.size) this.status(this.savedStatus());
+      return;
+    }
+    if (error.uploadsWait) {
+      this.status("Uploading images · waiting for the board's server");
       return;
     }
     if (error.incompatible) {

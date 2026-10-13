@@ -363,6 +363,79 @@ test("an image this device cannot store is still saved to the shared board", asy
   }
 });
 
+test("images past what one person may add a minute wait for the worker without reading as offline", async () => {
+  const { SharedDocument } = await import("../src/collaboration/document.js");
+  const { encode } = await import("../src/collaboration/protocol.js");
+  const { environment } = await import("./collaboration-helpers.js");
+  const env = environment(),
+    b = board("Many pictures");
+  b.items = [item("note", 0, 0, { text: "x" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  let state, shown;
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed: (next) => (state = next),
+    activity() {},
+    status: (text) => (shown = text),
+  });
+  let uploading = 0,
+    most = 0;
+  const call = env.service.call.bind(env.service);
+  env.service.call = async (identity, input) => {
+    if (input.op !== "asset.put") return call(identity, input);
+    most = Math.max(most, ++uploading);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    try {
+      return await call(identity, input);
+    } finally {
+      uploading--;
+    }
+  };
+  try {
+    await session.start();
+    const before = structuredClone(state),
+      next = structuredClone(state);
+    for (let n = 0; n < 70; n++)
+      next.items.push(
+        item("image", n * 20, 200, {
+          src: `data:image/png;base64,${btoa(`picture ${n}`)}`,
+          w: 10,
+          h: 10,
+        }),
+      );
+    await session.commit(next, before);
+    await session.flush().catch((error) => session.failure(error));
+    assert.ok(most > 1, "Several files go up at once");
+    assert.ok(session.pendingAssets.size > 0);
+    assert.equal(shown, "Uploading images · waiting for the board's server");
+    // The next minute, the rest go up and the edit is saved.
+    env.now += 60_000;
+    await session.flushed();
+    assert.equal(session.pendingAssets.size, 0);
+    assert.equal(session.pending.size, 0);
+    assert.match(shown, /^Saved/);
+    const { doc } = await env.service.load(b.id);
+    assert.equal(
+      doc.snapshot().items.filter((i) => i.type === "image").length,
+      70,
+    );
+    doc.destroy();
+  } finally {
+    session.close();
+  }
+});
+
 test("an image that could not be downloaded is tried again on a quiet board", async () => {
   const { SharedDocument } = await import("../src/collaboration/document.js");
   const { encode } = await import("../src/collaboration/protocol.js");
