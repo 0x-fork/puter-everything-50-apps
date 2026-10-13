@@ -308,6 +308,61 @@ test("an image the worker refuses is given up, and later edits still save", asyn
   }
 });
 
+test("an image this device cannot store is still saved to the shared board", async () => {
+  const { SharedDocument } = await import("../src/collaboration/document.js");
+  const { encode } = await import("../src/collaboration/protocol.js");
+  const { environment } = await import("./collaboration-helpers.js");
+  const env = environment(),
+    b = board("Full device");
+  b.items = [item("note", 0, 0, { text: "x" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  // The device's storage refuses images, as when it is full.
+  const store = memoryStore(),
+    put = store.collaborationPut;
+  store.collaborationPut = async (row) => {
+    if (row.kind === "asset")
+      throw Object.assign(Error("The quota has been exceeded."), {
+        name: "QuotaExceededError",
+      });
+    return put(row);
+  };
+  let state, shown;
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store,
+    changed: (next) => (state = next),
+    activity() {},
+    status: (text) => (shown = text),
+  });
+  try {
+    await session.start();
+    const before = structuredClone(state),
+      withImage = structuredClone(state);
+    withImage.items.push(item("image", 50, 50, { src: image, w: 10, h: 10 }));
+    await session.commit(withImage, before);
+    await session.flushed();
+    const { doc } = await env.service.load(b.id);
+    const saved = doc.snapshot();
+    doc.destroy();
+    assert.ok(saved.items.some((i) => i.type === "image" && ASSET.test(i.src)));
+    assert.equal(session.pending.size, 0);
+    assert.equal(session.pendingAssets.size, 0);
+    assert.match(shown, /^Saved/);
+  } finally {
+    session.close();
+  }
+});
+
 test("an image that could not be downloaded is tried again on a quiet board", async () => {
   const { SharedDocument } = await import("../src/collaboration/document.js");
   const { encode } = await import("../src/collaboration/protocol.js");

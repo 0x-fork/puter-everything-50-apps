@@ -667,14 +667,23 @@ export class CollaborationSession {
           this.assets.set(asset, i[key]);
           this.assetIds.set(i[key], asset);
           this.pendingAssets.add(asset);
-          await this.store.collaborationPut({
-            id: `${this.scope}|asset:${asset}`,
-            scope: this.scope,
-            kind: "asset",
-            asset,
-            data: i[key],
-            pending: true,
-          });
+          // The bytes are held in memory until uploaded. Kept on the device
+          // too, they survive a reload; a device that cannot keep them, as
+          // when its storage is full, still saves the edit while this tab
+          // stays open, as with edits it cannot keep (see track).
+          try {
+            await this.store.collaborationPut({
+              id: `${this.scope}|asset:${asset}`,
+              scope: this.scope,
+              kind: "asset",
+              asset,
+              data: i[key],
+              pending: true,
+            });
+          } catch {
+            this.recoveryFailed = true;
+            this.status("Local recovery failed. Keep this tab open.");
+          }
         }
         i[key] = "asset:" + asset;
       }
@@ -697,14 +706,18 @@ export class CollaborationSession {
         await this.store.collaborationDelete(`${this.scope}|asset:${asset}`);
         continue;
       }
-      await this.store.collaborationPut({
-        id: `${this.scope}|asset:${asset}`,
-        scope: this.scope,
-        kind: "asset",
-        asset,
-        data: this.assets.get(asset),
-        pending: false,
-      });
+      // Uploaded, the file is safe whether or not this device can record
+      // that; a row left pending is only uploaded again after a reload.
+      await this.store
+        .collaborationPut({
+          id: `${this.scope}|asset:${asset}`,
+          scope: this.scope,
+          kind: "asset",
+          asset,
+          data: this.assets.get(asset),
+          pending: false,
+        })
+        .catch(() => {});
       this.pendingAssets.delete(asset);
     }
   }
