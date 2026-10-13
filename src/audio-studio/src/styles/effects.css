@@ -1907,3 +1907,30 @@ input[type='range'].fx-slider:disabled {
   font-size: var(--fs-sm);
   max-width: 260px;
 }
+
+/* ------------------------------------------------------- delay time units */
+
+.fx-units-row,
+.fx-units-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.fx-units-row {
+  gap: 8px;
+}
+
+.fx-units-row .select {
+  width: auto;
+  min-width: 130px;
+}
+
+.fx-tempo-note {
+  font-size: var(--fs-sm);
+}
+
+.echo-split {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+}
