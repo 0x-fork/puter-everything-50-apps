@@ -322,7 +322,7 @@ export const MENUS = [
         ],
       },
       { label: 'Time Display', items: (app) => app.timeFormatMenuItems?.() || [] },
-      { label: 'Video Display', submenu: ['view.videoFit', 'view.video25', 'view.video50', 'view.video100', 'view.video200', '-', 'view.videoTimecode'] },
+      { label: 'Video Display', submenu: ['view.video200', 'view.video100', 'view.video50', 'view.video25', 'view.videoFit', '-', 'view.videoTimecode'] },
       { label: 'Waveform Channels', submenu: ['view.waveLayered', 'view.waveUniqueColors'] },
       '-',
       'view.scrollToPlayhead',

@@ -111,3 +111,41 @@ describe('status bar', async () => {
     expect(statusParts(app, withVideo, { cursor: null, freeBytes: null })).not.toContain('29.97 fps');
   });
 });
+
+describe('View menu', () => {
+  it('lists the time display formats with SMPTE rates in descending order and names the custom rate', async () => {
+    const app = await makeApp();
+    app.prefs.set('customFps', 15);
+    const labels = app.timeFormatMenuItems().map((i) => i.label);
+    expect(labels.slice(0, 13)).toEqual([
+      'Decimal (mm:ss.ddd)',
+      'Compact (hh:mm:ss.ddd)',
+      'SMPTE 59.94 fps',
+      'SMPTE 59.94 fps Drop',
+      'SMPTE 30 fps',
+      'SMPTE 29.97 fps',
+      'SMPTE 29.97 fps Drop',
+      'SMPTE 25 fps (EBU)',
+      'SMPTE 24 fps (Film)',
+      'SMPTE 23.976 fps',
+      'Samples',
+      'Bars and Beats',
+      'Custom (15 fps)',
+    ]);
+    app.timeFormatMenuItems().find((i) => i.label === 'SMPTE 59.94 fps Drop').run();
+    expect(app.prefs.get('timeFormat')).toBe('smpte5994df');
+  });
+
+  it('has the status bar fields, waveform channel options and editor panel controls', async () => {
+    const { MENUS, commandMenuPaths } = await import('../src/ui/menus.js');
+    const app = await makeApp();
+    const paths = commandMenuPaths(MENUS);
+    for (const id of ['status.cursor', 'status.frameRate', 'status.dropped']) expect(paths.get(id)).toEqual(['Status Bar']);
+    expect(paths.get('view.waveLayered')).toEqual(['Waveform Channels']);
+    expect(app.commands.label('status.frameRate')).toBe('Video Frame Rate');
+    expect(app.commands.label('status.dropped')).toBe('Detect Dropped Samples');
+    expect(app.commands.label('view.editorControls')).toBe('Show Editor Panel Controls');
+    app.commands.run('view.editorControls');
+    expect(document.documentElement.dataset.editorControls).toBe('off');
+  });
+});

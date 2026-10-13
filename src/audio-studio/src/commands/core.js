@@ -872,7 +872,14 @@ export function installCoreCommands(app) {
 
   // Dynamic menus.
   app.timeFormatMenuItems = () =>
-    TIME_FORMATS.map((f) => ({ type: 'cmd', label: f.label, enabled: true, checked: app.prefs.get('timeFormat') === f.id, run: () => app.prefs.set('timeFormat', f.id) }));
+    TIME_FORMATS.map((f) => ({
+      type: 'cmd',
+      // The custom rate names its frame rate, as in "Custom (12 fps)".
+      label: f.id === 'frames' ? `Custom (${Number(app.prefs.get('customFps')) || 12} fps)` : f.label,
+      enabled: true,
+      checked: app.prefs.get('timeFormat') === f.id,
+      run: () => app.prefs.set('timeFormat', f.id),
+    }));
   app.documentMenuItems = () => app.documents.map((d) => ({ type: 'cmd', label: `${d.name}${d.dirty ? ' *' : ''}`, enabled: true, checked: d === app.active, run: () => app.activate(d) }));
   app.recentMenuItems = () => {
     const list = app.prefs.get('recent') || [];
