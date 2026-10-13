@@ -4,7 +4,7 @@
 
 import { h, announce } from '../../lib/dom.js';
 import { registerEditor } from '../editors.js';
-import { controlsFor, disclosure, radioChoice, vSlider, groupBox, glyph, enableWhen } from '../layout.js';
+import { controlsFor, disclosure, radioChoice, vSlider, groupBox, glyph, enableWhen, checkbox } from '../layout.js';
 import { responseEditor, spectrumMonitor } from './common.js';
 import { learnSoundModel, MAX_SOUND_SECONDS } from '../defs/restoration.js';
 import { downloadBlob, pickLocalFiles } from '../../storage/files.js';
@@ -31,13 +31,17 @@ const focusIcons = () => ({
   3: glyph('M3 15h8l4-6h6'),
 });
 
-/** Amount and focus on the left, the gain as a fader on the right. */
-const focusView = (extra) => {
+/**
+ * Amount and focus on the left; on the right the gain fader under a
+ * checkbox (DeNoise: output noise only; DeReverb: auto gain, which takes
+ * over from the fader).
+ */
+const focusView = (extra, check) => {
   const view = (ctx) =>
     h(
       'div.fx-split.rs-focus',
       h('div.fx-stack', spectrumMonitor(ctx), radioChoice(ctx, 'focus', { icons: focusIcons(), className: 'fx-segmented' }), controlsFor(ctx, ['amount', ...extra])),
-      groupBox('Gain', vSlider(ctx, 'gain', { label: '' })),
+      groupBox('', checkbox(ctx, check), check === 'autoGain' ? enableWhen(ctx, vSlider(ctx, 'gain'), (v) => !v.autoGain) : vSlider(ctx, 'gain')),
     );
   view.hides = true;
   return view;
@@ -137,8 +141,8 @@ phaseView.hides = true;
 
 registerEditor('dehummer', dehummer);
 registerEditor('autoPhaseCorrection', phaseView);
-registerEditor('denoise', focusView([]));
-registerEditor('dereverb', focusView(['decay']));
+registerEditor('denoise', focusView([], 'noiseOnly'));
+registerEditor('dereverb', focusView(['decay'], 'autoGain'));
 registerEditor('hissReduction', hissView);
 
 // Adaptive Noise Reduction: the live spectrum over the generated controls.

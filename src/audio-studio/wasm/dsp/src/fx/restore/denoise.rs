@@ -3,7 +3,8 @@
 //! priori SNR), which keeps residual noise smooth instead of "musical".
 //!
 //! Params: 0 amount % (sets the deepest reduction, 100% = 40 dB),
-//! 1 processing focus (0 all, 1 low, 2 mid, 3 high), 2 output gain dB.
+//! 1 processing focus (0 all, 1 low, 2 mid, 3 high), 2 output gain dB,
+//! 3 output noise only (0/1: what the reduction removes, to audition it).
 
 use super::spectral::{fmax, bin_hz, focus_weight, power, power_scale, MinStats};
 use crate::fx::util::{db_to_gain, Stft};
@@ -21,6 +22,7 @@ pub struct DeNoise {
     prev_clean: Vec<Vec<f32>>,
     p: Vec<f32>,
     gmin: Vec<f32>,
+    noise_only: bool,
 }
 
 impl DeNoise {
@@ -38,6 +40,7 @@ impl DeNoise {
             prev_clean: vec![vec![0.0; bins]; channels],
             p: vec![0.0; bins],
             gmin: vec![1.0; bins],
+            noise_only: false,
         };
         d.update_floor();
         d
@@ -57,6 +60,10 @@ impl Effect for DeNoise {
             0 => self.amount = v.clamp(0.0, 100.0),
             1 => self.focus = v.round().clamp(0.0, 3.0) as u32,
             2 => self.gain.target = db_to_gain(v.clamp(-40.0, 40.0)),
+            3 => {
+                self.noise_only = v >= 0.5;
+                return;
+            }
             _ => return,
         }
         self.update_floor();
@@ -66,11 +73,15 @@ impl Effect for DeNoise {
         let scale = power_scale(FFT);
         let (stats, prev, p, gmin) = (&mut self.stats, &mut self.prev_clean, &mut self.p, &self.gmin);
         let off = self.amount <= 0.0;
+        let noise_only = self.noise_only;
         self.stft.process(buf, frames, |re, im| {
             for c in 0..re.len() {
                 power(&re[c], &im[c], p, scale);
                 stats[c].update(p);
                 if off {
+                    if noise_only {
+                        re[c].iter_mut().chain(im[c].iter_mut()).for_each(|v| *v = 0.0);
+                    }
                     continue;
                 }
                 let noise = &stats[c].noise;
@@ -80,8 +91,9 @@ impl Effect for DeNoise {
                     let xi = fmax(0.98 * prev[c][k] / n + 0.02 * fmax(gamma - 1.0, 0.0), 1e-3);
                     let g = fmax(xi / (1.0 + xi), gmin[k]);
                     prev[c][k] = g * g * p[k];
-                    re[c][k] *= g;
-                    im[c][k] *= g;
+                    let m = if noise_only { 1.0 - g } else { g };
+                    re[c][k] *= m;
+                    im[c][k] *= m;
                 }
             }
         });
@@ -112,6 +124,25 @@ impl Effect for DeNoise {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn noise_only_is_what_the_reduction_removes() {
+        use crate::fx::testutil::*;
+        let rate = 48000.0;
+        let x = noise(24000, 0.2, 9);
+        let run = |only: f32| {
+            let mut fx = make(132, rate, 1);
+            fx.set_param(0, 80.0);
+            fx.set_param(3, only);
+            fx.reset();
+            run_mono(fx.as_mut(), &x)
+        };
+        let (kept, removed) = (run(0.0), run(1.0));
+        let lat = 2048;
+        for i in 12000..24000 {
+            assert!((kept[i] + removed[i] - x[i - lat]).abs() < 1e-3, "at {i}");
+        }
+    }
+
     use crate::fx::testutil::*;
 
     #[test]

@@ -106,7 +106,7 @@ registerEffect({
   name: 'DeNoise',
   group: GROUP,
   kind: 132,
-  params: [pct('amount', 'Amount', 40), choice('focus', 'Processing Focus', FOCUS, 0), db('gain', 'Gain', -20, 20, 0)],
+  params: [pct('amount', 'Amount', 40), choice('focus', 'Processing Focus', FOCUS, 0), db('gain', 'Gain', -20, 20, 0), bool('noiseOnly', 'Output Noise Only', false)],
   presets: [
     preset('Gentle Cleanup', { amount: 25, focus: 0, gain: 0 }),
     preset('Voice Over Background Noise', { amount: 60, focus: 2, gain: 1 }),
@@ -129,6 +129,7 @@ registerEffect({
     choice('focus', 'Processing Focus', FOCUS, 0),
     db('gain', 'Gain', -20, 20, 0),
     ms('decay', 'Room Decay (RT60)', 100, 5000, 800, { step: 10 }),
+    bool('autoGain', 'Auto Gain', false),
   ],
   presets: [
     preset('Small Room', { amount: 50, focus: 0, gain: 0, decay: 400 }),

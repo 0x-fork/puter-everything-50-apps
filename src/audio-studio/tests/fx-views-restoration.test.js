@@ -140,3 +140,24 @@ describe('automatic phase correction', () => {
     await p;
   });
 });
+
+describe('denoise and dereverb', () => {
+  it('denoise can output what it removes, dereverb can make up its level', async () => {
+    await import('./fx-wasm.js');
+    const { dsp } = await import('../src/audio/dsp.js');
+    const { paramArray } = await import('../src/effects/registry.js');
+    const { normalizeValues } = await import('../src/effects/params.js');
+    const d = await dsp();
+    const x = Float32Array.from({ length: 24000 }, (_, i) => 0.2 * Math.sin(i * 1.7) * Math.sin(i * 0.013) + 0.05 * Math.sin(i * 2.9));
+    const dn = getEffect('denoise');
+    const run = (def, v) => d.runEffect(def.kind, 48000, [x], paramArray(def, normalizeValues(def, v)))[0];
+    const kept = run(dn, { amount: 80 });
+    const removed = run(dn, { amount: 80, noiseOnly: true });
+    let err = 0;
+    for (let i = 12000; i < 24000; i++) err = Math.max(err, Math.abs(kept[i] + removed[i] - x[i]));
+    expect(err).toBeLessThan(1e-3);
+    const dr = getEffect('dereverb');
+    const rms = (a) => Math.sqrt(a.reduce((s, v) => s + v * v, 0) / a.length);
+    expect(rms(run(dr, { amount: 100, decay: 3000, autoGain: true }).subarray(12000))).toBeGreaterThan(rms(run(dr, { amount: 100, decay: 3000 }).subarray(12000)));
+  });
+});
