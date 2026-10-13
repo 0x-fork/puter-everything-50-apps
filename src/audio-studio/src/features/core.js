@@ -39,7 +39,7 @@ export function installCore(app) {
     ],
   });
   app.registerPanel({ id: 'files', title: 'Files', create: filesPanel, near: ['favorites', 'media'], menu: (a) => a.dock?.instances.get('files')?.menu?.() || [] });
-  app.registerPanel({ id: 'history', title: 'History', create: historyPanel, near: ['markers'] });
+  app.registerPanel({ id: 'history', title: 'History', create: historyPanel, near: ['markers'], menu: (a) => a.dock?.instances.get('history')?.menu?.() || [] });
   app.registerPanel({ id: 'markers', title: 'Markers', create: markersPanel, near: ['effects', 'media'] });
   app.registerPanel({ id: 'levels', title: 'Levels', create: levelsPanel, menu: (a) => a.levelsMenu?.() || [] });
   app.registerPanel({ id: 'selection', title: 'Selection/View', create: selectionPanel, near: ['levels'] });

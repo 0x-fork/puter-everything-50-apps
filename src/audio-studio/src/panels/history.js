@@ -5,19 +5,23 @@
 // Edits change the history often, so the list is updated in place: one row per
 // entry is kept (keyed by the entry object) and only rows that changed are
 // touched. While the panel is hidden nothing is rendered; showing it catches up.
+// The panel menu undoes, redoes, deletes the states after the current one or
+// clears the history.
 
 import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
 import { confirmDialog } from '../ui/dialog.js';
+import { resolveItems } from '../ui/menubar.js';
 
 export function historyPanel(app) {
   const list = h('ol.history-list', { role: 'listbox', 'aria-label': 'History' });
   const count = h('span.muted');
-  const clearBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Clear history', title: 'Clear history', onclick: async () => {
+  const clearHistory = async () => {
     const doc = app.active;
     if (!doc) return;
     if (await confirmDialog({ title: 'Clear History', message: 'Clear the undo history for this file? This cannot be undone.', confirm: 'Clear', danger: true })) doc.history.clear();
-  } }, icon('trash-2', 15));
+  };
+  const clearBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Clear history', title: 'Clear history', onclick: clearHistory }, icon('trash-2', 15));
   const el = h('div.history-panel', list, h('div.panel-footer', count, h('div.spacer'), clearBtn));
   let off = null;
   let visible = false;
@@ -121,8 +125,18 @@ export function historyPanel(app) {
   };
   app.on('active', bind);
   bind();
+  const menu = () => {
+    const hh = hist();
+    return [
+      ...resolveItems(app, ['edit.undo', 'edit.redo']),
+      { type: 'sep' },
+      { type: 'cmd', label: 'Delete Later States', enabled: Boolean(hh?.canRedo), run: () => hist()?.dropRedo() },
+      { type: 'cmd', label: 'Clear History...', enabled: Boolean(hh && hh.entries.length > 1), run: clearHistory },
+    ];
+  };
   return {
     el,
+    menu,
     show() {
       visible = true;
       if (stale) render();

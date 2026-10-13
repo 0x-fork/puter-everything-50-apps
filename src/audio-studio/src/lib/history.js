@@ -85,6 +85,14 @@ export class History extends Emitter {
     return true;
   }
 
+  /** Drops the entries after the current one (nothing left to redo). */
+  dropRedo() {
+    if (!this.canRedo) return false;
+    this.entries.length = this.index + 1;
+    this.emit('change', this);
+    return true;
+  }
+
   clear() {
     this.entries = [this.entries[this.index]];
     this.index = 0;

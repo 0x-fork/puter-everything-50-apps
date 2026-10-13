@@ -332,3 +332,22 @@ describe('Files panel', () => {
     expect(p.el.querySelector('.files-footer').hidden).toBe(true);
   });
 });
+
+describe('History panel menu', () => {
+  it('deletes the states after the current one', () => {
+    const app = makeApp();
+    const doc = audioDoc();
+    app.addDocument(doc);
+    const p = create(app, 'history');
+    doc.apply('One', { ...doc.state, meta: { title: '1' } });
+    doc.apply('Two', { ...doc.state, meta: { title: '2' } });
+    doc.history.undo();
+    const del = p.menu().find((i) => i.label === 'Delete Later States');
+    expect(del.enabled).toBe(true);
+    del.run();
+    expect(doc.history.entries.map((e) => e.label)).toEqual(['Open', 'One']);
+    expect(doc.history.canRedo).toBe(false);
+    expect(p.menu().find((i) => i.label === 'Delete Later States').enabled).toBe(false);
+    expect(p.menu().some((i) => /Undo/.test(i.label || ''))).toBe(true);
+  });
+});
