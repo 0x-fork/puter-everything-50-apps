@@ -4690,6 +4690,63 @@ test("Frames and navigation stays open beside the board while going from frame t
   }
 });
 
+test("an edit inside one frame writes only the rows it changed in Frames and navigation again", async () => {
+  const app = await setup();
+  const { doc, click, tick } = app;
+  try {
+    const frames = ["First", "Second", "Third", "Fourth"].map((text, n) =>
+      item("frame", n * 1000, 0, { w: 800, h: 600, text, order: n }),
+    );
+    const notes = frames.map((f, n) =>
+      item("note", f.x + 100, 100, { text: `Note ${n}`, parentId: f.id }),
+    );
+    await rotationFixture(app, [...frames, ...notes]);
+    await click('[data-action="frames"]');
+    const panel = doc.querySelector("#frames-panel");
+    const rows = () => [...panel.querySelectorAll(".frame-row")];
+    const reading = () =>
+      rows().map((r) => [
+        r.textContent,
+        r.getAttribute("aria-level"),
+        [...r.querySelectorAll("button")].map((b) => b.tabIndex).join(" "),
+      ]);
+    // The keyboard moves the Tab stop to the third frame in place.
+    rows()[2].querySelector(".frame-go").focus();
+    await tick();
+    const before = rows();
+    const note = [...doc.querySelectorAll("#board-outline button")].find(
+      (b) => b.textContent === "Sticky note: Note 1",
+    );
+    await click(`#board-outline [data-id="${note.dataset.id}"]`);
+    await click('[data-action="delete"]');
+    await tick();
+    const after = rows();
+    assert.equal(after.length, 4);
+    assert.deepEqual(
+      after.map((r, n) => r === before[n]),
+      [false, false, false, true],
+      "the rows the edit or the Tab stop changed are written again",
+    );
+    assert.match(after[1].textContent, /Second 0 objects↑↓$/);
+    assert.deepEqual(
+      reading().map(([, , stops]) => stops),
+      ["-1 -1 -1 -1", "-1 -1 -1 -1", "0 0 0 0", "-1 -1 -1 -1"],
+    );
+    // Undone, the row reads as before.
+    const edited = reading();
+    await click('[data-action="undo"]');
+    await tick();
+    assert.match(rows()[1].textContent, /Second 1 object↑↓$/);
+    assert.deepEqual(
+      rows().map((r, n) => r === after[n]),
+      [true, false, true, true],
+    );
+    assert.deepEqual(reading().slice(2), edited.slice(2));
+  } finally {
+    await app.close();
+  }
+});
+
 test("going to a frame from Frames and navigation is a step Back undoes, and the address links to that frame", async () => {
   const app = await setup();
   const { doc, w, click, tick } = app;
