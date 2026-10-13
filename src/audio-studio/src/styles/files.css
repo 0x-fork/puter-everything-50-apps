@@ -475,12 +475,12 @@
 
 /* Narrow frames: labels above their fields. */
 @container (max-width: 340px) {
-  .meta-form {
+  .metadata-panel .meta-form {
     grid-template-columns: minmax(0, 1fr);
     row-gap: 2px;
   }
 
-  .meta-form > label {
+  .metadata-panel .meta-form > label {
     margin-top: 6px;
     padding-top: 0;
   }

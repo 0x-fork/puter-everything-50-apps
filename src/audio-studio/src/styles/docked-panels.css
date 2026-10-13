@@ -12,10 +12,9 @@
   display: flex;
   flex: none;
   gap: 2px;
+  flex-wrap: wrap;
   padding: 4px 8px 0;
-  overflow-x: auto;
   border-bottom: 1px solid var(--border-soft);
-  scrollbar-width: none;
 }
 
 .subtab {
@@ -146,7 +145,7 @@
 
 /* Narrow frames: labels above values. */
 @container (max-width: 260px) {
-  .prop-row {
+  .properties-panel .prop-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
     padding: 2px 0;

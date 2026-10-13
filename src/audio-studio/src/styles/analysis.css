@@ -109,7 +109,9 @@
 
 .freq-holds {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
+  row-gap: 6px;
   gap: 2px;
   margin-left: auto;
 }
