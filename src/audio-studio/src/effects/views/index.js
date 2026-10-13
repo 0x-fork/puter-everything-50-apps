@@ -5,3 +5,4 @@ import './restoration.js';
 import './noise-print.js';
 import './special.js';
 import './distortion.js';
+import './stereo.js';

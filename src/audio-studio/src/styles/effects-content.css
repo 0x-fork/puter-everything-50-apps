@@ -466,3 +466,18 @@ input[type='range'].slider.fx-vslider::-moz-range-track {
 .fx-spectrum {
   height: 170px;
 }
+
+/* Center Channel Extractor and Graphic Phase Shifter. */
+.fx-split.cce-split {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.cce-levels {
+  display: flex;
+  gap: 12px;
+  padding-top: 6px;
+}
+
+.fx-plot.gps-plot {
+  height: 260px;
+}

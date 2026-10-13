@@ -5,7 +5,7 @@
 //!
 //! Params: 0 channel (0 left, 1 right, 2 both), 1 FFT size, 2 curve scale
 //! (0 log frequency interpolation, 1 linear), 3 curve (data param).
-//! Data slot 0: [f0, deg0, f1, deg1, ...], degrees in -180..180.
+//! Data slot 0: [f0, deg0, f1, deg1, ...], degrees in -360..360.
 //! Latency: the FFT size.
 
 use crate::fx::filter::{clean_curve, curve_bins, fft_size};
@@ -59,7 +59,7 @@ impl PhaseShifter {
     fn update(&mut self) {
         curve_bins(&self.curve, self.stft.n, self.rate, self.log, &mut self.target);
         for t in &mut self.target {
-            *t = t.clamp(-180.0, 180.0) * PI / 180.0;
+            *t = t.clamp(-360.0, 360.0) * PI / 180.0;
         }
         // DC and Nyquist must stay real.
         let last = self.target.len() - 1;
