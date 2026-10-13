@@ -23388,6 +23388,15 @@ test("others are told a dropped move is settling until its save goes through, an
   hub.peer.connect = async (code) => {
     const conn = await connect(code);
     for (const end of [conn, conn.other]) {
+      // A ticket, as one renewed at a check-in, may first go out on the
+      // ordered channel.
+      const send = end.send.bind(end);
+      end.send = (data) => {
+        const packet = JSON.parse(data);
+        if (packet.ticket?.user === collaborator.uuid)
+          theirs.add(`${packet.ticket.session}:${packet.ticket.expires}`);
+        return send(data);
+      };
       const channel = end.peerconnection.createDataChannel;
       end.peerconnection.createDataChannel = (...args) => {
         const made = channel(...args),
