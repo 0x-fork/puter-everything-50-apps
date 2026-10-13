@@ -115,11 +115,14 @@ export function decodeRaw(bytes, { encoding, channels, bigEndian = false, offset
 async function importRawDialog(app) {
   const [file] = await pickLocalFiles({ accept: '*/*', multiple: false });
   if (!file) return;
-  const rate = h('select.select', { 'aria-label': 'Sample rate' }, [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000].map((r) => h('option', { value: r, selected: r === 44100 }, `${r} Hz`)));
-  const channels = h('input.input.num', { type: 'number', min: 1, max: 8, value: 2, 'aria-label': 'Channels' });
-  const enc = h('select.select', { 'aria-label': 'Sample type' }, RAW_ENCODINGS.map((e) => h('option', { value: e.id, selected: e.id === 's16' }, e.label)));
+  // The last settings used come back (raw files usually arrive in batches of one kind).
+  const last = { rate: 44100, channels: 2, encoding: 's16', order: 'le', offset: 0, ...(app.prefs.get('importRaw') || {}) };
+  const rate = h('select.select', { 'aria-label': 'Sample rate' }, [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000].map((r) => h('option', { value: r, selected: r === last.rate }, `${r} Hz`)));
+  const channels = h('input.input.num', { type: 'number', min: 1, max: 8, value: last.channels, 'aria-label': 'Channels' });
+  const enc = h('select.select', { 'aria-label': 'Sample type' }, RAW_ENCODINGS.map((e) => h('option', { value: e.id, selected: e.id === last.encoding }, e.label)));
   const order = h('select.select', { 'aria-label': 'Byte order' }, h('option', { value: 'le' }, 'Little-endian'), h('option', { value: 'be' }, 'Big-endian'));
-  const offset = h('input.input.num', { type: 'number', min: 0, value: 0, 'aria-label': 'Start byte offset' });
+  order.value = last.order === 'be' ? 'be' : 'le';
+  const offset = h('input.input.num', { type: 'number', min: 0, value: last.offset, 'aria-label': 'Start byte offset' });
   const info = h('p.faint', { style: { margin: '8px 0 0' } });
   const update = () => {
     const e = RAW_ENCODINGS.find((x) => x.id === enc.value);
@@ -143,6 +146,7 @@ async function importRawDialog(app) {
   });
   if (r !== 'ok') return;
   const ch = Math.max(1, Math.min(8, Math.round(Number(channels.value) || 1)));
+  app.prefs.set('importRaw', { rate: Number(rate.value), channels: ch, encoding: enc.value, order: order.value, offset: Math.max(0, Math.round(Number(offset.value) || 0)) });
   const data = decodeRaw(new Uint8Array(await file.arrayBuffer()), { encoding: enc.value, channels: ch, bigEndian: order.value === 'be', offset: Math.max(0, Math.round(Number(offset.value) || 0)) });
   if (!data[0].length) return app.notify('The file has no complete sample frames with those settings.', { error: true });
   const bits = { u8: 8, s8: 8, ulaw: 16, alaw: 16, s16: 16, s24: 24 }[enc.value] || 32;

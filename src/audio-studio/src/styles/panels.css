@@ -710,6 +710,10 @@
   max-width: 100%;
 }
 
+.prefs-row > .btn {
+  justify-self: start;
+}
+
 .prefs-row > .input:not(.num) {
   max-width: 280px;
 }
