@@ -62,6 +62,26 @@ const canvasFonts = new WeakMap();
 // repaint: a board pans at sixty repaints a second.
 const fontFailures = new Map();
 const FONT_RETRY_MS = 30_000;
+// Text measured before a font loaded is measured again once it has. One
+// load is reported to each canvas that asked for it, to the font set's
+// `loadingdone` and to `fonts.ready`, and each of them cleared every layout,
+// which painted every library preview again each time. The layouts are
+// cleared only when a font face has loaded since they last were; a font set
+// that cannot be counted clears them every time. Says whether they were.
+let facesMeasured = -1;
+export function refreshTextLayouts(fontSet = globalThis.document?.fonts) {
+  let loaded = -1;
+  if (typeof fontSet?.[Symbol.iterator] === "function") {
+    loaded = 0;
+    for (const face of fontSet) if (face.status === "loaded") loaded++;
+    if (loaded === facesMeasured) return false;
+  }
+  facesMeasured = loaded;
+  clearTextLayoutCache();
+  clearTagLayouts();
+  clearConnectorLabelCache();
+  return true;
+}
 const fontWaits = (id) =>
   Date.now() - (fontFailures.get(id) ?? -Infinity) < FONT_RETRY_MS;
 function fontFailed(ids) {
@@ -802,9 +822,7 @@ export function paint(canvas, items, view, options = {}) {
       if (needed.some((id) => !fontFamilyReady(id)))
         Promise.all(needed.map((id) => loadFontFamily(id)))
           .then(() => {
-            clearTextLayoutCache();
-            clearTagLayouts();
-            clearConnectorLabelCache();
+            refreshTextLayouts();
             state.repaint();
           })
           .catch(() => {
@@ -1298,6 +1316,13 @@ function paintPreview(canvas, rect = canvas.getBoundingClientRect()) {
       tags: b.tags,
       textColor: canvas.dataset.ink,
       tinyText: false,
+      // Painted again through here once its fonts or pictures load, so
+      // the picture is noted as painted with those fonts: the library's
+      // own repaint for a font load then finds it painted already.
+      repaint: () => {
+        delete canvas.dataset.painted;
+        paintPreview(canvas);
+      },
     },
   );
   canvas.dataset.painted = painted;

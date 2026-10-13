@@ -18,6 +18,7 @@ import {
   fitTextLayout,
   richTextLayout,
   clearTextLayoutCache,
+  textLayoutVersion,
 } from "../src/text.js";
 import {
   copyObjectStyle,
@@ -26,7 +27,12 @@ import {
   readObjectStyle,
 } from "../src/object-style.js";
 import { SharedDocument } from "../src/collaboration/document.js";
-import { drawObject, rasterRegion, paint } from "../src/render.js";
+import {
+  drawObject,
+  rasterRegion,
+  paint,
+  refreshTextLayouts,
+} from "../src/render.js";
 import { switchShape } from "../src/shapes.js";
 import { quickConnectPlan } from "../src/quick-connect.js";
 
@@ -324,6 +330,26 @@ function paintingWindow(load) {
     },
   };
 }
+
+test("a font load clears the text layouts once, however often it is reported", () => {
+  // A load is reported to the canvas that asked for it, to loadingdone and
+  // to fonts.ready: only the first finds a face loaded since the last clear.
+  const faces = [{ status: "loaded" }, { status: "loading" }];
+  const fontSet = { load() {}, [Symbol.iterator]: () => faces.values() };
+  const version = textLayoutVersion();
+  assert.equal(refreshTextLayouts(fontSet), true);
+  assert.equal(textLayoutVersion(), version + 1);
+  assert.equal(refreshTextLayouts(fontSet), false, "nothing loaded since");
+  assert.equal(textLayoutVersion(), version + 1, "the layouts are kept");
+  faces[1].status = "loaded";
+  assert.equal(refreshTextLayouts(fontSet), true, "another face loaded");
+  assert.equal(refreshTextLayouts(fontSet), false);
+  // A font set whose faces cannot be counted clears them every time.
+  const opaque = { load() {} };
+  assert.equal(refreshTextLayouts(opaque), true);
+  assert.equal(refreshTextLayouts(opaque), true);
+  assert.equal(textLayoutVersion(), version + 4);
+});
 
 test("a canvas painted with fonts another canvas loaded keeps the layouts and paints once", async () => {
   let loads = 0;

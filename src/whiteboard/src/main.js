@@ -37,7 +37,6 @@ import {
 } from "./facilitation/model.js";
 import "./facilitation/facilitation.css";
 import { timerRemaining } from "./timer.js";
-import { clearTagLayouts } from "./tag-renderer.js";
 import { tagFooter } from "./tags.js";
 import { createTagsUI, taggable } from "./tags-ui.js";
 import { autoLayoutMindMaps, preserveManualMindMoves } from "./mind-map.js";
@@ -395,7 +394,6 @@ import {
   connectorEndpointHit,
   setConnectorEnd,
   connectorLabel,
-  clearConnectorLabelCache,
 } from "./connectors.js";
 import {
   canEditText,
@@ -405,7 +403,6 @@ import {
   textValign,
   canAutoFitText,
   fitTextLayout,
-  clearTextLayoutCache,
   growsWithText,
   autoHeightLayout,
   reflowTextItems,
@@ -497,6 +494,7 @@ import { bindText } from "./collaboration/text-binding.js";
 import {
   paint,
   paintPreviews,
+  refreshTextLayouts,
   exportPNG,
   preview,
   frameLabelAt,
@@ -13660,17 +13658,14 @@ window.addEventListener("resize", () => {
   if (current) draw();
   else paintPreviews();
 });
+// Previews already painted with the loaded fonts are not painted again.
 document.fonts?.ready.then(() => {
-  clearTextLayoutCache();
-  clearTagLayouts();
-  clearConnectorLabelCache();
+  refreshTextLayouts();
   if (current) draw();
   else paintPreviews();
 });
 document.fonts?.addEventListener("loadingdone", () => {
-  clearTextLayoutCache();
-  clearTagLayouts();
-  clearConnectorLabelCache();
+  refreshTextLayouts();
   if (current) draw();
   else paintPreviews();
 });
