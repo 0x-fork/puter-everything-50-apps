@@ -854,20 +854,24 @@ export class CollaborationSession {
       this.status(this.shown || this.savedStatus());
   }
   // Uploads are spaced so a room's edits stay within what its worker can
-  // store, about eight a second, by how many people uploaded in the last ten
-  // seconds as their peers announced: 0.4 seconds for a few, 1.25 for ten,
-  // and at most 3 from 24 on, so editing stays usable in the busiest room.
-  // Moves, drawings and typing show live meanwhile. Without peer links,
-  // others' uploads are unseen and a quarter of a large room counts.
+  // store, about eight a second, by how many people uploaded in the last
+  // fifteen seconds as their peers announced: 0.4 seconds for a few, 1.25
+  // for ten, 12.5 for a hundred, and at most 15 from 120 on. Moves, drawings
+  // and typing show live meanwhile, so waiting longer to save them keeps a
+  // busy room's worker within its storage quota without slowing what people
+  // see. Without peer links, nothing shows until it is saved, so uploads
+  // wait at most 3 seconds, and with others' uploads unseen a quarter of a
+  // large room counts.
   batchDelay() {
     const now = Date.now();
     let active = 1;
     for (const [id, at] of this.uploaders || [])
-      if (now - at < 10_000) active++;
+      if (now - at < 15_000) active++;
       else this.uploaders.delete(id);
     const people = this.roster?.length || 0;
-    if (people > 8 && !this.linked()) active = Math.max(active, people / 4);
-    return Math.min(3000, Math.max(400, active * 125));
+    if (people > 8 && !this.linked())
+      return Math.min(3000, Math.max(400, Math.max(active, people / 4) * 125));
+    return Math.min(15_000, Math.max(400, active * 125));
   }
   // The first edit after a quiet spell goes out at once; edits made soon
   // after an upload wait for the rest of the batch delay, so a busy device

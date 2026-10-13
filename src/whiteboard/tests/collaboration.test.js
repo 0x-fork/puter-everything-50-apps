@@ -2502,12 +2502,21 @@ test("uploads are spaced by how many people are uploading, not how many are pres
     for (let n = 0; n < 9; n++)
       session.receive("committed", { id: `e${n}` }, ticket(n), n + 1);
     assert.equal(session.batchDelay(), 1250, "ten people uploading");
-    for (let n = 9; n < 60; n++)
+    for (let n = 9; n < 99; n++)
       session.receive("committed", { id: `e${n}` }, ticket(n), n + 1);
-    assert.equal(session.batchDelay(), 3000, "at most three seconds");
-    // Others' uploads are unseen without peer links.
-    session.uploaders.clear();
+    assert.equal(session.batchDelay(), 12_500, "a hundred people uploading");
+    for (let n = 99; n < 200; n++)
+      session.receive("committed", { id: `e${n}` }, ticket(n), n + 1);
+    assert.equal(session.batchDelay(), 15_000, "at most fifteen seconds");
+    // Others' uploads are unseen without peer links, and nothing of this
+    // device's edits shows before they are saved.
     session.linked = () => false;
+    assert.equal(
+      session.batchDelay(),
+      3000,
+      "at most three seconds without peer links",
+    );
+    session.uploaders.clear();
     assert.equal(session.batchDelay(), 3000);
     session.roster = session.roster.slice(0, 20);
     assert.equal(session.batchDelay(), 625);
