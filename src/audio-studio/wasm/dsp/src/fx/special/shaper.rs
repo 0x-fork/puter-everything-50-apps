@@ -209,19 +209,36 @@ pub const DIODE: u32 = 4;
 pub const FOLD: u32 = 5;
 pub const CUT: u32 = 6;
 /// Drawn curves: output magnitude looked up in `Shape::tables[0]` (positive)
-/// or `[1]` (negative), sampled evenly over input magnitudes 0..1; inputs
-/// above 1 hold the last value.
+/// or `[1]` (negative). A table covers TABLE_OCTAVES octaves below full
+/// scale with TABLE_STEPS samples per octave, spaced evenly in magnitude
+/// within each octave: entry j holds the output for input magnitude
+/// 2^(j / STEPS - OCTAVES) rounded down to the octave, times
+/// (1 + (j % STEPS) / STEPS), so quiet levels get as fine a grid as loud
+/// ones. Below the table the gain of its first entry holds; inputs at or
+/// above full scale hold the last entry.
 pub const TABLE_POS: u32 = 7;
 pub const TABLE_NEG: u32 = 8;
+pub const TABLE_OCTAVES: i32 = 20;
+pub const TABLE_STEPS: usize = 128;
 
-/// Linear interpolation in an evenly sampled 0..1 table (identity when empty).
+/// Interpolated lookup in an octave table (identity when empty).
 #[inline]
 fn lookup(table: &[f32], a: f32) -> f32 {
     let n = table.len();
     if n < 2 {
         return a;
     }
-    let t = a * (n - 1) as f32;
+    if a <= 0.0 {
+        return 0.0;
+    }
+    let bits = a.to_bits();
+    let e = ((bits >> 23) & 0xff) as i32 - 127;
+    if e < -TABLE_OCTAVES {
+        // Constant gain below the table (its first entry is at 2^-OCTAVES).
+        return a * table[0] * (1u64 << TABLE_OCTAVES) as f32;
+    }
+    let m = (bits & 0x7f_ffff) as f32 * (1.0 / 8_388_608.0);
+    let t = ((e + TABLE_OCTAVES) as usize * TABLE_STEPS) as f32 + m * TABLE_STEPS as f32;
     if t >= (n - 1) as f32 {
         return table[n - 1];
     }
@@ -350,7 +367,7 @@ impl Shaper {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::fx::testutil::*;
 
@@ -438,14 +455,32 @@ mod tests {
         assert_eq!(s.eval(2.0), 1.0);
     }
 
+    /// An octave table of `f(input magnitude)`.
+    pub fn octave_table(f: impl Fn(f32) -> f32) -> Vec<f32> {
+        (0..=TABLE_OCTAVES as usize * TABLE_STEPS)
+            .map(|j| {
+                let base = 2f32.powi((j / TABLE_STEPS) as i32 - TABLE_OCTAVES);
+                f(base * (1.0 + (j % TABLE_STEPS) as f32 / TABLE_STEPS as f32))
+            })
+            .collect()
+    }
+
     #[test]
     fn drawn_tables_interpolate_and_hold() {
         // Positive: a curve that halves everything; negative: identity (empty table).
-        let half: Vec<f32> = (0..=4).map(|i| i as f32 * 0.125).collect();
+        let half = octave_table(|a| a * 0.5);
         let s = Shape { pos: TABLE_POS, neg: TABLE_NEG, tables: [half, Vec::new()], ..Shape::default() };
         assert!((s.eval(0.3) - 0.15).abs() < 1e-6);
         assert!((s.eval(3.0) - 0.5).abs() < 1e-6);
         assert!((s.eval(-0.3) + 0.3).abs() < 1e-6);
+        // Quiet levels keep their resolution, even below the table.
+        assert!((s.eval(1e-5) / 0.5e-5 - 1.0).abs() < 1e-4);
+        assert!((s.eval(1e-8) / 0.5e-8 - 1.0).abs() < 1e-4);
+        // A gate at -80 dB: shapes this quiet survive the lookup.
+        let gate = octave_table(|a| if a < 1e-4 { 0.0 } else { a });
+        let s = Shape { pos: TABLE_POS, tables: [gate, Vec::new()], ..Shape::default() };
+        assert_eq!(s.eval(0.5e-4), 0.0);
+        assert!((s.eval(2e-4) - 2e-4).abs() < 1e-9);
     }
 
     #[test]

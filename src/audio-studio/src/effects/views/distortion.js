@@ -2,13 +2,14 @@
 // as editable graphs (level into the curve in, level out, both in dB).
 // A preset curve shows as points along its shape; dragging, adding or
 // removing a point turns that half into a drawn curve. Between the graphs:
-// link (symmetric) and copy buttons.
+// link (symmetric) and copy buttons. dB Range sets how low the graphs reach
+// (below it a curve keeps its gain); Linear Scale shows amplitude axes.
 
 import { h } from '../../lib/dom.js';
 import { cssVar } from '../../ui/theme.js';
 import { icon } from '../../ui/icons.js';
 import { envelopeControl, registerEditor } from '../editors.js';
-import { controlsFor, groupBox, glyph, enableWhen } from '../layout.js';
+import { controlsFor, groupBox, glyph, enableWhen, checkbox } from '../layout.js';
 import { DRAWN, DRAWN_FLOOR } from '../defs/special.js';
 
 const LO = DRAWN_FLOOR;
@@ -41,7 +42,7 @@ export function presetCurve(kind, a) {
 }
 
 const toDb = (a) => Math.max(LO, 20 * Math.log10(Math.max(1e-9, a)));
-const SAMPLE_AT = [-60, -48, -36, -24, -18, -12, -9, -6, -4, -2, -1, 0];
+const SAMPLE_AT = [-120, -108, -96, -84, -72, -60, -48, -36, -24, -18, -12, -9, -6, -4, -2, -1, 0];
 
 /**
  * Points along a preset curve driven by `driveDb` (input level to output
@@ -64,67 +65,129 @@ function halfState(v, side) {
   return { kind, drawn, points, mirrored };
 }
 
+/**
+ * Graph axes for the dB Range and Linear Scale settings: the editor's value
+ * span, and conversions between levels in dB and the editor's position (t,
+ * input) and value (v, output). Linear axes run over amplitude 0..1.
+ */
+export function curveAxes(v) {
+  if (v.linearScale) {
+    const fromAmp = (a) => (a > 0 ? Math.max(LO, 20 * Math.log10(a)) : LO);
+    return {
+      lo: LO,
+      param: { min: 0, max: 1, step: 0.001, unit: '' },
+      toT: (xDb) => (xDb <= LO ? 0 : 10 ** (xDb / 20)),
+      fromT: fromAmp,
+      toV: (yDb) => (yDb <= LO ? 0 : 10 ** (yDb / 20)),
+      fromV: fromAmp,
+      ticks: [0.25, 0.5, 0.75],
+      tickLabels: ['0.25', '0.5', '0.75'],
+      yTicks: [0.25, 0.5, 0.75],
+      text: (d) => (d <= LO ? '0' : (10 ** (d / 20)).toFixed(3)),
+    };
+  }
+  const lo = Math.min(-12, Math.max(LO, Math.round(v.dbRange ?? -60)));
+  const step = lo < -80 ? 20 : 10;
+  const ticks = [];
+  for (let d = -step; d > lo; d -= step) ticks.unshift(d);
+  return {
+    lo,
+    param: { min: lo, max: 0, step: 0.1, unit: 'dB' },
+    toT: (xDb) => (Math.max(lo, xDb) - lo) / -lo,
+    fromT: (t) => lo + t * -lo,
+    toV: (yDb) => yDb,
+    fromV: (y) => y,
+    ticks: ticks.map((d) => (d - lo) / -lo),
+    tickLabels: ticks.map((d, i) => (i % 2 === ticks.length % 2 ? '' : String(d))),
+    yTicks: ticks,
+    text: (d) => `${d.toFixed(1)} dB`,
+  };
+}
+
+/** The part of a curve inside the axes: a first point at their bottom, then the points above it. */
+export function visiblePoints(points, ax) {
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+  return [{ x: ax.lo, y: Math.max(LO, interp(sorted, ax.lo)) }, ...sorted.filter((p) => p.x > ax.lo + 1e-6)];
+}
+
 function curveGraph(ctx, side) {
-  const toEnv = (pts) => pts.map((p) => ({ t: (p.x - LO) / -LO, v: p.y }));
+  const wrap = h('div.dist-graph-wrap');
+  let env = null;
+  let key = '';
+  let ax = curveAxes(ctx.values);
   let editing = false;
-  let shown = JSON.stringify(halfState(ctx.values, side).points);
-  const env = envelopeControl({
-    param: { id: side, label: side === 'positive' ? 'Positive curve' : 'Negative curve', min: LO, max: 0, step: 0.1, unit: 'dB' },
-    value: toEnv(halfState(ctx.values, side).points),
-    xLabel: (t) => `${(LO + t * -LO).toFixed(1)} dB in`,
-    pointText: (pt) => `In ${(LO + pt.t * -LO).toFixed(1)} dB, out ${pt.v.toFixed(1)} dB`,
-    xTicks: [-50, -40, -30, -20, -10].map((d) => (d - LO) / -LO),
-    xTickLabels: ['-50', '', '-30', '', '-10'],
-    yTicks: [-50, -40, -30, -20, -10],
-    className: 'dist-graph',
-    onChange: (pts) => {
-      const next = pts.map((p) => ({ x: Math.round((LO + p.t * -LO) * 10) / 10, y: Math.round(p.v * 10) / 10 }));
-      const wasDrawn = halfState(ctx.values, side).drawn;
-      shown = JSON.stringify(next);
-      editing = true;
-      // Editing the mirrored negative half breaks the link.
-      if (side === 'negative' && ctx.values.symmetric) ctx.set('symmetric', false);
-      ctx.set(side === 'positive' ? 'posCurve' : 'negCurve', next);
-      ctx.set(side, DRAWN);
-      // A preset curve was shown with its drive applied, so its drawn copy
-      // already includes the drive: take the drive out once no preset half needs it.
-      const other = side === 'positive' ? 'negative' : 'positive';
-      if (!wasDrawn && (ctx.values.symmetric || halfState(ctx.values, other).drawn)) ctx.set('drive', 0);
-      editing = false;
-    },
-    overlay: (g, W, H, { yOf }) => {
-      // Unity line, and the effective curve when Curve Smoothing blends it toward a soft saturation.
-      g.strokeStyle = cssVar('--grid-strong');
-      g.setLineDash([3, 3]);
-      g.lineWidth = 1;
-      g.beginPath();
-      g.moveTo(0, yOf(LO, H));
-      g.lineTo(W, yOf(0, H));
-      g.stroke();
-      g.setLineDash([]);
-      // The response the input actually gets, when smoothing or (for drawn curves) the drive changes it.
-      const v = ctx.values;
-      const smooth = v.curveSmoothing / 100;
-      const st = halfState(v, side);
-      if (!smooth && !(st.drawn && v.drive)) return;
-      g.strokeStyle = cssVar('--hot');
-      g.globalAlpha = 0.7;
-      g.lineWidth = 1.5;
-      g.beginPath();
-      for (let i = 0; i <= 120; i++) {
-        const xDb = LO + (-LO * i) / 120;
-        const a = 10 ** ((xDb + v.drive) / 20);
-        const y0 = st.drawn ? 10 ** (interp(st.points, xDb + v.drive) / 20) : presetCurve(st.kind, a);
-        const y = y0 + (fastTanh(a) - y0) * smooth;
-        const px = (i / 120) * W;
-        const py = yOf(toDb(y), H);
-        if (i) g.lineTo(px, py);
-        else g.moveTo(px, py);
-      }
-      g.stroke();
-      g.globalAlpha = 1;
-    },
-  });
+  let shown = '';
+  const r1 = (x) => Math.round(x * 10) / 10;
+  const toEnv = (pts) => visiblePoints(pts, ax).map((p) => ({ t: ax.toT(p.x), v: ax.toV(p.y) }));
+  const fromEnv = (pts) => pts.map((p) => ({ x: r1(ax.fromT(p.t)), y: r1(ax.fromV(p.v)) }));
+  const build = () => {
+    ax = curveAxes(ctx.values);
+    shown = JSON.stringify(halfState(ctx.values, side).points);
+    env = envelopeControl({
+      param: { id: side, label: side === 'positive' ? 'Positive curve' : 'Negative curve', ...ax.param },
+      value: toEnv(halfState(ctx.values, side).points),
+      xLabel: (t) => `${ax.text(ax.fromT(t))} in`,
+      pointText: (pt) => `In ${ax.text(ax.fromT(pt.t))}, out ${ax.text(ax.fromV(pt.v))}`,
+      xTicks: ax.ticks,
+      xTickLabels: ax.tickLabels,
+      yTicks: ax.yTicks,
+      className: 'dist-graph',
+      // Drawn straight in dB, as the processor interpolates, whatever the axes.
+      render: (pts, n) => {
+        const db = fromEnv(pts);
+        return Float32Array.from({ length: n }, (_, i) => ax.toV(Math.max(LO, interp(db, ax.fromT(i / (n - 1))))));
+      },
+      onChange: (pts) => {
+        const next = fromEnv(pts);
+        const wasDrawn = halfState(ctx.values, side).drawn;
+        shown = JSON.stringify(next);
+        editing = true;
+        // Editing the mirrored negative half breaks the link.
+        if (side === 'negative' && ctx.values.symmetric) ctx.set('symmetric', false);
+        ctx.set(side === 'positive' ? 'posCurve' : 'negCurve', next);
+        shown = JSON.stringify(halfState(ctx.values, side).points);
+        ctx.set(side, DRAWN);
+        // A preset curve was shown with its drive applied, so its drawn copy
+        // already includes the drive: take the drive out once no preset half needs it.
+        const other = side === 'positive' ? 'negative' : 'positive';
+        if (!wasDrawn && (ctx.values.symmetric || halfState(ctx.values, other).drawn)) ctx.set('drive', 0);
+        editing = false;
+      },
+      overlay: (g, W, H, { yOf }) => {
+        // Unity line, and the effective curve when Curve Smoothing blends it toward a soft saturation.
+        g.strokeStyle = cssVar('--grid-strong');
+        g.setLineDash([3, 3]);
+        g.lineWidth = 1;
+        g.beginPath();
+        g.moveTo(0, yOf(ax.param.min, H));
+        g.lineTo(W, yOf(ax.param.max, H));
+        g.stroke();
+        g.setLineDash([]);
+        // The response the input actually gets, when smoothing or (for drawn curves) the drive changes it.
+        const v = ctx.values;
+        const smooth = v.curveSmoothing / 100;
+        const st = halfState(v, side);
+        if (!smooth && !(st.drawn && v.drive)) return;
+        g.strokeStyle = cssVar('--hot');
+        g.globalAlpha = 0.7;
+        g.lineWidth = 1.5;
+        g.beginPath();
+        for (let i = 0; i <= 160; i++) {
+          const xDb = ax.fromT(i / 160);
+          const a = 10 ** ((xDb + v.drive) / 20);
+          const y0 = st.drawn ? 10 ** (interp(st.points, xDb + v.drive) / 20) : presetCurve(st.kind, a);
+          const y = y0 + (fastTanh(a) - y0) * smooth;
+          const px = (i / 160) * W;
+          const py = yOf(ax.toV(toDb(y)), H);
+          if (i) g.lineTo(px, py);
+          else g.moveTo(px, py);
+        }
+        g.stroke();
+        g.globalAlpha = 1;
+      },
+    });
+    wrap.replaceChildren(env);
+  };
   const caption = h('div.dist-caption.faint');
   const update = () => {
     const st = halfState(ctx.values, side);
@@ -135,6 +198,11 @@ function curveGraph(ctx, side) {
           ? `Drawn curve; the drive adds ${ctx.values.drive.toFixed(1)} dB before it (thin line)`
           : 'Drawn curve'
         : 'Drag a point to draw your own curve';
+    const k = `${ctx.values.linearScale ? 'lin' : ctx.values.dbRange}`;
+    if (k !== key) {
+      key = k;
+      build();
+    }
     env.classList.toggle('dist-mirrored', st.mirrored);
     if (editing) return;
     const now = JSON.stringify(st.points);
@@ -146,7 +214,7 @@ function curveGraph(ctx, side) {
   ctx.subscribe(update);
   update();
   const kindRow = enableWhen(ctx, controlsFor(ctx, [side], { labels: { [side]: 'Curve' } }), (v) => side === 'positive' || !v.symmetric);
-  return groupBox(side === 'positive' ? 'Positive' : 'Negative', env, caption, kindRow);
+  return groupBox(side === 'positive' ? 'Positive' : 'Negative', wrap, caption, kindRow);
 }
 
 /** Output dB of drawn points at input xDb (straight in dB between points). */
@@ -179,7 +247,7 @@ function distortionView(ctx) {
   const graphs = h('div.dist-graphs', curveGraph(ctx, 'positive'), h('div.dist-tools', linkBtn, toNeg, toPos), curveGraph(ctx, 'negative'));
   const settings = h(
     'div.fx-split.fx-split-even',
-    groupBox('Settings', controlsFor(ctx, ['drive', 'curveSmoothing', 'timeSmoothing', 'mix', 'output'])),
+    groupBox('Settings', controlsFor(ctx, ['drive', 'curveSmoothing', 'timeSmoothing', 'mix', 'output']), h('div.dist-scale', enableWhen(ctx, controlsFor(ctx, ['dbRange']), (v) => !v.linearScale), checkbox(ctx, 'linearScale'))),
     groupBox('Post Filter', controlsFor(ctx, ['filter', 'filterType', 'filterFreq', 'filterQ'], { labels: { filter: 'Filter the Output' } })),
   );
   return h('div.fx-stack', graphs, settings);

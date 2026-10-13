@@ -24,22 +24,30 @@ const CURVES = ['Clean', 'Soft Saturate', 'Hard Clip', 'Tube Warmth', 'Diode Kne
 
 /** Curve choice whose shape comes from the drawn points (fx/special/distortion.rs DRAWN). */
 export const DRAWN = 7;
-/** Input range of a drawn distortion curve in dB (points run from here to 0 dBFS). */
-export const DRAWN_FLOOR = -60;
+/** Lowest input level of a drawn distortion curve in dB (points run from here to 0 dBFS). */
+export const DRAWN_FLOOR = -120;
 const UNITY = [{ x: DRAWN_FLOOR, y: DRAWN_FLOOR }, { x: 0, y: 0 }];
+/** Octave table layout of a drawn curve (shaper.rs TABLE_OCTAVES, TABLE_STEPS). */
+export const TABLE_OCTAVES = 20;
+export const TABLE_STEPS = 128;
+
+/** Input magnitude of octave-table entry j: evenly spaced within each octave below full scale. */
+export const tableInput = (j) => 2 ** (Math.floor(j / TABLE_STEPS) - TABLE_OCTAVES) * (1 + (j % TABLE_STEPS) / TABLE_STEPS);
 
 /**
- * Lookup table for a drawn curve ([{ x: in dB, y: out dB }]): output
- * magnitudes sampled evenly over input magnitudes 0..1, as the shaper reads
- * it (shaper.rs TABLE_POS). Below the first point the curve keeps that
- * point's gain; between points it is straight in dB.
+ * Octave table for a drawn curve ([{ x: in dB, y: out dB }]): output
+ * magnitudes at tableInput(j), as the shaper reads it (shaper.rs
+ * TABLE_POS), so quiet levels are shaped as finely as loud ones. Below the
+ * first point the curve keeps that point's gain; between points it is
+ * straight in dB.
  */
-export function drawnCurveTable(points, n = 2049) {
+export function drawnCurveTable(points) {
   const pts = [...(points?.length ? points : UNITY)].sort((a, b) => a.x - b.x);
+  const n = TABLE_OCTAVES * TABLE_STEPS + 1;
   const out = new Float32Array(n);
   let k = 0;
-  for (let i = 1; i < n; i++) {
-    const d = 20 * Math.log10(i / (n - 1));
+  for (let j = 0; j < n; j++) {
+    const d = 20 * Math.log10(tableInput(j));
     let y;
     if (d <= pts[0].x) y = d + (pts[0].y - pts[0].x);
     else if (d >= pts[pts.length - 1].x) y = pts[pts.length - 1].y;
@@ -49,12 +57,12 @@ export function drawnCurveTable(points, n = 2049) {
       const b = pts[k + 1];
       y = a.y + ((b.y - a.y) * (d - a.x)) / (b.x - a.x || 1);
     }
-    out[i] = 10 ** (y / 20);
+    out[j] = 10 ** (y / 20);
   }
   return out;
 }
 
-const drawnParam = (id, label) => ({ id, label, type: 'transfer', default: UNITY, min: DRAWN_FLOOR, max: 0, unit: 'dB', hidden: true });
+const drawnParam = (id, label) => ({ id, label, type: 'transfer', default: UNITY, min: DRAWN_FLOOR, max: 0, unit: 'dB', hidden: true, extendEnds: true });
 
 registerEffect({
   id: 'distortion',
@@ -76,6 +84,10 @@ registerEffect({
     db('output', 'Output Gain', -24, 12, 0),
     drawnParam('posCurve', 'Positive Drawn Curve'),
     drawnParam('negCurve', 'Negative Drawn Curve'),
+    // The curve graphs' span: the lowest level shown and edited, and linear
+    // amplitude axes instead of dB. Below the span a curve keeps its gain.
+    num('dbRange', 'dB Range', -120, -12, -60, 'dB', { step: 1 }),
+    bool('linearScale', 'Linear Scale', false),
   ],
   latency: () => OS4_LATENCY,
   data: (v) => [

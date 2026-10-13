@@ -54,6 +54,9 @@ export function coerce(p, v) {
     const lo = p.min ?? -100;
     const hi = p.max ?? 0;
     const pts = v.map((pt) => ({ x: Math.min(hi, Math.max(lo, Number(pt.x) || 0)), y: Math.min(hi, Math.max(lo, Number(pt.y) || 0)) })).sort((a, b) => a.x - b.x);
+    // `extendEnds`: a curve that starts above the bottom of the range continues
+    // down at its first point's gain (curves drawn over a narrower range keep their shape).
+    if (p.extendEnds && pts[0].x > lo) pts.unshift({ x: lo, y: Math.max(lo, pts[0].y + lo - pts[0].x) });
     // The ends span the whole input range so the curve is defined everywhere.
     pts[0] = { ...pts[0], x: lo };
     pts[pts.length - 1] = { ...pts[pts.length - 1], x: hi };

@@ -9,8 +9,8 @@ import { openEffectDialog } from '../src/effects/dialog.js';
 import { autoEditor } from '../src/effects/editors.js';
 import { normalizeValues } from '../src/effects/params.js';
 import { dsp } from '../src/audio/dsp.js';
-import { drawnCurveTable, DRAWN } from '../src/effects/defs/special.js';
-import { presetCurve, presetPoints } from '../src/effects/views/distortion.js';
+import { drawnCurveTable, DRAWN, TABLE_OCTAVES, TABLE_STEPS, tableInput } from '../src/effects/defs/special.js';
+import { presetCurve, presetPoints, curveAxes, visiblePoints } from '../src/effects/views/distortion.js';
 import { dopplerPosition, dopplerRatio } from '../src/effects/views/special.js';
 import { fakeApp, filled } from './fx-helpers.js';
 
@@ -27,17 +27,49 @@ const peak = (a) => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
 
 describe('drawn distortion curves', () => {
   it('tables a unity curve as the identity and holds the end', () => {
-    const t = drawnCurveTable([{ x: -60, y: -60 }, { x: 0, y: 0 }], 101);
-    expect(t[0]).toBe(0);
-    expect(t[50]).toBeCloseTo(0.5, 5);
-    expect(t[100]).toBeCloseTo(1, 5);
+    const t = drawnCurveTable([{ x: -120, y: -120 }, { x: 0, y: 0 }]);
+    expect(t).toHaveLength(TABLE_OCTAVES * TABLE_STEPS + 1);
+    expect(t[0]).toBeCloseTo(2 ** -20, 9);
+    expect(t[(TABLE_OCTAVES - 1) * TABLE_STEPS + 64]).toBeCloseTo(0.75, 5);
+    expect(t.at(-1)).toBeCloseTo(1, 5);
   });
   it('follows the points in dB and keeps the first gain below them', () => {
-    const t = drawnCurveTable([{ x: -60, y: -66 }, { x: -6, y: -12 }, { x: 0, y: -12 }], 2049);
-    const at = (a) => t[Math.round(a * 2048)];
+    const t = drawnCurveTable([{ x: -60, y: -66 }, { x: -6, y: -12 }, { x: 0, y: -12 }]);
+    const at = (a) => {
+      const j = Array.from({ length: t.length }, (_, k) => k).reduce((best, k) => (Math.abs(tableInput(k) - a) < Math.abs(tableInput(best) - a) ? k : best), 0);
+      return t[j];
+    };
     expect(20 * Math.log10(at(0.5))).toBeCloseTo(-12, 0); // -6 dB in
     expect(20 * Math.log10(at(1))).toBeCloseTo(-12, 1);
     expect(20 * Math.log10(at(0.0005))).toBeCloseTo(20 * Math.log10(0.0005) - 6, 0);
+    // The octave grid stays fine at -90 dB, where a linear grid would have nothing.
+    expect(20 * Math.log10(at(10 ** (-90 / 20)))).toBeCloseTo(-96, 0);
+  });
+  it('extends a curve drawn over a narrower range at its first gain', () => {
+    const def = getEffect('distortion');
+    const v = normalizeValues(def, { posCurve: [{ x: -60, y: -66 }, { x: 0, y: -6 }] });
+    expect(v.posCurve[0]).toEqual({ x: -120, y: -120 });
+    expect(v.posCurve[1]).toEqual({ x: -60, y: -66 });
+    expect(normalizeValues(def, { posCurve: [{ x: -60, y: -60 }, { x: 0, y: 0 }] }).posCurve[0]).toEqual({ x: -120, y: -120 });
+  });
+  it('gates below -80 dB with a curve drawn on a -96 dB range', async () => {
+    const d = await dsp();
+    const def = getEffect('distortion');
+    const v = normalizeValues(def, { drive: 0, positive: DRAWN, symmetric: true, dbRange: -96, posCurve: [{ x: -96, y: -120 }, { x: -82, y: -120 }, { x: -78, y: -78 }, { x: 0, y: 0 }] });
+    const quiet = sine(1000, 48000, 24000, 10 ** (-86 / 20));
+    const loud = sine(1000, 48000, 24000, 10 ** (-70 / 20));
+    const run = (x) => d.runEffect(def.kind, 48000, [x], paramArray(def, v), { data: slotSpec(def, v, { rate: 48000 }).data })[0];
+    expect(rms(run(quiet).subarray(12000)) / rms(quiet.subarray(12000))).toBeLessThan(0.1);
+    expect(rms(run(loud).subarray(12000)) / rms(loud.subarray(12000))).toBeGreaterThan(0.8);
+  });
+  it('maps graph axes for the dB range and linear scale', () => {
+    const db = curveAxes({ dbRange: -96 });
+    expect(db.lo).toBe(-96);
+    expect(db.toT(-48)).toBeCloseTo(0.5);
+    const lin = curveAxes({ linearScale: true });
+    expect(lin.toT(-6.0206)).toBeCloseTo(0.5, 4);
+    expect(lin.fromV(0)).toBe(-120);
+    expect(visiblePoints([{ x: -120, y: -120 }, { x: -60, y: -66 }, { x: 0, y: 0 }], db)[0]).toEqual({ x: -96, y: -98.4 });
   });
   it('applies a drawn curve in the WASM distortion', async () => {
     const d = await dsp();
@@ -72,6 +104,20 @@ describe('drawn distortion curves', () => {
     expect(values.positive).toBe(DRAWN);
     expect(values.drive).toBe(0);
     expect(values.posCurve.length).toBeGreaterThan(5);
+  });
+  it('rescales the graphs for a dB range and linear axes', async () => {
+    const { app, doc } = setup();
+    const p = openEffectDialog(app, getEffect('distortion'), { doc, values: { drive: 0, positive: 2, symmetric: true, dbRange: -60 } });
+    const dlg = document.querySelector('.fx-dialog');
+    const count = () => dlg.querySelectorAll('.dist-graph')[0].querySelectorAll('.fx-point').length;
+    const at60 = count();
+    const lin = [...dlg.querySelectorAll('label.check input')].find((i) => i.closest('label').textContent === 'Linear Scale');
+    lin.click();
+    // Linear axes show the whole curve, down to -120 dB.
+    expect(count()).toBeGreaterThan(at60);
+    expect(dlg.querySelector('.dist-graph .fx-point').getAttribute('aria-valuetext')).toMatch(/^In 0, out/);
+    dlg.querySelector('.btn.primary').click();
+    expect((await p).linearScale).toBe(true);
   });
 });
 
