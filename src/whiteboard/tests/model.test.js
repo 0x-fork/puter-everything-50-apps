@@ -422,12 +422,20 @@ test("copies and undo steps share a drawing's points, but not one still being dr
   const history = new History();
   history.push([drawing]);
   history.push([drawing]);
-  assert.equal(history.past[0][0].points, points);
-  assert.equal(history.past[1][0].points, points);
+  // The drawing takes the packed copy its undo steps share: the same points.
+  assert.deepEqual(drawing.points, points);
+  assert.equal(history.past[0][0].points, drawing.points);
+  assert.equal(history.past[1][0].points, drawing.points);
   assert.notEqual(history.past[0][0], drawing);
-  assert.equal(undoCopy([drawing])[0].points, points);
+  assert.equal(undoCopy([drawing])[0].points, drawing.points);
   // Other copies, as of a shared board, stay wholly their own.
-  assert.notEqual(sharedCopy(drawing).points, points);
+  assert.notEqual(sharedCopy(drawing).points, drawing.points);
+  // Points read back from storage are shared once they are copied too.
+  const stored = structuredClone(drawing);
+  const step = undoCopy(stored);
+  assert.deepEqual(stored.points, points);
+  assert.equal(undoCopy(stored).points, step.points);
+  assert.equal(stored.points, step.points);
   // A drawing in progress grows in place, so an undo step keeps what it had.
   const growing = item("pen", 0, 0, { points: startDrawing() });
   const before = undoCopy(growing);

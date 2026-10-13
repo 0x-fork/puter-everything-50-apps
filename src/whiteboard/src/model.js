@@ -652,7 +652,7 @@ export function sharedCopy(value, drawn = false) {
       value.type === "pen" &&
       Array.isArray(value.points) &&
       !growing.has(value.points)
-        ? value.points
+        ? packedPoints(value)
         : sharedCopy(value[key], drawn);
     // Assigning this key would set the copy's prototype instead.
     if (key === "__proto__")
@@ -665,6 +665,20 @@ export function sharedCopy(value, drawn = false) {
     else copy[key] = v;
   }
   return copy;
+}
+// Finished drawings' points that copies share. Points read back from
+// IndexedDB or made by structuredClone() are holey arrays, which IndexedDB
+// stores about twice as slowly as the packed ones sharedCopy() builds: every
+// save sharing them would pay for that, where copying them once does not. So
+// a drawing first shared takes a packed copy of its points in their place,
+// the same points, which nothing changes in place.
+const packed = new WeakSet();
+function packedPoints(drawing) {
+  if (!packed.has(drawing.points)) {
+    drawing.points = sharedCopy(drawing.points);
+    packed.add(drawing.points);
+  }
+  return drawing.points;
 }
 // An undo step, or the board as a gesture found it. It shares finished
 // drawings' points with the board: copying a board of long drawings on

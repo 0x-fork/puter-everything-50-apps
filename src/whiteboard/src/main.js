@@ -2702,8 +2702,9 @@ const lockedAs = (ids, locked) =>
     .filter((i) => ids.has(i.id))
     .every((i) => !!i.locked === locked);
 // Every snapshot passed here is a copy made for this version alone, so the
-// store keeps it without copying it again.
-function checkpoint(label = "Board edit", snapshot = sharedCopy(current)) {
+// store keeps it without copying it again. Like an undo step, it may share
+// finished drawings' points with the board, which never change in place.
+function checkpoint(label = "Board edit", snapshot = undoCopy(current)) {
   if (!snapshot) return;
   queuedShared = null;
   revisionChain = revisionChain
@@ -3051,7 +3052,10 @@ function save({ outlined = false } = {}) {
     contentVersion++;
     renderOutline();
   }
-  const snapshot = sharedCopy(current);
+  // Stored, uploaded and shared copies only read the snapshot, so it shares
+  // finished drawings' points with the board as undo steps do: copying them
+  // took most of each save on a board of long drawings.
+  const snapshot = undoCopy(current);
   if (collaboration && !collaborationBusy) {
     // Plain copies, as for undo: structuredClone() takes several times as
     // long on a large board, for every edit.
@@ -3180,7 +3184,7 @@ function mutate(fn, { mindLayout = false, continues = false } = {}) {
     recorded = !continues && !collaboration;
   // The recovery version of the board as it was is written once the change
   // has gone through: a refused change leaves none.
-  const before = continues ? null : sharedCopy(current);
+  const before = continues ? null : undoCopy(current);
   if (recorded) history.push(undoState());
   const priorMind = mindLayout
     ? []
