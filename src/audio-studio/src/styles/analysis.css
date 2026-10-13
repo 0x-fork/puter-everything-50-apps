@@ -238,6 +238,80 @@
 }
 
 /* Amplitude Statistics */
+.amplitude-general,
+.rms-hist-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.amplitude-general .table-scroll {
+  flex: 1;
+}
+
+.amplitude-actions {
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 0;
+}
+
+.amplitude-actions .btn .icon {
+  margin-right: 4px;
+}
+
+.rms-hist {
+  position: relative;
+  flex: 1;
+  min-height: 80px;
+  outline: none;
+}
+
+.rms-hist canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.rms-hist:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.rms-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.rms-width {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rms-width .input {
+  width: 80px;
+}
+
+.rms-ref {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.rms-ref legend {
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--text-dim);
+}
+
+.rms-note:empty {
+  display: none;
+}
+
 .stats-table th[scope='row'] {
   color: var(--text-dim);
   font-weight: 400;

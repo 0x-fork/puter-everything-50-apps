@@ -10,6 +10,8 @@ import { Channel } from '../src/audio/channel.js';
 import { correlationLabelStep, meterIsVertical, correlationText } from '../src/analysis/phase.js';
 import { MENUS } from '../src/ui/menus.js';
 import { HOLD_COLORS, spectrumBars } from '../src/analysis/frequency.js';
+import { statsRows, histogramSeries } from '../src/analysis/amplitude.js';
+import { accumulateRmsHistogram, HIST_BINS, HIST_FLOOR } from '../src/analysis/rms-histogram.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
 
 const RATE = 1000;
@@ -118,5 +120,56 @@ describe('Frequency Analysis', () => {
     expect(bars[1]).toBe(-10); // bin 100 (100 Hz) falls in the second slice of 0..512 Hz
     expect(bars[0]).toBe(-80);
     expect(bars[7]).toBe(-80);
+  });
+});
+
+describe('Amplitude Statistics', () => {
+  it('bins windowed RMS levels in 1 dB steps', () => {
+    const hist = new Uint32Array(HIST_BINS);
+    const x = new Float32Array(300);
+    x.fill(1, 0, 100); // 0 dB
+    x.fill(0.1, 100, 200); // -20 dB
+    accumulateRmsHistogram(hist, x, 100); // last window silent
+    expect(hist[-HIST_FLOOR]).toBe(1);
+    expect(hist[-HIST_FLOOR - 20]).toBe(1);
+    expect(hist[0]).toBe(1);
+    const { lo, hi, series } = histogramSeries({ channels: [{ hist }] }, 1);
+    expect(lo).toBe(0);
+    expect(hi).toBe(HIST_BINS - 1);
+    expect(series[0][-HIST_FLOOR]).toBeCloseTo(100 / 3);
+  });
+
+  it('shifts RMS rows by 3.01 dB for a sine-wave reference', () => {
+    const ch = { min: -0.5, max: 0.5, sum: 0, sq: 0.25 * 100, clipped: 0, bits: 16, rmsMin: 0.5, rmsMax: 0.5, rmsSum: 0.5, rmsCount: 1, frames: 100 };
+    const result = { channels: [ch], loudness: { truePeak: [0.5], integrated: -20, range: 0, maxMomentary: -20, maxShortTerm: -20 } };
+    const row = (rows, label) => rows.find((r) => r[0] === label)[1][0];
+    expect(row(statsRows(result, 1), 'Total RMS Amplitude')).toBe('-6.02 dB');
+    expect(row(statsRows(result, 1, { ref: 'sine' }), 'Total RMS Amplitude')).toBe('-3.01 dB');
+    expect(row(statsRows(result, 1, { ref: 'sine' }), 'Peak Amplitude')).toBe('-6.02 dB');
+  });
+
+  it('has General, RMS Histogram and RMS Settings tabs', () => {
+    const app = makeApp();
+    app.addDocument(audioDoc());
+    const p = create(app, 'amplitude');
+    const tabs = [...p.el.querySelectorAll('[role=tab]')];
+    expect(tabs.map((t) => t.textContent)).toEqual(['General', 'RMS Histogram', 'RMS Settings']);
+    expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+    tabs[2].click();
+    expect(app.prefs.get('amplitudeTab')).toBe('settings');
+    const pane = p.el.querySelector(`#${tabs[2].getAttribute('aria-controls')}`);
+    expect(pane.hidden).toBe(false);
+    const width = pane.querySelector('input[type=number]');
+    width.value = '5000';
+    width.dispatchEvent(new Event('change'));
+    expect(app.prefs.get('amplitudeStats').windowMs).toBe(1000);
+    const sine = pane.querySelector('input[value=sine]');
+    sine.checked = true;
+    sine.dispatchEvent(new Event('change'));
+    expect(app.prefs.get('amplitudeStats').ref).toBe('sine');
+    // Arrow keys move between tabs.
+    tabs[2].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+    expect([...p.el.querySelectorAll('button')].some((b) => b.textContent === 'Copy All')).toBe(true);
   });
 });

@@ -1,0 +1,75 @@
+/* Docked panel parts shared by several panels: in-panel tabs and
+   collapsible property sections. */
+
+.subtabs-host {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.subtabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 4px 8px 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-soft);
+  scrollbar-width: none;
+}
+
+.subtab {
+  position: relative;
+  flex: none;
+  padding: 4px 8px 6px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.subtab:hover {
+  color: var(--text);
+}
+
+.subtab[aria-selected='true'] {
+  color: var(--text-strong);
+}
+
+.subtab[aria-selected='true']::after {
+  position: absolute;
+  right: 6px;
+  bottom: -1px;
+  left: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text-strong);
+  content: '';
+}
+
+.subtab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.subtab-panes {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.subtab-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+
+.subtab-pane[hidden] {
+  display: none !important;
+}
