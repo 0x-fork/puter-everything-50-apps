@@ -1062,6 +1062,98 @@ test("an upload keeps the shared state on this device once", async () => {
   }
 });
 
+test("a device that cannot keep its copy of the board still saves, shows others' edits, and joins", async () => {
+  const env = environment();
+  const b = board("Full device");
+  b.items = [item("note", 0, 0, { text: "Hi" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  // The device's storage refuses the copy of the board, as when it is full.
+  const store = memoryStore(),
+    put = store.collaborationPut;
+  store.collaborationPut = async (row) => {
+    if (row.kind === "snapshot")
+      throw Object.assign(Error("The quota has been exceeded."), {
+        name: "QuotaExceededError",
+      });
+    return put(row);
+  };
+  const open = (user, rows = store) => {
+    const statuses = [];
+    const session = new CollaborationSession({
+      puter: env.sdk(user),
+      server: "https://whiteboard-test.puter.work",
+      room: b.id,
+      user,
+      store: rows,
+      changed() {},
+      activity() {},
+      status(s) {
+        statuses.push(s);
+      },
+    });
+    return { session, statuses };
+  };
+  const first = open(owner),
+    other = open(editor, memoryStore());
+  await env.service
+    .call(owner, {
+      op: "invite",
+      room: b.id,
+      role: "editor",
+    })
+    .then(({ token }) =>
+      env.service.call(editor, { op: "join", room: b.id, token }),
+    );
+  let again;
+  try {
+    await first.session.start();
+    await other.session.start();
+    for (const text of ["One", "Two", "Three"]) {
+      const before = first.session.shared.snapshot(b.id),
+        next = structuredClone(before);
+      next.items[0].text = text;
+      await first.session.commit(next, before);
+      await first.session.flushed();
+    }
+    assert.equal(first.session.pending.size, 0);
+    assert.match(first.statuses.at(-1), /^Saved/);
+    const { doc } = await env.service.load(b.id);
+    assert.equal(doc.snapshot().items[0].text, "Three");
+    doc.destroy();
+    // Another person's edit is shown.
+    const before = other.session.shared.snapshot(b.id),
+      next = structuredClone(before);
+    next.items[0].text = "From Bob";
+    await other.session.synchronize();
+    await other.session.commit(next, other.session.shared.snapshot(b.id));
+    await other.session.flushed();
+    await first.session.synchronize();
+    assert.equal(first.session.shared.snapshot(b.id).items[0].text, "From Bob");
+    assert.match(first.statuses.at(-1), /^Saved/);
+    first.session.close();
+    // Reloading keeps the edits the missing copy could not hold, sends
+    // them again as nothing new, and joins.
+    assert.ok([...store.rows.values()].some((r) => r.kind === "update"));
+    again = open(owner);
+    await again.session.start();
+    await again.session.flushed();
+    assert.equal(again.session.pending.size, 0);
+    assert.equal(again.session.shared.snapshot(b.id).items[0].text, "From Bob");
+    assert.match(again.statuses.at(-1), /^Saved/);
+  } finally {
+    first.session.close();
+    other.session.close();
+    again?.session.close();
+  }
+});
+
 test("a session continuing under a new ID publishes its new peer invite at once", async () => {
   const env = environment(),
     hub = createPeerHub();

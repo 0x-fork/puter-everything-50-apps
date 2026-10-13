@@ -598,6 +598,18 @@ export class CollaborationSession {
       this.beatAgain = false;
     }
   }
+  // The copy kept on this device lets a reload show the board without a
+  // connection; the board's server holds everything saved. Failing to write
+  // it, as when the device's storage is full, must not hold back saving
+  // edits or showing others', so callers that go on regardless use this.
+  async keepCopy() {
+    try {
+      await this.cache();
+      return true;
+    } catch {
+      return false;
+    }
+  }
   async cache() {
     await this.store.collaborationPut({
       id: `${this.scope}|snapshot`,
@@ -966,10 +978,13 @@ export class CollaborationSession {
       throw Error("The server did not acknowledge this edit.");
     this.shared.apply(decode(result.update));
     this.arrived(digest);
-    // Keep the acknowledged edits locally before removing their rows.
-    await this.cache();
+    // Keep the acknowledged edits locally before removing their rows. If
+    // that copy cannot be written, the rows stay stored, so a reload still
+    // has these edits and sends them again, which the worker takes as
+    // nothing new; they are saved either way, so the upload moves on.
+    const kept = await this.keepCopy();
     for (const row of rows) {
-      await this.store.collaborationDelete(row.id);
+      if (kept) await this.store.collaborationDelete(row.id).catch(() => {});
       this.pending.delete(row.digest);
     }
     this.peers
@@ -1022,7 +1037,7 @@ export class CollaborationSession {
     const remade = this.replay(decode(result.update), refused, later);
     // Undo history belonged to the replaced document.
     this.shared.undo.clear();
-    await this.cache();
+    await this.keepCopy();
     await this.publish();
     if (!this.closed) this.rejected({ remade });
   }
@@ -1236,7 +1251,7 @@ export class CollaborationSession {
         .catch(() => {});
     }
     if (changed) {
-      await this.cache();
+      await this.keepCopy();
       await this.publish();
       this.synchronized = true;
     }
