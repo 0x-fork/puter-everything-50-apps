@@ -474,7 +474,7 @@
 }
 
 /* Narrow frames: labels above their fields. */
-@container (max-width: 260px) {
+@container (max-width: 340px) {
   .meta-form {
     grid-template-columns: minmax(0, 1fr);
     row-gap: 2px;

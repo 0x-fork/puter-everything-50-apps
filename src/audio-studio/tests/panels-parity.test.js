@@ -14,6 +14,7 @@ import { statsRows, histogramSeries } from '../src/analysis/amplitude.js';
 import { accumulateRmsHistogram, HIST_BINS, HIST_FLOOR } from '../src/analysis/rms-histogram.js';
 import { bextChunk, parseBext, cartChunk, parseCart, cleanMeta, id3v2Tag, parseId3v2, vorbisComment, parseVorbisComment } from '../src/audio/meta.js';
 import { WavWriter } from '../src/export/pcm.js';
+import { makeCollapsible } from '../src/panels/properties.js';
 import { parseWav } from '../src/audio/wav.js';
 import { META_TABS, normalizeMetaValue, metadataPanel } from '../src/panels/metadata.js';
 import { WORKSPACES } from '../src/ui/workspaces.js';
@@ -248,5 +249,35 @@ describe('Metadata', () => {
     expect(p.el.querySelector('[data-tab=riff]').classList.contains('has-data')).toBe(true);
     doc.history.undo();
     expect(inputFor('id3', 'Title').value).toBe('');
+  });
+});
+
+describe('Properties', () => {
+  it('names the file on top and collapses sections, remembering them', () => {
+    const app = makeApp();
+    app.addDocument(audioDoc());
+    const p = create(app, 'properties');
+    expect(p.el.querySelector('.prop-title').textContent).toBe('a.wav');
+    const toggle = p.el.querySelector('.prop-toggle');
+    expect(toggle.textContent).toBe('File');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    toggle.click();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(p.el.querySelector('.prop-body').hidden).toBe(true);
+    expect(app.prefs.get('propertiesCollapsed')).toEqual(['File']);
+    // A new panel (or a re-render) starts with the section closed.
+    const again = create(app, 'properties');
+    expect(again.el.querySelector('.prop-toggle').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('makes any section built by a feature collapsible', () => {
+    const root = document.createElement('div');
+    root.innerHTML = '<section class="prop-section"><h3 class="prop-heading">Track</h3><div class="prop-row">x</div></section>';
+    const collapsed = new Set(['Track']);
+    makeCollapsible(root, collapsed);
+    expect(root.querySelector('.prop-body').hidden).toBe(true);
+    root.querySelector('.prop-toggle').click();
+    expect(collapsed.has('Track')).toBe(false);
+    expect(root.querySelector('.prop-body').textContent).toBe('x');
   });
 });
