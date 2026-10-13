@@ -85,6 +85,7 @@ function queued(rows) {
 function sessionDocument(update) {
   const doc = new SharedDocument(update, { merge: true });
   doc.cacheItems({ deep: true });
+  doc.watchArrivals();
   return doc;
 }
 
@@ -1276,25 +1277,25 @@ export class CollaborationSession {
     const noticed = () => (changed = brought = true);
     const access = [this.role, this.readOnly, this.contentReadOnly].join();
     this.shared.doc.on("update", noticed);
-    let written;
     try {
-      written = this.shared.applyTracked(decode(result.update));
+      this.shared.apply(decode(result.update));
     } finally {
       this.shared.doc.off("update", noticed);
     }
     // Once this document was checked whole, a synchronization checks only
-    // what it brought, as the worker does each save, and the board as a
-    // whole: on a large board in a busy room, checking every object each
-    // time cost about 15 ms per synchronization, even one bringing nothing.
-    const checked = this.checked === this.shared;
+    // what arrived since the last check, from the worker or from peers, as
+    // the worker does each save, and the board as a whole: on a large board
+    // in a busy room, checking every object each time cost about 15 ms per
+    // synchronization, even one bringing nothing. A board found to need a
+    // newer app is checked whole until it no longer does.
+    const arrived = this.shared.takeArrivals(),
+      checked = this.checked === this.shared && !this.incompatible;
     try {
-      this.shared.validate(
-        ACCEPTED,
-        checked ? { items: written.items, changes: written.changes } : {},
-      );
+      this.shared.validate(ACCEPTED, checked ? arrived : {});
       this.checked = this.shared;
       this.incompatible = false;
     } catch (error) {
+      this.checked = null;
       // An edit queued on this device may no longer fit what others saved
       // meanwhile, as a change to the same object; the worker refuses such
       // an edit, so it is uploaded now and dropped like any refused edit,

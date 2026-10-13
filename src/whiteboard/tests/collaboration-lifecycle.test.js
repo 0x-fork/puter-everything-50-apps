@@ -1,4 +1,5 @@
 import test from "node:test";
+import * as Y from "yjs";
 import assert from "node:assert/strict";
 import { board, item } from "../src/model.js";
 import { SharedDocument } from "../src/collaboration/document.js";
@@ -1082,10 +1083,81 @@ test("what only a newer app writes is noticed when a later synchronization bring
       "This board needs a newer version of the app · reload",
     );
     assert.equal(session.readOnly, true);
+    // The next synchronization brings nothing new; the property is still
+    // there, so the board stays read-only.
+    session.request = request;
+    await session.synchronize().catch((e) => session.failure(e));
+    assert.equal(session.readOnly, true);
   } finally {
     session.close();
   }
 });
+
+for (const path of ["a peer", "a save's response"])
+  test(`what only a newer app writes is noticed when ${path} brings it`, async () => {
+    const env = environment();
+    const b = board("Arrived");
+    b.items = [item("note", 0, 0, { text: "Hi" })];
+    const seed = new SharedDocument();
+    seed.commit(b);
+    await env.service.call(owner, {
+      op: "create",
+      room: b.id,
+      update: encode(seed.update()),
+    });
+    seed.destroy();
+    const statuses = [];
+    const session = new CollaborationSession({
+      puter: env.sdk(owner),
+      server: "https://whiteboard-test.puter.work",
+      room: b.id,
+      user: owner,
+      store: memoryStore(),
+      changed() {},
+      activity() {},
+      status: (s) => statuses.push(s),
+    });
+    try {
+      await session.start();
+      await session.synchronize();
+      const newer = new SharedDocument(session.shared.update()),
+        vector = newer.vector();
+      newer.doc.transact(() =>
+        newer.items.get(b.items[0].id).set("sparkle", true),
+      );
+      const update = newer.update(vector);
+      newer.destroy();
+      if (path === "a peer")
+        // As a receipted peer edit is applied.
+        session.shared.apply(update);
+      else {
+        const request = session.request.bind(session);
+        session.request = async (op, input) => {
+          const result = await request(op, input);
+          return op === "commit"
+            ? {
+                ...result,
+                update: encode(Y.mergeUpdates([decode(result.update), update])),
+              }
+            : result;
+        };
+        const before = session.shared.snapshot(b.id),
+          next = structuredClone(before);
+        next.items[0].x = 50;
+        await session.commit(next, before);
+        await session.flushed();
+        session.request = request;
+      }
+      await session.synchronize().catch((e) => session.failure(e));
+      assert.equal(
+        statuses.at(-1),
+        "This board needs a newer version of the app · reload",
+      );
+      assert.equal(session.readOnly, true);
+    } finally {
+      session.close();
+    }
+  });
 
 test("a queued edit that no longer fits the board is uploaded and settled before the board is called too new", async () => {
   const env = environment();

@@ -630,6 +630,40 @@ export class SharedDocument {
       }
     });
   }
+  // From the first call, keeps what every change not made here touched, as
+  // applyTracked lists it (`items` and `changes`), however it arrived, until
+  // takeArrivals hands it over: a session checks only that once it has
+  // checked the document whole.
+  watchArrivals() {
+    if (this.watching) return;
+    this.watching = true;
+    this.doc.on("afterTransaction", (transaction) => {
+      if (transaction.origin === LOCAL || transaction.origin === REPAIR) return;
+      const arrived = (this.arrivals ??= {
+        items: new Set(),
+        changes: new Map(),
+      });
+      for (const [type, keys] of transaction.changed) {
+        if (!arrived.changes.has(type)) arrived.changes.set(type, new Set());
+        for (const key of keys) arrived.changes.get(type).add(key);
+        let root = type,
+          id = null;
+        while (root._item) {
+          id = root._item.parentSub;
+          root = root._item.parent;
+        }
+        if (root !== this.items) continue;
+        if (type === this.items) {
+          for (const key of keys) if (key !== null) arrived.items.add(key);
+        } else if (id !== null) arrived.items.add(id);
+      }
+    });
+  }
+  takeArrivals() {
+    const arrived = this.arrivals || { items: new Set(), changes: new Map() };
+    this.arrivals = null;
+    return arrived;
+  }
   // Writes the connectors attached to an object, and the objects at their
   // other ends, into `out` from index `n` while it has room, and returns
   // the index after them. The index of connectors by end is built when
