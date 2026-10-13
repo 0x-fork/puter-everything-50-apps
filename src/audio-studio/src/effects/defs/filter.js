@@ -197,6 +197,58 @@ registerEffect({
 
 // ------------------------------------------------------- Scientific Filter
 
+export const MAX_SCIENTIFIC_ORDER = 8;
+
+/** Stop-band edges of a design: frequencies that must be down by the stop attenuation. */
+function stopEdges(v, width, rate) {
+  const top = rate * 0.4999;
+  const lo = Math.min(v.cutoff, v.highCutoff);
+  const hi = Math.max(v.cutoff, v.highCutoff);
+  if (v.mode === 0) return [Math.min(top, v.cutoff + width)];
+  if (v.mode === 1) return [Math.max(1, v.cutoff - width)];
+  if (v.mode === 2) return [Math.max(1, lo - width), Math.min(top, hi + width)];
+  // Band stop: the inner edges, or the middle when the transitions meet.
+  return lo + width < hi - width ? [lo + width, hi - width] : [Math.sqrt(lo * hi)];
+}
+
+/** Attenuation in dB (positive) of design `v` at frequency f, relative to unity gain. */
+function attenuation(v, f, rate) {
+  return -F.cascadeDb(F.scientificSections(v, rate), [f], rate, 0)[0];
+}
+
+/**
+ * The lowest order (1..8) whose response is down by `stopAtten` dB within
+ * `transition` Hz of the cutoff(s); { order, met } with met false when even
+ * the steepest order falls short.
+ */
+export function scientificOrderFor(v, rate) {
+  const edges = stopEdges(v, Math.max(0.1, v.transition), rate);
+  for (let order = 1; order <= MAX_SCIENTIFIC_ORDER; order++) {
+    const d = { ...v, order };
+    if (edges.every((f) => attenuation(d, f, rate) >= v.stopAtten)) return { order, met: true };
+  }
+  return { order: MAX_SCIENTIFIC_ORDER, met: false };
+}
+
+/**
+ * How far past the cutoff the design reaches the stop attenuation (Hz, the
+ * transition bandwidth of the current order), or null beyond the audio band.
+ */
+export function scientificTransition(v, rate) {
+  let lo = 0.1;
+  let hi = rate / 2;
+  const ok = (w) => stopEdges(v, w, rate).every((f) => attenuation(v, f, rate) >= v.stopAtten);
+  const edge = v.mode === 1 ? v.cutoff : v.mode === 3 ? Math.abs(v.highCutoff - v.cutoff) / 2 : rate / 2;
+  if (!ok(Math.min(hi, edge * 0.999))) return null;
+  hi = Math.min(hi, edge * 0.999);
+  for (let i = 0; i < 40; i++) {
+    const mid = Math.sqrt(lo * hi);
+    if (ok(mid)) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
+
 registerEffect({
   id: 'scientificFilter',
   name: 'Scientific Filter',
@@ -205,11 +257,16 @@ registerEffect({
   params: [
     choice('type', 'Type', ['Butterworth', 'Chebyshev', 'Bessel'], 0),
     choice('mode', 'Mode', ['Low Pass', 'High Pass', 'Band Pass', 'Band Stop'], 0),
-    num('order', 'Order', 1, 8, 4, '', { step: 1 }),
+    num('order', 'Order', 1, 8, 4, '', { step: 1, enabledIf: (v) => v.designBy !== 1 }),
     hz('cutoff', 'Cutoff', 10, 20000, 1000),
     hz('highCutoff', 'High Cutoff', 10, 20000, 4000, { enabledIf: (v) => v.mode >= 2 }),
     db('ripple', 'Passband Ripple', 0.01, 6, 1, { step: 0.01, enabledIf: (v) => v.type === 1 }),
     db('gain', 'Master Gain', -24, 24, 0),
+    // Design by order, or by a transition band: the dialog then sets the
+    // lowest order that is down by the stop attenuation within that width.
+    choice('designBy', 'Design By', ['Order', 'Transition Bandwidth'], 0, { control: 'radio' }),
+    hz('transition', 'Transition Bandwidth', 1, 10000, 1000, { enabledIf: (v) => v.designBy === 1 }),
+    db('stopAtten', 'Stop Attenuation', 3, 120, 40, { step: 1 }),
   ],
   display: 'scientific',
   about: 'Classic analog filter designs: Butterworth for the flattest passband, Chebyshev for a steeper edge at the cost of ripple, Bessel for the most even delay. Switch the graph to phase or group delay to compare them.',

@@ -124,6 +124,30 @@ describe('Filter and EQ dialogs', () => {
     await close();
   });
 
+  it('Scientific Filter designs by transition bandwidth', async () => {
+    const { scientificOrderFor, scientificTransition } = await import('../src/effects/defs/filter.js');
+    const base = { ...defaults(getEffect('scientificFilter')), cutoff: 1000, stopAtten: 40 };
+    // Butterworth falls 6 dB per octave per order: 40 dB one octave up needs order 7.
+    expect(scientificOrderFor({ ...base, transition: 1000 }, RATE)).toEqual({ order: 7, met: true });
+    expect(scientificOrderFor({ ...base, transition: 3000 }, RATE).order).toBeLessThan(5);
+    expect(scientificOrderFor({ ...base, transition: 50 }, RATE)).toEqual({ order: 8, met: false });
+    // Chebyshev is steeper than Butterworth.
+    expect(scientificOrderFor({ ...base, type: 1, transition: 1000 }, RATE).order).toBeLessThan(7);
+    // The reverse: order 4 is down 40 dB at about 3.16 kHz, 2.16 kHz past the cutoff.
+    const w = scientificTransition({ ...base, order: 4 }, RATE);
+    expect(w).toBeGreaterThan(1800);
+    expect(w).toBeLessThan(2400);
+    const { dlg, close } = open('scientificFilter', { ...defaults(getEffect('scientificFilter')), type: 0, cutoff: 1000 });
+    const radio = [...dlg.querySelectorAll('.fx-radios input')].find((i) => i.parentElement.textContent === 'Transition Bandwidth');
+    radio.checked = true;
+    radio.dispatchEvent(new Event('change'));
+    const ranges = [...dlg.querySelectorAll('input[type=range]')];
+    expect(ranges.find((r) => r.getAttribute('aria-label') === 'Order').disabled).toBe(true);
+    expect(ranges.find((r) => r.getAttribute('aria-label') === 'Transition Bandwidth').disabled).toBe(false);
+    expect(dlg.querySelector('.fx-sci-design').textContent).toBe('Order 7 is down 40 dB within 1000 Hz');
+    await close();
+  });
+
   it('computes phase and group delay of a filter design', () => {
     const lp = butterworth(RATE, 1000, 2, false);
     const [ph] = cascadePhase(lp, [1000], RATE);
