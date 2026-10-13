@@ -267,7 +267,8 @@
 }
 
 .panner-guides path,
-.panner-guides line {
+.panner-guides line,
+.panner-guides circle {
   fill: none;
   stroke: var(--grid-strong);
   stroke-width: 0.75;
@@ -344,6 +345,60 @@
 
 .panner-reset {
   margin-left: auto;
+}
+
+.panner-pad[hidden],
+.panner-fields[hidden],
+.surround-panner[hidden] {
+  display: none;
+}
+
+.surround-panner {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 6px;
+}
+
+.surround-pad {
+  min-height: 160px;
+}
+
+.surround-speaker rect {
+  fill: var(--bg-panel);
+  stroke: var(--divider);
+}
+
+.surround-speaker text {
+  fill: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: 7px;
+}
+
+.surround-listener {
+  fill: var(--text-faint);
+}
+
+.surround-input {
+  fill: var(--track-color, var(--accent));
+  opacity: 0.6;
+}
+
+.surround-levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  font-size: var(--fs-sm);
+}
+
+.surround-level {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.panner-note {
+  margin: 0;
 }
 
 /* Playlist --------------------------------------------------------------- */

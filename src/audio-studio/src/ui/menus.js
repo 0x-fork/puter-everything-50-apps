@@ -179,7 +179,7 @@ export const MENUS = [
   {
     label: 'Multitrack',
     submenu: [
-      { label: 'Tracks', submenu: ['mt.addMono', 'mt.addStereo', '-', 'mt.addMonoBus', 'mt.addBus', '-', 'mt.addVideoTrack', '-', 'mt.addTracks', '-', 'mt.duplicateTrack', 'mt.deleteTrack', 'mt.deleteEmpty', '-', 'mt.moveTrackUp', 'mt.moveTrackDown', 'mt.trackColor'] },
+      { label: 'Tracks', submenu: ['mt.addMono', 'mt.addStereo', 'mt.add51', '-', 'mt.addMonoBus', 'mt.addBus', 'mt.add51Bus', '-', 'mt.addVideoTrack', '-', 'mt.addTracks', '-', 'mt.duplicateTrack', 'mt.deleteTrack', 'mt.deleteEmpty', '-', 'mt.moveTrackUp', 'mt.moveTrackDown', 'mt.trackColor'] },
       'mt.insertFiles',
       { label: 'Video', submenu: ['video.toPlayhead', 'video.toStart', 'video.lock', '-', 'video.remove'] },
       '-',
