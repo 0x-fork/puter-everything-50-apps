@@ -16,7 +16,11 @@ import { createPinch } from '../lib/gestures.js';
 import { snapAxis, SAFE_ZONES, rulerStep } from './player-guides.js';
 import { createMaskOverlay } from './mask-overlay.js';
 import { maskEdit } from './mask-edit-state.js';
+import { proxyMode, canProxy } from '../model/proxy.js';
+import { createRemovalOverlay } from './removal-overlay.js';
+import { removeEdit } from './remove-edit-state.js';
 import '../styles/player-tools.css';
+import '../styles/proxy.css';
 
 const SNAP_PX = 6;
 const RULER = 18;
@@ -97,7 +101,35 @@ export function createPlayerView(ctx) {
     { label: 'Save frame to media', icon: 'imagePlus', onSelect: () => ctx.snapshotToMedia?.() },
     { label: 'Export frame as image', icon: 'download', onSelect: () => ctx.exportStill?.() },
   ].filter(Boolean), { align: 'end', label: 'Player options' });
-  const head = h('div.panel-head', h('h2.panel-title', 'Player'), h('span.spacer'), menuBtn);
+  // Which of the project's timelines is playing; the menu switches or adds timelines.
+  const tlName = h('span.player-timeline-name');
+  const tlBtn = h('button.player-timeline-btn', { type: 'button', 'aria-label': 'Timelines', 'data-tip': 'Switch or add timelines' }, icon('timelines', 14), tlName, icon('chevronDown', 12));
+  menuButton(tlBtn, () => ctx.timelines?.menuItems() || [], { label: 'Timelines' });
+  const renderTimelineName = () => {
+    const name = ctx.timelines?.active().name || 'Timeline 1';
+    if (tlName.textContent !== name) tlName.textContent = name;
+    tlBtn.setAttribute('aria-label', `Timeline: ${name}. Switch or add timelines`);
+  };
+  renderTimelineName();
+    // Compare proxies with the original files (shown while any media here has a ready proxy).
+  const proxyBtn = h('button.btn.small.ghost.proxy-toggle', { type: 'button', hidden: true, 'aria-pressed': 'true' }, icon('zap', 14), h('span.proxy-toggle-label', 'Proxy'));
+  proxyBtn.addEventListener('click', () => {
+    player.setShowOriginal?.(!player.showOriginal);
+    announce(player.showOriginal ? 'Showing the original media' : 'Showing proxy media');
+  });
+  const syncProxyBtn = () => {
+    const proxies = ctx.proxies;
+    const p = store.project;
+    const any = Boolean(proxies) && proxyMode(p) !== 'off' && Object.values(p.assets).some((a) => canProxy(a) && proxies.isReady(a));
+    proxyBtn.hidden = !any;
+    const original = Boolean(player.showOriginal);
+    proxyBtn.setAttribute('aria-pressed', String(!original));
+    proxyBtn.querySelector('.proxy-toggle-label').textContent = original ? 'Original' : 'Proxy';
+    proxyBtn.dataset.tip = original ? 'Showing the original files. Click to use proxies' : 'Showing proxy media. Click to compare with the original files';
+    proxyBtn.setAttribute('aria-label', 'Use proxy media in the preview');
+  };
+  syncProxyBtn();
+  const head = h('div.panel-head', h('h2.panel-title', 'Player'), tlBtn, h('span.spacer'), proxyBtn, menuBtn);
   const grid = h('div.player-grid', { 'aria-hidden': 'true', hidden: !opts.grid },
     h('span.gv', { style: { left: '33.333%' } }), h('span.gv', { style: { left: '66.666%' } }),
     h('span.gh', { style: { top: '33.333%' } }), h('span.gh', { style: { top: '66.666%' } }));
@@ -422,6 +454,8 @@ export function createPlayerView(ctx) {
   let box = null;
   // While the Mask panel is open, the selected clip shows its mask handles instead of the transform box.
   const maskOverlay = createMaskOverlay({ store, actions, stage });
+  // While the Remove panel is open, it shows the object removal regions instead.
+  const removalOverlay = createRemovalOverlay({ store, actions, stage });
 
   function selectedLayer() {
     const s = store.selected;
@@ -453,6 +487,13 @@ export function createPlayerView(ctx) {
     }
     const b = player.boxFor(layer);
     if (!b) return;
+    if (removalOverlay.active(layer)) {
+      maskOverlay.clear();
+      if (!overlay.contains(removalOverlay.el)) overlay.replaceChildren(removalOverlay.el);
+      removalOverlay.draw(layer, b, cssW / store.project.settings.width, cssW, cssH);
+      return;
+    }
+    removalOverlay.clear();
     if (maskOverlay.active(layer)) {
       if (!overlay.contains(maskOverlay.el)) overlay.replaceChildren(maskOverlay.el);
       maskOverlay.draw(layer, b, cssW / store.project.settings.width, cssW, cssH);
@@ -489,7 +530,7 @@ export function createPlayerView(ctx) {
         for (const v of guides().h) y.push(v * s.height);
       }
       for (const l of evaluate(store.project, player.time).flatMap((q) => (q.kind === 'transition' ? [q.from, q.to] : [q]))) {
-        if (!['media', 'text', 'sticker'].includes(l.kind) || l.clip.id === movingId) continue;
+        if (!['media', 'text', 'sticker', 'avatar'].includes(l.kind) || l.clip.id === movingId) continue;
         const b = player.boxFor(l);
         if (!b) continue;
         const a = (l.rotation * Math.PI) / 180;
@@ -515,7 +556,7 @@ export function createPlayerView(ctx) {
     const layers = evaluate(store.project, player.time).flatMap((l) => (l.kind === 'transition' ? [l.from, l.to] : [l]));
     for (let i = layers.length - 1; i >= 0; i--) {
       const l = layers[i];
-      if (!['media', 'text', 'sticker'].includes(l.kind) || l.opacity <= 0.01) continue;
+      if (!['media', 'text', 'sticker', 'avatar'].includes(l.kind) || l.opacity <= 0.01) continue;
       const b = player.boxFor(l);
       if (!b) continue;
       const a = (-l.rotation * Math.PI) / 180;
@@ -727,13 +768,18 @@ export function createPlayerView(ctx) {
     });
   };
   const offs = [
+    player.on('proxy', syncProxyBtn),
+    ...(ctx.proxies ? [ctx.proxies.on('change', syncProxyBtn)] : []),
+    store.on('change', syncProxyBtn),
     player.on('play', onPlay),
     player.on('frame', onFrame),
     store.on('select', drawOverlay),
     maskEdit.on('change', drawOverlay),
+    removeEdit.on('change', drawOverlay),
     store.on('change', () => {
       updateTime();
       relayout();
+      renderTimelineName();
     }),
   ];
   updateTime();
@@ -752,6 +798,7 @@ export function createPlayerView(ctx) {
     dispose() {
       offs.forEach((f) => f());
       maskOverlay.dispose();
+      removalOverlay.dispose();
       ro.disconnect();
       document.removeEventListener('fullscreenchange', onFs);
     },

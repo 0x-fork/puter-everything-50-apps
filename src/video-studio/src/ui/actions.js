@@ -17,7 +17,7 @@ import { createOrganizeActions } from './organize-actions.js';
 import { createSmartActions } from './smart-actions.js';
 import { createMulticamActions } from './multicam-actions.js';
 import { createMediaActions } from './media-actions.js';
-import { allClipsDeep } from '../model/compound.js';
+import { allClipsDeep, removeAssetClips } from '../model/compound.js';
 import { defaultLength } from './preferences-dialog.js';
 import { createClipEffectActions } from './clip-effects-actions.js';
 
@@ -78,14 +78,8 @@ export function createActions(ctx) {
     removeAsset(assetId) {
       const used = allClipsDeep(store.project).some((c) => c.assetId === assetId);
       store.update('Delete media', (p) => {
-        // Clips inside compound clips go too.
-        const strip = (tracks) => {
-          for (const t of tracks) {
-            t.clips = t.clips.filter((c) => c.assetId !== assetId);
-            for (const c of t.clips) if (c.type === 'compound') strip(c.sequence.tracks);
-          }
-        };
-        strip(p.tracks);
+        // Clips inside compound clips and on other timelines go too.
+        removeAssetClips(p, [assetId]);
         delete p.assets[assetId];
       });
       if (used) announce('Media and its clips deleted');
@@ -600,8 +594,27 @@ export function createActions(ctx) {
      * Give a clip a speed curve (null: back to constant 1x). key coalesces a
      * drag into one undo step; span keeps the source length the drag began with.
      */
-    setSpeedCurve(id, points, { label = 'Speed curve', key = null, span } = {}) {
-      return store.update(label, (p) => T.setSpeedCurve(p, id, points, { ...store.opts, ...(span !== undefined ? { span } : {}) }), key ? { coalesce: `${key}:${id}` } : {});
+    setSpeedCurve(id, points, { label = 'Speed curve', key = null, span, dropRamp = false } = {}) {
+      return store.update(label, (p) => T.setSpeedCurve(p, id, points, { ...store.opts, ...(span !== undefined ? { span } : {}), dropRamp }), key ? { coalesce: `${key}:${id}` } : {});
+    },
+
+    /** Move the selected clips by whole frames (negative: earlier), as one undo step per run of presses. */
+    nudgeSelected(frames) {
+      const ids = sel();
+      const lead = ids.map((id) => T.findClip(store.project, id)).find(Boolean);
+      if (!lead) return false;
+      const d = Math.round((frames * US) / store.fps);
+      return store.update('Nudge clip', (p) => T.moveClip(p, lead.clip.id, { start: Math.max(0, lead.clip.start + d), trackId: lead.track.id }, { ...store.opts, with: ids }), { coalesce: `nudge:${ids.join(',')}` });
+    },
+
+    /** Velocity ramp (curve plus accent) in one undo step; null removes it. */
+    applySpeedRamp(id, rampId, { accent = true, label = rampId ? 'Velocity ramp' : 'Remove velocity ramp' } = {}) {
+      return store.update(label, (p) => T.applySpeedRamp(p, id, rampId, { ...store.opts, accent }));
+    },
+
+    /** Turn the accent of a clip's velocity ramp on or off (the curve stays as it is). */
+    setRampAccent(id, on) {
+      return store.update(on ? 'Add ramp accent' : 'Remove ramp accent', (p) => T.setRampAccent(p, id, on));
     },
 
     toggleClipMute(id) {
@@ -632,6 +645,19 @@ export function createActions(ctx) {
     setProjectSettings(patch, label = 'Project settings') {
       store.update(label, (p) => {
         Object.assign(p.settings, patch);
+      }, { structural: false });
+    },
+
+    /** Proxy media for the preview: 'off', 'on' or 'auto' (the default, stored as no field). */
+    setProxyMode(mode) {
+      if (!['off', 'on', 'auto'].includes(mode)) return;
+      store.update('Proxy media', (p) => {
+        if ((p.settings.proxy || 'auto') === mode) return false;
+        // Media is shared by all of the project's timelines, so they all follow.
+        for (const settings of [p.settings, ...(p.timelines || []).map((t) => t.settings).filter(Boolean)]) {
+          if (mode === 'auto') delete settings.proxy;
+          else settings.proxy = mode;
+        }
       }, { structural: false });
     },
 

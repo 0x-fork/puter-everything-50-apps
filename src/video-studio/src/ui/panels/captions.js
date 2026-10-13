@@ -1,7 +1,8 @@
 /**
- * Captions tab: captions generated from speech (Puter speech to text), an
- * editable list of the project's captions, and .srt / .vtt import and
- * .srt export. Captions are text clips marked caption: true.
+ * Captions tab: captions generated from speech (Puter speech to text),
+ * lyrics from a song, an editable list of the project's captions, and
+ * .srt / .vtt import and .srt export. Captions are text clips marked
+ * caption: true.
  */
 import { h, announce } from '../../lib/dom.js';
 import { icon } from '../../lib/icons.js';
@@ -11,7 +12,7 @@ import { makeClip, DEFAULT_TEXT_STYLE } from '../../model/project.js';
 import { TEXT_PRESETS } from '../../model/catalog.js';
 import * as T from '../../model/timeline.js';
 import { tabLayout, emptyState } from './common.js';
-import { selectField, segmented, sliderField } from '../controls.js';
+import { selectField, segmented, sliderField, switchField } from '../controls.js';
 import { openDialog, toast } from '../dialog.js';
 import { showMenu } from '../menu.js';
 import { prefs, setPref } from '../prefs.js';
@@ -20,6 +21,7 @@ import {
   parseSubtitles, toSrt, mixdown, transcribeMix, clipsForScope, errorMessage, wrapCaption,
 } from '../../media/transcribe.js';
 import { aiAvailable, synthesize, addSpeechToTimeline } from '../../media/tts.js';
+import { lyricsFromClip, songClips, LYRIC_STYLE } from '../../media/lyrics.js';
 import { transcriptPanel } from './transcript.js';
 import { translateLines, emojiForLines, keywordsForLines } from '../../media/transcript.js';
 import { CAPTION_STYLES, applyCaptionStyle } from '../../model/caption-styles.js';
@@ -28,7 +30,7 @@ import { lookCanvas, hoverAnimateLook } from '../text-thumbs.js';
 import { tileGrid, tile } from './common.js';
 import '../../styles/audio.css';
 
-const DEFAULT_OPTS = { language: 'auto', scope: 'main', preset: 'yellow-caption', maxWords: 5, position: 'bottom' };
+const DEFAULT_OPTS = { language: 'auto', scope: 'main', preset: 'yellow-caption', maxWords: 5, position: 'bottom', lyricsStyle: LYRIC_STYLE, lyricsPosition: 'bottom', lyricsIsolate: true };
 
 const isCaption = (c) => c.type === 'text' && c.caption;
 
@@ -85,6 +87,33 @@ function applyCaptions(ctx, cues, { mode, preset, position, wrap = true, label =
   return clips.length;
 }
 
+/**
+ * Captions from the project's speech: mix the sound (opts.scope), turn it
+ * into timed words with Puter speech to text, group them into lines and put
+ * them on a new text track (mode 'replace' drops existing captions first).
+ * onStep(index, fraction) follows the three stages. Returns how many
+ * captions were added (0 when no speech was found).
+ */
+export async function generateCaptions(ctx, opts, { mode = 'keep', signal, onStep } = {}) {
+  const o = { ...DEFAULT_OPTS, ...opts };
+  onStep?.(0, 0);
+  // Work on a copy so edits made meanwhile do not shift what is being mixed.
+  const project = structuredClone(ctx.store.project);
+  const mix = await mixdown(project, ctx.library, { scope: o.scope, signal, onProgress: (f) => onStep?.(0, f) });
+  onStep?.(1, 0);
+  const fake = import.meta.env.DEV ? globalThis.__vsFakeTranscript : null;
+  const words = fake
+    ? await fake(mix, STT_RATE)
+    : await transcribeMix(mix, STT_RATE, { language: o.language, signal, testMode: Boolean(import.meta.env.DEV && globalThis.__vsSpeechTestMode), onProgress: (f) => onStep?.(1, f) });
+  if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+  onStep?.(2, 0);
+  const preset = TEXT_PRESETS.find((p) => p.id === o.preset);
+  const lineChars = lineCharsFor(preset, project.settings.width);
+  const cues = groupWords(words, { maxWords: o.maxWords, maxChars: Math.min(lineChars * 2, 84), maxGap: 0.8 });
+  if (!cues.length) return 0;
+  return applyCaptions(ctx, cues, { mode, preset: o.preset, position: o.position, captionStyle: o.captionStyle || null });
+}
+
 function fieldRow(label, control, id) {
   return h('div.field', h('span.field-label', { id }, label), control);
 }
@@ -119,12 +148,33 @@ function styleControls(opts, save) {
   };
 }
 
+/** Steps with a progress bar and Cancel, for long caption jobs. setStep(i, fraction). */
+function stepProgress(steps, label) {
+  const stepEls = steps.map((s) => h('li.cap-step', h('span.cap-step-icon', { 'aria-hidden': 'true' }), h('span', s)));
+  const bar = h('div.cap-bar', { role: 'progressbar', 'aria-label': `${label} progress`, 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' }, h('div.cap-bar-fill'));
+  const cancel = h('button.btn.small', { type: 'button' }, 'Cancel');
+  const el = h('div.cap-progress', { hidden: true, role: 'group', 'aria-label': label }, h('ol.cap-steps', stepEls), bar, h('div.cap-progress-foot', cancel));
+  const setStep = (i, frac = 0) => {
+    stepEls.forEach((li, j) => {
+      li.dataset.state = j < i ? 'done' : j === i ? 'active' : 'todo';
+      li.querySelector('.cap-step-icon').replaceChildren(j < i ? icon('check', 12) : j === i ? h('span.spinner.small') : '');
+    });
+    const pct = Math.round(((i + Math.min(1, frac)) / steps.length) * 100);
+    bar.setAttribute('aria-valuenow', String(pct));
+    bar.firstChild.style.width = `${pct}%`;
+  };
+  return { el, cancel, setStep };
+}
+
+/** Sign-in prompt for the AI caption tools when signed out. */
+function signInState(ctx, title, text) {
+  const btn = ctx.account?.onSignIn ? h('button.btn.primary', { type: 'button', onclick: () => ctx.account.onSignIn() }, icon('cloud', 16), 'Sign in to Puter') : null;
+  return { el: emptyState('user', title, text, btn), sync() {} };
+}
+
 function autoPanel(ctx, opts, save) {
   const { store } = ctx;
-  if (!aiAvailable(ctx)) {
-    const btn = ctx.account?.onSignIn ? h('button.btn.primary', { type: 'button', onclick: () => ctx.account.onSignIn() }, icon('cloud', 16), 'Sign in to Puter') : null;
-    return { el: emptyState('user', 'Sign in to generate captions', 'Generated captions turn speech into text with Puter AI, so they need a Puter account. You can still import subtitle files or add captions by hand.', btn), sync() {} };
-  }
+  if (!aiAvailable(ctx)) return signInState(ctx, 'Sign in to generate captions', 'Generated captions turn speech into text with Puter AI, so they need a Puter account. You can still import subtitle files or add captions by hand.');
   const lang = selectField({ label: 'Spoken language', options: LANGUAGES, value: opts.language, onChange: (v) => { opts.language = v; save(); } });
   const scope = segmented({
     label: 'Listen to',
@@ -137,23 +187,9 @@ function autoPanel(ctx, opts, save) {
   const generate = h('button.btn.primary.block', { type: 'button' }, icon('magic', 16), 'Generate');
   generate.addEventListener('click', () => run());
 
-  const STEPS = ['Preparing audio', 'Transcribing', 'Creating captions'];
-  const stepEls = STEPS.map((s) => h('li.cap-step', h('span.cap-step-icon', { 'aria-hidden': 'true' }), h('span', s)));
-  const bar = h('div.cap-bar', { role: 'progressbar', 'aria-label': 'Caption progress', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0' }, h('div.cap-bar-fill'));
-  const cancel = h('button.btn.small', { type: 'button' }, 'Cancel');
-  const progress = h('div.cap-progress', { hidden: true, role: 'group', 'aria-label': 'Generating captions' }, h('ol.cap-steps', stepEls), bar, h('div.cap-progress-foot', cancel));
+  const { el: progress, cancel, setStep } = stepProgress(['Preparing audio', 'Transcribing', 'Creating captions'], 'Generating captions');
   let abort = null;
   cancel.addEventListener('click', () => abort?.abort());
-
-  const setStep = (i, frac = 0) => {
-    stepEls.forEach((el, j) => {
-      el.dataset.state = j < i ? 'done' : j === i ? 'active' : 'todo';
-      el.querySelector('.cap-step-icon').replaceChildren(j < i ? icon('check', 12) : j === i ? h('span.spinner.small') : '');
-    });
-    const pct = Math.round(((i + Math.min(1, frac)) / STEPS.length) * 100);
-    bar.setAttribute('aria-valuenow', String(pct));
-    bar.firstChild.style.width = `${pct}%`;
-  };
 
   async function run() {
     if (abort) return;
@@ -167,29 +203,14 @@ function autoPanel(ctx, opts, save) {
     const { signal } = abort;
     generate.disabled = true;
     progress.hidden = false;
-    setStep(0);
-    announce('Preparing audio');
-    // Work on a copy so edits made meanwhile do not shift what is being mixed.
-    const project = structuredClone(store.project);
+    let said = -1;
     try {
-      const mix = await mixdown(project, ctx.library, { scope: opts.scope, signal, onProgress: (f) => setStep(0, f) });
-      setStep(1);
-      announce('Transcribing');
-      const fake = import.meta.env.DEV ? globalThis.__vsFakeTranscript : null;
-      const words = fake
-        ? await fake(mix, STT_RATE)
-        : await transcribeMix(mix, STT_RATE, { language: opts.language, signal, testMode: Boolean(import.meta.env.DEV && globalThis.__vsSpeechTestMode), onProgress: (f) => setStep(1, f) });
-      if (signal.aborted) throw new DOMException('Cancelled', 'AbortError');
-      setStep(2);
-      const preset = TEXT_PRESETS.find((p) => p.id === opts.preset);
-      const lineChars = lineCharsFor(preset, project.settings.width);
-      const cues = groupWords(words, { maxWords: opts.maxWords, maxChars: Math.min(lineChars * 2, 84), maxGap: 0.8 });
-      if (!cues.length) {
-        toast('No speech was found in the audio.', { kind: 'info' });
-      } else {
-        const n = applyCaptions(ctx, cues, { mode, preset: opts.preset, position: opts.position });
-        toast(`Added ${n} caption${n === 1 ? '' : 's'}.`, { kind: 'success' });
-      }
+      const n = await generateCaptions(ctx, opts, { mode, signal, onStep: (i, f) => {
+        setStep(i, f);
+        if (i !== said) announce(STEPS[(said = i)]);
+      } });
+      if (!n) toast('No speech was found in the audio.', { kind: 'info' });
+      else toast(`Added ${n} caption${n === 1 ? '' : 's'}.`, { kind: 'success' });
     } catch (err) {
       if (err?.name === 'AbortError') announce('Captions cancelled');
       else {
@@ -221,6 +242,135 @@ function autoPanel(ctx, opts, save) {
   };
 }
 
+/** Short clip description for the song picker ("Song.mp3, 0:04 to 3:12"). */
+function songLabel(clip, asset) {
+  const t = (us) => {
+    const s = Math.round(us / US);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+  return `${clip.name || asset.name}, ${t(clip.start)} to ${t(T.clipEnd(clip))}`;
+}
+
+/**
+ * Lyrics from a song: pick a music clip, isolate the vocals, transcribe and
+ * break the words into lines at the song's phrasing (media/lyrics.js), then
+ * add them as captions in a lyric look. ctx.lyricsDeps can stand in for the
+ * decoding, separation, speech to text and beat steps (tests).
+ */
+function lyricsPanel(ctx, opts, save) {
+  const { store } = ctx;
+  if (!aiAvailable(ctx)) return signInState(ctx, 'Sign in to create lyrics', 'Lyrics are heard with Puter AI speech to text, so they need a Puter account. You can still import a lyrics subtitle file or type lines in the Captions list.');
+  const song = h('select.select', { id: `lyr-song-${uid('x')}` });
+  song.addEventListener('change', () => syncButton());
+  const songField = h('div.field', h('label.field-label', { for: song.id }, 'Song'), song);
+  const lang = selectField({ label: 'Sung language', options: LANGUAGES, value: opts.language, onChange: (v) => { opts.language = v; save(); } });
+  const isolate = switchField({
+    label: 'Isolate vocals first',
+    hint: 'Separates the singing from the music before listening. Works best on stereo songs.',
+    checked: opts.lyricsIsolate !== false,
+    onChange: (v) => { opts.lyricsIsolate = v; save(); },
+  });
+  const look = selectField({
+    label: 'Lyric look',
+    options: CAPTION_STYLES.map((x) => ({ value: x.id, label: x.label })),
+    value: opts.lyricsStyle,
+    onChange: (v) => { opts.lyricsStyle = v; save(); },
+  });
+  const pos = segmented({
+    label: 'Position',
+    options: Object.keys(CAPTION_POSITIONS).map((k) => ({ value: k, label: k[0].toUpperCase() + k.slice(1) })),
+    value: opts.lyricsPosition,
+    onChange: (v) => { opts.lyricsPosition = v; save(); },
+  });
+  const create = h('button.btn.primary.block', { type: 'button' }, icon('music', 16), 'Create lyrics');
+  create.addEventListener('click', () => run());
+  const empty = h('p.asset-hint.lyr-empty', 'Add a song (an audio clip, or a video with sound) to the timeline first.');
+  const { el: progress, cancel, setStep } = stepProgress(['Reading the song', 'Isolating vocals', 'Listening for words', 'Placing lines on the beat'], 'Creating lyrics');
+  const STEP = { decode: 0, isolate: 1, transcribe: 2, phrase: 3 };
+  let abort = null;
+  cancel.addEventListener('click', () => abort?.abort());
+
+  function syncButton() {
+    create.disabled = Boolean(abort) || !song.value;
+  }
+
+  function sync() {
+    const list = songClips(store.project);
+    const prev = song.value;
+    const sel = store.selected?.clip;
+    song.replaceChildren(...list.map(({ clip, asset }) => h('option', { value: clip.id }, songLabel(clip, asset))));
+    const pick = [sel?.id, prev].find((id) => id && list.some((x) => x.clip.id === id));
+    if (pick) song.value = pick;
+    empty.hidden = list.length > 0;
+    songField.hidden = !list.length;
+    look.set(opts.lyricsStyle);
+    pos.set(opts.lyricsPosition);
+    syncButton();
+  }
+
+  async function run() {
+    if (abort || !song.value) return;
+    const mode = await askReplace(store);
+    if (!mode) return;
+    abort = new AbortController();
+    const { signal } = abort;
+    syncButton();
+    progress.hidden = false;
+    setStep(0);
+    announce('Reading the song');
+    const project = structuredClone(store.project);
+    try {
+      const res = await lyricsFromClip(project, song.value, {
+        library: ctx.library,
+        language: opts.language,
+        isolate: opts.lyricsIsolate !== false,
+        signal,
+        onStep: (step, f) => {
+          setStep(STEP[step], f);
+          if (!f) announce(progress.querySelectorAll('.cap-step')[STEP[step]].textContent);
+        },
+        ...(ctx.lyricsDeps || {}),
+      });
+      if (!res.cues.length) {
+        toast('No singing was found in this clip.', { kind: 'info' });
+        return;
+      }
+      const style = CAPTION_STYLES.find((x) => x.id === opts.lyricsStyle) || CAPTION_STYLES[0];
+      const n = applyCaptions(ctx, res.cues, { mode, preset: style.preset, position: opts.lyricsPosition, label: 'Lyrics from music', captionStyle: style.id });
+      toast(`Added ${n} lyric line${n === 1 ? '' : 's'}.`, { kind: 'success' });
+    } catch (err) {
+      if (err?.name === 'AbortError') announce('Lyrics cancelled');
+      else {
+        console.error(err);
+        toast(errorMessage(err, "Couldn't create lyrics."), { kind: 'error' });
+      }
+    } finally {
+      abort = null;
+      progress.hidden = true;
+      syncButton();
+    }
+  }
+
+  const el = h('div.cap-form.lyr-form',
+    h('p.asset-hint', 'Turn a song into lyric captions: the singing is separated from the music, heard, and split into lines where the singer breathes and the bars begin.'),
+    empty,
+    songField,
+    lang.el,
+    isolate.el,
+    look.el,
+    fieldRow('Position', pos.el, 'lyr-pos'),
+    create,
+    progress,
+  );
+  pos.el.setAttribute('aria-labelledby', 'lyr-pos');
+  const refresh = () => {
+    if (el.isConnected && !abort) sync();
+  };
+  const offs = [store.on('change', refresh), store.on('select', refresh)];
+  sync();
+  return { el, sync, dispose: () => offs.forEach((off) => off()) };
+}
+
 const fieldSizing = typeof CSS !== 'undefined' && CSS.supports?.('field-sizing', 'content');
 
 /** Grow a caption textarea to its content (CSS field-sizing where supported). */
@@ -242,6 +392,7 @@ function listPanel(ctx, opts) {
   aiBtn?.addEventListener('click', () => showMenu(aiBtn, [
     { label: 'Translate captions...', icon: 'languages', onSelect: () => openTranslate(ctx) },
     { label: 'Add emojis', icon: 'effects', onSelect: () => addEmojis(ctx) },
+    { label: 'Dub into another language...', icon: 'speech', onSelect: () => import('../dub-dialog.js').then((m) => m.openDubDialog(ctx)) },
   ], { label: 'AI caption tools' }));
   const markBtn = h('button.btn.small', { type: 'button', 'aria-haspopup': 'menu' }, icon('highlighter', 14), 'Highlight', icon('chevronDown', 12));
   markBtn.addEventListener('click', () => showMenu(markBtn, [
@@ -249,7 +400,9 @@ function listPanel(ctx, opts) {
     aiAvailable(ctx) ? { label: 'Highlight key words with AI', icon: 'magic', onSelect: () => highlightKeywords(ctx, { ai: true }) } : null,
     { label: 'Clear highlights', icon: 'close', onSelect: () => clearHighlights(ctx) },
   ].filter(Boolean), { label: 'Highlight words' }));
-  const el = h('div.cap-list-panel', h('div.cap-list-tools', addBtn, markBtn, readBtn, aiBtn), body);
+  const findBtn = h('button.icon-btn.small', { type: 'button', 'aria-label': 'Find and replace', 'data-tip': 'Find and replace' }, icon('search', 14));
+  findBtn.addEventListener('click', () => import('../find-replace.js').then((m) => m.openFindReplace(ctx)));
+  const el = h('div.cap-list-panel', h('div.cap-list-tools', addBtn, markBtn, readBtn, aiBtn, findBtn), body);
   let sig = '';
   let rows = new Map(); // clip id -> { row, text, time }
 
@@ -683,6 +836,7 @@ export function captionsTab(ctx) {
   const panels = {};
   const make = {
     auto: () => autoPanel(ctx, opts, save),
+    lyrics: () => lyricsPanel(ctx, opts, save),
     transcript: () => transcriptPanel(ctx, opts, save, {
       onCaptions: async (cues) => {
         const mode = await askReplace(ctx.store);
@@ -700,6 +854,7 @@ export function captionsTab(ctx) {
     search: false,
     categories: [
       { id: 'auto', label: 'Generate' },
+      { id: 'lyrics', label: 'Lyrics' },
       { id: 'transcript', label: 'Transcript' },
       { id: 'list', label: 'Captions' },
       { id: 'styles', label: 'Styles' },

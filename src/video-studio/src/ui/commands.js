@@ -8,6 +8,7 @@ import { US } from '../lib/time.js';
 import { editPoint, findClip } from '../model/timeline.js';
 import { isMulticam } from '../model/multicam.js';
 import { prefs, setPref } from './prefs.js';
+import { KEY_LAYOUTS, DEFAULT_LAYOUT, findLayout, layoutKeys, findConflicts } from './shortcut-layouts.js';
 
 /** Groups shown in the Keyboard shortcuts dialog. */
 export const SHORTCUT_GROUPS = ['Playback', 'Editing', 'Timeline', 'Markers and range', 'Player', 'File', 'Help'];
@@ -22,6 +23,11 @@ export function createCommands(ctx) {
   const step = (frames) => store.seek(store.time + Math.round((frames * US) / store.fps));
   const hasSel = () => store.selection.size > 0;
   const multicamSel = () => isMulticam(store.selected?.clip);
+  const stepTimeline = (dir) => {
+    const list = ctx.timelines?.list() || [];
+    const i = list.findIndex((t) => t.active);
+    if (list.length > 1) ctx.timelines.open(list[(i + dir + list.length) % list.length].id);
+  };
 
   const list = [
     // Playback
@@ -53,6 +59,7 @@ export function createCommands(ctx) {
     { id: 'paste', label: 'Paste', group: 'Editing', keys: ['Mod+V'], run: () => actions.paste(), enabled: () => actions.hasClipboard() },
     { id: 'duplicate', label: 'Duplicate', group: 'Editing', keys: ['Mod+D'], run: () => actions.duplicate(), enabled: hasSel },
     { id: 'selectAll', label: 'Select all', group: 'Editing', keys: ['Mod+A'], run: () => actions.selectAll() },
+    { id: 'findReplace', label: 'Find and replace text', group: 'Editing', keys: ['Mod+F'], run: () => import('./find-replace.js').then((m) => m.openFindReplace(ctx)) },
     { id: 'deselect', label: 'Deselect', group: 'Editing', keys: ['Escape'], run: () => store.clearSelection() },
     { id: 'freeze', label: 'Freeze frame', group: 'Editing', keys: ['Alt+F'], run: () => actions.freeze() },
     { id: 'detachAudio', label: 'Detach audio', group: 'Editing', keys: ['Alt+D'], run: () => actions.detachAudio() },
@@ -75,6 +82,8 @@ export function createCommands(ctx) {
     { id: 'crop', label: 'Crop', group: 'Editing', keys: ['Alt+C'], run: () => ctx.openCrop?.(), enabled: () => ['video', 'image'].includes(store.selected?.clip.type) },
     { id: 'splitScenes', label: 'Split at scene changes', group: 'Editing', keys: [], run: () => actions.splitScenes(), enabled: () => store.selected?.clip.type === 'video' },
     { id: 'removeSilences', label: 'Remove silences', group: 'Editing', keys: [], run: () => actions.removeSilences() },
+    { id: 'dub', label: 'Dub into another language', group: 'Editing', keys: [], run: () => import('./dub-dialog.js').then((m) => m.openDubDialog(ctx)) },
+    { id: 'assistant', label: 'Edit assistant', group: 'Editing', keys: ['Mod+K'], run: () => ctx.assistant?.toggle() },
     { id: 'trackMotion', label: 'Track motion', group: 'Editing', keys: [], run: () => ctx.openTracking?.(), enabled: () => Boolean(store.selected && 'transform' in store.selected.clip) },
     { id: 'savePreset', label: 'Save clip as preset', group: 'Editing', keys: [], run: () => import('./clip-presets.js').then((m) => m.saveClipPreset(ctx)), enabled: () => Boolean(store.selected) },
     { id: 'managePresets', label: 'Manage clip presets', group: 'Editing', keys: [], run: () => import('./clip-presets.js').then((m) => m.managePresets(ctx)) },
@@ -90,6 +99,10 @@ export function createCommands(ctx) {
     { id: 'easeOut', label: 'Keyframe: ease out', group: 'Editing', keys: [], run: () => actions.setKeyEase('easeOut'), enabled: () => Boolean(store.selected) },
     { id: 'easeInOut', label: 'Keyframe: ease in and out', group: 'Editing', keys: [], run: () => actions.setKeyEase('easeInOut'), enabled: () => Boolean(store.selected) },
     { id: 'easeLinear', label: 'Keyframe: linear', group: 'Editing', keys: [], run: () => actions.setKeyEase('linear'), enabled: () => Boolean(store.selected) },
+    { id: 'nudgeLeft', label: 'Nudge selection one frame left', group: 'Editing', keys: [], run: () => actions.nudgeSelected(-1), enabled: hasSel },
+    { id: 'nudgeRight', label: 'Nudge selection one frame right', group: 'Editing', keys: [], run: () => actions.nudgeSelected(1), enabled: hasSel },
+    { id: 'nudgeLeft10', label: 'Nudge selection ten frames left', group: 'Editing', keys: [], run: () => actions.nudgeSelected(-10), enabled: hasSel },
+    { id: 'nudgeRight10', label: 'Nudge selection ten frames right', group: 'Editing', keys: [], run: () => actions.nudgeSelected(10), enabled: hasSel },
     { id: 'selectLeft', label: 'Select clips left of playhead', group: 'Editing', keys: ['BracketLeft'], run: () => actions.selectSide('left') },
     { id: 'selectRight', label: 'Select clips right of playhead', group: 'Editing', keys: ['BracketRight'], run: () => actions.selectSide('right') },
 
@@ -130,6 +143,11 @@ export function createCommands(ctx) {
 
     // File
     { id: 'import', label: 'Import media', group: 'File', keys: ['Mod+I'], run: () => ctx.openImport?.() },
+    { id: 'newTimeline', label: 'New timeline', group: 'File', keys: ['Mod+Alt+N'], run: () => ctx.timelines?.createWithDialog() },
+    { id: 'duplicateTimeline', label: 'Duplicate timeline', group: 'File', keys: [], run: () => ctx.timelines?.duplicate() },
+    { id: 'renameTimeline', label: 'Rename timeline', group: 'File', keys: [], run: () => ctx.timelines?.rename() },
+    { id: 'prevTimeline', label: 'Previous timeline', group: 'File', keys: [], run: () => stepTimeline(-1), enabled: () => (ctx.timelines?.list().length || 0) > 1 },
+    { id: 'nextTimeline', label: 'Next timeline', group: 'File', keys: [], run: () => stepTimeline(1), enabled: () => (ctx.timelines?.list().length || 0) > 1 },
     { id: 'export', label: 'Export', group: 'File', keys: ['Mod+E'], run: () => ctx.openExport?.() },
     { id: 'scriptToVideo', label: 'Script to video', group: 'File', keys: [], run: () => ctx.openScriptVideo?.() },
     { id: 'shareReview', label: 'Share for review', group: 'File', keys: [], run: () => ctx.openShareReview?.() },
@@ -142,11 +160,16 @@ export function createCommands(ctx) {
     { id: 'shortcuts', label: 'Keyboard shortcuts', group: 'Help', keys: ['Mod+Slash'], run: () => ctx.openShortcuts?.() },
   ];
 
-  // Remember each command's own keys, then layer the user's rebinding on top.
-  for (const c of list) c.defaultKeys = [...c.keys];
+  // Each command's own keys, then the chosen keyboard layout (its defaultKeys), then the user's rebinding on top.
+  const factory = Object.fromEntries(list.map((c) => [c.id, [...c.keys]]));
+  const layoutId = () => findLayout(prefs().shortcutLayout || DEFAULT_LAYOUT).id;
   const applyOverrides = () => {
+    const base = layoutKeys(layoutId(), factory);
     const custom = prefs().shortcuts || {};
-    for (const c of list) c.keys = Array.isArray(custom[c.id]) ? custom[c.id].filter((k) => typeof k === 'string') : [...c.defaultKeys];
+    for (const c of list) {
+      c.defaultKeys = base[c.id];
+      c.keys = Array.isArray(custom[c.id]) ? custom[c.id].filter((k) => typeof k === 'string') : [...c.defaultKeys];
+    }
   };
   applyOverrides();
 
@@ -154,6 +177,32 @@ export function createCommands(ctx) {
 
   return {
     list,
+    layouts: KEY_LAYOUTS,
+    /** Id of the keyboard layout in use. */
+    get layout() {
+      return layoutId();
+    },
+    /**
+     * Switch keyboard layouts. keepCustom keeps the user's rebinding on top
+     * (dropping any the new layout already matches); otherwise it is cleared.
+     */
+    setLayout(id, { keepCustom = true } = {}) {
+      const next = findLayout(id).id;
+      setPref('shortcutLayout', next);
+      const base = layoutKeys(next, factory);
+      const custom = keepCustom ? { ...(prefs().shortcuts || {}) } : {};
+      for (const [cid, keys] of Object.entries(custom)) if (!base[cid] || JSON.stringify(keys) === JSON.stringify(base[cid])) delete custom[cid];
+      setPref('shortcuts', custom);
+      applyOverrides();
+    },
+    /** Number of commands the user rebound. */
+    customCount() {
+      return Object.keys(prefs().shortcuts || {}).filter((id) => byId.has(id)).length;
+    },
+    /** Keys more than one command uses: [{ key, commands }]. */
+    allConflicts() {
+      return findConflicts(Object.fromEntries(list.map((c) => [c.id, c.keys]))).map(({ key, ids }) => ({ key, commands: ids.map((i) => byId.get(i)) }));
+    },
     /** Rebind a command (keys = [] removes its shortcut); null restores the default. */
     setKeys(id, keys) {
       const custom = { ...(prefs().shortcuts || {}) };
@@ -164,6 +213,7 @@ export function createCommands(ctx) {
       setPref('shortcuts', custom);
       applyOverrides();
     },
+    /** Clear the user's rebinding (the layout stays). */
     resetKeys() {
       setPref('shortcuts', {});
       applyOverrides();

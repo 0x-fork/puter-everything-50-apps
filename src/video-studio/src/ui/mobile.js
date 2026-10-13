@@ -38,6 +38,7 @@ export const CATEGORIES = [
   { id: 'audio', label: 'Audio', icon: 'music' },
   { id: 'text', label: 'Text', icon: 'text' },
   { id: 'captions', label: 'Captions', icon: 'captions' },
+  { id: 'avatars', label: 'Avatars', icon: 'avatar' },
   { id: 'stickers', label: 'Graphics', icon: 'sticker' },
   { id: 'transitions', label: 'Transitions', icon: 'transition' },
   { id: 'effects', label: 'Effects', icon: 'effects' },
@@ -169,6 +170,10 @@ export function createMobileChrome(ctx, root, { matchMedia: mmImpl } = {}) {
       if (!store.selected?.clip.cutout) actions.removeBackground();
       openDetails(b);
       ctx.inspector?.showVideoSub?.('cutout');
+    } },
+    { id: 'remove', label: 'Remove', icon: 'eraser', when: (c) => c.type === 'video' || c.type === 'image', run: (b) => {
+      openDetails(b);
+      ctx.inspector?.showVideoSub?.('remove');
     } },
     { id: 'retouch', label: 'Retouch', icon: 'retouch', when: (c) => c.type === 'video' || c.type === 'image', run: (b) => {
       openDetails(b);

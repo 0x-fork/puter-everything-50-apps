@@ -16,6 +16,7 @@ import { bindLayerMatte } from './cutout.js';
 import { effectPass, drawLayerWithEffects, freeClipFx } from './fx-render.js';
 import { withFilterLook } from '../model/filter-looks.js';
 import { betweenTexture } from './slow-motion.js';
+import { processSource } from './source-fx.js';
 
 const FILTER_BY_ID = new Map(FILTERS.map((f) => [f.id, f]));
 const GRADE_KEYS = ['brightness', 'contrast', 'saturation', 'exposure', 'temperature', 'tint', 'highlights', 'shadows', 'fade', 'vignette', 'grain', 'sharpen', 'vibrance', 'whites', 'blacks', 'brilliance', 'clarity'];
@@ -448,8 +449,10 @@ export class Compositor {
     if (layer.extras && !layer.inner) return drawLayerWithExtras(this, layer, time);
     const info = this.resolve(layer);
     if (!info || !info.source) return false;
-    const entry = this._texture(info);
+    let entry = this._texture(info);
     if (!entry) return false;
+    // Object removal and enhance work on the source picture itself (source-fx.js).
+    if (layer.removal || layer.enhance) entry = processSource(this, layer, info, entry, time);
     const gl = this.gl;
     const p = this._use(this._program('layer', QUAD_VS, LAYER_FS));
     const box = this.layerBox(layer, info);
@@ -588,7 +591,7 @@ export class Compositor {
       alt = t;
     };
     for (const layer of layers) {
-      if (layer.kind === 'media' || layer.kind === 'text' || layer.kind === 'sticker') {
+      if (layer.kind === 'media' || layer.kind === 'text' || layer.kind === 'sticker' || layer.kind === 'avatar') {
         const mode = BLEND_MODE_INDEX[layer.blend] || 0;
         if (mode === 0) {
           this._into(acc);
@@ -687,8 +690,11 @@ export class Compositor {
     this._freeTargets();
     freeClipFx(this);
     this._matteCache?.dispose();
+    this._removalRaster?.dispose();
+    this.srcFxCache = null;
     this._faceCache?.dispose();
     this._hairCache?.dispose();
+    this._poseCache?.dispose();
     for (const e of [...this.curveTextures.values(), ...this.lutTextures.values()]) gl.deleteTexture(e.tex);
     this.curveTextures.clear();
     this.lutTextures.clear();

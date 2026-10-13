@@ -16,9 +16,12 @@ import { applyMotion, WHOLE_LOOPS } from './motion-anims.js';
 import { expandProject } from './compound.js';
 import { isGlyphAnim, isWholeClipAnim } from './text-anim.js';
 import { evaluateMasks } from '../model/masks.js';
-import { layerExtras } from '../model/clip-extras.js';
+import { layerExtras, enhanceAt } from '../model/clip-extras.js';
+import { removalAt } from '../model/removal.js';
 import { activeClipEffects } from '../model/clip-effects.js';
 import { smoothSlowAt } from '../model/slow-motion.js';
+import { styleEffect } from '../model/stylize.js';
+import { avatarPose } from './avatar-motion.js';
 
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
 const easeOut = (p) => 1 - (1 - p) ** 3;
@@ -163,6 +166,14 @@ export function clipLayer(project, clip, t, trackIndex) {
     layer.textAnim = state.textAnim || null;
     layer.textColor = textColorAt(clip, local);
   }
+  if (clip.type === 'avatar') {
+    // A talking presenter: drawn over the whole frame in a pose for this moment (engine/avatars.js).
+    layer.local = local;
+    layer.frameW = project.settings.width;
+    layer.frameH = project.settings.height;
+    const a = clip.avatar;
+    layer.pose = avatarPose({ seed: a.seed, t: local / 1e6, voiceSec: voiceTimeAt(project, a, t), lips: a.lips, framing: a.framing });
+  }
   if (clip.parent) withParent(layer, clip.parent, t, project);
   if (layer.kind === 'media') {
     const asset = project.assets[clip.assetId];
@@ -182,13 +193,20 @@ export function clipLayer(project, clip, t, trackIndex) {
     layer.retouch = clip.retouch || null;
     layer.faceShape = clip.faceShape || null;
     layer.hairColor = clip.hairColor || null;
+    layer.bodyShape = clip.bodyShape || null;
+    layer.makeup = clip.makeup || null;
     layer.colorTarget = clip.colorTarget || null;
     layer.maskUse = clip.maskUse || null;
     layer.masks = evaluateMasks(clip, local);
     layer.extras = layerExtras(clip, local, project.settings.fps, (l) => motionStateAt(clip, l));
+    // Passes on the source picture itself: object removal, then enhance (engine/source-fx.js).
+    layer.removal = removalAt(clip, local);
+    layer.enhance = enhanceAt(clip, local);
   }
-  // The clip's own effect stack (rendered on this clip only, see engine/fx-render.js).
-  const fx = activeClipEffects(clip);
+  // The clip's own effect stack (rendered on this clip only, see engine/fx-render.js),
+  // after its style look (model/stylize.js).
+  const look = layer.kind === 'media' ? styleEffect(clip.stylize) : null;
+  const fx = look ? [look, ...activeClipEffects(clip)] : activeClipEffects(clip);
   if (fx.length) {
     layer.effects = fx;
     layer.fxTime = local;
@@ -283,6 +301,24 @@ export function evaluate(project, t, { includeHidden = false } = {}) {
     }
   }
   return layers;
+}
+
+/**
+ * Seconds into an avatar's voice at timeline time t: from the first clip of
+ * its voice audio under t that is heard, or null when none plays. Moving or
+ * trimming the voice clip keeps the lips in step with what is heard.
+ */
+export function voiceTimeAt(project, avatar, t) {
+  const id = avatar?.voiceAsset;
+  if (!id || !avatar.lips) return null;
+  for (const track of project.tracks) {
+    if (track.kind !== 'audio' || track.muted) continue;
+    for (const c of track.clips) {
+      if (c.assetId !== id || c.disabled || c.muted || t < c.start || t >= c.start + c.duration) continue;
+      return sourceTimeAt(c, t) / 1e6;
+    }
+  }
+  return null;
 }
 
 /** Whether a clip is drawn at t: a multi-camera angle that gives the sound is heard throughout but seen only in its show ranges. */

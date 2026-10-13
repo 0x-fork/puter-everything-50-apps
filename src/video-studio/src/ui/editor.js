@@ -9,8 +9,11 @@ import { EditorStore } from '../model/store.js';
 import { AutoSaver } from '../storage/library.js';
 import { Player } from '../engine/player.js';
 import { MediaService } from '../media/media-service.js';
+import { ProxyManager } from '../media/proxy-manager.js';
+import { proxyMode } from '../model/proxy.js';
 import { syncProjectFonts } from '../media/fonts.js';
 import { createActions } from './actions.js';
+import { createTimelineActions } from './timeline-actions.js';
 import { createCommands } from './commands.js';
 import { createTopbar, LAYOUTS } from './topbar.js';
 import { createAssetsPanel } from './panels/index.js';
@@ -25,6 +28,7 @@ import { openDialog, toast, installTooltips } from './dialog.js';
 import { openShortcutsDialog } from './shortcuts-dialog.js';
 import { createHistoryPanel } from './history-panel.js';
 import { createReviewPanel } from './review/review-panel.js';
+import { createEditAssistant } from './edit-assistant.js';
 import { openPreferences, pref, onPrefsChange } from './preferences-dialog.js';
 import { prefs, setPref } from './prefs.js';
 
@@ -37,6 +41,9 @@ export class Editor {
     store.on('toggles', () => setPref('toggles', { ...store.toggles }));
     this.saver = new AutoSaver(library, store);
     this.media = new MediaService(library);
+    // Proxy media for heavy footage: a device cache, remembered lists in the preferences.
+    this.proxies = new ProxyManager({ library, memory: { get: () => prefs().proxyMemory, set: (v) => setPref('proxyMemory', v) } });
+    this.media.proxies = this.proxies;
     // Uploaded fonts are registered with the browser before text draws with them.
     syncProjectFonts(library, project);
 
@@ -45,6 +52,7 @@ export class Editor {
       store,
       library,
       media: this.media,
+      proxies: this.proxies,
       saver: this.saver,
       account,
       exitToHome: () => this.exit(),
@@ -87,11 +95,12 @@ export class Editor {
     this.onNewProject = onNewProject;
     this.onOpenProject = onOpenProject;
     ctx.actions = createActions(ctx);
+    ctx.timelines = createTimelineActions(ctx);
     ctx.commands = createCommands(ctx);
 
     // Player canvas is created up front so the engine exists before views mount.
     const canvas = h('canvas.player-canvas', { 'aria-hidden': 'true' });
-    ctx.player = new Player({ store, library, canvas });
+    ctx.player = new Player({ store, library, canvas, proxies: this.proxies });
     ctx.player.canvas = canvas;
     ctx.player.loop = pref('loopPlayback');
     this._offPrefs = onPrefsChange(() => (ctx.player.loop = pref('loopPlayback')));
@@ -124,6 +133,9 @@ export class Editor {
     ctx.review = createReviewPanel(ctx);
     this.el.append(ctx.review.el);
     ctx.mobile = createMobileChrome(ctx, this.el);
+    ctx.assistant = createEditAssistant(ctx);
+    ctx.timeline.el.append(ctx.assistant.launcher);
+    this.el.append(ctx.assistant.el);
     root.replaceChildren(this.el);
     root.removeAttribute('aria-busy');
     installTooltips(this.el);
@@ -152,6 +164,7 @@ export class Editor {
     store.on('change', () => (document.title = `${store.project.name} - Video Studio`));
     this._coverTimer = null;
     store.on('change', () => this._scheduleCover());
+    this._watchProxies();
   }
 
   _resizer(dir, which) {
@@ -181,6 +194,7 @@ export class Editor {
         el.setAttribute('aria-valuenow', String(Math.round((1 - v) * 100)));
       }
       this.ctx.playerView.relayout?.();
+      if (which === 'left') this.ctx.assets.relayout?.();
     };
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -293,6 +307,7 @@ export class Editor {
       else r.setAttribute('aria-valuenow', String(Math.round((1 - l.upperH) * 100)));
     }
     this.ctx.playerView.relayout?.();
+    this.ctx.assets.relayout?.();
     this.ctx.timeline.render?.(true);
     announce(`${l.label} layout`);
   }
@@ -335,6 +350,27 @@ export class Editor {
     }
   }
 
+  /** Keep proxies in step with the project: make wanted ones, stop work for removed media. */
+  _watchProxies() {
+    const { store } = this;
+    const proxies = this.proxies;
+    let sig = '';
+    const sync = (force = false) => {
+      const p = store.project;
+      const next = `${proxyMode(p)}|${Object.values(p.assets).map((a) => a.hash).join(',')}`;
+      if (!force && next === sig) return;
+      sig = next;
+      proxies.sync(p);
+    };
+    proxies.init().then(() => sync(true), () => {});
+    this._offProxySync = [
+      store.on('change', () => sync()),
+      proxies.on('change', (e) => {
+        if (e?.slow) sync(true);
+      }),
+    ];
+  }
+
   async exit(opts = {}) {
     this.ctx.player?.pause();
     await this.saver.flush().catch(() => {});
@@ -349,6 +385,7 @@ export class Editor {
     this._offPrefs?.();
     this.ctx.history?.dispose?.();
     this.ctx.review?.dispose?.();
+    this.ctx.assistant?.dispose?.();
     clearTimeout(this._coverTimer);
     document.removeEventListener('keydown', this._onKey);
     window.removeEventListener('beforeunload', this._onUnload);
@@ -359,6 +396,8 @@ export class Editor {
     this.ctx.inspector?.dispose?.();
     this.ctx.assets?.dispose?.();
     this.ctx.player?.dispose();
+    this._offProxySync?.forEach((off) => off());
+    this.proxies.dispose();
     this.media.dispose();
     this.library.releaseMedia();
   }

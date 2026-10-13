@@ -4,7 +4,8 @@
  *
  * project = {
  *   format: 'video-studio-project', version, id, name, created, modified,
- *   settings: { width, height, fps, ratio, background: { type: 'color'|'blur', color, blur } },
+ *   settings: { width, height, fps, ratio, background: { type: 'color'|'blur', color, blur }, proxy?: 'off'|'on' },
+ *     (proxy: proxy media for the preview, model/proxy.js; no field means 'auto')
  *   assets: { [id]: Asset },
  *   tracks: [Track]            // visual order, top to bottom
  *   markers: [{ id, time, color, label, note? }],
@@ -14,17 +15,22 @@
  *   transcript?: { words: [{ text, start, end }], language }  // timed words of the speech
  *   bins?: [{ id, name, parent }]  // media bin folders; asset.folder points at one (model/bins.js)
  *   fonts?: [{ id, family, name, hash, ext, mime, size }]   // uploaded fonts
+ *   timelineId?, timelines?: [{ id, name, ...contents }]   // more timelines sharing the media (model/timelines.js)
  * }
  * Track = { id, kind: 'video'|'audio'|'text'|'effect'|'filter'|'adjust', main?, locked, hidden, muted, solo?, name?, size?, clips: [Clip] }
  *   (main: true marks the base track, the one video track overlays stack on)
  * Clip  = { id, type, start, duration, ... } (see makeClip)
  *   video, image and adjust clips may also carry grade (see model/color.js)
- *   video and audio clips may carry speedCurve (see model/speed-curve.js)
+ *   video and audio clips may carry speedCurve (see model/speed-curve.js) and
+ *   speedRamp, the velocity ramp it came from (see model/speed-ramps.js)
  *   video clips may carry smoothSlow: 'blend'|'flow' (see model/slow-motion.js)
- *   video and image clips may carry masks (model/masks.js) and motionBlur,
- *   denoise, relight, canvas (model/clip-extras.js); transform may carry
+ *   video and image clips may carry masks (model/masks.js), removal
+ *   (model/removal.js) and motionBlur, denoise, relight, enhance, canvas
+ *   (model/clip-extras.js); transform may carry
  *   sx, sy (non-uniform scale) and uniform: false
- *   video, image, text and sticker clips may carry effects (see model/clip-effects.js)
+ *   video, image, text, sticker and avatar clips may carry effects (see model/clip-effects.js)
+ *   video and image clips may carry stylize: { id, amount } (see model/stylize.js)
+ *   avatar clips hold a talking presenter (see model/avatar.js)
  */
 import { uid } from '../lib/ids.js';
 import { US } from '../lib/time.js';
@@ -33,16 +39,21 @@ import { normalizeGrade } from './color.js';
 import { normalizeBins, fixAssetFolders } from './bins.js';
 import { TEXT_STYLE_EXTRAS, normTextExtras } from './text-style.js';
 import { normalizeCurve, meanSpeed } from './speed-curve.js';
+import { normalizeSpeedRamp } from './speed-ramps.js';
 import { normalizeMasks } from './masks.js';
 import { normalizeClipExtras } from './clip-extras.js';
 import { normalizeCutout } from './cutout.js';
-import { normalizeRetouch, normalizeFaceShape, normalizeHairColor } from './retouch.js';
+import { normalizeRemoval } from './removal.js';
+import { normalizeRetouch, normalizeFaceShape, normalizeHairColor, normalizeBodyShape, normalizeMakeup } from './retouch.js';
 import { normalizeMarks } from './text-marks.js';
+import { normalizeProxyMode } from './proxy.js';
 import { isEase } from './keyframes.js';
 import { normalizeSmoothSlow } from './slow-motion.js';
 import { effectDefaults, normalizeEffectParams } from './effect-params.js';
 import { normalizeClipEffects, canHaveEffects } from './clip-effects.js';
 import { fitMulticam, normalizeMulticam, MAX_ANGLES } from './multicam.js';
+import { normalizeAvatar, DEFAULT_AVATAR } from './avatar.js';
+import { normalizeStylize } from './stylize.js';
 
 export const FORMAT = 'video-studio-project';
 export const VERSION = 1;
@@ -79,6 +90,7 @@ export const TRACK_KIND_FOR = {
   audio: 'audio',
   text: 'text',
   sticker: 'text',
+  avatar: 'video',
   effect: 'effect',
   filter: 'filter',
   adjust: 'adjust',
@@ -238,6 +250,20 @@ export function makeClip(type, fields = {}) {
         keyframes: {},
         ...fields,
       };
+    case 'avatar':
+      // A talking presenter (model/avatar.js) drawn over the frame like a picture.
+      return {
+        ...base,
+        transform: { ...DEFAULT_TRANSFORM },
+        opacity: 1,
+        blend: 'normal',
+        animIn: null,
+        animOut: null,
+        animLoop: null,
+        keyframes: {},
+        ...fields,
+        avatar: { ...DEFAULT_AVATAR, ...fields.avatar },
+      };
     case 'effect':
       return { ...base, duration: 3 * US, effect: 'blur', params: effectDefaults(fields.effect || 'blur'), ...fields };
     case 'filter':
@@ -293,7 +319,8 @@ function normKeyframes(k) {
     if (!Array.isArray(list) || unsafeKey(prop)) continue;
     const keys = list
       .filter((x) => x && Number.isFinite(Number(x.t)) && x.v !== undefined)
-      .map((x) => ({ t: Math.max(0, int(x.t)), v: num(x.v), ease: isEase(x.ease) ? x.ease : 'linear' }))
+      // ramp: added by a velocity ramp's accent (model/speed-ramps.js).
+      .map((x) => ({ t: Math.max(0, int(x.t)), v: num(x.v), ease: isEase(x.ease) ? x.ease : 'linear', ...(x.ramp === true ? { ramp: true } : {}) }))
       .sort((a, b) => a.t - b.t);
     if (keys.length) out[prop] = keys;
   }
@@ -372,11 +399,17 @@ export function normalizeClip(c) {
     normalizeClipExtras(c, out);
     if (c.chroma && typeof c.chroma === 'object') out.chroma = { color: color(c.chroma.color, '#00ff00'), strength: clampN(c.chroma.strength, 0, 100, 40), spill: clampN(c.chroma.spill ?? c.chroma.shadow, 0, 100, 0) };
     if (c.cutout && typeof c.cutout === 'object') out.cutout = normalizeCutout(c.cutout);
+    const removal = normalizeRemoval(c.removal);
+    if (removal) out.removal = removal;
     if (c.retouch && typeof c.retouch === 'object') out.retouch = normalizeRetouch(c.retouch);
     if (c.faceShape && typeof c.faceShape === 'object') out.faceShape = normalizeFaceShape(c.faceShape);
     if (c.hairColor && typeof c.hairColor === 'object') out.hairColor = normalizeHairColor(c.hairColor);
+    if (c.bodyShape && typeof c.bodyShape === 'object') out.bodyShape = normalizeBodyShape(c.bodyShape);
+    if (c.makeup && typeof c.makeup === 'object') out.makeup = normalizeMakeup(c.makeup);
     if (c.colorTarget === 'person' || c.colorTarget === 'background') out.colorTarget = c.colorTarget;
     if (c.maskUse === 'color') out.maskUse = 'color';
+    const look = normalizeStylize(c.stylize);
+    if (look) out.stylize = look;
   }
   if ((c.type === 'video' || c.type === 'audio') && !out.freeze) {
     // Variable speed: clip.speed mirrors the curve's mean speed (source span / duration).
@@ -384,6 +417,8 @@ export function normalizeClip(c) {
     if (curve) {
       out.speedCurve = curve;
       out.speed = meanSpeed(curve);
+      const ramp = normalizeSpeedRamp(c.speedRamp);
+      if (ramp) out.speedRamp = ramp;
     }
     // Kept at 1x too, so the choice survives a speed change; it only acts below 1x.
     const smooth = c.type === 'video' ? normalizeSmoothSlow(c.smoothSlow) : null;
@@ -404,6 +439,7 @@ export function normalizeClip(c) {
     // Multi-color graphics keep their own palette unless set to the custom color.
     if (c.colorMode === 'original') out.colorMode = 'original';
   }
+  if (c.type === 'avatar') out.avatar = normalizeAvatar(c.avatar);
   if (c.type === 'effect') {
     out.effect = str(c.effect, 'blur');
     out.params = normalizeEffectParams(out.effect, c.params);
@@ -558,6 +594,7 @@ export function normalizeProject(raw) {
       color: color(s.background?.color, '#000000'),
       blur: clampN(s.background?.blur, 0, 1, 0.5),
     },
+    ...(normalizeProxyMode(s.proxy) ? { proxy: normalizeProxyMode(s.proxy) } : {}),
   };
   const assets = {};
   for (const a of Object.values(raw.assets && typeof raw.assets === 'object' ? raw.assets : {})) {
@@ -638,7 +675,37 @@ export function normalizeProject(raw) {
     ...(num(raw.deletedAt) > 0 ? { deletedAt: int(raw.deletedAt) } : {}),
     ...(bins.length ? { bins } : {}),
     ...normFonts(raw.fonts),
+    ...normTimelines(raw),
   };
+}
+
+/** What a stored timeline owns (see model/timelines.js). */
+const TIMELINE_KEYS = ['settings', 'tracks', 'markers', 'range', 'transcript', 'guides', 'cover'];
+
+/**
+ * The project's other timelines: each stored one is checked like a project
+ * of its own against the shared media; the open one is just { id, name }.
+ */
+function normTimelines(raw) {
+  if (raw.nested || !Array.isArray(raw.timelines) || typeof raw.timelineId !== 'string') return {};
+  const ids = new Set();
+  const timelines = [];
+  for (const t of raw.timelines.slice(0, 50)) {
+    const id = str(t?.id);
+    if (!id || ids.has(id) || unsafeKey(id)) continue;
+    ids.add(id);
+    const name = str(t.name).replace(/\s+/g, ' ').trim().slice(0, 80) || `Timeline ${timelines.length + 1}`;
+    if (id === raw.timelineId) {
+      timelines.push({ id, name });
+      continue;
+    }
+    const n = normalizeProject({ ...t, format: FORMAT, assets: raw.assets, bins: raw.bins, nested: true });
+    const entry = { id, name };
+    for (const k of TIMELINE_KEYS) if (n[k] !== undefined && n[k] !== null) entry[k] = n[k];
+    timelines.push(entry);
+  }
+  if (!ids.has(raw.timelineId)) return {};
+  return { timelineId: raw.timelineId, timelines };
 }
 
 /**
