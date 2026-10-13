@@ -9,6 +9,7 @@
 import { registerEffect, getEffect, paramArray } from '../registry.js';
 import { offloaded } from '../offline-fx.js';
 import { num, db, hz, pct, bool, choice, preset, pause, checkAbort, dataId, biquadDb } from './util.js';
+import { LOUDNESS_STANDARDS } from './loudness-standards.js';
 import { detectionWindow, levelsDb, findSilence, removeSilence, audioMarkers } from './special-silence.js';
 
 const SPECIAL = 'Special';
@@ -218,13 +219,15 @@ registerEffect({
     num('target', 'Target Loudness', -40, -5, -23, 'LUFS', { step: 0.5 }),
     num('peakCeiling', 'True Peak Ceiling', -12, 0, -1, 'dBTP', { step: 0.1 }),
     choice('scale', 'Meter Scale', ['+9 LU (EBU)', '+18 LU (EBU)'], 0),
+    choice('standard', 'Loudness Standard', LOUDNESS_STANDARDS.map((x) => x.label), 0),
+    choice('units', 'Loudness Units', ['LUFS (absolute)', 'LU (relative to the target)'], 0),
   ],
   presets: [
-    preset('Broadcast (EBU R128)', { target: -23, peakCeiling: -1, scale: 0 }),
-    preset('Broadcast (ATSC A/85)', { target: -24, peakCeiling: -2, scale: 0 }),
-    preset('Podcast', { target: -16, peakCeiling: -1, scale: 0 }),
-    preset('Music Streaming', { target: -14, peakCeiling: -1, scale: 1 }),
-    preset('Film Dialogue', { target: -27, peakCeiling: -2, scale: 1 }),
+    preset('Broadcast (EBU R128)', { target: -23, peakCeiling: -1, scale: 0, standard: 0 }),
+    preset('Broadcast (ATSC A/85)', { target: -24, peakCeiling: -2, scale: 0, standard: 1 }),
+    preset('Podcast', { target: -16, peakCeiling: -1, scale: 0, standard: 3 }),
+    preset('Music Streaming', { target: -14, peakCeiling: -1, scale: 1, standard: 2 }),
+    preset('Film Dialogue', { target: -27, peakCeiling: -2, scale: 1, standard: 4 }),
   ],
 });
 

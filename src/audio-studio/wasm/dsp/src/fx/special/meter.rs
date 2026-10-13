@@ -7,8 +7,9 @@
 //!         ceiling only steer the display).
 //! Readout: [momentary LUFS, short-term LUFS, integrated LUFS, loudness range
 //!         LU, true peak L (linear), true peak R (linear), max momentary
-//!         LUFS, max short-term LUFS, seconds measured]; loudness values are
-//!         -inf until enough audio has passed.
+//!         LUFS, max short-term LUFS, seconds measured, sample peak L and R
+//!         (linear) since the previous readout]; loudness values are -inf
+//!         until enough audio has passed.
 
 use crate::fx::Effect;
 use crate::loudness::Meter;
@@ -25,6 +26,8 @@ pub struct LoudnessMeter {
     range: f32,
     slow_at: usize,
     frames: u64,
+    /// Sample peak per channel since the last readout (the live input meter).
+    recent_peak: [f32; 2],
 }
 
 impl LoudnessMeter {
@@ -37,6 +40,7 @@ impl LoudnessMeter {
             range: 0.0,
             slow_at: 0,
             frames: 0,
+            recent_peak: [0.0; 2],
         }
     }
 }
@@ -66,6 +70,13 @@ impl Effect for LoudnessMeter {
             self.meter.push(&tmp, frames);
         }
         self.frames += frames as u64;
+        for c in 0..channels.min(2) {
+            let m = buf[c * frames..(c + 1) * frames].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            self.recent_peak[c] = self.recent_peak[c].max(m);
+        }
+        if channels == 1 {
+            self.recent_peak[1] = self.recent_peak[0];
+        }
     }
 
     fn reset(&mut self) {
@@ -74,6 +85,7 @@ impl Effect for LoudnessMeter {
         self.range = 0.0;
         self.slow_at = 0;
         self.frames = 0;
+        self.recent_peak = [0.0; 2];
     }
 
     fn readout(&mut self, out: &mut [f32]) -> usize {
@@ -97,7 +109,13 @@ impl Effect for LoudnessMeter {
         out[6] = f(m.max_window(4));
         out[7] = f(m.max_window(30));
         out[8] = (self.frames as f64 / self.rate as f64) as f32;
-        9
+        if out.len() < 11 {
+            return 9;
+        }
+        out[9] = self.recent_peak[0];
+        out[10] = self.recent_peak[1];
+        self.recent_peak = [0.0; 2];
+        11
     }
 }
 
@@ -116,7 +134,11 @@ mod tests {
         assert_eq!(l, x);
         assert_eq!(r, x);
         let mut out = [0.0f32; 12];
-        assert_eq!(fx.readout(&mut out), 9);
+        assert_eq!(fx.readout(&mut out), 11);
+        assert!((out[9] - amp).abs() < 0.01 && (out[10] - amp).abs() < 0.01);
+        // The live peak starts over after each readout.
+        fx.readout(&mut out);
+        assert_eq!(out[9], 0.0);
         for (i, v) in out[..3].iter().enumerate() {
             assert!((v + 20.0).abs() < 0.1, "{i}: {v}");
         }
