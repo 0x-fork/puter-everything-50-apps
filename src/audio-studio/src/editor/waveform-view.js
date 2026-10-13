@@ -12,6 +12,7 @@ import { Overview } from './overview.js';
 import { WaveformRenderer } from '../render/waveform-gl.js';
 import { channelColumns } from '../audio/peaks.js';
 import { cssVar, CANVAS_FONT, parseColor } from '../ui/theme.js';
+import { markerColor } from '../ui/appearance.js';
 import { icon } from '../ui/icons.js';
 import './editor-icons.js';
 import { gainRange, fadeRange, fadeCurve, smoothBoundaries } from '../model/edits.js';
@@ -580,7 +581,7 @@ export class WaveformView {
         }
       }
       if (x < 0 || x > W) continue;
-      ctx.strokeStyle = cssVar('--marker');
+      ctx.strokeStyle = markerColor(m.type);
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(x, 0);

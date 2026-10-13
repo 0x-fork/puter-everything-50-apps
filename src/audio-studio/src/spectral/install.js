@@ -119,7 +119,7 @@ export function installSpectral(app) {
         l.view.layout();
         l.invalidate();
       }
-    } else if (key === 'spectralLog' || key === 'spectralPitch' || key === 'spectralGrid' || key === 'spectralGridOpacity') for (const l of layers) l.invalidate();
+    } else if (key === 'spectralLog' || key === 'spectralPitch' || key === 'spectralGrid' || key === 'spectralGridOpacity' || key.startsWith('pitch')) for (const l of layers) l.invalidate();
     else if (key === 'spectralPlaySelected') app.syncGraph();
   });
 

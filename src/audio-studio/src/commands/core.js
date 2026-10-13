@@ -7,7 +7,7 @@ import { AudioFile } from '../model/audio-file.js';
 import { Channel } from '../audio/channel.js';
 import * as E from '../model/edits.js';
 import { createMarker, nextMarkerName, sortMarkers, MARKER_TYPES } from '../model/markers.js';
-import { openDialog, promptDialog, confirmDialog } from '../ui/dialog.js';
+import { openDialog, confirmDialog } from '../ui/dialog.js';
 import { openFiles, pickLocalFiles, openFromPuter, saveDocument, encodeDocument, downloadBlob } from '../storage/files.js';
 import { TIME_FORMATS, parseTime } from '../lib/time.js';
 import { appIcon } from '../ui/icons.js';
@@ -16,8 +16,9 @@ import { baseName } from '../audio/decode.js';
 import * as puter from '../storage/puter.js';
 import { shortcutsDialog } from '../ui/shortcuts-dialog.js';
 import { preferencesDialog } from '../ui/preferences.js';
-import { deleteSmoothFrames } from '../editor/view-prefs.js';
+import { deleteSmoothFrames, zoomInFactor } from '../editor/view-prefs.js';
 import { shuttleCommands } from './shuttle.js';
+import { mixPasteDialog, convertSampleTypeDialog, interpretRateDialog } from './edit-dialogs.js';
 
 const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
 const hasAudio = (app) => Boolean(audio(app));
@@ -111,74 +112,15 @@ async function durationDialog(app, title, label) {
   return frames;
 }
 
-async function convertSampleTypeDialog(app) {
+async function convertSampleType(app) {
   const doc = audio(app);
-  const rate = h('select.select', { 'aria-label': 'Sample rate' }, [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000].map((r) => h('option', { value: r, selected: r === doc.sampleRate }, `${r} Hz`)));
-  const channels = h('select.select', { 'aria-label': 'Channels' }, h('option', { value: '1', selected: doc.channelCount === 1 }, 'Mono'), h('option', { value: '2', selected: doc.channelCount === 2 }, 'Stereo'));
-  const bits = h('select.select', { 'aria-label': 'Bit depth' }, [8, 16, 24, 32].map((b) => h('option', { value: b, selected: b === doc.info.bitDepth }, b === 32 ? '32 (float)' : String(b))));
-  const r = await openDialog({
-    title: 'Convert Sample Type',
-    body: h(
-      'div',
-      h('p.muted', { style: { margin: '0 0 10px' } }, `Current: ${doc.sampleRate} Hz, ${doc.channelCount === 1 ? 'Mono' : 'Stereo'}, ${doc.info.bitDepth === 32 ? '32 (float)' : `${doc.info.bitDepth}-bit`}`),
-      h('div.form-grid', h('label', 'Sample Rate:'), rate, h('label', 'Channels:'), channels, h('label', 'Bit Depth:'), bits),
-    ),
-    buttons: [
-      { label: 'Cancel', value: null },
-      { label: 'OK', value: 'ok', primary: true },
-    ],
-  });
-  if (r !== 'ok') return;
-  let state = doc.state;
-  const newRate = Number(rate.value);
-  if (newRate !== doc.sampleRate) {
-    const d = await dsp();
-    const ratio = newRate / doc.sampleRate;
-    state = {
-      ...state,
-      sampleRate: newRate,
-      channels: state.channels.map((c) => Channel.fromSamples(d.resample(c.toArray(), doc.sampleRate, newRate))),
-      markers: state.markers.map((m) => ({ ...m, start: Math.round(m.start * ratio), duration: Math.round(m.duration * ratio) })),
-    };
-  }
-  state = { ...E.convertChannels(state, Number(channels.value)), bitDepth: Number(bits.value) };
+  const state = await convertSampleTypeDialog(app, doc);
+  if (!state) return;
   const ratio = state.sampleRate / doc.sampleRate;
   doc.view = { ...doc.view, start: doc.view.start * ratio, end: doc.view.end * ratio };
   doc.selection = { start: 0, end: 0, channels: state.channels.map(() => true) };
   doc.apply('Convert Sample Type', state, { cursor: Math.round(doc.cursor * ratio) });
   app.syncGraph();
-}
-
-async function mixPasteDialog(app) {
-  const doc = audio(app);
-  const clip = await conformRate(app.clipboard, doc.sampleRate);
-  if (!clip || clip.type === 'clips') return;
-  const existing = h('input.slider', { type: 'range', min: 0, max: 200, value: 100, class: 'slider', 'aria-label': 'Existing audio volume' });
-  const pasted = h('input.slider', { type: 'range', min: 0, max: 200, value: 100, class: 'slider', 'aria-label': 'Copied audio volume' });
-  const exVal = h('span.hot', '100%');
-  const paVal = h('span.hot', '100%');
-  existing.addEventListener('input', () => (exVal.textContent = `${existing.value}%`));
-  pasted.addEventListener('input', () => (paVal.textContent = `${pasted.value}%`));
-  const mode = h('select.select', { 'aria-label': 'Paste mode' }, h('option', { value: 'overlap' }, 'Overlap (Mix)'), h('option', { value: 'insert' }, 'Insert'), h('option', { value: 'replace' }, 'Replace'));
-  const r = await openDialog({
-    title: 'Mix Paste',
-    body: h('div.form-grid', h('label', 'Existing Audio:'), h('div.row', existing, exVal), h('label', 'Copied Audio:'), h('div.row', pasted, paVal), h('label', 'Mode:'), mode),
-    buttons: [
-      { label: 'Cancel', value: null },
-      { label: 'OK', value: 'ok', primary: true },
-    ],
-  });
-  if (r !== 'ok') return;
-  const ge = Number(existing.value) / 100;
-  const gp = Number(pasted.value) / 100;
-  const scaled = gp === 1 ? clip : { ...clip, channels: clip.channels.map((c) => Channel.fromSamples(c.toArray().map((v) => v * gp))) };
-  const at = doc.hasSelection ? doc.selection.start : doc.cursor;
-  const n = clip.channels[0]?.length ?? 0;
-  let state;
-  if (mode.value === 'insert') state = E.insertClip(doc.state, at, scaled, doc.channelMask);
-  else if (mode.value === 'replace') state = E.replaceRange(doc.state, at, at + n, scaled, doc.channelMask);
-  else state = E.mixPaste(doc.state, at, clip, { existing: ge, pasted: gp, mask: doc.channelMask });
-  doc.apply('Mix Paste', state, { selection: { start: at, end: at + n } });
 }
 
 function aboutDialog() {
@@ -397,7 +339,7 @@ export function installCoreCommands(app) {
       },
     },
     { id: 'edit.pasteToNew', label: 'Paste to New', shortcut: 'Mod+Alt+V', enabled: (a) => a.clipboard?.type === 'audio', run: () => newDocFromClip(app, app.clipboard, 'Untitled') },
-    { id: 'edit.mixPaste', label: 'Mix Paste...', shortcut: 'Mod+Shift+V', enabled: (a) => hasAudio(a) && a.clipboard?.type === 'audio', run: () => mixPasteDialog(app) },
+    { id: 'edit.mixPaste', label: 'Mix Paste...', shortcut: 'Mod+Shift+V', enabled: hasAudio, run: () => mixPasteDialog(app, { doc: audio(app), conformRate }) },
     {
       id: 'edit.delete',
       label: 'Delete',
@@ -483,16 +425,15 @@ export function installCoreCommands(app) {
       checked: (a) => Boolean(a.prefs.get('snap')[k]),
       run: () => app.prefs.set('snap', { ...app.prefs.get('snap'), [k]: !app.prefs.get('snap')[k] }),
     })),
-    { id: 'edit.convertSampleType', label: 'Convert Sample Type...', shortcut: 'Shift+T', enabled: hasAudio, run: () => convertSampleTypeDialog(app) },
+    { id: 'edit.convertSampleType', label: 'Convert Sample Type...', shortcut: 'Shift+T', enabled: hasAudio, run: () => convertSampleType(app) },
     {
       id: 'edit.interpretRate',
       label: 'Interpret Sample Rate...',
       enabled: hasAudio,
       run: async () => {
         const doc = audio(app);
-        const value = await promptDialog({ title: 'Interpret Sample Rate', label: 'Play this audio as if it were recorded at (Hz):', value: String(doc.sampleRate), validate: (v) => (Number(v) >= 1000 && Number(v) <= 384000 ? '' : 'Enter a rate between 1000 and 384000 Hz.') });
-        if (!value) return;
-        const rate = Math.round(Number(value));
+        const rate = await interpretRateDialog(app, doc);
+        if (!rate || rate === doc.sampleRate) return;
         const ratio = rate / doc.sampleRate;
         doc.apply('Interpret Sample Rate', { ...doc.state, sampleRate: rate });
         doc.setView(doc.view.start, doc.view.end);
@@ -687,9 +628,9 @@ export function installCoreCommands(app) {
       shortcut: '=',
       altShortcuts: ['Shift+=', '+'],
       enabled: anyDoc,
-      run: () => zoomTime(app, 0.5),
+      run: () => zoomTime(app, zoomInFactor(app)),
     },
-    { id: 'view.zoomOutTime', label: 'Zoom Out (Time)', shortcut: '-', enabled: anyDoc, run: () => zoomTime(app, 2) },
+    { id: 'view.zoomOutTime', label: 'Zoom Out (Time)', shortcut: '-', enabled: anyDoc, run: () => zoomTime(app, 1 / zoomInFactor(app)) },
     { id: 'view.zoomInAmp', label: 'Zoom In (Amplitude)', shortcut: 'Alt+=', enabled: hasAudio, run: () => audio(app).setAmp(audio(app).view.amp * 1.5) },
     { id: 'view.zoomOutAmp', label: 'Zoom Out (Amplitude)', shortcut: 'Alt+-', enabled: hasAudio, run: () => audio(app).setAmp(audio(app).view.amp / 1.5) },
     {

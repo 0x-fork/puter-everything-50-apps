@@ -1,8 +1,9 @@
 // Preferences feature: commands that open Preferences on a given page,
 // File > Import/Export > Application Settings, and the wiring that hands
 // preference values to the modules that act on them (markers, clip
-// placement, effect chains, meters, appearance) and keeps open audio files in
-// step when synchronizing is on.
+// placement, effect chains, meters, appearance, audio devices and channel
+// maps), keeps open audio files in step when synchronizing is on and warns
+// when open audio grows past the memory limit.
 
 import { h } from '../lib/dom.js';
 import { exportSettings, validateSettings } from '../lib/prefs.js';
@@ -11,7 +12,8 @@ import { placementOptions } from '../multitrack/insert.js';
 import { rackOptions } from '../effects/rack.js';
 import { meterLevels } from '../multitrack/meter.js';
 import { installAppearance } from '../ui/appearance.js';
-import { CATEGORIES, preferencesDialog } from '../ui/preferences.js';
+import { CATEGORIES, preferencesDialog, openAudioBytes } from '../ui/preferences.js';
+import { formatBytesShort } from '../export/formats.js';
 import { openDialog } from '../ui/dialog.js';
 import { pickLocalFiles, downloadBlob } from '../storage/files.js';
 
@@ -19,6 +21,7 @@ import { pickLocalFiles, downloadBlob } from '../storage/files.js';
 export function applyModulePrefs(prefs) {
   markerOptions.undo = prefs.get('markerUndo') !== false;
   markerOptions.name = String(prefs.get('markerName') || 'Marker').trim() || 'Marker';
+  markerOptions.lock = Boolean(prefs.get('markerLock'));
   placementOptions.randomColor = Boolean(prefs.get('randomTrackColor'));
   placementOptions.avoidOverlap = Boolean(prefs.get('avoidOverlap'));
   placementOptions.sameTrack = prefs.get('insertMultiple') === 'same';
@@ -29,6 +32,18 @@ export function applyModulePrefs(prefs) {
   meterLevels.caution = Number.isFinite(caution) ? caution : -12;
   meterLevels.warning = Number.isFinite(warning) ? Math.max(meterLevels.caution, warning) : -3;
 }
+
+/** Hands device settings to the playback engine. */
+export function applyEnginePrefs(app) {
+  const e = app.engine;
+  if (!e) return;
+  e.setLatencyHint?.(app.prefs.get('latencyHint') || 'interactive');
+  e.setOutputMap?.(app.prefs.get('outputMap'));
+  e.setInputMap?.(app.prefs.get('inputMap'));
+  if ((app.prefs.get('outputDevice') || '') !== (e.sinkId || '')) e.setSink?.(app.prefs.get('outputDevice') || '');
+}
+
+const ENGINE_KEYS = new Set(['latencyHint', 'outputMap', 'inputMap', 'outputDevice']);
 
 /** Settings file name for today: "Audio Studio Settings 2026-10-12.json". */
 export function settingsFileName(now = new Date()) {
@@ -76,6 +91,7 @@ async function importSettings(app) {
 
 export function installPreferences(app) {
   applyModulePrefs(app.prefs);
+  applyEnginePrefs(app);
   installAppearance(app);
 
   app.prefs.on('change', (key) => {
@@ -83,6 +99,21 @@ export function installPreferences(app) {
     // Settings the playback graph is built from.
     if (key === 'panLaw' || key === 'panLawDb' || key === 'fxProcessBypassed') app.syncGraph();
     if (key === 'shortcuts') app.commands.reloadShortcuts?.();
+    if (ENGINE_KEYS.has(key)) applyEnginePrefs(app);
+  });
+
+  // Preferences > Memory: one warning each time open audio grows past the limit.
+  let overLimit = false;
+  app.on('documents', () => {
+    const limit = Number(app.prefs.get('memoryWarnMb')) * 1024 * 1024;
+    const bytes = openAudioBytes(app);
+    if (!(limit > 0) || bytes <= limit) {
+      overLimit = false;
+      return;
+    }
+    if (overLimit) return;
+    overLimit = true;
+    app.notify(`Open files use about ${formatBytesShort(bytes)} of memory. Save and close files you no longer need to keep the browser responsive.`);
   });
 
   // Keep selection, zoom and playhead in step across open audio files.

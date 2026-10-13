@@ -16,6 +16,7 @@ import { normalizeValues } from './params.js';
 import { lastValues } from './presets.js';
 import { openEffectDialog } from './dialog.js';
 import { groupedEffects } from './rack.js';
+import { showNotice } from '../ui/notices.js';
 
 let nextFav = 1;
 const favId = () => `fav${Date.now().toString(36)}${nextFav++}`;
@@ -424,7 +425,22 @@ export function installFavorites(app) {
   app.commands.register([
     { id: 'fav.add', label: 'New Favorite...', run: () => newFavoriteDialog(app) },
     { id: 'fav.edit', label: 'Edit Favorites...', run: () => app.dock?.openPanel('favorites') },
-    { id: 'fav.recordStart', label: 'Start Recording Favorite', enabled: () => !fav.recording, run: () => setRecording(true) },
+    {
+      id: 'fav.recordStart',
+      label: 'Start Recording Favorite',
+      enabled: () => !fav.recording,
+      run: async () => {
+        const go = await showNotice(app, {
+          id: 'favoriteRecording',
+          title: 'Recording a Favorite',
+          message: [
+            'Audio Studio is recording a favorite. Apply an effect in the Waveform editor and its settings are saved as a favorite you can run from the Favorites menu, the Favorites panel or a batch process.',
+            'To stop without saving, choose Favorites > Stop Recording Favorite.',
+          ],
+        });
+        if (go) setRecording(true);
+      },
+    },
     { id: 'fav.recordStop', label: 'Stop Recording Favorite', enabled: () => fav.recording, run: () => setRecording(false) },
   ]);
 

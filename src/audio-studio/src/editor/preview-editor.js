@@ -49,7 +49,8 @@ export function installPreviewEditor(app, host) {
   let controller = null;
   let changesLength = false;
 
-  const wanted = () => Boolean(current) && (app.prefs.get('previewEditor') || (changesLength && app.prefs.get('previewAuto') !== false));
+  // Automatic: for effects that change the length, or for any effect (Preferences > Effects).
+  const wanted = () => Boolean(current) && (app.prefs.get('previewEditor') || (app.prefs.get('previewAuto') !== false && (changesLength || app.prefs.get('previewAutoMode') === 'any')));
 
   const sync = () => {
     const show = wanted();
@@ -143,7 +144,7 @@ export function installPreviewEditor(app, host) {
     if (!current || doc !== current.doc || el.hidden) return;
     if (e.kind === 'view' || e.kind === 'selection' || e.kind === 'edit' || e.kind === 'history') schedule(e.kind === 'view' ? 120 : 250);
   });
-  app.prefs.on('change', (key) => (key === 'previewEditor' || key === 'previewAuto') && sync());
+  app.prefs.on('change', (key) => (key === 'previewEditor' || key === 'previewAuto' || key === 'previewAutoMode') && sync());
   new ResizeObserver(() => draw()).observe(surface);
 
   app.commands.register([

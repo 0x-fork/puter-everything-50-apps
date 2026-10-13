@@ -12,6 +12,7 @@ import { Overview } from './overview.js';
 import { ClipWaveRenderer } from '../render/clips-gl.js';
 import { channelColumns } from '../audio/peaks.js';
 import { cssVar, CANVAS_FONT, parseColor, resolvedTheme } from '../ui/theme.js';
+import { markerColor } from '../ui/appearance.js';
 import { icon } from '../ui/icons.js';
 import { contextMenu } from '../ui/menubar.js';
 import { fadeShape } from '../engine/mixcore.js';
@@ -976,7 +977,7 @@ export class MultitrackView {
         }
       }
       if (x < 0 || x > W) continue;
-      ctx.strokeStyle = cssVar('--marker');
+      ctx.strokeStyle = markerColor(m.type);
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(x, 0);
@@ -1723,7 +1724,7 @@ export class MultitrackView {
       if (c && d.result) {
         const mode = stretchOf(c).mode;
         try {
-          stretcherFor(this.app, doc).apply('Stretch Clip', [d.id], { mode: mode === 'off' ? 'realtime' : mode, ratio: d.result.ratio, start: d.result.start });
+          stretcherFor(this.app, doc).apply('Stretch Clip', [d.id], { mode: mode === 'off' ? (this.app.prefs.get('clipStretchMode') === 'rendered' ? 'rendered' : 'realtime') : mode, ratio: d.result.ratio, start: d.result.start });
           announce(`Clip stretched to ${Math.round(d.result.ratio * 1000) / 10}%`);
         } catch (err) {
           this.app.notify(err?.message || 'The clip could not be stretched.', { error: true });

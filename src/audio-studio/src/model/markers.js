@@ -7,9 +7,10 @@ let nextMarker = 1;
 /**
  * Marker behavior from Preferences > Markers & Metadata (set by the app):
  * `undo` false makes marker-only edits change the document without adding
- * undo steps; `name` is the default name prefix for new markers.
+ * undo steps; `name` is the default name prefix for new markers; `lock`
+ * keeps markers at their times when audio before them is deleted or inserted.
  */
-export const markerOptions = { undo: true, name: 'Marker' };
+export const markerOptions = { undo: true, name: 'Marker', lock: false };
 
 /** True when `next` differs from `prev` only in its markers. */
 export function markersOnlyChange(prev, next) {
@@ -45,6 +46,7 @@ export function sortMarkers(markers) {
 
 /** Markers after removing frames [a, b): inside cues vanish, later ones shift, ranges shrink. */
 export function shiftMarkersForDelete(markers = [], a, b) {
+  if (markerOptions.lock) return markers;
   const cut = b - a;
   const out = [];
   for (const m of markers) {
@@ -65,6 +67,7 @@ export function shiftMarkersForDelete(markers = [], a, b) {
 
 /** Markers after inserting n frames at `at`: later markers shift; spanning ranges grow. */
 export function shiftMarkersForInsert(markers = [], at, n) {
+  if (markerOptions.lock) return markers;
   return markers.map((m) => {
     // A cue exactly at the insertion point stays put; ranges starting there move with their audio.
     if (m.start > at || (m.duration > 0 && m.start === at)) return { ...m, start: m.start + n };
