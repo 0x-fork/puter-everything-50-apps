@@ -1,0 +1,118 @@
+/* Speed tab: curve presets and the speed curve editor. */
+.speed-tab .subtabs {
+  margin-bottom: 4px;
+}
+
+.speed-pitch {
+  padding: 4px 12px 12px;
+}
+
+.speed-smooth {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 4px;
+}
+
+.speed-smooth .field-label {
+  white-space: normal;
+}
+
+.speed-smooth .field-hint {
+  margin-top: 2px;
+}
+
+.speed-smooth .segmented button {
+  white-space: nowrap;
+  padding: 0 6px;
+}
+
+.speed-smooth.is-off .segmented {
+  opacity: 0.6;
+}
+
+.speed-preset-grid {
+  grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+}
+
+.speed-preset-grid .choice-preview {
+  aspect-ratio: 7 / 4;
+}
+
+.speed-preset-grid .choice-label {
+  white-space: normal;
+  min-height: 2.5em;
+}
+
+.speed-glyph {
+  width: 80%;
+  height: auto;
+  overflow: visible;
+}
+
+.speed-glyph-base {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.speed-glyph-line {
+  fill: none;
+  stroke: var(--text-2);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.choice:hover .speed-glyph-line {
+  stroke: var(--text);
+}
+
+.choice[aria-checked='true'] .speed-glyph-line {
+  stroke: var(--accent-text);
+}
+
+.speed-custom-icon {
+  display: inline-flex;
+  color: var(--text-2);
+}
+
+.choice[aria-checked='true'] .speed-custom-icon {
+  color: var(--accent-text);
+}
+
+.speed-curve-box {
+  position: relative;
+  width: 100%;
+}
+
+.speed-curve-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 5 / 3;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.speed-curve-canvas:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.speed-curve-readout {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  min-height: 1.4em;
+}
+
+.speed-curve-help {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+}

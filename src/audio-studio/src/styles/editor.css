@@ -1,0 +1,473 @@
+/* Editor panel: waveform view, rulers, overview, transport. */
+
+.editor-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden !important;
+}
+
+.editor-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.editor-view {
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  overflow: auto;
+}
+
+.editor-empty-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 460px;
+  text-align: center;
+}
+
+.editor-empty-inner h2 {
+  margin: 4px 0 0;
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.editor-empty-inner p {
+  margin: 0 0 8px;
+}
+
+.editor-empty-icon {
+  display: flex;
+}
+
+.editor-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* Waveform view grid */
+.wf {
+  display: grid;
+  grid-template-rows: 34px 26px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  background: var(--bg-panel);
+}
+
+.wf-top,
+.wf-ruler-row,
+.wf-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.wf-top {
+  padding: 4px 0 4px 6px;
+}
+
+.overview {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--bg-editor);
+  cursor: pointer;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.overview canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.overview-playhead {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--playhead);
+  pointer-events: none;
+}
+
+.overview-frame {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border: 1.5px solid var(--text-dim);
+  border-radius: 2px;
+  background: var(--grid);
+  pointer-events: none;
+}
+
+.overview-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--text-dim);
+}
+
+.overview-grip.left {
+  left: -1px;
+}
+
+.overview-grip.right {
+  right: -1px;
+}
+
+.wf-ruler-row {
+  padding-left: 6px;
+}
+
+.time-ruler {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+}
+
+.time-ruler canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.wf-ruler-corner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+
+.icon-btn.sm {
+  width: 20px;
+  height: 20px;
+}
+
+.playhead-handle {
+  position: absolute;
+  left: -6px;
+  bottom: 0;
+  width: 13px;
+  height: 14px;
+  background: var(--cti);
+  clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%);
+  pointer-events: none;
+}
+
+.wf-main {
+  padding: 0 0 6px 6px;
+}
+
+.wf-lanes {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-editor);
+  touch-action: none;
+  cursor: text;
+  outline: none;
+}
+
+.wf-lanes:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.wf-lanes canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.playhead {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--playhead);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.fade-handle {
+  position: absolute;
+  top: 6px;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--text-dim);
+  border-radius: 2px;
+  background: var(--bg-raised);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.fade-handle:hover {
+  border-color: var(--text-strong);
+  background: var(--text-dim);
+}
+
+.hud {
+  position: absolute;
+  top: 26px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px 0 6px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  transform: translateX(-50%);
+  opacity: 0.88;
+}
+
+.hud:hover {
+  opacity: 1;
+}
+
+.hud-icon {
+  display: inline-flex;
+}
+
+.hud-knob {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.hud-value {
+  min-width: 48px;
+  color: var(--hot);
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-amp {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wf-amp canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.wf-channel-buttons {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.channel-btn {
+  position: absolute;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.channel-btn[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+/* Transport bar */
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 8px;
+  border-top: 1px solid var(--border-soft);
+  flex: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.transport::-webkit-scrollbar {
+  display: none;
+}
+
+.transport-time {
+  flex: 1 1 120px;
+  min-width: 112px;
+}
+
+.time-display {
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--hot);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.time-display:hover {
+  background: var(--bg-hover);
+}
+
+.transport-buttons,
+.transport-zoom {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.transport-zoom {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+
+.transport-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.transport-btn.record {
+  color: var(--record);
+}
+
+.transport-btn.record.on {
+  background: var(--record);
+  color: var(--accent-text);
+}
+
+.transport-btn.on {
+  color: var(--accent-strong);
+}
+
+/* Narrow editor frames (tablet): zoom buttons wrap to a second row instead of
+   scrolling out of sight. */
+[data-layout='tablet'] .transport {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 40px;
+  padding: 4px 8px;
+  row-gap: 2px;
+}
+
+[data-layout='phone'] .transport {
+  flex-wrap: wrap;
+  height: auto;
+  padding: 4px 6px;
+  gap: 4px;
+}
+
+[data-layout='phone'] .transport-time {
+  flex: 1 1 100%;
+  display: flex;
+  justify-content: center;
+}
+
+[data-layout='phone'] .transport-zoom {
+  display: none;
+}
+
+[data-layout='phone'] .transport-btn {
+  width: 36px;
+  height: 36px;
+}
+
+[data-layout='phone'] .transport-buttons {
+  flex: 1;
+  justify-content: center;
+}
+
+[data-layout='phone'] .wf {
+  grid-template-rows: 30px 24px minmax(0, 1fr);
+}
+
+[data-layout='phone'] .wf-top,
+[data-layout='phone'] .wf-ruler-row,
+[data-layout='phone'] .wf-main {
+  grid-template-columns: minmax(0, 1fr) 30px;
+}
+
+@media (pointer: coarse) {
+  .fade-handle {
+    width: 20px;
+    height: 20px;
+  }
+}
+
+/* View > Show Editor Panel Controls off: the editor fills the panel. */
+:root[data-editor-controls='off'] .editor-panel > .transport {
+  display: none;
+}
+
+/* Preview Editor: the effect's result under the waveform while its dialog is open. */
+.preview-host {
+  display: contents;
+}
+.preview-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 34%;
+  min-height: 90px;
+  border-top: 2px solid var(--border);
+  background: var(--bg-editor);
+}
+.preview-editor[hidden] {
+  display: none;
+}
+.preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: var(--fs-sm);
+}
+.preview-title {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.preview-surface {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.preview-gl {
+  position: absolute;
+  top: 0;
+  left: 0;
+}

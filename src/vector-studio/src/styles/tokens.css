@@ -1,0 +1,102 @@
+/*
+ * Design tokens. Two themes share one set of names; <html data-theme-resolved>
+ * picks light or dark (system by default). Flat surfaces: no gradients and
+ * no shadows except on floating layers (menus, popovers, dialogs) where
+ * elevation is needed to separate them from the canvas.
+ */
+:root {
+  --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --fs: 12px;
+  --fs-sm: 11px;
+  --fs-lg: 13px;
+
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  --topbar-h: 40px;
+  --tabs-h: 30px;
+  --toolbar-w: 52px;
+  --strip-w: 40px;
+  --dock-w: 296px;
+  --status-h: 50px;
+  --control-h: 28px;
+
+  --t-fast: 100ms;
+  --t: 160ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Filled accent surfaces carry white text, so both stay above 4.5:1. */
+  --accent: #2563eb;
+  --accent-hover: #1d4fd8;
+  --on-accent: #ffffff;
+  --danger: #e5484d;
+  --success: #30a46c;
+  --warning: #f5a524;
+  --selection-color: #4f80ff;
+  --guide-color: #3fd6ff;
+  --alignment-guide-color: #ff3fb4;
+}
+
+:root,
+:root[data-theme-resolved='light'] {
+  color-scheme: light;
+  --bg-app: #e4e4e4;
+  --bg-topbar: #f3f3f3;
+  --bg-panel: #f3f3f3;
+  --bg-panel-2: #ebebeb;
+  --bg-elev: #ffffff;
+  --bg-input: #ffffff;
+  --bg-hover: rgba(0, 0, 0, 0.06);
+  --bg-active: rgba(0, 0, 0, 0.1);
+  --bg-selected: rgba(61, 123, 253, 0.14);
+  --border: #d4d4d4;
+  --border-strong: #b9b9b9;
+  --text: #1f1f1f;
+  --text-2: #4b4b4b;
+  --text-3: #5e5e5e;
+  --focus: #2b6af0;
+  --link: #1d4fd8;
+  --scrim: rgba(0, 0, 0, 0.35);
+  --pasteboard: #d8d8d8;
+  --artboard-border: #2b2b2b;
+  --artboard-label: #4b4b4b;
+  --grid-color: rgba(0, 0, 0, 0.16);
+  --ruler-bg: #f3f3f3;
+  --ruler-fg: #6e6e6e;
+  --shadow-float: 0 8px 28px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08);
+  --tooltip-bg: #1f1f1f;
+  --tooltip-fg: #ffffff;
+}
+
+:root[data-theme-resolved='dark'] {
+  color-scheme: dark;
+  --bg-app: #1d1d1d;
+  --bg-topbar: #262626;
+  --bg-panel: #2c2c2c;
+  --bg-panel-2: #333333;
+  --bg-elev: #383838;
+  --bg-input: #1e1e1e;
+  --bg-hover: rgba(255, 255, 255, 0.07);
+  --bg-active: rgba(255, 255, 255, 0.13);
+  --bg-selected: rgba(61, 123, 253, 0.28);
+  --border: #3d3d3d;
+  --border-strong: #545454;
+  --text: #ececec;
+  --text-2: #bdbdbd;
+  --text-3: #a6a6a6;
+  --focus: #6d9dff;
+  --link: #7aa7ff;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --pasteboard: #4a4a4a;
+  --artboard-border: #111111;
+  --artboard-label: #c8c8c8;
+  --grid-color: rgba(0, 0, 0, 0.22);
+  --ruler-bg: #2c2c2c;
+  --ruler-fg: #a3a3a3;
+  --shadow-float: 0 10px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --tooltip-bg: #f0f0f0;
+  --tooltip-fg: #1a1a1a;
+}

@@ -1,0 +1,321 @@
+# Photo Studio architecture
+
+Photo Studio is a browser image editor (vanilla TypeScript, Vite, Puter.js).
+This guide is for contributors adding features.
+
+## Layout of the source
+
+| Area | Location | Notes |
+| --- | --- | --- |
+| Workspace chrome | `src/app/` | Registries, menus, toolbar, dock, pointer input, shortcuts, icons |
+| Orchestrator | `src/editor.ts` | Sessions (open documents), history access, update loop, view |
+| Features | `src/features/` | Each feature registers commands, tools, panels and overlays |
+| Document model | `src/model/` | Immutable-snapshot documents, tiles, selections, PSD codec |
+| Imaging | `src/imaging/` | Pure algorithms on typed arrays (filters, adjustments, codecs, effects, text...) |
+| Painting engine | `src/engine/paint.ts` | Dab-based strokes into copy-on-write tiles |
+| GPU compositor | `src/renderer/` | WebGPU with WebGL2 fallback; both shaders must stay in sync |
+
+## Registries (`src/app/registry.ts`)
+
+- `registerCommand({ id, label, run, shortcut?, enabled?, checked?, menu?, hidden? })`.
+  Menu placement comes from `src/app/menus.ts` (`menuSkeleton`): a command whose ID
+  appears there shows up automatically; unregistered IDs are omitted. Dynamic submenus
+  (e.g. `filter.blur`, `window.panels`) collect commands whose `menu` field names them.
+  Shortcuts use `Mod` for Command/Ctrl, e.g. `Mod+Shift+N`, `Alt+Backspace`, `F5`.
+- `registerTool({ id, label, key, icon, group, options, bindOptions, pointerDown/Move/Up, hover, keyDown, overlay, activate, deactivate, cursor })`.
+  `group` selects the toolbar slot (see `toolGroups` in `src/app/toolbar.ts`); tools in
+  one group share a slot with a flyout, and Shift+key cycles them.
+  Pointer events give `CanvasPointer` (`x`, `y` in document pixels, `pressure`, modifier flags, `coalesced` samples).
+- `registerPanel({ id, title, icon, location: 'dock-top'|'dock-middle'|'dock-bottom'|'strip', mount, update, menu })`.
+  `mount` runs once; `update` runs after every edit while the panel is visible.
+  Window → Panels entries are generated. `menu` lists the panel's own commands;
+  the dock appends the standard items (minimize, collapse to icon or dock as tab,
+  close) to every panel menu. Strip sections are listed in `stripSections` (`src/app/dock.ts`).
+- Icons (`src/app/icons.ts`) are Lucide glyphs plus original ones on the same
+  24-unit grid (1.7 stroke, round caps and joins). Give each tool its own glyph;
+  `tests/icons.test.ts` fails on literal names that do not exist.
+- `registerOverlay(id, (e) => svgMarkup)` draws document-space SVG above the canvas (use `1 / e.zoom` for hairlines).
+- `contributeMenu(menuId, items, afterId?)` inserts items into an existing menu.
+- Feature entry points are listed in `src/features/index.ts` (one line each).
+
+Never show a control that does nothing: register a command only when it works.
+
+## Loading on demand (`src/app/lazy.ts`)
+
+Registration stays eager (menus, toolbar, shortcuts and panels are complete at
+startup); implementations load with `import()` on first use. Keep a feature's
+`index.ts` and the modules it imports statically light: no dialogs, codecs,
+workspaces or heavy algorithms.
+
+- `lazy(() => import('./dialog'))` is a memoized loader; `.loaded` gives
+  synchronous access once loaded, `.prefetch()` starts it quietly. Loads slower
+  than ~150 ms show a progress cursor and a bar on the status bar.
+- `registerCommand({ id, label, ...lazyRun(mod, (m, e, arg) => m.open(e, arg)) })`
+  runs a function of the module; menus prefetch it on hover.
+- `lazyTool(meta, loader)` registers a tool from its toolbar metadata; it loads
+  when chosen or hovered, and pointer input that arrives earlier is replayed.
+  `lazyPanel(meta, loader)` mounts a panel body when first shown.
+- `prefetchOnIdle(...)` and `whenIdle(task)` run work when the browser is idle
+  (likely-next modules, installed-font detection).
+- State that menus and hooks read at any time (`enabled`/`checked`, layer
+  badges, update hooks) lives in small modules next to the implementation
+  (`filters/state.ts`, `embedded/link-state.ts`, `transform/session-state.ts`);
+  the implementation re-exports it so existing imports keep working.
+- The Filter menu comes from `filters/menu.ts` (generated from the catalog,
+  checked by `tests/filters-menu.test.ts`; regenerate with `UPDATE_FILTER_MENU=1`).
+- Workers are separate chunks (`new Worker(new URL(...))`).
+
+Panels that redraw on every update should patch rather than rebuild: the
+Layers panel describes one HTML fragment per row and `patchList`
+(`src/ui/patch-list.ts`) keeps unchanged rows. See `docs/performance.md` for
+measurements and the opt-in timing budgets.
+
+Shortcuts are global: give each command its own (`tests/shortcuts.test.ts` runs
+`shortcutConflicts` over the real registry for macOS and Windows/Linux, where Ctrl
+is the Mod key). A shortcut list can hold platform alternatives; menus show the
+first one that can be typed. Brush-like tools get [ ], Shift+[ ] and Alt+right-drag
+by defining `brush`, and number keys through `e.settings.numberKey(value, shift)`.
+Use an ellipsis (…) in a label exactly when the command asks for input before
+acting. `tests/menus.test.ts` checks the menu tree (orphans, anchors, labels,
+reachability) and `tests/browser/smoke-all.spec.ts` runs every command, tool and
+panel in the browser; add fixture state there when a new command needs it.
+Options-bar controls get tooltips from `src/app/option-tips.ts` when they have no
+`title`; add an entry for a new control whose label alone does not explain it.
+
+## Documents, history and tiles
+
+- `e.doc` is the current immutable `PhotoDocument`. Change it only through
+  `e.command(label, (draft) => { ... })` (one undo step) or `e.editLayer(label, fn)`.
+  Live previews: build a modified document (shallow copies) and call `e.preview(doc)`.
+- Layer kinds: `pixel` (destructive tiles), `image` (embedded object with
+  non-destructive transform), `text`, `vector`, `solid`, `group`, `adjustment`, legacy `paint`.
+- Pixel content lives in `TileGrid`s (`src/model/tiles.ts`): 256 px immutable tiles
+  shared between history states. Read with `readRGBA/readMask(store, grid, rect)`,
+  write with `writeRect(store, grid, x, y, buffer)` which returns a *new* grid.
+  `e.assets.tiles` is the store. Never mutate a tile that a committed grid references.
+- Pixel layers keep `transform` equal to their content bounds (`syncPixelTransform`).
+  Moving/transforming them is baked automatically when the edit is committed.
+- Selections: `doc.selectionMask` (1-channel grid, origin 0) and `doc.selection` (its
+  bounds). Use `selectionGrid`, `applySelection`, `commitSelectionMask(e, mask, op, label)`.
+- Layer masks painted in the app are `layer.maskGrid` (fill 255 = reveal all).
+
+## Document windows and views (`src/app/views.ts`)
+
+- A `DocumentView` is one window onto a session (document) with its own zoom, pan,
+  rotation and mirroring; `e.views` lists them and `e.activeView` receives input.
+  `e.session` is the active view's document; assigning it switches to that
+  document's most recent window.
+- Geometry lives in `src/app/view-transform.ts`. Convert coordinates only with
+  `e.docPoint` / `e.clientPoint` (or `e.viewMatrix()`); the stage can be rotated,
+  so never derive document coordinates from `#stage` bounding boxes.
+- `WindowManager` (`e.windows`) lays out tabbed, tiled, n-up and floating windows
+  (`src/app/view-layout.ts`). Only the active window hosts the live canvas; others
+  draw a copy of their document's last frame, taken through
+  `renderer.frameListeners` (also used by Pattern Preview).
+
+## Helpers for pixel features (`src/features/pixels.ts`)
+
+- `pixelTarget(e)` resolves what painting/filters should edit: the selected pixel
+  layer, its mask when the mask thumbnail is active, Quick Mask, or rasterizes an
+  embedded/text/shape layer first. `commitTarget(e, target, grid, label)` stores the result.
+- `applyToLayer(e, label, (src, rect) => out)` runs an RGBA8 operation on the target
+  layer, restricted and blended by the active selection, as one undo step.
+- `compositeRGBA(e)` and `layerRGBA(e, layer)` read pixels back from the GPU.
+
+## Embedded objects (`src/model/embedded.ts`, `src/features/embedded/`)
+
+- `doc.embeds[id]` holds the content of an embedded object: a nested `.photo`
+  project asset (`project`), the original file (`source`), the rendered result
+  drawn by instances (`composite`), an optional `link` and `stack` mode. An
+  `image` layer with `embed.contents` is an instance; Duplicate Layer shares the
+  entry, New Embedded Object via Copy copies it. Changing content always makes
+  new assets and a new entry (`setContents`), so undo is a reference swap.
+- Edit Contents opens the project in a new session; that session's `saveHandler`
+  renders it and executes one history step in the parent session.
+- Skew, distort, perspective and warp store `embed.frame` (quad, optional mesh,
+  the rectangle of the cached render and the composite it came from). `asset`
+  is then a cache rendered from the composite; `scheduleRefresh` re-renders
+  stale caches in place after edits (it is derived data, not a history step).
+  Later rectangle edits of `transform` compose with the frame (`effectiveFrame`).
+- Composites and per-layer stack inputs render on a private offscreen
+  compositor (`embedded/render.ts`), never on the visible canvas.
+
+## Layer styles, fill layers and patterns (`src/features/effects/`)
+
+- `layer.style` holds a `LayerStyle` (`src/imaging/effects/types.ts`). The compositor
+  (`src/renderer/layer-style.ts`) reads the layer's document-space pixels (tiles for
+  plain pixel layers, otherwise a render-alone readback), renders effects in a worker
+  through the function registered with `registerStyleRenderer`, and composites the
+  below/layer/above passes in place of the layer. Results are cached by content and
+  style; a move only translates them. The interactive canvas draws ready results
+  while new ones render (`renderer.progressiveStyles`); readbacks and exports wait.
+- Fill layers are kind `solid` with `fill` (`src/model/fill-layer.ts`): a gradient or a
+  pattern rendered by the compositor and edited in Properties.
+- `doc.patterns` stores patterns defined from pixels (tile grids, saved with the project).
+- PSD export rasterizes styled layers and fill layers into pixels with effects baked in.
+- `doc.globalLight` replaces each style's own global angle/altitude when set (Global Light dialog).
+
+## Advanced blending and spatial adjustments
+
+- `layer.blending` (`src/model/blending.ts`) holds Blend If ranges, excluded channels,
+  knockout and the group/mask options. The composite pass uniforms are 96 floats
+  (`UNIFORM_FLOATS`): floats 48–79 carry the ranges and 80–83 the Blend If flag and
+  excluded channels (`blendingUniforms`). Mode `u[29] = 4` mixes the backdrop toward
+  the source by a document-sized shape mask (knockout, clipped layers that do not
+  blend as a group). `rangeWeight`/`blendIfWeight` are the CPU reference of the shader math.
+- Knockout backdrops: `Renderer.knockStack` holds a copy of each enclosing group's
+  start (shallow); the Background layer alone is rendered once per draw (deep).
+- Spatial adjustment kinds (Clarity & Dehaze, Grain) render through
+  `Backend.filterPass` (`filter-shaders.ts`, `spatial-pass.ts`); the CPU reference
+  in `src/imaging/adjust/spatial.ts` serves destructive commands and tests.
+
+## Artboards, frames, comps and slices (`src/features/layout/`)
+
+- Artboards and frames are groups with `layer.artboard` / `layer.frame` data
+  (`src/model/artboard.ts`, `src/model/frame.ts`). Artboards stay at the top level.
+  The compositor (`Renderer.groupSource`) draws an artboard's background and clips
+  artboards and frames through the shared pass, so both backends behave the same.
+- Layout geometry (artboard and frame rectangles, slices, comp positions) follows
+  crops, resizes and canvas rotations through `mapLayoutGeometry`.
+- Hooks for moving layers: `layerMoveHooks` and `pickFallbacks` (`src/ui/transform.ts`)
+  and `snapProviders` (`src/model/transform.ts`).
+- `doc.layerComps` and `doc.slices` hold comps and user/layer-based slices; automatic
+  slices come from `partitionSlices`. `src/imaging/codecs/pdf.ts` writes image PDFs.
+
+## Video timeline and video layers (`src/features/animation/video*.ts`)
+
+- A document has either `doc.animation` (frame animation) or `doc.timeline`
+  (`src/model/video-timeline.ts`): frame rate, duration and current time in
+  timeline frames, a work area, and a `Clip` per layer (absent records span the
+  whole timeline) with `start`, `in` (content trimmed from the start), `length`,
+  keyframes for position (offsets), opacity and layer style (linear or hold)
+  and fade/fade-with-color/cross-fade transitions. Keyframe times count from
+  the content's start, so they move with the clip.
+- As with frame animation, the layers show the current time: `applyTime`
+  (`video-timeline-ops.ts`) writes keyed values and video frames into them, and
+  `syncTimeline` (a document hook) records edits at the current time as keys
+  (when the property's stopwatch is on) and as altered frames of video layers.
+  `applyTime` marks its own changes (`placed`) so they are not recorded.
+- Clip ranges and transitions apply only when a document is drawn:
+  `presentTimeline` runs through `registerPresentation` in the renderer
+  (layers read back alone are not affected), so the Layers panel keeps each
+  layer's own visibility and opacity.
+- A video layer is a pixel layer with `layer.video` (`src/model/video-layer.ts`):
+  the footage (an opaque source asset), the frame origin, interpreted frame
+  rate, alpha and loops, a run-length map of footage and blank frames, and
+  altered frames as tile grids. `pixels` holds the frame shown, so painting,
+  filters and adjustments work unchanged and become the frame's alteration.
+- Footage decodes on demand (`video-frames.ts`): WebM through the demuxer
+  (`imaging/codecs/webm-demux.ts`) and WebCodecs, continuing forward while
+  playing; other formats by seeking a hidden `<video>`. Decoded frames are tile
+  grids in an LRU `FrameCache` (budget in Preferences → Performance) whose tiles
+  are kept through `tileHolders`. `setTime` decodes before it commits a
+  coalesced "Set Current Time" step; `editTimeline` does the same for edits.
+- Playback (`video-playback.ts`) previews `timeDocument` copies in real time,
+  skipping frames still decoding. Render Video builds the same copies per
+  output frame and encodes them as they render.
+- Video layer placement: frames live in layer space at `video.x/y`; footage
+  frames reach it through `video.matrix` and each altered frame through its
+  `alteredMatrix` entry (absent = identity). `transformVideo` composes a
+  document transform into all of them. Canvas edits do this in
+  `mapDocumentGeometry` (the point map is fitted as a projective matrix);
+  layer transforms do it where they rebuild a pixel layer (`applyPrepared` for
+  layer flips and rotations, the transform session, Transform Again and
+  `commitPixelResample`). Placing a time resamples a frame through its matrix
+  (`lookup.place`, cached by tiles and matrix); whole-pixel moves place grids
+  as they are. Painting a resampled frame stores it in layer space without a
+  matrix. Mode and profile conversions (`mapDocument`) convert every frame,
+  keeping converted footage frames as altered frames. Mesh warps are refused.
+- Layer comps act on the layers as shown at the current time: with a stopwatch
+  on, the position, opacity or style they change becomes a keyframe.
+- Artboards and a video timeline do not mix: the history hook refuses an edit
+  that would combine them, and the artboard commands say so up front.
+
+## Assisted editing (`src/features/assist/`)
+
+- Puter AI calls live only in `src/imaging/ai/puter-ai.ts` and run only from an
+  explicit button press in a dialog that states what is sent (prompt, pixels)
+  and that it needs a Puter account. Results become new layers; the prompt is
+  kept in `layer.generated` and shown in Properties. Tests replace `aiCodec`
+  and stub `globalThis.puter`.
+- Classical counterparts run in the assist worker (`worker.ts`): Enhanced
+  Upscale (`imaging/filters/upscale.ts`), object detection
+  (`imaging/segment/objects.ts`). Denoise and Sharpen Details are ordinary
+  filter operations (`imaging/filters/restore.ts`).
+- `commitResampled` (`features/transform/image-size.ts`) stores resampled
+  layer, mask, live-filter, channel and selection grids as one history step.
+
+## Type on paths and variables
+
+- Path and area text keep their path in `textData.path` (`TypePath`, local text space).
+  `layoutText` lays path text out straight and bends it onto the path
+  (`src/imaging/text/path-text.ts`): runs become rotated glyphs, and `layout.map` /
+  `layout.unmap` convert between straight and local coordinates, so carets, selections
+  and hit testing reuse the straight geometry. Area text breaks lines into the spans of
+  the shape. The path is also a `PathTarget` of kind `text`, so the pen and path
+  selection tools edit it; `selectHooks` let the type feature claim its markers.
+- `doc.variables` binds layers to variables and holds data sets (`src/model/variables.ts`).
+  `documentWithSet` (`src/features/variables/apply.ts`) builds the document a set
+  produces without committing it, for previews, Apply Data Set and batch export.
+
+## Scripting and application events (`src/features/scripting/`)
+
+- Application events (`src/app/app-events.ts`): `emitAppEvent('new-document' | 'open-document' |
+  'before-save' | 'after-save' | 'export' | 'close-document' | 'start', session)`.
+  Code that creates, opens, saves, exports or closes documents announces it; `before-save`
+  is awaited. `withoutAppEvents(work)` keeps batch processing quiet.
+- Scripts run in `ScriptSandbox` (`sandbox.ts`): a hidden `sandbox="allow-scripts"` iframe
+  with a strict CSP starts a worker with `runtime.js` (the `studio` API as scripts see it)
+  followed by the script. Everything crosses one MessageChannel as structured clones.
+- `ScriptHost` (`host.ts`) implements the API on the editor: it checks every argument,
+  activates the document an edit targets, and combines a run's history states into one
+  step per document with `History.mark` / `History.squash`. Tests drive it with a mock editor.
+- Installed scripts and event rules live in IndexedDB (`store.ts`, database
+  `photo-studio-scripts`); enabled scripts register `script.run.<id>` commands with
+  `menu: 'file.scripts'`. A new API method is one entry in `ScriptHost.table`, one wrapper in
+  `runtime.js` and a line in `docs/scripting.md`.
+
+## Preferences, versions and recovery
+
+- `src/model/preferences.ts` is the schema of Edit → Preferences (pages, sections,
+  types, defaults), with validation, migration from older stored layouts and
+  JSON import/export. A new setting is one `SETTINGS` entry plus the code that
+  reads `e.preferences.<key>`; workspace-wide effects (CSS variables and
+  classes) live in `features/preferences/apply.ts`. Call
+  `e.preferencesChanged()` after changing a value; features that cache a
+  setting subscribe with `e.preferenceHooks`.
+- `src/persistence/local-store.ts` wraps IndexedDB (`MemoryStore` for tests);
+  `persistence/versions.ts` stores versions and recovery records on it.
+  `e.saveHooks` run after a project is written (versions, recovery cleanup).
+- Warnings that can be turned off use `warnOnce` (`features/preferences/warnings.ts`).
+
+## Canvas edits and document-wide state
+
+- A canvas edit (resize, crop, rotation, flip, perspective crop) maps the state kept
+  beside the layers through one point map with `mapDocumentGeometry` (paths,
+  annotations, layout rectangles and comp positions, variable placements, perspective
+  planes, guides and frame offsets). Edits that rebuild layer content also call
+  `remapCompPositions`, which keeps comp positions relative to their layers.
+  Add new document-space state there, not to each command.
+- Change `doc.resolution` with `setDocumentResolution`: type sizes are in points and
+  are converted so text keeps its size in pixels.
+- Restore a whole state (revert, snapshot, version) with `replaceDocument`, which also
+  removes properties the state does not have.
+- Turn a layer of another kind into pixels with `clearToPixelLayer` and store pixels of
+  a Live Filter layer moved by a canvas edit with `setLivePixels`.
+- Masks that belong to a layer's content (linked layer mask, Live Filter mask) are
+  carried through its transforms with `carryMask`; for layers other than pixel layers
+  the history does this (`followLinkedMasks`) from the change of the content placement.
+- `renderer.beforeReadback` runs before composite and layer readbacks; it waits for
+  pending embedded object frame renders, so pixels read right after an edit match it.
+
+## Imaging conventions
+
+Pure functions on `RGBA8`/`Mask8` (`src/imaging/types.ts`), straight alpha,
+deterministic, no DOM. Operations with parameters implement `ImageOperation` so the
+UI can generate dialogs, presets, recorded actions and live filters from `params`.
+
+## Legal
+
+Use original, descriptive feature names and original icons and presets, and
+record every third-party component in `docs/third-party.md`.

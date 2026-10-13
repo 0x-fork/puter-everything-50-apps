@@ -1,0 +1,416 @@
+// Effect dialog, modelled on a pro editor's effect windows: "Effect - Name"
+// with a preset bar, a graphical editor when the effect has one, generated
+// parameter controls, and a footer with the power (bypass) toggle, Preview
+// play/stop, preview loop, input/output meters, Apply and Close.
+//
+// mode 'apply' (Effects menu): resolves the chosen values on Apply, null on Close.
+// mode 'edit' (rack slots): changes go live through onChange; only Close.
+
+import { h, announce } from '../lib/dom.js';
+import { icon } from '../ui/icons.js';
+import { openDialog } from '../ui/dialog.js';
+import { hotNumber, select } from '../ui/controls.js';
+import { slotSpec } from './registry.js';
+import { normalizeValues, paramType, toPosition, fromPosition, formatValue, parseValue, setLinked, linkGroups, coerce } from './params.js';
+import { allPresets, savePreset, deletePreset, matchPreset, lastValues } from './presets.js';
+import { autoEditor, envelopeControl, curveControl } from './editors.js';
+import { isRealtime } from './apply.js';
+
+const CUSTOM = '\u0000custom';
+
+/**
+ * Generated controls for a definition. Returns { el, refresh(values) }.
+ * onSet(id, value) is called for user changes.
+ */
+export function paramControls(def, getValues, onSet, { doc = null, range = null, smooth } = {}) {
+  const grid = h('div.fx-params');
+  const refreshers = [];
+  let section = null;
+  for (const p of def.params) {
+    if (p.hidden) continue;
+    const type = paramType(p);
+    const label = p.label || p.id;
+    if ((p.section || null) !== section) {
+      section = p.section || null;
+      if (section) grid.append(h('div.fx-section', { role: 'heading', 'aria-level': '3' }, section));
+    }
+    if (type === 'bool') {
+      const box = h('input', { type: 'checkbox', checked: Boolean(getValues()[p.id]), onchange: () => onSet(p.id, box.checked) });
+      grid.append(h('label.check.fx-bool', box, label));
+      refreshers.push((v) => (box.checked = Boolean(v[p.id])));
+    } else if (type === 'choice') {
+      const sel = select({ value: getValues()[p.id], options: p.options || [], label, onChange: (val) => onSet(p.id, coerce(p, val)) });
+      grid.append(h('div.fx-row', h('label.fx-label', label), h('div.fx-choice', sel)));
+      refreshers.push((v) => (sel.value = String(v[p.id])));
+    } else if (type === 'curve') {
+      const env = curveControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points) });
+      grid.append(h('div.fx-envelope-row', h('div.fx-label', label), env));
+      refreshers.push((v, from) => {
+        if (from !== p.id) env.setPoints(v[p.id]);
+        else env.redraw();
+      });
+    } else if (type === 'envelope') {
+      const env = envelopeControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points), doc, range, smooth: () => Boolean(smooth?.(getValues())) });
+      grid.append(h('div.fx-envelope-row', h('div.fx-label', label), env));
+      refreshers.push((v, from) => {
+        if (from !== p.id) env.setPoints(v[p.id]);
+        else env.redraw();
+      });
+    } else {
+      const log = p.scale === 'log' && p.min > 0;
+      const min = p.min ?? 0;
+      const max = p.max ?? 1;
+      const step = p.step || (max - min) / 1000;
+      const slider = h('input.slider.fx-slider', {
+        type: 'range',
+        min: log ? 0 : min,
+        max: log ? 1000 : max,
+        step: log ? 1 : step,
+        'aria-label': label,
+        oninput: () => onSet(p.id, log ? fromPosition(p, Number(slider.value) / 1000) : Number(slider.value)),
+      });
+      const hot = log
+        ? hotNumber({
+            value: toPosition(p, getValues()[p.id]),
+            min: 0,
+            max: 1,
+            step: 0.0025,
+            label,
+            pixelsPerStep: 0.75,
+            format: (x) => formatValue(p, fromPosition(p, x)),
+            parse: (s) => toPosition(p, parseValue(p, s)),
+            onInput: (x) => onSet(p.id, fromPosition(p, x)),
+            onChange: (x) => onSet(p.id, fromPosition(p, x)),
+            defaultValue: toPosition(p, p.default),
+          })
+        : hotNumber({
+            value: getValues()[p.id],
+            min,
+            max,
+            step,
+            label,
+            pixelsPerStep: Math.max(0.01, (240 * step) / (max - min || 1)),
+            format: (x) => formatValue(p, x),
+            parse: (s) => parseValue(p, s),
+            onInput: (x) => onSet(p.id, x),
+            onChange: (x) => onSet(p.id, x),
+            defaultValue: p.default,
+          });
+      const show = (v) => {
+        const val = v[p.id];
+        slider.value = String(log ? Math.round(toPosition(p, val) * 1000) : val);
+        slider.setAttribute('aria-valuetext', formatValue(p, val));
+        hot.setValue(log ? toPosition(p, val) : val);
+      };
+      show(getValues());
+      grid.append(h('div.fx-row', h('label.fx-label', { onclick: () => hot.focus() }, label), slider, h('div.fx-value', hot)));
+      refreshers.push(show);
+    }
+  }
+  return { el: grid, refresh: (values, from) => refreshers.forEach((f) => f(values, from)) };
+}
+
+/**
+ * Inline name entry inside `bar` (a nested modal would fight the open
+ * dialog's keyboard handling, so Enter and Escape are caught at the window
+ * before the dialog sees them). onSave(name) may throw to show a message.
+ * Returns a function that dismisses the prompt.
+ */
+export function inlinePrompt(bar, { label, value = '', onSave, returnFocus }) {
+  const input = h('input.input', { type: 'text', value, 'aria-label': label.replace(/:$/, '') });
+  const error = h('span.fx-name-error', { role: 'alert' });
+  let open = true;
+  const done = (refocus = true) => {
+    if (!open) return;
+    open = false;
+    window.removeEventListener('keydown', keys, true);
+    bar.hidden = true;
+    bar.replaceChildren();
+    if (refocus) returnFocus?.focus();
+  };
+  const ok = () => {
+    try {
+      onSave(input.value);
+      done();
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  };
+  const keys = (e) => {
+    if (!bar.contains(e.target)) return;
+    if (e.key === 'Escape') done();
+    else if (e.key === 'Enter' && e.target === input) ok();
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  };
+  window.addEventListener('keydown', keys, true);
+  bar.replaceChildren(h('label.fx-label', label), input, h('button.btn', { type: 'button', onclick: ok }, 'Save'), h('button.btn', { type: 'button', onclick: () => done() }, 'Cancel'), error);
+  bar.hidden = false;
+  input.focus();
+  input.select();
+  return () => done(false);
+}
+
+/** Input and output level bars (L/R each) fed while the dialog is open. */
+function meterStrip() {
+  const bar = () => h('div.fx-meter-bar', h('div.fx-meter-fill'));
+  const rows = [
+    ['In', [bar(), bar()]],
+    ['Out', [bar(), bar()]],
+  ];
+  const el = h('div.fx-meters', { 'aria-hidden': 'true' }, rows.map(([label, bars]) => h('div.fx-meter-row', h('span.fx-meter-label', label), h('div.fx-meter-pair', bars))));
+  const toFrac = (peak) => (peak <= 0.001 ? 0 : Math.max(0, Math.min(1, (20 * Math.log10(peak) + 60) / 60)));
+  const set = (input, output) => {
+    [input, output].forEach((pk, r) => {
+      rows[r][1].forEach((b, c) => {
+        const v = pk[c] ?? pk[0] ?? 0;
+        const fill = b.firstChild;
+        fill.style.transform = `scaleX(${toFrac(v)})`;
+        b.classList.toggle('clip', v >= 0.999);
+      });
+    });
+  };
+  return { el, set };
+}
+
+/** Peak of each channel of `doc` around frame `at` (input metering without a pre-effect tap). */
+function inputPeak(doc, at, frames = 2048) {
+  const buf = new Float32Array(frames);
+  return doc.state.channels.slice(0, 2).map((c) => {
+    c.read(Math.max(0, Math.floor(at - frames)), buf);
+    let m = 0;
+    for (let i = 0; i < frames; i++) m = Math.max(m, Math.abs(buf[i]));
+    return m;
+  });
+}
+
+/**
+ * Opens the effect dialog. Options:
+ *  mode 'apply' | 'edit', values, title, applyLabel, enabled (power state),
+ *  onChange(values), onPower(enabled), doc, slotId (the rack or track slot
+ *  being edited, so editors can show that slot's live readouts)
+ */
+export function openEffectDialog(app, def, { mode = 'apply', values: initial, title, applyLabel = 'Apply', enabled = true, onChange, onPower, doc = app.active?.kind === 'audio' ? app.active : null, slotId = null } = {}) {
+  let values = normalizeValues(def, initial || lastValues(app.prefs, def));
+  let power = enabled;
+  let previewing = false;
+  const realtime = isRealtime(def);
+  const groups = linkGroups(def);
+  const subscribers = new Set();
+  const range = doc ? doc.editRange() : null;
+  const cleanups = [];
+
+  // ----------------------------------------------------------- values
+  const ctx = {
+    get values() {
+      return values;
+    },
+    set: (id, v) => setValue(id, v),
+    subscribe: (fn) => subscribers.add(fn),
+    def,
+    app,
+    doc,
+    slotId,
+    /** Runs fn when the dialog closes. */
+    onClose: (fn) => cleanups.push(fn),
+    /** fn(Float32Array) with this effect's live readouts while audio plays through it. */
+    onReadout: (fn) => {
+      const mine = (key) => (slotId ? key.endsWith(`:${slotId}`) : key === `preview:${def.id}`);
+      const off = app.engine.on('fx-readout', (list) => {
+        for (const [key, v] of list) if (mine(key)) fn(v);
+      });
+      cleanups.push(off);
+      return off;
+    },
+  };
+  let controls = null;
+  let previewTimer = 0;
+  function setValue(id, v, from = id) {
+    const p = def.params.find((q) => q.id === id);
+    if (!p) return;
+    const next = paramType(p) === 'number' ? setLinked(def, values, id, v, groups) : { ...values, [id]: coerce(p, v) };
+    if (JSON.stringify(next) === JSON.stringify(values)) return;
+    values = next;
+    changed(from);
+  }
+  function setAll(next) {
+    values = normalizeValues(def, next);
+    changed(null);
+  }
+  // The Preview Editor follows the settings of effects about to be applied to a file.
+  const announceValues = (v) => mode === 'apply' && doc && app.emit('effect-values', v && { def, values: v, doc });
+  function changed(from) {
+    controls?.refresh(values, from);
+    subscribers.forEach((fn) => fn(values));
+    syncPresetSelect();
+    onChange?.(values);
+    announceValues(values);
+    if (previewing && mode === 'apply' && !previewTimer) {
+      previewTimer = requestAnimationFrame(() => {
+        previewTimer = 0;
+        pushPreview();
+      });
+    }
+  }
+
+  // ---------------------------------------------------------- presets
+  const presetSel = h('select.select.fx-preset-select', { 'aria-label': 'Presets', onchange: () => {
+    const p = allPresets(app.prefs, def).find((x) => x.name === presetSel.value);
+    if (p) {
+      setAll(p.values);
+      announce(`Preset ${p.name}`);
+    }
+  } });
+  const delBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Delete preset', title: 'Delete preset', onclick: () => {
+    const name = presetSel.value;
+    const p = allPresets(app.prefs, def).find((x) => x.name === name);
+    if (!p?.user) return;
+    deletePreset(app.prefs, def.id, name);
+    syncPresetSelect();
+    announce(`Preset ${name} deleted`);
+  } }, icon('trash-2', 15));
+  function syncPresetSelect() {
+    const list = allPresets(app.prefs, def);
+    const current = matchPreset(app.prefs, def, values);
+    const opts = [];
+    if (!current) opts.push(h('option', { value: CUSTOM }, '(Custom)'));
+    const builtIn = list.filter((p) => !p.user);
+    const user = list.filter((p) => p.user);
+    for (const p of builtIn) opts.push(h('option', { value: p.name }, p.name));
+    if (user.length) opts.push(h('optgroup', { label: 'Your Presets' }, user.map((p) => h('option', { value: p.name }, p.name))));
+    presetSel.replaceChildren(...opts);
+    presetSel.value = current || CUSTOM;
+    delBtn.disabled = !list.find((p) => p.name === current)?.user;
+  }
+
+  const nameBar = h('div.fx-namebar', { hidden: true });
+  const askName = (labelText, initialName, confirm) => cleanups.push(inlinePrompt(nameBar, { label: labelText, value: initialName, onSave: confirm, returnFocus: presetSel }));
+  const saveBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Save settings as a preset', title: 'Save settings as a preset', onclick: () => {
+    askName('Preset name:', matchPreset(app.prefs, def, values) && !allPresets(app.prefs, def).find((p) => p.name === presetSel.value && !p.user) ? presetSel.value : 'My Preset', (name) => {
+      const saved = savePreset(app.prefs, def, name, values);
+      syncPresetSelect();
+      announce(`Preset ${saved} saved`);
+    });
+  } }, icon('save', 15));
+  const favBtn = app.favorites
+    ? h('button.icon-btn', { type: 'button', 'aria-label': 'Save settings as a favorite', title: 'Save settings as a favorite', onclick: () => {
+        askName('Favorite name:', def.name, (name) => {
+          app.favorites.addEffect(name, def.id, values);
+          announce(`Favorite ${name} saved`);
+        });
+      } }, icon('star', 15))
+    : null;
+  const presetBar = h('div.fx-presetbar', h('span.fx-label', 'Presets:'), presetSel, saveBtn, delBtn, favBtn);
+  syncPresetSelect();
+
+  // ------------------------------------------------------------ body
+  const editor = autoEditor(def);
+  const editorEl = editor ? editor(ctx) : null;
+  const smoothParam = def.params.find((p) => paramType(p) === 'bool' && /spline|smooth|curve/i.test(p.id));
+  controls = paramControls(def, () => values, (id, v) => setValue(id, v), { doc, range, smooth: (v) => smoothParam && v[smoothParam.id] });
+  const body = h('div.fx-dialog-body', presetBar, nameBar, editorEl ? h('div.fx-editor', editorEl) : null, controls.el);
+
+  // ---------------------------------------------------------- footer
+  const powerBtn = h('button.icon-btn.fx-power', { type: 'button', 'aria-pressed': String(power), 'aria-label': 'Effect power', title: 'Turn the effect on or off (bypass) while previewing', onclick: () => {
+    power = !power;
+    powerBtn.setAttribute('aria-pressed', String(power));
+    announce(power ? 'Effect on' : 'Effect bypassed');
+    if (mode === 'edit') onPower?.(power);
+    else if (previewing) pushPreview();
+  } }, icon('power', 15));
+  const playBtn = h('button.icon-btn.fx-play', { type: 'button', 'aria-label': 'Preview', title: realtime || mode === 'edit' ? 'Play the selection through the effect' : 'Preview is not available for this effect', disabled: !doc || (!realtime && mode !== 'edit'), onclick: () => togglePreview() }, icon('transport-play', 15));
+  const loopBtn = h('button.icon-btn.fx-loop', { type: 'button', 'aria-pressed': String(app.prefs.get('fxPreviewLoop') !== false), 'aria-label': 'Loop preview', title: 'Loop the preview', onclick: () => {
+    const on = loopBtn.getAttribute('aria-pressed') !== 'true';
+    loopBtn.setAttribute('aria-pressed', String(on));
+    app.prefs.set('fxPreviewLoop', on);
+    if (previewing) {
+      app.stop();
+      startPlayback();
+    }
+  } }, icon('transport-loop', 15));
+  const meters = meterStrip();
+  const footerStart = h('div.fx-footer-tools', powerBtn, playBtn, loopBtn, meters.el);
+
+  function pushPreview() {
+    if (mode !== 'apply') return;
+    app.previewFx = previewing && realtime ? [slotSpec(def, values, { key: `preview:${def.id}`, enabled: power })] : null;
+    app.syncGraph();
+  }
+  function startPlayback() {
+    const loop = loopBtn.getAttribute('aria-pressed') === 'true';
+    const sel = doc.selection;
+    const hasSel = sel.end > sel.start;
+    app.play({ from: hasSel ? sel.start : doc.cursor, loop });
+  }
+  function setPreviewing(on) {
+    previewing = on;
+    playBtn.replaceChildren(icon(on ? 'transport-stop' : 'transport-play', 15));
+    playBtn.setAttribute('aria-label', on ? 'Stop preview' : 'Preview');
+    playBtn.classList.toggle('on', on);
+  }
+  function togglePreview() {
+    if (!doc) return;
+    if (previewing) {
+      app.stop();
+      return;
+    }
+    if (app.active !== doc) app.activate(doc);
+    setPreviewing(true);
+    pushPreview();
+    startPlayback();
+    if (!meterRaf) meterRaf = requestAnimationFrame(meterLoop);
+  }
+  const onTransport = (s) => {
+    if (s === 'stopped' && previewing) {
+      setPreviewing(false);
+      pushPreview();
+      meters.set([0, 0], [0, 0]);
+    }
+  };
+  cleanups.push(app.on('transport', onTransport));
+  // Meters: the input is read from the file at the playhead; the output is the
+  // engine's latest file-track peak (held for a moment, then decaying).
+  let out = [0, 0];
+  let meterRaf = 0;
+  cleanups.push(app.engine.on('meters', (m) => {
+    const pk = m.tracks.get('file') || m.master;
+    out = [Math.max(out[0], pk[0] ?? 0), Math.max(out[1], pk[1] ?? pk[0] ?? 0)];
+  }));
+  const meterLoop = () => {
+    meterRaf = 0;
+    if (!previewing || !doc) return;
+    meters.set(inputPeak(doc, app.engine.position), out);
+    out = out.map((v) => v * 0.8);
+    meterRaf = requestAnimationFrame(meterLoop);
+  };
+  cleanups.push(() => cancelAnimationFrame(meterRaf));
+
+  // Measuring effects (Loudness Meter) leave the audio unchanged: nothing to apply.
+  const buttons = mode === 'apply' && !def.measureOnly
+    ? [
+        { label: 'Close', value: null },
+        { label: applyLabel, value: 'apply', primary: true },
+      ]
+    : [{ label: 'Close', value: null, primary: true }];
+
+  announceValues(values);
+  return openDialog({
+    title: title || `Effect - ${def.name}`,
+    className: 'fx-dialog',
+    body,
+    footerStart,
+    buttons,
+    initialFocus: '.fx-params input, .fx-params .hot, .fx-params select',
+  }).then((r) => {
+    cancelAnimationFrame(previewTimer);
+    announceValues(null);
+    cleanups.forEach((f) => f());
+    if (previewing) app.stop();
+    if (mode === 'apply' && app.previewFx?.some((s) => s.key === `preview:${def.id}`)) {
+      app.previewFx = null;
+      app.syncGraph();
+    }
+    return r === 'apply' ? values : null;
+  });
+}

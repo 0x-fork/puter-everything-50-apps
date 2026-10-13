@@ -1,0 +1,308 @@
+import './styles/base.css';
+import './styles/layout.css';
+import './styles/card.css';
+import './styles/animations.css';
+
+// Offline support (public/sw.js). Production-only: a service worker on the
+// dev server would turn every subsequent change into a stale-cache mystery,
+// since it would start intercepting fetches for files Vite hasn't rebuilt
+// yet. .catch(() => {}) matters -- registration rejects on file:// and in
+// some private-browsing modes, and an unhandled rejection here is a bug
+// report waiting to happen for something that isn't actually a bug.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+
+import { createGame, undo, drawFromStock } from './game/state.js';
+import { isWon } from './game/rules.js';
+import { serialize, deserialize } from './game/serialize.js';
+import { render } from './ui/board.js';
+import { preloadCardmeister } from './ui/cardview.js';
+import { createDragController } from './ui/drag.js';
+import { createAnimator } from './ui/animate.js';
+import {
+  loadLocalStats, saveLocalStats, recordGameStarted, recordGameWon, mergeStats,
+  loadLocalSave, saveLocalSave, clearLocalSave,
+} from './services/stats.js';
+import * as cloud from './services/puter-sync.js';
+import { shouldAdoptRemote } from './services/save-arbitration.js';
+
+// Start the cardmeister download immediately rather than waiting for the
+// first rich-face build mid-render, so the opening deal doesn't paint as
+// blank/unstyled cards for one script round-trip.
+preloadCardmeister();
+
+const boardEl = document.getElementById('board');
+const movesEl = document.getElementById('moves');
+const winEl = document.getElementById('win');
+const winStatsEl = document.getElementById('winStats');
+
+let game = createGame();
+let stats = loadLocalStats();
+let countedThisGame = false;
+let signedIn = false;
+// True only once a load-time cloud pull of the save has actually succeeded.
+// A failed (or never-attempted) pull leaves this false, so we never push our
+// local board on top of a remote game we failed to read — see writeSave/dropSave.
+let remoteSaveTrusted = false;
+// True once the board on screen is the player's, and not a candidate for
+// being silently replaced by a load-time cloud restore. This is not "the
+// player made a move" — dealing a fresh game via New also sets it, because
+// the player just as clearly owns that board and a stale remote save must
+// not be adopted over it either. See the load-time block for why this
+// matters: it's the guard that stops a slow cloud round-trip from clobbering
+// whatever the player is now looking at.
+let playerOwnsBoard = false;
+
+const animator = createAnimator({ boardEl });
+
+function updateStats() {
+  movesEl.textContent = game.moves;
+}
+
+function requestRender() {
+  render({
+    boardEl,
+    game,
+    hooks: {
+      attachDrag: (el, info) => drag.attachDrag(el, info),
+      attachStockTap: el => drag.attachStockTap(el),
+      afterCard: animator.afterCard,
+    },
+  });
+  updateStats();
+}
+
+function checkWin() {
+  if (isWon(game)) animator.startCelebration(showWin);
+}
+
+// Resume: save only committed state, never mid-drag or mid-animation, so this
+// hangs off the same points that already trigger a re-render after a move.
+const SAVE_DEBOUNCE_MS = 800;
+let saveTimer = null;
+
+function writeSave() {
+  // A won board is never resumable — showWin()'s dropSave() is what's
+  // supposed to own clearing it, but the celebration animation delays that
+  // call, and this debounce/flush can otherwise race ahead of it and
+  // resurrect the finished board.
+  if (isWon(game)) return;
+  // An untouched deal (moves === 0, nothing to undo) isn't worth persisting
+  // — flushSave() runs on every visibilitychange, so merely opening the page
+  // and switching tabs would otherwise write it. Under last-write-wins that
+  // never-played deal could later outrank a real in-progress game saved from
+  // another device, just because its timestamp happens to be newer.
+  if (game.moves === 0 && game.history.length === 0) return;
+  const save = serialize(game, Date.now());
+  saveLocalSave(save);
+  // Only push remotely once the load-time pull actually succeeded — pushing
+  // on top of a remote we failed to read could clobber a newer game left on
+  // another device (same anti-clobber discipline as stats sync).
+  if (remoteSaveTrusted && signedIn) cloud.pushSave(save);
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(writeSave, SAVE_DEBOUNCE_MS);
+}
+
+function flushSave() {
+  clearTimeout(saveTimer);
+  writeSave();
+}
+
+function dropSave() {
+  clearTimeout(saveTimer);
+  clearLocalSave();
+  // If the load-time cloud pull hasn't resolved yet, remoteSaveTrusted is
+  // still false and this can't safely clear the remote (see its
+  // declaration) — a stale remote save can briefly survive a New pressed
+  // during that window. Accepted rather than adding a pending-clear flag:
+  // restoreFromCloud() always sets remoteSaveTrusted once the pull settles,
+  // regardless of whether it was adopted, so the very next dropSave() (next
+  // New/win) clears it correctly, and the very next scheduleSave() flush
+  // overwrites it with the current board. playerOwnsBoard (set by newGame())
+  // already stops the stale remote from ever being adopted in the
+  // meantime, which was the actual data-loss risk — this is just a
+  // several-second window where an orphaned remote value sits unread.
+  if (remoteSaveTrusted && signedIn) cloud.clearSave();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushSave();
+});
+
+// A KV write is not guaranteed to finish during unload, so only touch local here.
+window.addEventListener('beforeunload', () => {
+  clearTimeout(saveTimer);
+  if (isWon(game)) return; // same reasoning as writeSave() — never resurrect a finished board
+  if (game.moves === 0 && game.history.length === 0) return; // skip untouched deals, as writeSave() does
+  saveLocalSave(serialize(game, Date.now()));
+});
+
+function showWin() {
+  stats = recordGameWon(stats, game.moves, Date.now());
+  saveLocalStats(stats);
+  winStatsEl.textContent = `${game.moves} moves. Nicely done.`
+    + (stats.bestMoves === game.moves ? ' New best.' : ` Best: ${stats.bestMoves}.`);
+  winEl.classList.add('show');
+  if (signedIn) syncStats(); // pull, merge, push — same guard as everywhere else; fire-and-forget
+  dropSave(); // a won board is not resumable — clear it so a reload deals fresh
+}
+
+// A game counts as played once the player actually moves, so opening the page
+// and walking away does not pad the count.
+function countGameOnce() {
+  if (countedThisGame) return;
+  countedThisGame = true;
+  stats = recordGameStarted(stats, Date.now());
+  saveLocalStats(stats);
+}
+
+const drag = createDragController({
+  boardEl,
+  getGame: () => game,
+  requestRender,
+  onMoveApplied: ({ flipped }) => {
+    playerOwnsBoard = true;
+    countGameOnce();
+    animator.queueFlip(flipped);
+    checkWin();
+    scheduleSave();
+  },
+});
+
+function onStockTap() {
+  countGameOnce();
+  const stockPileEl = boardEl.querySelector('.pile[data-kind="stock"]');
+  const srcRect = stockPileEl ? stockPileEl.getBoundingClientRect() : null;
+  const result = drawFromStock(game);
+  if (!result.ok) return;
+  playerOwnsBoard = true;
+  if (result.drawn && srcRect) animator.queueFlight(result.drawn, srcRect);
+  requestRender();
+  scheduleSave();
+}
+
+function newGame() {
+  drag.cancelDrag();
+  animator.cancelCelebration();
+  game = createGame();
+  countedThisGame = false;
+  // The player just dealt this board on purpose — it must never be
+  // silently swapped out by a load-time cloud restore that is still
+  // in flight. See the playerOwnsBoard declaration for why "owns", not
+  // "interacted", is the right name for this flag.
+  playerOwnsBoard = true;
+  winEl.classList.remove('show');
+  requestRender();
+  dropSave(); // a fresh deal replaces whatever was saved, so drop the old save
+}
+
+function doUndo() {
+  if (!undo(game)) return;
+  playerOwnsBoard = true;
+  requestRender();
+  scheduleSave();
+}
+
+boardEl.addEventListener('stock-tap', onStockTap);
+document.getElementById('newgame').onclick = newGame;
+document.getElementById('winNew').onclick = newGame;
+document.getElementById('undo').onclick = doUndo;
+
+// Coalesced with rAF: an unthrottled resize handler would run requestRender
+// on every fired event, and in rich mode every render rebuilds 52 custom
+// elements, each of which builds a data-URI SVG and hands it to the image
+// decoder — expensive to repeat dozens of times across one resize drag.
+let resizeRaf = 0;
+window.addEventListener('resize', () => {
+  if (resizeRaf) return;
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = 0;
+    requestRender();
+  });
+});
+window.addEventListener('keydown', e => {
+  if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); doUndo(); }
+  if (e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) newGame();
+});
+
+async function syncStats() {
+  const pulled = await cloud.pullStats();
+  if (!pulled.ok) return false; // cannot merge safely — do not write
+  stats = mergeStats(stats, pulled.value);
+  saveLocalStats(stats);
+  return cloud.pushStats(stats); // true only if the remote write landed
+}
+
+// Resume: adopting a save means the game it describes was already counted as
+// played when it was first started, so countedThisGame must come back true —
+// otherwise the next move would count it again and inflate the "played" stat.
+function adoptSave(save) {
+  const restored = deserialize(save);
+  if (!restored) return false;
+  game = restored;
+  countedThisGame = true;
+  return true;
+}
+
+function restoreLocal() {
+  const local = loadLocalSave();
+  return local ? { save: local, ts: local.ts || 0 } : null;
+}
+
+// Sets remoteSaveTrusted as a side effect: true only when this pull actually
+// succeeds, so a failed read never licenses a later push over an unseen save.
+async function restoreFromCloud() {
+  if (!signedIn) return null;
+  const pulled = await cloud.pullSave();
+  remoteSaveTrusted = pulled.ok;
+  if (!pulled.ok || !pulled.value) return null;
+  return { save: pulled.value, ts: pulled.value.ts || 0 };
+}
+
+// Resume: restore synchronously from local before the first paint so the
+// player gets their board back immediately, with zero network round-trips in
+// the critical path. Must sit after `game`/`countedThisGame` are declared
+// above, or this throws a TDZ ReferenceError. The captured ts is reused below
+// instead of reading localStorage a second time — see the load-time block.
+const bootSave = restoreLocal();
+if (bootSave) adoptSave(bootSave.save);
+
+requestRender();
+
+// Load-time cloud path: only touch the cloud if already signed in, so opening
+// the game never throws a login dialog at anyone. Puter's docs state that an
+// app published on Puter.com has the user automatically signed in there, so
+// isSignedIn() alone already gives silent auto-sync in the one place this
+// game expects to run; loaded as a plain website instead, it stays silent
+// too, because isSignedIn() itself never prompts (see puter-sync.js).
+(async () => {
+  signedIn = await cloud.isSignedIn();
+  if (!signedIn) return;
+
+  await syncStats(); // pull, merge, push — fire-and-forget beyond its local effect
+
+  // Last-write-wins on timestamp, no merge, and compared against `bootSave`
+  // (captured above) rather than a fresh restoreLocal() call — the several
+  // round-trips above (isSignedIn, pullStats, pushStats, and the pullSave
+  // inside restoreFromCloud) leave plenty of time for the player to already
+  // be a few moves into the game the boot restore handed them, or to have
+  // pressed New for a fresh deal. Re-reading localStorage here would pick
+  // that up and let a merely-newer remote save silently overwrite it.
+  // playerOwnsBoard is the real guard: once the player has committed any
+  // change to the board they're looking at — including dealing a new one —
+  // their in-memory game is authoritative and cloud save-adoption is
+  // skipped entirely — this also avoids swapping `game` out from under an
+  // in-progress drag via getGame(). The adopt/skip decision itself is a
+  // pure function so it can be unit tested — see save-arbitration.js.
+  const remote = await restoreFromCloud();
+  const bootTs = bootSave ? bootSave.ts : 0;
+  const remoteTs = remote ? remote.ts : 0;
+  const adopt = remote && shouldAdoptRemote({ bootTs, remoteTs, playerOwnsBoard });
+  if (adopt && adoptSave(remote.save)) requestRender();
+})();

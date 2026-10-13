@@ -1,0 +1,624 @@
+// Effect definitions: Amplitude and Compression (plus the Loudness Maximizer
+// from Special, which shares the limiter core). Realtime processors live in
+// wasm/dsp/src/fx/dynamics (kinds 30..38); Normalize, Fade Envelope and Gain
+// Envelope are offline processes.
+//
+// Dynamics processors also expose `transfer(values, inputDb) => outputDb`, the
+// static input/output curve, so dialogs can draw a transfer graph.
+
+import { registerEffect } from '../registry.js';
+import { offloaded } from '../offline-fx.js';
+import { num, db, hz, ms, pct, bool, choice, section, preset, checkAbort, pause, dataId } from './util.js';
+
+const AMP = 'Amplitude and Compression';
+
+// ------------------------------------------------------------------ helpers
+
+/** Rust `ms_frames` in f32 arithmetic, so latency matches the WASM report. */
+function msFrames(msValue, rate) {
+  const f = Math.fround(Math.fround(Math.fround(Math.max(0, msValue)) * Math.fround(0.001)) * Math.fround(rate));
+  return Math.round(f);
+}
+
+/** Latency of util::Limiter with a 10 ms maximum lookahead. */
+function limiterLatency(lookMs, rate) {
+  const max = Math.max(1, msFrames(10, rate));
+  const look = Math.min(Math.max(msFrames(Math.min(Math.max(lookMs, 0.1), 10), rate), 1), max);
+  return look - 1;
+}
+
+/** util::compress_db */
+export function compressDb(level, threshold, ratio, knee = 0) {
+  const slope = 1 / Math.max(1, ratio) - 1;
+  const over = level - threshold;
+  if (knee > 0 && 2 * Math.abs(over) <= knee) {
+    const t = over + knee / 2;
+    return (slope * t * t) / (2 * knee);
+  }
+  return over > 0 ? slope * over : 0;
+}
+
+/** util::expand_db */
+export function expandDb(level, threshold, ratio, knee = 0) {
+  const slope = Math.max(1, ratio) - 1;
+  const under = threshold - level;
+  if (knee > 0 && 2 * Math.abs(under) <= knee) {
+    const t = under + knee / 2;
+    return (-slope * t * t) / (2 * knee);
+  }
+  return under > 0 ? -slope * under : 0;
+}
+
+const attack = (def, o = {}) => ms('attack', 'Attack Time', 0.1, 500, def, { scale: 'log', ...o });
+const release = (def, o = {}) => ms('release', 'Release Time', 1, 5000, def, { scale: 'log', ...o });
+
+// ------------------------------------------------------------- Hard Limiter
+
+registerEffect({
+  id: 'hardLimiter',
+  name: 'Hard Limiter',
+  group: AMP,
+  kind: 30,
+  params: [
+    db('ceiling', 'Maximum Amplitude', -30, 0, -0.1),
+    db('inputBoost', 'Input Boost', 0, 30, 0),
+    ms('lookahead', 'Look-Ahead Time', 0.5, 10, 5),
+    release(80, { min: 10, max: 1000 }),
+    bool('link', 'Link Channels', true),
+  ],
+  presets: [
+    preset('Default', { ceiling: -0.1, inputBoost: 0, lookahead: 5, release: 80, link: true }),
+    preset('Transparent Peak Catch', { ceiling: -0.3, inputBoost: 0, lookahead: 7, release: 150, link: true }),
+    preset('Broadcast Safe -1 dB', { ceiling: -1, inputBoost: 0, lookahead: 5, release: 100, link: true }),
+    preset('Gentle Lift +3 dB', { ceiling: -0.5, inputBoost: 3, lookahead: 7, release: 200, link: true }),
+    preset('Loud and Tight +6 dB', { ceiling: -0.1, inputBoost: 6, lookahead: 4, release: 50, link: true }),
+    preset('Dialogue -2 dB Ceiling', { ceiling: -2, inputBoost: 4, lookahead: 5, release: 120, link: true }),
+  ],
+  latency: (v, rate) => limiterLatency(v.lookahead, rate),
+  transfer: (v, inDb) => Math.min(inDb + v.inputBoost, v.ceiling),
+});
+
+// --------------------------------------------------- Single-band Compressor
+
+registerEffect({
+  id: 'singleBandCompressor',
+  name: 'Single-band Compressor',
+  group: AMP,
+  kind: 31,
+  params: [
+    db('threshold', 'Threshold', -60, 0, -20),
+    num('ratio', 'Ratio', 1, 30, 4, ':1', { step: 0.1 }),
+    attack(10),
+    release(100),
+    db('outputGain', 'Output Gain', -30, 30, 0),
+    db('knee', 'Knee Width', 0, 24, 6),
+    choice('detection', 'Detection', ['Peak', 'RMS'], 0),
+    bool('link', 'Link Channels', true),
+  ],
+  presets: [
+    preset('Default', { threshold: -20, ratio: 4, attack: 10, release: 100, outputGain: 0, knee: 6, detection: 0, link: true }),
+    preset('Gentle Glue', { threshold: -18, ratio: 2, attack: 30, release: 300, outputGain: 2, knee: 12, detection: 1, link: true }),
+    preset('Steady Voice', { threshold: -24, ratio: 3, attack: 5, release: 150, outputGain: 5, knee: 8, detection: 1, link: true }),
+    preset('Punchy Drums', { threshold: -20, ratio: 5, attack: 25, release: 80, outputGain: 4, knee: 3, detection: 0, link: true }),
+    preset('Bass Control', { threshold: -22, ratio: 4, attack: 15, release: 200, outputGain: 3, knee: 6, detection: 1, link: true }),
+    preset('Heavy Squash', { threshold: -35, ratio: 12, attack: 1, release: 60, outputGain: 12, knee: 2, detection: 0, link: true }),
+  ],
+  transfer: (v, inDb) => inDb + compressDb(inDb, v.threshold, v.ratio, v.knee) + v.outputGain,
+});
+
+// ----------------------------------------------------------------- Dynamics
+
+registerEffect({
+  id: 'dynamics',
+  name: 'Dynamics',
+  group: AMP,
+  kind: 32,
+  params: [
+    bool('gateOn', 'AutoGate', false, { section: 'AutoGate' }),
+    db('gateThreshold', 'Gate Threshold', -80, 0, -50, { section: 'AutoGate' }),
+    ms('gateAttack', 'Gate Attack', 0.1, 100, 2, { scale: 'log', section: 'AutoGate' }),
+    ms('gateRelease', 'Gate Release', 1, 2000, 200, { scale: 'log', section: 'AutoGate' }),
+    ms('gateHold', 'Gate Hold', 0, 1000, 50, { section: 'AutoGate' }),
+    bool('compOn', 'Compressor', true, { section: 'Compressor' }),
+    db('threshold', 'Compressor Threshold', -60, 0, -20, { section: 'Compressor' }),
+    num('ratio', 'Compressor Ratio', 1, 30, 3, ':1', { step: 0.1, section: 'Compressor' }),
+    db('knee', 'Compressor Knee', 0, 24, 6, { section: 'Compressor' }),
+    bool('expOn', 'Expander', false, { section: 'Expander' }),
+    db('expThreshold', 'Expander Threshold', -80, 0, -45, { section: 'Expander' }),
+    num('expRatio', 'Expander Ratio', 1, 30, 2, ':1', { step: 0.1, section: 'Expander' }),
+    bool('limOn', 'Limiter', false, { section: 'Limiter' }),
+    db('limThreshold', 'Limiter Threshold', -30, 0, -1, { section: 'Limiter' }),
+    attack(5, { section: 'Settings' }),
+    release(150, { section: 'Settings' }),
+    choice('detection', 'Detection', ['Peak', 'RMS'], 0, { section: 'Settings' }),
+    bool('link', 'Link Channels', true, { section: 'Settings' }),
+    db('makeup', 'Make-up Gain', -30, 30, 0, { section: 'Settings' }),
+  ],
+  presets: [
+    preset('Default', {}),
+    preset('Clean Up Room Noise', { gateOn: true, gateThreshold: -48, gateAttack: 1, gateRelease: 250, gateHold: 80, compOn: true, threshold: -22, ratio: 2.5 }),
+    preset('Broadcast Voice', { gateOn: true, gateThreshold: -55, compOn: true, threshold: -24, ratio: 4, knee: 8, limOn: true, limThreshold: -1, attack: 3, release: 120, detection: 1, makeup: 6 }),
+    preset('Tight Drums', { gateOn: true, gateThreshold: -35, gateAttack: 0.2, gateRelease: 60, gateHold: 20, compOn: true, threshold: -18, ratio: 4, attack: 15, release: 80 }),
+    preset('Soft Expansion', { compOn: false, expOn: true, expThreshold: -40, expRatio: 1.8, release: 300 }),
+    preset('Leveled and Limited', { compOn: true, threshold: -26, ratio: 3, knee: 10, limOn: true, limThreshold: -3, detection: 1, makeup: 8 }),
+  ],
+  transfer: (v, inDb) => {
+    let g = 0;
+    if (v.compOn) g += compressDb(inDb, v.threshold, v.ratio, v.knee);
+    if (v.expOn) g += expandDb(inDb, v.expThreshold, v.expRatio, 3);
+    let out = inDb + g + v.makeup;
+    if (v.limOn) out = Math.min(out, v.limThreshold);
+    if (v.gateOn && inDb < v.gateThreshold) out = -Infinity;
+    return out;
+  },
+});
+
+// ------------------------------------------------------ Dynamics Processing
+
+/** Transfer curve points from [input dB, output dB] pairs. */
+const curvePts = (list) => list.map(([x, y]) => ({ x, y }));
+
+/**
+ * Output level (dB) of a drawn transfer curve at input level `x`: linear
+ * between points, the first point's gain below it and the last segment's
+ * slope above it (as wasm/dsp/src/fx/dynamics/curve.rs evaluates it).
+ */
+export function curveOutput(points, x) {
+  const pts = [...(points || [])].sort((a, b) => a.x - b.x);
+  if (!pts.length) return x;
+  if (pts.length === 1 || x <= pts[0].x) return x + pts[0].y - pts[0].x;
+  for (let k = 1; k < pts.length; k++) {
+    const b = pts[k];
+    if (x <= b.x || k === pts.length - 1) {
+      const a = pts[k - 1];
+      const w = b.x - a.x;
+      return w > 1e-6 ? a.y + ((b.y - a.y) * (x - a.x)) / w : b.y;
+    }
+  }
+  return x;
+}
+
+const COMP_3 = curvePts([[-100, -100], [-20, -20], [0, -13.3]]);
+
+registerEffect({
+  id: 'dynamicsProcessing',
+  name: 'Dynamics Processing',
+  group: AMP,
+  kind: 39,
+  readout: true,
+  params: [
+    { id: 'curve', label: 'Transfer Curve', type: 'transfer', min: -100, max: 0, unit: 'dB', hidden: true, default: COMP_3 },
+    choice('detection', 'Detection', ['Peak', 'RMS'], 0, { section: 'Detector' }),
+    attack(2, { section: 'Detector' }),
+    release(120, { section: 'Detector' }),
+    ms('lookahead', 'Look-Ahead Time', 0, 20, 2, { section: 'Detector' }),
+    bool('link', 'Link Channels', true, { section: 'Detector' }),
+    bool('bandLimit', 'Band Limit Detector', false, { section: 'Detector Band' }),
+    hz('lowCut', 'Low Cut', 20, 20000, 100, { section: 'Detector Band' }),
+    hz('highCut', 'High Cut', 20, 20000, 10000, { section: 'Detector Band' }),
+    db('makeup', 'Make-up Gain', -30, 30, 0, { section: 'Output' }),
+  ],
+  presets: [
+    preset('Compressor 3:1', { curve: COMP_3, detection: 0, attack: 2, release: 120, lookahead: 2, bandLimit: false, makeup: 0 }),
+    preset('Gentle Compressor 2:1', { curve: curvePts([[-100, -100], [-30, -30], [0, -15]]), detection: 1, attack: 10, release: 250, lookahead: 2, bandLimit: false, makeup: 4 }),
+    preset('Limiter -1 dB', { curve: curvePts([[-100, -100], [-1, -1], [0, -1]]), detection: 0, attack: 0.1, release: 80, lookahead: 5, bandLimit: false, makeup: 0 }),
+    preset('Expander 1:2', { curve: curvePts([[-100, -100], [-70, -100], [-40, -40], [0, 0]]), detection: 1, attack: 2, release: 200, lookahead: 2, bandLimit: false, makeup: 0 }),
+    preset('Noise Gate -50 dB', { curve: curvePts([[-100, -100], [-51, -100], [-50, -50], [0, 0]]), detection: 0, attack: 0.5, release: 150, lookahead: 3, bandLimit: false, makeup: 0 }),
+    preset('De-Esser Band', { curve: curvePts([[-100, -100], [-32, -32], [0, -24]]), detection: 0, attack: 0.5, release: 60, lookahead: 2, bandLimit: true, lowCut: 4500, highCut: 10000, makeup: 0 }),
+    preset('Lift Quiet Passages', { curve: curvePts([[-100, -100], [-70, -70], [-50, -40], [-20, -20], [0, 0]]), detection: 1, attack: 20, release: 400, lookahead: 2, bandLimit: false, makeup: 0 }),
+    preset('Broadcast Squash', { curve: curvePts([[-100, -100], [-60, -60], [-30, -24], [-12, -12], [0, -8]]), detection: 1, attack: 5, release: 150, lookahead: 4, bandLimit: true, lowCut: 80, highCut: 12000, makeup: 4 }),
+  ],
+  latency: (v, rate) => msFrames(Math.min(20, Math.max(0, v.lookahead)), rate),
+  transfer: (v, inDb) => curveOutput(v.curve, inDb) + v.makeup,
+  data(values) {
+    const pts = [...(values.curve || COMP_3)].sort((a, b) => a.x - b.x);
+    return [{ slot: 0, id: dataId(pts), values: Float32Array.from(pts.flatMap((p) => [p.x, p.y])) }];
+  },
+});
+
+// ----------------------------------------------------- Multiband Compressor
+
+const BAND_NAMES = ['Low', 'Low Mid', 'High Mid', 'High'];
+const BAND_TIMES = [
+  [10, 250],
+  [5, 150],
+  [3, 100],
+  [1, 80],
+];
+
+const bandParams = BAND_NAMES.flatMap((name, b) =>
+  section(`${name} Band`, `band${b + 1}`, [
+    db('threshold', `${name} Threshold`, -60, 0, -18),
+    db('gain', `${name} Gain`, -18, 18, 0),
+    num('ratio', `${name} Ratio`, 1, 30, 2, ':1', { step: 0.1 }),
+    ms('attack', `${name} Attack`, 0.1, 500, BAND_TIMES[b][0], { scale: 'log' }),
+    ms('release', `${name} Release`, 1, 5000, BAND_TIMES[b][1], { scale: 'log' }),
+    bool('solo', `Solo ${name}`, false),
+    bool('bypass', `Bypass ${name}`, false),
+  ]),
+);
+
+/** Multiband preset values from per-band [threshold, gain, ratio] triples. */
+function bands(list, extra = {}) {
+  const out = {};
+  list.forEach(([t, g, r], b) => {
+    out[`band${b + 1}Threshold`] = t;
+    out[`band${b + 1}Gain`] = g;
+    out[`band${b + 1}Ratio`] = r;
+  });
+  return { ...out, ...extra };
+}
+
+registerEffect({
+  id: 'multibandCompressor',
+  name: 'Multiband Compressor',
+  group: AMP,
+  kind: 33,
+  params: [
+    hz('xover1', 'Low Crossover', 20, 20000, 120, { section: 'Crossovers' }),
+    hz('xover2', 'Mid Crossover', 20, 20000, 2000, { section: 'Crossovers' }),
+    hz('xover3', 'High Crossover', 20, 20000, 10000, { section: 'Crossovers' }),
+    ...bandParams,
+    db('outputGain', 'Output Gain', -18, 18, 0, { section: 'Output' }),
+    bool('limiter', 'Output Limiter', true, { section: 'Output' }),
+    db('limThreshold', 'Limiter Threshold', -30, 0, 0, { section: 'Output' }),
+    db('limMargin', 'Limiter Margin', -30, 0, -0.1, { section: 'Output' }),
+    ms('limRelease', 'Limiter Release', 10, 1000, 100, { scale: 'log', section: 'Output' }),
+    bool('brickwall', 'Brickwall Limiting', true, { section: 'Output' }),
+    bool('link', 'Link Channels', true, { section: 'Output' }),
+  ],
+  presets: [
+    preset('Default', {}),
+    preset('Gentle Master Polish', bands([[-20, 0, 1.5], [-18, 0, 1.5], [-18, 0.5, 1.5], [-20, 1, 1.5]], { limThreshold: -3, limMargin: -0.3 })),
+    preset('Tame Low End', bands([[-28, 0, 4], [-18, 0, 1], [-18, 0, 1], [-18, 0, 1]], { xover1: 150 })),
+    preset('Clear Speech', bands([[-30, -3, 3], [-22, 1, 2.5], [-20, 2, 2], [-24, 0, 2.5]], { xover1: 100, xover2: 1500, xover3: 7000, limThreshold: -4, limMargin: -1 })),
+    preset('Loud Broadcast', bands([[-24, 1, 3], [-24, 0, 3], [-24, 1, 3], [-26, 1, 3]], { limThreshold: -8, limMargin: -1 })),
+    preset('Soften Harsh Highs', bands([[-18, 0, 1], [-18, 0, 1], [-26, 0, 3], [-30, -1, 4]], { xover2: 2500, xover3: 7500 })),
+  ],
+  latency: (v, rate) => (v.limiter && v.brickwall ? Math.max(1, msFrames(5, rate)) - 1 : 0),
+});
+
+// ---------------------------------------------------------- Tube Compressor
+
+registerEffect({
+  id: 'tubeCompressor',
+  name: 'Tube-modeled Compressor',
+  group: AMP,
+  kind: 34,
+  params: [
+    db('threshold', 'Threshold', -60, 0, -20),
+    num('ratio', 'Ratio', 1, 30, 3, ':1', { step: 0.1 }),
+    attack(20),
+    release(250),
+    db('outputGain', 'Output Gain', -30, 30, 0),
+    db('drive', 'Drive', 0, 24, 6),
+    pct('character', 'Character', 30),
+  ],
+  presets: [
+    preset('Default', { threshold: -20, ratio: 3, attack: 20, release: 250, outputGain: 0, drive: 6, character: 30 }),
+    preset('Warm Vocal', { threshold: -22, ratio: 2.5, attack: 15, release: 200, outputGain: 3, drive: 8, character: 40 }),
+    preset('Vintage Bus', { threshold: -16, ratio: 2, attack: 30, release: 400, outputGain: 2, drive: 4, character: 25 }),
+    preset('Gritty Bass', { threshold: -24, ratio: 5, attack: 10, release: 150, outputGain: 4, drive: 16, character: 60 }),
+    preset('Clean Leveling', { threshold: -20, ratio: 3, attack: 20, release: 250, outputGain: 3, drive: 0, character: 0 }),
+  ],
+  transfer: (v, inDb) => inDb + compressDb(inDb, v.threshold, v.ratio, 10) + v.outputGain,
+});
+
+// ------------------------------------------------------------------ DeEsser
+
+registerEffect({
+  id: 'deesser',
+  name: 'DeEsser',
+  group: AMP,
+  kind: 35,
+  params: [
+    choice('mode', 'Mode', ['Broadband', 'Multiband'], 1),
+    hz('frequency', 'Center Frequency', 1000, 16000, 6500),
+    hz('bandwidth', 'Bandwidth', 100, 10000, 3000),
+    db('threshold', 'Threshold', -60, 0, -30),
+    db('reduction', 'Maximum Reduction', 0, 40, 12),
+    bool('sibilanceOnly', 'Output Sibilance Only', false),
+  ],
+  presets: [
+    preset('Default', { mode: 1, frequency: 6500, bandwidth: 3000, threshold: -30, reduction: 12, sibilanceOnly: false }),
+    preset('Low Voice Sibilance', { mode: 1, frequency: 4800, bandwidth: 2500, threshold: -32, reduction: 10 }),
+    preset('High Voice Sibilance', { mode: 1, frequency: 7800, bandwidth: 3500, threshold: -30, reduction: 12 }),
+    preset('Gentle Broadband', { mode: 0, frequency: 6500, bandwidth: 4000, threshold: -26, reduction: 6 }),
+    preset('Strong Ess Control', { mode: 1, frequency: 6000, bandwidth: 5000, threshold: -40, reduction: 20 }),
+  ],
+});
+
+// ---------------------------------------------------- Speech Volume Leveler
+
+registerEffect({
+  id: 'speechVolumeLeveler',
+  name: 'Speech Volume Leveler',
+  group: AMP,
+  kind: 36,
+  params: [
+    db('target', 'Target Volume Level', -40, 0, -18),
+    pct('amount', 'Leveling Amount', 60),
+    bool('gate', 'Noise Gate', true),
+    db('gateThreshold', 'Noise Gate Threshold', -80, -20, -50),
+    ms('attack', 'Attack Time', 10, 2000, 300, { scale: 'log', section: 'Advanced' }),
+    ms('release', 'Release Time', 100, 10000, 1500, { scale: 'log', section: 'Advanced' }),
+    db('maxBoost', 'Maximum Boost', 0, 36, 15, { section: 'Advanced' }),
+    db('maxCut', 'Maximum Cut', 0, 36, 15, { section: 'Advanced' }),
+  ],
+  presets: [
+    preset('Default', {}),
+    preset('Podcast Conversation', { target: -16, amount: 75, gate: true, gateThreshold: -48, attack: 250, release: 1200 }),
+    preset('Quiet Lecture Room', { target: -18, amount: 90, gate: true, gateThreshold: -55, maxBoost: 24, release: 2000 }),
+    preset('Light Touch', { target: -20, amount: 35, gate: true, gateThreshold: -50, attack: 500, release: 2500 }),
+    preset('Phone Interview', { target: -16, amount: 80, gate: true, gateThreshold: -42, maxBoost: 20, attack: 200, release: 900 }),
+  ],
+});
+
+// ------------------------------------------------------------ Channel Mixer
+
+registerEffect({
+  id: 'channelMixer',
+  name: 'Channel Mixer',
+  group: AMP,
+  kind: 37,
+  params: [
+    pct('lToL', 'Left from Left', 100, { min: -200, max: 200, section: 'Left Output' }),
+    pct('rToL', 'Left from Right', 0, { min: -200, max: 200, section: 'Left Output' }),
+    bool('invertL', 'Invert Left', false, { section: 'Left Output' }),
+    pct('lToR', 'Right from Left', 0, { min: -200, max: 200, section: 'Right Output' }),
+    pct('rToR', 'Right from Right', 100, { min: -200, max: 200, section: 'Right Output' }),
+    bool('invertR', 'Invert Right', false, { section: 'Right Output' }),
+  ],
+  presets: [
+    preset('Default', { lToL: 100, rToL: 0, invertL: false, lToR: 0, rToR: 100, invertR: false }),
+    preset('Swap Channels', { lToL: 0, rToL: 100, lToR: 100, rToR: 0 }),
+    preset('Mono Mix', { lToL: 50, rToL: 50, lToR: 50, rToR: 50 }),
+    preset('Left to Both', { lToL: 100, rToL: 0, lToR: 100, rToR: 0 }),
+    preset('Right to Both', { lToL: 0, rToL: 100, lToR: 0, rToR: 100 }),
+    preset('Mid and Side', { lToL: 50, rToL: 50, lToR: 50, rToR: -50 }),
+    preset('Vocal Cancel (Difference)', { lToL: 100, rToL: -100, lToR: -100, rToR: 100 }),
+    preset('Fix Right Polarity', { invertR: true }),
+  ],
+});
+
+// ------------------------------------------------- Loudness Maximizer (Special)
+
+registerEffect({
+  id: 'loudnessMaximizer',
+  name: 'Loudness Maximizer',
+  group: 'Special',
+  kind: 38,
+  params: [
+    db('inputBoost', 'Boost', 0, 24, 6),
+    db('ceiling', 'Output Ceiling', -12, 0, -0.3),
+    release(100, { min: 10, max: 1000 }),
+    ms('lookahead', 'Look-Ahead Time', 0.5, 10, 5),
+    pct('lowBoost', 'Lift Quiet Passages', 0),
+  ],
+  presets: [
+    preset('Default', { inputBoost: 6, ceiling: -0.3, release: 100, lookahead: 5, lowBoost: 0 }),
+    preset('Subtle Loudness', { inputBoost: 3, ceiling: -1, release: 200, lookahead: 7, lowBoost: 0 }),
+    preset('Streaming Master', { inputBoost: 6, ceiling: -1, release: 120, lookahead: 5, lowBoost: 15 }),
+    preset('Maximum Impact', { inputBoost: 12, ceiling: -0.1, release: 50, lookahead: 4, lowBoost: 30 }),
+    preset('Voice Presence', { inputBoost: 8, ceiling: -1, release: 150, lookahead: 5, lowBoost: 60 }),
+  ],
+  latency: (v, rate) => limiterLatency(v.lookahead, rate),
+});
+
+// ------------------------------------------------ Repair DC Offset (offline)
+
+/**
+ * Removes the DC component by subtracting each channel's mean over the
+ * processed range. Chosen over a DC-blocking high-pass because it is exact:
+ * no phase shift at low frequencies, no settling transient at the start of
+ * the range, and the same result however long the file is (the mean is
+ * accumulated in double precision). An offset that drifts over time is
+ * outside its scope; a high-pass (Filter and EQ) handles that.
+ */
+export async function runDcOffset({ channels, onProgress, signal }) {
+  const out = [];
+  for (let c = 0; c < channels.length; c++) {
+    checkAbort(signal);
+    const src = channels[c];
+    let sum = 0;
+    for (let i = 0; i < src.length; i++) sum += src[i];
+    const mean = src.length ? sum / src.length : 0;
+    const dst = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i++) dst[i] = src[i] - mean;
+    out.push(dst);
+    onProgress?.((c + 1) / channels.length);
+    await pause();
+  }
+  return out;
+}
+
+registerEffect({
+  id: 'dcOffset',
+  name: 'Repair DC Offset',
+  group: AMP,
+  // Listed directly in the Effects menu (next to Invert and Reverse), not in its group submenu.
+  topLevel: true,
+  kind: null,
+  params: [],
+  run: runDcOffset,
+  process: offloaded('dcOffset'),
+});
+
+// ------------------------------------------------------- Normalize (offline)
+
+/**
+ * Peak normalization. Statistics come from the WASM stats kernel; the gain
+ * multiply is a single pass per channel.
+ */
+async function runNormalize({ channels, values, dsp, onProgress, signal }) {
+  const target = values.unit === 0 ? 10 ** (values.targetDb / 20) : values.targetPercent / 100;
+  const info = [];
+  for (const ch of channels) {
+    checkAbort(signal);
+    const [min, max, sum] = dsp.stats(ch);
+    const mean = values.removeDc && ch.length ? sum / ch.length : 0;
+    info.push({ mean, peak: Math.max(Math.abs(max - mean), Math.abs(min - mean)) });
+  }
+  const loudest = Math.max(0, ...info.map((i) => i.peak));
+  const out = [];
+  for (let c = 0; c < channels.length; c++) {
+    const { mean, peak } = info[c];
+    const p = values.equal ? loudest : peak;
+    const gain = p > 0 ? target / p : 1;
+    const src = channels[c];
+    const dst = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i++) dst[i] = (src[i] - mean) * gain;
+    out.push(dst);
+    onProgress?.((c + 1) / channels.length);
+    await pause();
+  }
+  return out;
+}
+
+registerEffect({
+  id: 'normalize',
+  name: 'Normalize',
+  group: AMP,
+  kind: null,
+  params: [
+    choice('unit', 'Normalize To', ['Decibels', 'Percent'], 1),
+    num('targetPercent', 'Target (%)', 1, 200, 100, '%', { step: 0.1 }),
+    db('targetDb', 'Target (dB)', -60, 6, 0),
+    bool('equal', 'Normalize All Channels Equally', true),
+    bool('removeDc', 'DC Bias Adjust', false),
+  ],
+  presets: [
+    preset('Full Scale', { unit: 1, targetPercent: 100, equal: true, removeDc: false }),
+    preset('Peak -1 dB', { unit: 0, targetDb: -1, equal: true, removeDc: false }),
+    preset('Peak -3 dB with DC Removal', { unit: 0, targetDb: -3, equal: true, removeDc: true }),
+    preset('Half Scale', { unit: 1, targetPercent: 50, equal: true }),
+    preset('Balance Channels to -0.5 dB', { unit: 0, targetDb: -0.5, equal: false, removeDc: true }),
+  ],
+  run: runNormalize,
+  process: offloaded('normalize'),
+});
+
+// ------------------------------------------- Fade and Gain Envelopes (offline)
+
+/**
+ * Renders breakpoint points [{ t: 0..1, v }] to n per-sample values, with
+ * straight lines or a monotone cubic spline (no overshoot between points).
+ * Exported for envelope editors that draw the same curve.
+ */
+export function renderEnvelope(points, n, spline = false) {
+  const out = new Float32Array(n);
+  const pts = [...(points?.length ? points : [{ t: 0, v: 1 }])]
+    .map((p) => ({ t: Math.min(1, Math.max(0, p.t)), v: p.v }))
+    .sort((a, b) => a.t - b.t);
+  if (pts[0].t > 0) pts.unshift({ t: 0, v: pts[0].v });
+  if (pts[pts.length - 1].t < 1) pts.push({ t: 1, v: pts[pts.length - 1].v });
+  const m = pts.length;
+  // Fritsch-Carlson tangents.
+  const tan = new Float64Array(m);
+  if (spline && m > 2) {
+    const d = [];
+    for (let k = 0; k < m - 1; k++) d.push((pts[k + 1].v - pts[k].v) / (pts[k + 1].t - pts[k].t || 1e-9));
+    tan[0] = d[0];
+    tan[m - 1] = d[m - 2];
+    for (let k = 1; k < m - 1; k++) tan[k] = d[k - 1] * d[k] <= 0 ? 0 : (d[k - 1] + d[k]) / 2;
+    for (let k = 0; k < m - 1; k++) {
+      if (d[k] === 0) {
+        tan[k] = 0;
+        tan[k + 1] = 0;
+        continue;
+      }
+      const a = tan[k] / d[k];
+      const b = tan[k + 1] / d[k];
+      const s = a * a + b * b;
+      if (s > 9) {
+        const f = 3 / Math.sqrt(s);
+        tan[k] = f * a * d[k];
+        tan[k + 1] = f * b * d[k];
+      }
+    }
+  }
+  const scale = n > 1 ? 1 / (n - 1) : 0;
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i * scale;
+    while (k < m - 2 && t > pts[k + 1].t) k++;
+    const a = pts[k];
+    const b = pts[k + 1];
+    const h = b.t - a.t;
+    if (h <= 0) {
+      out[i] = b.v;
+      continue;
+    }
+    const u = Math.min(1, Math.max(0, (t - a.t) / h));
+    if (!spline || m <= 2) {
+      out[i] = a.v + (b.v - a.v) * u;
+    } else {
+      const u2 = u * u;
+      const u3 = u2 * u;
+      out[i] = (2 * u3 - 3 * u2 + 1) * a.v + (u3 - 2 * u2 + u) * h * tan[k] + (-2 * u3 + 3 * u2) * b.v + (u3 - u2) * h * tan[k + 1];
+    }
+  }
+  return out;
+}
+
+function envelopeRunner(maxValue) {
+  return async ({ channels, values, onProgress, signal }) => {
+    const n = channels[0]?.length || 0;
+    const env = renderEnvelope(values.envelope, n, values.curve === 1);
+    for (let i = 0; i < n; i++) env[i] = Math.min(maxValue, Math.max(0, env[i]));
+    const out = [];
+    for (let c = 0; c < channels.length; c++) {
+      checkAbort(signal);
+      const src = channels[c];
+      const dst = new Float32Array(n);
+      for (let i = 0; i < n; i++) dst[i] = src[i] * env[i];
+      out.push(dst);
+      onProgress?.((c + 1) / channels.length);
+      await pause();
+    }
+    return out;
+  };
+}
+
+const curveParam = choice('curve', 'Curve', ['Linear', 'Spline'], 0);
+
+registerEffect({
+  id: 'fadeEnvelope',
+  name: 'Fade Envelope',
+  group: AMP,
+  kind: null,
+  params: [
+    { id: 'envelope', label: 'Envelope', type: 'envelope', min: 0, max: 1, unit: '%', default: [{ t: 0, v: 0 }, { t: 1, v: 1 }] },
+    curveParam,
+  ],
+  presets: [
+    preset('Fade In', { envelope: [{ t: 0, v: 0 }, { t: 1, v: 1 }], curve: 0 }),
+    preset('Fade Out', { envelope: [{ t: 0, v: 1 }, { t: 1, v: 0 }], curve: 0 }),
+    preset('Smooth Fade In', { envelope: [{ t: 0, v: 0 }, { t: 0.5, v: 0.25 }, { t: 1, v: 1 }], curve: 1 }),
+    preset('Smooth Fade Out', { envelope: [{ t: 0, v: 1 }, { t: 0.5, v: 0.25 }, { t: 1, v: 0 }], curve: 1 }),
+    preset('Quick Fade In', { envelope: [{ t: 0, v: 0 }, { t: 0.1, v: 1 }, { t: 1, v: 1 }], curve: 0 }),
+    preset('Dip and Return', { envelope: [{ t: 0, v: 1 }, { t: 0.5, v: 0 }, { t: 1, v: 1 }], curve: 1 }),
+  ],
+  run: envelopeRunner(1),
+  process: offloaded('fadeEnvelope'),
+});
+
+registerEffect({
+  id: 'gainEnvelope',
+  name: 'Gain Envelope',
+  group: AMP,
+  kind: null,
+  params: [
+    { id: 'envelope', label: 'Envelope', type: 'envelope', min: 0, max: 4, unit: '%', default: [{ t: 0, v: 1 }, { t: 1, v: 1 }] },
+    curveParam,
+  ],
+  presets: [
+    preset('Unity', { envelope: [{ t: 0, v: 1 }, { t: 1, v: 1 }], curve: 0 }),
+    preset('Swell', { envelope: [{ t: 0, v: 0.5 }, { t: 0.7, v: 1.4 }, { t: 1, v: 1 }], curve: 1 }),
+    preset('Duck the Middle', { envelope: [{ t: 0, v: 1 }, { t: 0.3, v: 1 }, { t: 0.4, v: 0.35 }, { t: 0.6, v: 0.35 }, { t: 0.7, v: 1 }, { t: 1, v: 1 }], curve: 0 }),
+    preset('Build Up', { envelope: [{ t: 0, v: 0.5 }, { t: 1, v: 2 }], curve: 1 }),
+    preset('Taper Off', { envelope: [{ t: 0, v: 1 }, { t: 1, v: 0.5 }], curve: 1 }),
+  ],
+  run: envelopeRunner(4),
+  process: offloaded('gainEnvelope'),
+});

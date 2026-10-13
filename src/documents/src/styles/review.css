@@ -1,0 +1,63 @@
+/* Review: the comment markup column beside the pages. */
+.ed-workspace .canvas-host.has-comment-markup .canvas-pages { padding-right: 330px; }
+.ed-comments-layer { position: absolute; inset: 0 auto auto 0; width: 0; height: 0; z-index: 2; }
+.ed-comments-layer[hidden] { display: none; }
+.ed-comment-card {
+  position: absolute; width: 288px; box-sizing: border-box; padding: 10px 12px; border-radius: 8px;
+  background: var(--ed-card); color: var(--ed-ink); border: 1px solid var(--ed-line);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .08), 0 2px 6px rgba(0, 0, 0, .06);
+  font: 12px/1.45 var(--font); cursor: default; transition: top .12s var(--ease-spring), box-shadow .12s;
+}
+@media (prefers-reduced-motion: reduce) { .ed-comment-card { transition: none; } }
+.ed-comment-card.is-active { border-color: var(--ed-accent); box-shadow: 0 2px 4px rgba(0, 0, 0, .12), 0 6px 16px rgba(0, 0, 0, .1); z-index: 1; }
+.ed-comment-card:focus-visible { outline: 2px solid var(--ed-accent); outline-offset: 2px; }
+.ed-comment-card.is-resolved:not(.is-active) { opacity: .72; padding-block: 6px; }
+.wcc-entry + .wcc-entry { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--ed-line); }
+.wcc-head { display: flex; align-items: center; gap: 8px; min-height: 26px; }
+.wcc-avatar { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 10px; font-weight: 600; letter-spacing: .02em; }
+.wcc-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+.wcc-author { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wcc-date { color: var(--ed-ink-3); font-size: 11px; }
+.wcc-more { width: 26px; height: 26px; font-size: 15px; line-height: 1; color: var(--ed-ink-2); border-radius: 4px; }
+.wcc-more:hover:not(:disabled) { background: var(--ed-hover); }
+.wcc-text { margin: 4px 0 0 32px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wcc-text.is-clamped { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.wcc-editor { margin: 6px 0 0; }
+.wcc-entry .wcc-editor { margin-left: 32px; }
+.wcc-input {
+  display: block; width: 100%; box-sizing: border-box; resize: none; min-height: 30px; padding: 6px 8px;
+  border: 1px solid var(--ed-field); border-radius: 4px; background: var(--ed-card); color: var(--ed-ink); font: inherit;
+}
+.wcc-input:focus { outline: none; border-color: var(--ed-accent); box-shadow: 0 0 0 1px var(--ed-accent); }
+.wcc-actions { display: none; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.wcc-editor:focus-within .wcc-actions, .ed-comment-draft .wcc-actions, .wcc-entry.is-editing .wcc-actions { display: flex; }
+.wcc-reply { margin-top: 8px; }
+.ed-comment-card:not(.is-active) .wcc-reply, .ed-comment-card:not(.is-active) .wcc-resolve { display: none; }
+.wcc-resolve { margin-top: 6px; }
+.wcc-resolved { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; color: var(--ed-ink-3); }
+.btn.btn-sm.wcc-post, .btn.btn-sm.wcc-cancel, .btn.btn-sm.wcc-resolve { padding: 3px 10px; font-size: 12px; min-height: 26px; }
+@media (max-width: 700px) {
+  .ed-workspace .canvas-host.has-comment-markup .canvas-pages { padding-right: 12px; }
+  .ed-comment-card { position: relative; left: auto !important; top: auto !important; width: auto; margin: 8px 12px; }
+  .ed-comments-layer { position: static; width: auto; height: auto; }
+}
+/* Toggled large commands (Track Changes, Show Comments, Print Layout) show their pressed state too. */
+.ribbon-card button.ribbon-large[aria-pressed="true"], .ribbon-flyout button.ribbon-large[aria-pressed="true"] { background: var(--ribbon-glass-pressed); box-shadow: var(--ribbon-glass-pressed-edge); color: var(--ed-ink); }
+/* Reviewing Pane: comments and changes in document order. */
+.review-pane { flex: none; width: 280px; display: flex; flex-direction: column; border-left: 1px solid var(--ed-line); background: var(--ed-card); color: var(--ed-ink); min-height: 0; }
+.review-pane[hidden] { display: none; }
+.review-pane .canvas-panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 4px; }
+.review-pane h2 { font-size: 14px; margin: 0; }
+.review-pane-summary { margin: 0 12px 8px; color: var(--ed-ink-3); font-size: 12px; }
+.review-pane-list { overflow: auto; flex: 1; padding: 0 8px 12px; }
+.review-pane-item { display: block; width: 100%; text-align: left; padding: 7px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: 12px/1.4 var(--font); cursor: pointer; }
+.review-pane-item:hover, .review-pane-item:focus-visible { background: var(--ed-hover); }
+.review-pane-head { display: block; }
+.review-pane-head span { color: var(--ed-ink-3); }
+.review-pane-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--ed-ink-2); }
+/* Phones show it as a sheet under the page, above the status bar, as they do the other panes. */
+@media (max-width: 700px) { .review-pane { position: relative; order: 1; flex: 0 0 auto; width: 100%; max-height: min(45dvh, calc(100% - 130px)); border-left: 0; border-top: 1px solid var(--ed-line); z-index: 5; } }
+/* Read Aloud player, floating at the top right of the pages. */
+.read-aloud-bar { position: absolute; top: 12px; right: 20px; z-index: 6; display: flex; gap: 2px; padding: 4px; border-radius: 8px; background: var(--ed-card); border: 1px solid var(--ed-line); box-shadow: 0 2px 8px rgba(0, 0, 0, .14); }
+.read-aloud-bar[hidden] { display: none; }
+.read-aloud-bar .icon-btn { width: 30px; height: 30px; font-size: 13px; color: var(--ed-ink-2); }
