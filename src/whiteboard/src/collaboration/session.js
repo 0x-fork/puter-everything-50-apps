@@ -1140,18 +1140,19 @@ export class CollaborationSession {
       // not repeated if refused for something else.
       const made = copy.snapshot(this.room),
         current = this.shared.snapshot(this.room);
-      if (
-        remake ||
-        namedChanges(
-          made.workshop,
-          base.workshop,
-          workshopSettings(current).anonymous,
-        ).length
-      ) {
+      const named = namedChanges(
+        made.workshop,
+        base.workshop,
+        workshopSettings(current).anonymous,
+      ).length;
+      if (remake || named) {
         this.shared.commit(rebase(made, base, current), {
           content: !this.contentReadOnly,
         });
-        remade = true;
+        // Changes waiting for edits the state still lacks are left out of
+        // it, so a row made again only in part is reported as refused.
+        const store = copy.doc.store;
+        remade = !!named || !(store.pendingStructs || store.pendingDs);
       }
       for (const row of rows) {
         const before = copy.snapshot(this.room);

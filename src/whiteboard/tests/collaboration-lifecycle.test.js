@@ -981,6 +981,79 @@ test("edits the worker keeps refusing as out of order are made again on its stat
   }
 });
 
+test("an edit refused as out of order that cannot be made again on the worker's state is reported, not lost silently", async () => {
+  const env = environment();
+  const b = board("Conflicts");
+  b.items = [item("note", 0, 0, { text: "Hi" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const rejections = [];
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed() {},
+    activity() {},
+    status() {},
+    rejected: (r) => rejections.push(r),
+  });
+  const call = env.service.call.bind(env.service);
+  try {
+    await session.start();
+    // The state a lagging instance holds: from before this device's first edit.
+    const stale = (await call(owner, { op: "sync", room: b.id })).update;
+    // R1, saved through another instance.
+    let before = session.shared.snapshot(),
+      next = structuredClone(before);
+    next.items[0].text = "Hi there";
+    await session.commit(next, before);
+    await session.queue;
+    await session.flush();
+    assert.equal(session.pending.size, 0);
+    // R2 builds on R1; the lagging instance keeps refusing it and syncs stale.
+    env.service.call = async (user, input) => {
+      if (input.op === "commit")
+        throw Object.assign(
+          Error("This change depends on edits that have not arrived yet."),
+          { status: 409 },
+        );
+      if (input.op === "sync")
+        return { ...(await call(user, input)), update: stale };
+      return call(user, input);
+    };
+    before = session.shared.snapshot();
+    next = structuredClone(before);
+    next.items[0].text = "Hi there, world";
+    await session.commit(next, before);
+    await session.queue;
+    for (let n = 0; n < 8; n++) await session.flush();
+    await session.queue;
+    env.service.call = call;
+    await session.flushed();
+    await session.synchronize();
+    const text = session.shared.snapshot().items[0].text;
+    const { doc } = await env.service.load(b.id);
+    const saved = doc.snapshot().items[0].text;
+    doc.destroy();
+    // Either the edit is saved, or the person is told it was not.
+    assert.ok(
+      saved === "Hi there, world" || rejections.some((r) => !r.remade),
+      "edit lost without a word",
+    );
+  } finally {
+    env.service.call = call;
+    session.close();
+  }
+});
+
 test("a board holding what only a newer app writes asks for a reload instead of showing offline", async () => {
   const env = environment();
   const b = board("Newer");
