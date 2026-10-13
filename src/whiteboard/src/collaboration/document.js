@@ -611,6 +611,7 @@ export class SharedDocument {
     if (this.read) return;
     this.read = new Map();
     this.doc.on("afterTransaction", (transaction) => {
+      this.encoded = null;
       // Objects added, removed or replaced, or given another layer rank,
       // change the stacking order; see layered.
       if (transaction.changed.has(this.items)) this.order = null;
@@ -1180,8 +1181,15 @@ export class SharedDocument {
       rewrittenRoots,
     };
   }
+  // A document projected after every change also keeps its whole state
+  // encoded until the next change, as a worker hands it to everyone joining
+  // and keeps it after each read of the log, which usually brings nothing.
+  // Callers must not change what they are given.
   update(vector) {
-    return Y.encodeStateAsUpdate(this.doc, vector);
+    if (vector || !this.read) return Y.encodeStateAsUpdate(this.doc, vector);
+    if (this.doc._transactionCleanups.length > 0)
+      return Y.encodeStateAsUpdate(this.doc);
+    return (this.encoded ??= Y.encodeStateAsUpdate(this.doc));
   }
   vector() {
     return Y.encodeStateVector(this.doc);

@@ -1822,3 +1822,34 @@ test("a busy board is checkpointed once across instances, at most every five min
     true,
   );
 });
+
+test("a loaded board's whole state is encoded once until it changes", () => {
+  const b = board("Encoded");
+  b.items = [item("note", 0, 0, { text: "One" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  const live = new SharedDocument(seed.update());
+  live.cacheItems();
+  const first = live.update();
+  assert.equal(live.update(), first, "kept while unchanged");
+  assert.deepEqual(first, Y.encodeStateAsUpdate(live.doc));
+  // A change from elsewhere, and one made here, encode it again.
+  const other = new SharedDocument(seed.update());
+  const before = other.vector(),
+    next = other.snapshot();
+  next.items[0].text = "Two";
+  other.commit(next);
+  live.apply(other.update(before));
+  const second = live.update();
+  assert.notEqual(second, first);
+  assert.equal(new SharedDocument(second).snapshot().items[0].text, "Two");
+  const mine = live.snapshot();
+  mine.items[0].text = "Three";
+  live.commit(mine);
+  assert.equal(
+    new SharedDocument(live.update()).snapshot().items[0].text,
+    "Three",
+  );
+  // Asked for what a vector lacks, it encodes just that.
+  assert.ok(live.update(other.vector()).length < live.update().length);
+});
