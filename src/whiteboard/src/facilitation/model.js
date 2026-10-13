@@ -10,6 +10,7 @@ import { setObjectHeight } from "../geometry.js";
 import { timerPhase } from "../timer.js";
 import { canonicalLanguage } from "../accessibility/language-tag.js";
 import { sliceTextRuns, validateTextRuns } from "../rich-text.js";
+import { sameJSON } from "../same-json.js";
 
 export const REACTIONS = [
   ["thumbs", "👍", "Thumbs up"],
@@ -60,7 +61,7 @@ const actor = (v) => text(v, 200);
 const objectId = (v) => text(v, 256);
 const time = (v) => Number.isSafeInteger(v) && v >= 0 && v <= 8.64e15;
 const count = (v, max = 1e9) => Number.isSafeInteger(v) && v >= 0 && v <= max;
-const same = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+const same = sameJSON;
 const unique = (list) => new Set(list).size === list.length;
 const list = (v, max, check) =>
   Array.isArray(v) && v.length <= max && v.every(check);

@@ -1,14 +1,20 @@
 // Turns extracted document models into board objects inside new frames.
 // Every limit the board enforces is applied here, so the result always
 // passes validateBoard and can be inserted as one undoable batch.
-import { item, imageSize, validateBoard, COLORS, truncate } from "../model.js";
+import {
+  item,
+  imageSize,
+  validateBoard,
+  COLORS,
+  truncate,
+  MAX_OBJECTS,
+} from "../model.js";
 import { wrapText } from "../text.js";
 import { tableHeight } from "../bulk-content.js";
 import { splitTable } from "./tables.js";
 import { dataURL, IMAGE_BYTES, ATTACHMENT_BYTES, base64 } from "./binary.js";
 import { sheetSourceURL } from "./providers.js";
 
-export const MAX_OBJECTS = 5000;
 const GAP = 24,
   PAD = 32,
   TITLE = 64,

@@ -104,19 +104,7 @@ export function autoHeightLayout(
     width = Math.max(1, Math.abs(i.w));
   let contexts = heightLayouts.get(i);
   const cached = contexts?.get(ctx) || [];
-  const hit = cached.find(
-    (c) =>
-      c.width === width &&
-      c.font === style.font &&
-      c.text === text &&
-      c.runs === runs &&
-      c.blocks === blocks &&
-      c.color === style.color &&
-      c.decoration === style.decoration &&
-      c.highlight === i.highlight &&
-      c.lang === i.lang &&
-      c.footer === tagFooter(i),
-  );
+  const hit = heightHit(cached, i, style, width, text, runs, blocks);
   if (hit) {
     if (hit !== cached[0])
       contexts.set(ctx, [hit, ...cached.filter((c) => c !== hit)]);
@@ -181,6 +169,43 @@ export function autoHeightLayout(
   return layout;
 }
 
+// The cached height layout made for the same text, width and style.
+function heightHit(cached, i, style, width, text, runs, blocks) {
+  return cached.find(
+    (c) =>
+      c.width === width &&
+      c.font === style.font &&
+      c.text === text &&
+      c.runs === runs &&
+      c.blocks === blocks &&
+      c.color === style.color &&
+      c.decoration === style.decoration &&
+      c.highlight === i.highlight &&
+      c.lang === i.lang &&
+      c.footer === tagFooter(i),
+  );
+}
+// The height layout already made for the object with this text, if any,
+// without making one.
+export function cachedAutoHeightLayout(
+  i,
+  ctx,
+  text = i.text || "",
+  runs = i.textRuns,
+  blocks = i.textBlocks,
+) {
+  const hit = heightHit(
+    heightLayouts.get(i)?.get(ctx) || [],
+    i,
+    textStyle(i),
+    Math.max(1, Math.abs(i.w)),
+    text,
+    runs,
+    blocks,
+  );
+  return hit?.layout || null;
+}
+
 export function reflowTextItems(items, ctx) {
   let changed = false;
   for (const i of items) {
@@ -194,6 +219,46 @@ export function reflowTextItems(items, ctx) {
   return changed;
 }
 
+// What an object's fitted layout depends on.
+const fitSignature = (i, base, text, runs, blocks) => [
+  i.w,
+  i.h,
+  i.type,
+  i.shape,
+  i.textValign,
+  tagFooter(i),
+  base.font,
+  base.color,
+  base.align,
+  base.decoration,
+  i.highlight,
+  i.lang,
+  runs,
+  blocks,
+  text,
+];
+// The fitted layout already made for the object with this text, if any,
+// without making one.
+export function cachedFitTextLayout(
+  i,
+  ctx,
+  text = i.text || "",
+  defaultColor,
+  runs = i.textRuns,
+  blocks = i.textBlocks,
+) {
+  const signature = fitSignature(
+      i,
+      textStyle(i, defaultColor),
+      text,
+      runs,
+      blocks,
+    ),
+    cached = fittedLayouts.get(i)?.get(ctx);
+  return cached && signature.every((value, n) => value === cached.signature[n])
+    ? cached.layout
+    : null;
+}
 // Font size is derived, never written to the object. Each context caches the
 // latest layout per object, so panning and repainting do not remeasure text.
 // Fitting shrinks text to keep a word whole only down to this size.
@@ -209,23 +274,7 @@ export function fitTextLayout(
   blocks = i.textBlocks,
 ) {
   const base = textStyle(i, defaultColor);
-  const signature = [
-    i.w,
-    i.h,
-    i.type,
-    i.shape,
-    i.textValign,
-    tagFooter(i),
-    base.font,
-    base.color,
-    base.align,
-    base.decoration,
-    i.highlight,
-    i.lang,
-    runs,
-    blocks,
-    text,
-  ];
+  const signature = fitSignature(i, base, text, runs, blocks);
   let contexts = fittedLayouts.get(i);
   const cached = contexts?.get(ctx);
   if (cached && signature.every((value, n) => value === cached.signature[n]))

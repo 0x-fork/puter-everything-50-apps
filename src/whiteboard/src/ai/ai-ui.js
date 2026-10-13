@@ -1,4 +1,4 @@
-import { item, bounds, COLORS } from "../model.js";
+import { item, bounds, COLORS, MAX_OBJECTS } from "../model.js";
 import { addTranslations, t, language, plural } from "../i18n.js";
 import { planClusters, applyClusters } from "../clusters.js";
 import {
@@ -439,7 +439,7 @@ export function createAI({
   function insertNotes(notes) {
     if (!notes.length) return;
     const b = board();
-    if (b.items.length + notes.length > 5000)
+    if (b.items.length + notes.length > MAX_OBJECTS)
       throw Error(t("This would exceed the board limit of 5,000 objects."));
     const c = center();
     const created = noteGrid(notes, { x: c.x - 450, y: c.y - 200 });
@@ -547,7 +547,7 @@ export function createAI({
           };
           work.querySelector("#ai-add").onclick = () => {
             if (!onBoard(d) || !canEdit(new Set())) return;
-            if (b.items.length >= 5000)
+            if (b.items.length >= MAX_OBJECTS)
               return progress(
                 d,
                 "This would exceed the board limit of 5,000 objects.",

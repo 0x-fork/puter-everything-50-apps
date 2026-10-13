@@ -139,6 +139,49 @@ median initial participant rendering from 131.26 to 16.67 ms and a metadata
 update from 179.78 to 6.18 ms. These measurements exclude native layout and
 network latency; they do not simulate concurrent network sessions.
 
+## Large boards and large sessions
+
+Measured on an M-series Mac: boards in headless Chromium with generated content
+(frames of notes, shapes, text and connectors), the worker and browser sessions
+in Node with the real worker and an in-memory Puter, and rooms with the
+capacity simulation in `tests/worker-capacity.test.js` (three worker instances,
+Puter's listing quota, storage visible after a delay).
+
+A 5,000-object board opens in about 100 ms and pans in about 2.5 ms per frame
+at any zoom. Deleting, undoing or adding one object no longer rewrites the
+hidden object outline for screen readers (142 to 66 ms for a delete); undo keeps
+unchanged objects' text layouts (111 to 17 ms at 18% zoom); a board of drawings
+writes each edit in half the time; and the library paints large boards'
+thumbnails without laying out text too small to see (2.3 to 0.4 seconds for six
+5,000-object boards).
+
+On a shared 5,000-object board the worker checks a one-object save in about
+2.3 ms rather than 6.1 (15.5 rather than 33.6 at 20,000 objects), and hands the
+same encoded state to everyone joining. A browser writes a local edit into the
+shared document in about 3.5 ms rather than 14, and a synchronization that
+brings nothing costs about 3 ms rather than 16.
+
+With 100 of 150 people editing on the paid listing quota, uploads paced to keep
+the room near eight saves a second take the worker from 240 listings a minute
+(its whole quota), 57 writes a second and 3,273 retries to 143 listings, 20
+writes a second and none, and saves from 10.5 seconds at the 95th percentile to
+63 ms. Checkpoints are written once across instances, at most every five
+minutes, instead of about 18 a minute. An edit the worker keeps refusing as out
+of order is made again on its state rather than dropped. With 150 people moving
+cursors, a relay sends about half the bytes it did (2.4 rather than 4.7 MB a
+second). A hundred-person discussion's 98th reply saves in 0.28 rather than 2.2
+seconds.
+
+A device that cannot keep its copy of the board, as when its storage is full,
+keeps saving to the shared board; images past the per-minute upload limit say
+they are waiting rather than "Offline"; and large offline backlogs go up over
+slow connections in smaller batches.
+
+The 5,000-object limit is unchanged. At 10,000 objects a frame still pans in
+about 4 ms, but a local edit on a shared board takes about 39 ms (27 at 5,000
+before these changes) and incoming edits and the device copy cost twice as
+much, as the browser still copies and compares the whole board for each edit.
+
 ## Regression gates
 
 The full suite passed all 2,807 tests for the first six commits, as did the full

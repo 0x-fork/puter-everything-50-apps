@@ -85,6 +85,7 @@ function queued(rows) {
 function sessionDocument(update) {
   const doc = new SharedDocument(update, { merge: true });
   doc.cacheItems({ deep: true });
+  doc.watchArrivals();
   return doc;
 }
 
@@ -162,8 +163,11 @@ export class CollaborationSession {
     this.role = role;
     this.archived = archived;
     this.denied = false;
-    this.readOnly = archived || !canComment(role);
-    this.contentReadOnly = archived || !canEditContent(role);
+    // A board holding what only a newer app writes stays read-only here,
+    // whatever the role, until this copy can read it again.
+    this.readOnly = this.incompatible || archived || !canComment(role);
+    this.contentReadOnly =
+      this.incompatible || archived || !canEditContent(role);
     // Uploads stop while read-only; send what waited once access returns.
     if (wasReadOnly && !this.readOnly && this.poll && this.pending.size)
       this.scheduleFlush();
@@ -178,7 +182,7 @@ export class CollaborationSession {
   // changes. Unknown until a role is, and while access is refused, which
   // the status says instead.
   get access() {
-    if (!this.role || this.denied) return "";
+    if (!this.role || this.denied || this.incompatible) return "";
     return this.archived || !canComment(this.role)
       ? "view"
       : canEditContent(this.role)
@@ -598,6 +602,18 @@ export class CollaborationSession {
       this.beatAgain = false;
     }
   }
+  // The copy kept on this device lets a reload show the board without a
+  // connection; the board's server holds everything saved. Failing to write
+  // it, as when the device's storage is full, must not hold back saving
+  // edits or showing others', so callers that go on regardless use this.
+  async keepCopy() {
+    try {
+      await this.cache();
+      return true;
+    } catch {
+      return false;
+    }
+  }
   async cache() {
     await this.store.collaborationPut({
       id: `${this.scope}|snapshot`,
@@ -655,46 +671,90 @@ export class CollaborationSession {
           this.assets.set(asset, i[key]);
           this.assetIds.set(i[key], asset);
           this.pendingAssets.add(asset);
-          await this.store.collaborationPut({
-            id: `${this.scope}|asset:${asset}`,
-            scope: this.scope,
-            kind: "asset",
-            asset,
-            data: i[key],
-            pending: true,
-          });
+          // The bytes are held in memory until uploaded. Kept on the device
+          // too, they survive a reload; a device that cannot keep them, as
+          // when its storage is full, still saves the edit while this tab
+          // stays open, as with edits it cannot keep (see track).
+          try {
+            await this.store.collaborationPut({
+              id: `${this.scope}|asset:${asset}`,
+              scope: this.scope,
+              kind: "asset",
+              asset,
+              data: i[key],
+              pending: true,
+            });
+          } catch {
+            this.recoveryFailed = true;
+            this.status("Local recovery failed. Keep this tab open.");
+          }
         }
         i[key] = "asset:" + asset;
       }
     return copy;
   }
+  // Images and files are uploaded a few at a time, as they are downloaded,
+  // so a deck of pictures added at once does not wait on each in turn.
   async uploadAssets() {
-    for (const asset of this.pendingAssets) {
-      try {
-        await this.request("asset.put", {
-          asset,
-          data: this.assets.get(asset),
+    // Files added while others upload, as a second picture while the first
+    // goes up, are taken in the same pass: the edit adding them may already
+    // be on its way.
+    const taken = new Set();
+    const pick = () => {
+      for (const asset of this.pendingAssets)
+        if (!taken.has(asset)) {
+          taken.add(asset);
+          return asset;
+        }
+    };
+    let failed = null;
+    const next = async () => {
+      for (let asset; !failed && !this.closed && (asset = pick());)
+        await this.uploadAsset(asset).catch((error) => {
+          failed ??= error;
         });
-      } catch (error) {
-        // A file the worker refuses for what it is, such as one too large,
-        // would be refused on every retry and hold back every later edit.
-        // It is given up: the worker then refuses the edit that added it,
-        // which is recovered from like any other refused edit.
-        if (![400, 413, 422].includes(error.status)) throw error;
-        this.pendingAssets.delete(asset);
-        await this.store.collaborationDelete(`${this.scope}|asset:${asset}`);
-        continue;
-      }
-      await this.store.collaborationPut({
+    };
+    await Promise.all(Array.from({ length: 4 }, next));
+    if (failed?.status === 429)
+      // A person may add only so many files to a board a minute. Nothing is
+      // wrong with the connection; the rest go up when the worker allows.
+      failed.uploadsWait = true;
+    if (failed) throw failed;
+  }
+  async uploadAsset(asset) {
+    try {
+      await this.request("asset.put", {
+        asset,
+        data: this.assets.get(asset),
+      });
+    } catch (error) {
+      // A file the worker refuses for what it is, such as one too large,
+      // would be refused on every retry and hold back every later edit.
+      // It is given up: the worker then refuses the edit that added it,
+      // which is recovered from like any other refused edit.
+      if (![400, 413, 422].includes(error.status)) throw error;
+      // Said when the edit adding it is refused, rather than a conflict.
+      this.refusedFile =
+        error.status === 413 && /limit/.test(error.message)
+          ? error.message
+          : "An image or file could not be saved to the shared board.";
+      this.pendingAssets.delete(asset);
+      await this.store.collaborationDelete(`${this.scope}|asset:${asset}`);
+      return;
+    }
+    // Uploaded, the file is safe whether or not this device can record
+    // that; a row left pending is only uploaded again after a reload.
+    await this.store
+      .collaborationPut({
         id: `${this.scope}|asset:${asset}`,
         scope: this.scope,
         kind: "asset",
         asset,
         data: this.assets.get(asset),
         pending: false,
-      });
-      this.pendingAssets.delete(asset);
-    }
+      })
+      .catch(() => {});
+    this.pendingAssets.delete(asset);
   }
   // The board as it stood at an earlier version, with shared media hydrated.
   async versionBoard(at) {
@@ -805,20 +865,24 @@ export class CollaborationSession {
       this.status(this.shown || this.savedStatus());
   }
   // Uploads are spaced so a room's edits stay within what its worker can
-  // store, about eight a second, by how many people uploaded in the last ten
-  // seconds as their peers announced: 0.4 seconds for a few, 1.25 for ten,
-  // and at most 3 from 24 on, so editing stays usable in the busiest room.
-  // Moves, drawings and typing show live meanwhile. Without peer links,
-  // others' uploads are unseen and a quarter of a large room counts.
+  // store, about eight a second, by how many people uploaded in the last
+  // fifteen seconds as their peers announced: 0.4 seconds for a few, 1.25
+  // for ten, 12.5 for a hundred, and at most 15 from 120 on. Moves, drawings
+  // and typing show live meanwhile, so waiting longer to save them keeps a
+  // busy room's worker within its storage quota without slowing what people
+  // see. Without peer links, nothing shows until it is saved, so uploads
+  // wait at most 3 seconds, and with others' uploads unseen a quarter of a
+  // large room counts.
   batchDelay() {
     const now = Date.now();
     let active = 1;
     for (const [id, at] of this.uploaders || [])
-      if (now - at < 10_000) active++;
+      if (now - at < 15_000) active++;
       else this.uploaders.delete(id);
     const people = this.roster?.length || 0;
-    if (people > 8 && !this.linked()) active = Math.max(active, people / 4);
-    return Math.min(3000, Math.max(400, active * 125));
+    if (people > 8 && !this.linked())
+      return Math.min(3000, Math.max(400, Math.max(active, people / 4) * 125));
+    return Math.min(15_000, Math.max(400, active * 125));
   }
   // The first edit after a quiet spell goes out at once; edits made soon
   // after an upload wait for the rest of the batch delay, so a busy device
@@ -895,7 +959,12 @@ export class CollaborationSession {
           if (error.status === 409 && !this.closed) {
             this.conflicts = (this.conflicts || 0) + 1;
             if (this.conflicts < 8) {
-              this.soon = true;
+              // A worker short of storage requests refuses many people's
+              // edits at once; waiting longer each time, and not all for
+              // the same time, lets it catch up.
+              this.soon =
+                Math.min(8000, 1500 * 2 ** (this.conflicts - 1)) *
+                (0.75 + Math.random() / 2);
               break;
             }
             this.conflicts = 0;
@@ -904,9 +973,14 @@ export class CollaborationSession {
             this.batchRows = Math.ceil(rows.length / 2);
             this.soon = true;
             continue;
+          } else if (error.status === undefined && rows.length > 1) {
+            // A batch that times out or is cut off on a slow connection
+            // would every time; the next try sends half as much.
+            this.batchRows = Math.ceil(rows.length / 2);
+            throw error;
           } else if (![413, 422].includes(error.status) || this.closed)
             throw error;
-          await this.recover(rows);
+          await this.recover(rows, error);
           sent = true;
         }
         if (this.closed) return;
@@ -927,7 +1001,13 @@ export class CollaborationSession {
       if (this.pending.size && !this.closed && !this.readOnly)
         this.retryTimer = setTimeout(
           () => this.flush().catch((e) => this.failure(e)),
-          this.soon ? 1500 : this.flushAgain ? this.batchDelay() : 10000,
+          this.soon
+            ? typeof this.soon === "number"
+              ? this.soon
+              : 1500
+            : this.flushAgain
+              ? this.batchDelay()
+              : 10000,
         );
       this.soon = this.flushAgain = false;
     }
@@ -966,10 +1046,13 @@ export class CollaborationSession {
       throw Error("The server did not acknowledge this edit.");
     this.shared.apply(decode(result.update));
     this.arrived(digest);
-    // Keep the acknowledged edits locally before removing their rows.
-    await this.cache();
+    // Keep the acknowledged edits locally before removing their rows. If
+    // that copy cannot be written, the rows stay stored, so a reload still
+    // has these edits and sends them again, which the worker takes as
+    // nothing new; they are saved either way, so the upload moves on.
+    const kept = await this.keepCopy();
     for (const row of rows) {
-      await this.store.collaborationDelete(row.id);
+      if (kept) await this.store.collaborationDelete(row.id).catch(() => {});
       this.pending.delete(row.digest);
     }
     this.peers
@@ -989,7 +1072,7 @@ export class CollaborationSession {
   // clock and cannot be uploaded as they are, so the accepted prefix is saved,
   // the session returns to the authoritative document, and what each later
   // row changed is made again on top of it. Only the rejected edit is lost.
-  async recover(rows) {
+  async recover(rows, why) {
     let refused = rows[0];
     if (rows.length > 1) {
       refused = null;
@@ -999,6 +1082,7 @@ export class CollaborationSession {
         } catch (error) {
           if (![409, 413, 422].includes(error.status)) throw error;
           refused = row;
+          why = error;
           break;
         }
         if (this.closed) return;
@@ -1019,18 +1103,32 @@ export class CollaborationSession {
     this.track();
     previous.destroy();
     for (const row of discarded) await this.store.collaborationDelete(row.id);
-    const remade = this.replay(decode(result.update), refused, later);
+    const remade = this.replay(
+      decode(result.update),
+      refused,
+      later,
+      why?.status === 409,
+    );
     // Undo history belonged to the replaced document.
     this.shared.undo.clear();
-    await this.cache();
+    await this.keepCopy();
     await this.publish();
-    if (!this.closed) this.rejected({ remade });
+    // A file the worker refused is what the edit lacked.
+    const reason =
+      why?.status === 422 && /file that was not uploaded/.test(why.message)
+        ? this.refusedFile
+        : undefined;
+    this.refusedFile = null;
+    if (!this.closed) this.rejected({ remade, reason });
   }
   // Commits again what each row changed, read on a copy of the shared state
   // that has the refused row and the rows before it. Changes to anything the
-  // refused row added are dropped with it, as the shared state lacks it.
+  // refused row added are dropped with it, as the shared state lacks it. A
+  // row the worker kept refusing because edits it builds on had not arrived
+  // (`remake`) is made again on its state as far as that allows, rather than
+  // lost: the edits it lacks may never come, but its own changes are fine.
   // Returns whether the refused row itself was made again.
-  replay(state, refused, rows) {
+  replay(state, refused, rows, remake = false) {
     const copy = new SharedDocument(state);
     let remade = false;
     try {
@@ -1042,17 +1140,19 @@ export class CollaborationSession {
       // not repeated if refused for something else.
       const made = copy.snapshot(this.room),
         current = this.shared.snapshot(this.room);
-      if (
-        namedChanges(
-          made.workshop,
-          base.workshop,
-          workshopSettings(current).anonymous,
-        ).length
-      ) {
+      const named = namedChanges(
+        made.workshop,
+        base.workshop,
+        workshopSettings(current).anonymous,
+      ).length;
+      if (remake || named) {
         this.shared.commit(rebase(made, base, current), {
           content: !this.contentReadOnly,
         });
-        remade = true;
+        // Changes waiting for edits the state still lacks are left out of
+        // it, so a row made again only in part is reported as refused.
+        const store = copy.doc.store;
+        remade = !!named || !(store.pendingStructs || store.pendingDs);
       }
       for (const row of rows) {
         const before = copy.snapshot(this.room);
@@ -1193,9 +1293,20 @@ export class CollaborationSession {
     } finally {
       this.shared.doc.off("update", noticed);
     }
+    // Once this document was checked whole, a synchronization checks only
+    // what arrived since the last check, from the worker or from peers, as
+    // the worker does each save, and the board as a whole: on a large board
+    // in a busy room, checking every object each time cost about 15 ms per
+    // synchronization, even one bringing nothing. A board found to need a
+    // newer app is checked whole until it no longer does.
+    const arrived = this.shared.takeArrivals(),
+      checked = this.checked === this.shared && !this.incompatible;
     try {
-      this.shared.validate(ACCEPTED);
+      this.shared.validate(ACCEPTED, checked ? arrived : {});
+      this.checked = this.shared;
+      this.incompatible = false;
     } catch (error) {
+      this.checked = null;
       // An edit queued on this device may no longer fit what others saved
       // meanwhile, as a change to the same object; the worker refuses such
       // an edit, so it is uploaded now and dropped like any refused edit,
@@ -1206,6 +1317,8 @@ export class CollaborationSession {
         if (this.closed) return;
         try {
           this.shared.validate(ACCEPTED);
+          this.checked = this.shared;
+          this.incompatible = false;
         } catch (again) {
           again.incompatible = true;
           throw again;
@@ -1236,7 +1349,7 @@ export class CollaborationSession {
         .catch(() => {});
     }
     if (changed) {
-      await this.cache();
+      await this.keepCopy();
       await this.publish();
       this.synchronized = true;
     }
@@ -1570,7 +1683,14 @@ export class CollaborationSession {
           return;
         // The receipt shows the worker checked and saved these exact bytes,
         // so they are applied as a synchronization would apply them.
-        this.shared.apply(update);
+        const { items } = this.shared.applyTracked(update);
+        // What it changed, for the previews it ends (see settled).
+        const person = this.people.get(ticket.session);
+        if (person)
+          for (const id of items) (person.edited ??= new Set()).add(id);
+        (this.touched ??= new Map()).set(data.receipt.id, items);
+        if (this.touched.size > 64)
+          this.touched.delete(this.touched.keys().next().value);
         // Complete edits need no synchronization when their save is
         // announced; one waiting on missing edits still does.
         const store = this.shared.doc.store;
@@ -1622,12 +1742,18 @@ export class CollaborationSession {
             ids = this.committedIds;
           this.committedPeople = new Set();
           this.committedIds = new Set();
+          // What the saves changed, when their edits came over peer links.
+          let touched = new Set();
+          for (const id of ids)
+            if (this.touched?.has(id))
+              for (const item of this.touched.get(id)) touched.add(item);
+            else touched = null;
           const end = () => {
             let ended = false;
             for (const session of settled) {
               const p = this.people.get(session);
               if (!p || (!p.settling && !p.held.length)) continue;
-              this.settled(p);
+              this.settled(p, touched);
               ended = true;
             }
             if (ended && !this.closed)
@@ -1659,7 +1785,9 @@ export class CollaborationSession {
         this.showTimer = null;
         for (const id of this.shownPeople) {
           const person = this.people.get(id);
-          if (person) this.settled(person);
+          if (!person) continue;
+          this.settled(person, person.edited ?? null);
+          person.edited = null;
         }
         this.shownPeople.clear();
         if (this.closed) return;
@@ -1683,11 +1811,19 @@ export class CollaborationSession {
   // Someone's edit arrived: what it changed is shown as the board has it.
   // New objects they finished whose edits have not arrived yet, such as the
   // drawing after the one just saved, stay held, as does anything they are
-  // still creating. A move of an existing object is not told apart from
-  // their other edits; mind-map moves, for one, can save no new position.
-  settled(person) {
+  // still creating. Given the objects their edits changed (`touched`), as
+  // edits arriving over peer links tell, a finished move of any other
+  // object stays held too, for as long as holds last, since its own edit
+  // may wait for a later upload: busy rooms space uploads seconds apart.
+  // Without it, as when the edit was read from the worker, every move gives
+  // way; mind-map moves, for one, can save no new position.
+  settled(person, touched = null) {
     person.live = person.live.filter((i) => this.creating(i));
-    person.held = person.held.filter((h) => h.created && this.creating(h.item));
+    person.held = person.held.filter(
+      (h) =>
+        (h.created && this.creating(h.item)) ||
+        (touched && !touched.has(h.item.id)),
+    );
     this.showPerson(person);
     person.text = null;
     person.settling = person.settleUntil = null;
@@ -1934,7 +2070,12 @@ export class CollaborationSession {
       if (!this.pending.size) this.status(this.savedStatus());
       return;
     }
+    if (error.uploadsWait) {
+      this.status("Uploading images · waiting for the board's server");
+      return;
+    }
     if (error.incompatible) {
+      this.incompatible = true;
       this.readOnly = true;
       this.contentReadOnly = true;
       this.status("This board needs a newer version of the app · reload");

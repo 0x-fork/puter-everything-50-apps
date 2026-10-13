@@ -35,6 +35,7 @@ export function createFramesPanel(api) {
     // What the list was last drawn from, and what it showed.
     signature = null,
     written = "",
+    writtenRows = null,
     listed = [];
   const shownItems = () => (api.visualBoard?.() || api.board()).items;
   const list = () => panel.querySelector(".frame-list");
@@ -154,33 +155,38 @@ export function createFramesPanel(api) {
       const blocked = (to) => fixed || !every[to] || every[to].locked;
       return `<button class="secondary" data-order="${escape(f.id)}" data-delta="-1" tabindex="${stop}" aria-label="${t("Move frame earlier")}" ${blocked(n - 1) ? "disabled" : ""}>↑</button><button class="secondary" data-order="${escape(f.id)}" data-delta="1" tabindex="${stop}" aria-label="${t("Move frame later")}" ${blocked(n + 1) ? "disabled" : ""}>↓</button>`;
     };
+    const rows = all.map((f) => {
+      const n = place.get(f),
+        stop = f.id === active ? "0" : "-1",
+        depth = level(f),
+        holder = byId.get(parents.get(f.id));
+      return `<div class="frame-row" role="listitem" aria-level="${depth}" data-level="${Math.min(depth, 4)}"><button class="frame-go" data-frame="${escape(f.id)}" tabindex="${stop}"><span class="sr-only">${labelled(t("Go to frame"), "")}</span><span>${n + 1}</span> <strong data-user-content title="${escape(f.text || untitled(n))}">${frameTitleHTML(f, n)}</strong>${holder ? `<span class="sr-only">, ${labelled(t("In frame"), frameTitleHTML(holder, place.get(holder)))}</span>` : ""} <small>${plural(contents.get(f.id).size - 1, "{count} object", "{count} objects")}</small></button><button class="icon-btn frame-link" data-link="${escape(f.id)}" tabindex="${stop}" aria-label="${t("Copy link to frame")}" title="${t("Copy link to frame")}"><i data-lucide="link" aria-hidden="true"></i></button>${arrows(f, n, stop)}</div>`;
+    });
     write(
       all.length
-        ? `<div role="list">${all
-            .map((f) => {
-              const n = place.get(f),
-                stop = f.id === active ? "0" : "-1",
-                depth = level(f),
-                holder = byId.get(parents.get(f.id));
-              return `<div class="frame-row" role="listitem" aria-level="${depth}" data-level="${Math.min(depth, 4)}"><button class="frame-go" data-frame="${escape(f.id)}" tabindex="${stop}"><span class="sr-only">${labelled(t("Go to frame"), "")}</span><span>${n + 1}</span> <strong data-user-content title="${escape(f.text || untitled(n))}">${frameTitleHTML(f, n)}</strong>${holder ? `<span class="sr-only">, ${labelled(t("In frame"), frameTitleHTML(holder, place.get(holder)))}</span>` : ""} <small>${plural(contents.get(f.id).size - 1, "{count} object", "{count} objects")}</small></button><button class="icon-btn frame-link" data-link="${escape(f.id)}" tabindex="${stop}" aria-label="${t("Copy link to frame")}" title="${t("Copy link to frame")}"><i data-lucide="link" aria-hidden="true"></i></button>${arrows(f, n, stop)}</div>`;
-            })
-            .join("")}</div>` +
+        ? `<div role="list">${rows.join("")}</div>` +
             (fixed && arranging
               ? `<p class="dialog-copy">${t("Frames can be reordered once the facilitator shows every frame.")}</p>`
               : "")
         : every.length
           ? `<p class="dialog-copy">${t("No frames match your search.")}</p>`
           : `<p class="dialog-copy">${t("Add a frame to organize content and create presentation slides.")}</p>`,
+      all.length ? rows : null,
     );
     footer();
     mark();
   }
   // Writes the list when it changed, keeping its scroll position and the
   // keyboard on the same control of the same frame, or on the row now in
-  // the place of one removed.
-  function write(html) {
+  // the place of one removed. An edit on the board mostly changes one
+  // frame's count of objects, so when the rows are the same frames as
+  // before, only those that changed are written again.
+  function write(html, frameRows = null) {
     if (html === written) return;
+    const before = written,
+      beforeRows = writtenRows;
     written = html;
+    writtenRows = frameRows;
     const rows = list(),
       focused = rows.contains(document.activeElement)
         ? document.activeElement
@@ -189,10 +195,12 @@ export function createFramesPanel(api) {
       id = focused && rowOf(focused),
       delta = focused?.dataset.delta,
       top = rows.scrollTop;
-    rows.innerHTML = html;
+    if (!rewriteRows(rows, before, html, beforeRows, frameRows))
+      rows.innerHTML = html;
     rows.scrollTop = top;
     api.refreshIcons?.();
-    if (!focused) return;
+    // A control in a row left as it was keeps the keyboard.
+    if (!focused || focused.isConnected) return;
     const buttons = [...rows.querySelectorAll("button")];
     const same = buttons.find(
       (b) => b.dataset[control] === id && b.dataset.delta === delta,
@@ -206,6 +214,40 @@ export function createFramesPanel(api) {
       search().closest("label:not([hidden])")?.querySelector("input") ||
       panel.querySelector("#frames-close")
     ).focus({ preventScroll: true });
+  }
+  // Writes again the rows that changed, when the list shows as many frames
+  // as before and nothing else in it changed. Says whether it did, which it
+  // does not when so many changed that writing the whole list is quicker.
+  function rewriteRows(rows, before, html, beforeRows, frameRows) {
+    if (!beforeRows || !frameRows || beforeRows.length !== frameRows.length)
+      return false;
+    // What follows the rows, a note under the list, is the same.
+    const end = (list) =>
+      '<div role="list">'.length +
+      list.reduce((sum, row) => sum + row.length, 0) +
+      "</div>".length;
+    if (before.slice(end(beforeRows)) !== html.slice(end(frameRows)))
+      return false;
+    const shown = rows.firstElementChild?.children;
+    if (shown?.length !== frameRows.length) return false;
+    const changed = [];
+    for (let n = 0; n < frameRows.length; n++)
+      if (frameRows[n] !== beforeRows[n]) changed.push(n);
+    if (changed.length > 50) return false;
+    const template = document.createElement("template");
+    for (const n of changed) {
+      template.innerHTML = frameRows[n];
+      shown[n].replaceWith(template.content);
+    }
+    // The keyboard moves the Tab stop in place, without writing the list,
+    // so the rows left as they were follow the stop as written now.
+    for (const b of rows.querySelectorAll('button[tabindex="0"]'))
+      if (rowOf(b) !== active) b.tabIndex = -1;
+    const stop = shown[listed.indexOf(active)];
+    if (stop)
+      for (const b of stop.querySelectorAll("button"))
+        if (b.tabIndex !== 0) b.tabIndex = 0;
+    return true;
   }
   // Add frame is offered while this person may add frames, which a
   // facilitator's lock can change while the panel is open.
@@ -308,6 +350,7 @@ export function createFramesPanel(api) {
     panel = null;
     active = reached = signature = null;
     written = "";
+    writtenRows = null;
     listed = [];
     document
       .querySelector('[data-action="frames"]')

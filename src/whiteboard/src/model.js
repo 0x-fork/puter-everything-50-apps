@@ -46,6 +46,8 @@ export function truncate(text, limit) {
 }
 // The farthest a coordinate may lie from the board's centre.
 export const BOARD_EXTENT = 1e6;
+// The most objects a board holds.
+export const MAX_OBJECTS = 5000;
 // The view zooms out to 1%, as Miro's does, so Fit shows a board of any
 // size; below 15% the board leaves out text too small to read.
 export const MIN_ZOOM = 0.01;
@@ -381,7 +383,7 @@ export function validateBoard(value, allowed = {}, only = null) {
     typeof value.title !== "string" ||
     value.title.length > 200 ||
     !Array.isArray(value.items) ||
-    value.items.length > Math.max(5000, allowed.items ?? 0)
+    value.items.length > Math.max(MAX_OBJECTS, allowed.items ?? 0)
   )
     throw Error("This is not a supported Whiteboard file.");
   validateComments(value.comments);
@@ -634,9 +636,12 @@ export function validateBoard(value, allowed = {}, only = null) {
 export function sharedCopy(value, drawn = false) {
   if (typeof value !== "object" || value === null) return value;
   if (Array.isArray(value)) {
-    const copy = new Array(value.length);
+    // Pushed rather than written into new Array(length): that array stays
+    // holey, and IndexedDB stores a holey array about twice as slowly, which
+    // took 150 ms of every save of a board of long drawings.
+    const copy = [];
     for (let i = 0; i < value.length; i++)
-      copy[i] = sharedCopy(value[i], drawn);
+      copy.push(sharedCopy(value[i], drawn));
     return copy;
   }
   const copy = {};
@@ -647,7 +652,7 @@ export function sharedCopy(value, drawn = false) {
       value.type === "pen" &&
       Array.isArray(value.points) &&
       !growing.has(value.points)
-        ? value.points
+        ? packedPoints(value)
         : sharedCopy(value[key], drawn);
     // Assigning this key would set the copy's prototype instead.
     if (key === "__proto__")
@@ -661,10 +666,51 @@ export function sharedCopy(value, drawn = false) {
   }
   return copy;
 }
+// Finished drawings' points that copies share. Points read back from
+// IndexedDB or made by structuredClone() are holey arrays, which IndexedDB
+// stores about twice as slowly as the packed ones sharedCopy() builds: every
+// save sharing them would pay for that, where copying them once does not. So
+// a drawing first shared takes a packed copy of its points in their place,
+// the same points, which nothing changes in place.
+const packed = new WeakSet();
+function packedPoints(drawing) {
+  if (!packed.has(drawing.points)) {
+    drawing.points = sharedCopy(drawing.points);
+    packed.add(drawing.points);
+  }
+  return drawing.points;
+}
+// Whether these are a finished drawing's points as copies share them, which
+// nothing changes in place.
+export const sharedPoints = (points) => packed.has(points);
 // An undo step, or the board as a gesture found it. It shares finished
 // drawings' points with the board: copying a board of long drawings on
 // every step and press took tens of megabytes each time.
 export const undoCopy = (value) => sharedCopy(value, true);
+// An undo step's objects, each one the board holds unchanged being the
+// board's own object instead: what is measured for an object, as its text's
+// layout, is kept per object, and undoing on a board of thousands of notes
+// laid out all their text again. Unchanged means the same keys in the same
+// order with the same values.
+export function keepUnchanged(items, board) {
+  const live = new Map(board.map((i) => [i.id, i]));
+  return items.map((i) => {
+    const was = live.get(i.id);
+    return was && sameData(was, i) ? was : i;
+  });
+}
+function sameData(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a),
+    others = Object.keys(b);
+  if (keys.length !== others.length) return false;
+  for (let n = 0; n < keys.length; n++)
+    if (keys[n] !== others[n] || !sameData(a[keys[n]], b[keys[n]]))
+      return false;
+  return true;
+}
 export class History {
   constructor() {
     this.past = [];

@@ -25,15 +25,21 @@ export function refreshDeployment(puter, server) {
   return checks.get(server);
 }
 
+// The slowest upload a request is given time for: a large batch of edits
+// made offline still goes up over a congested venue connection.
+const SLOW_UPLOAD = 50_000;
 export async function call(puter, server, input) {
   const controller = new AbortController();
+  const bodyText = JSON.stringify(input);
   const timer = setTimeout(
     () => controller.abort(),
-    input.op?.startsWith("asset") ? 120000 : 30000,
+    Math.max(
+      input.op?.startsWith("asset") ? 120000 : 30000,
+      (bodyText.length / SLOW_UPLOAD) * 1000,
+    ),
   );
   try {
     server = workerURL(server);
-    const bodyText = JSON.stringify(input);
     let headers = await authorize(puter, server, bodyText);
     // Network failures and timeouts carry the browser's own wording, such
     // as "Failed to fetch"; people see a message they can act on instead.

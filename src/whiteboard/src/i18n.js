@@ -919,6 +919,12 @@ const pairs = {
     "Affichage des {shown} premiers objets sur {total} correspondants. Cherchez pour réduire la liste.",
   "Offline · changes saved on this device":
     "Hors ligne · modifications enregistrées sur cet appareil",
+  "Uploading images · waiting for the board's server":
+    "Envoi des images · en attente du serveur du tableau",
+  "This board has reached its 1 GB limit for images and files.":
+    "Ce tableau a atteint sa limite de 1 Go pour les images et les fichiers.",
+  "An image or file could not be saved to the shared board.":
+    "Une image ou un fichier n’a pas pu être enregistré sur le tableau partagé.",
   "Some changes could not be saved because they conflicted with the shared board.":
     "Certaines modifications n’ont pas pu être enregistrées, car elles étaient en conflit avec le tableau partagé.",
   "Board unavailable · local changes retained":

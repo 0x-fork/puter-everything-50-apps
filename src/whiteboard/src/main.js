@@ -37,7 +37,6 @@ import {
 } from "./facilitation/model.js";
 import "./facilitation/facilitation.css";
 import { timerRemaining } from "./timer.js";
-import { clearTagLayouts } from "./tag-renderer.js";
 import { tagFooter } from "./tags.js";
 import { createTagsUI, taggable } from "./tags-ui.js";
 import { autoLayoutMindMaps, preserveManualMindMoves } from "./mind-map.js";
@@ -395,7 +394,6 @@ import {
   connectorEndpointHit,
   setConnectorEnd,
   connectorLabel,
-  clearConnectorLabelCache,
 } from "./connectors.js";
 import {
   canEditText,
@@ -405,9 +403,10 @@ import {
   textValign,
   canAutoFitText,
   fitTextLayout,
-  clearTextLayoutCache,
+  cachedFitTextLayout,
   growsWithText,
   autoHeightLayout,
+  cachedAutoHeightLayout,
   reflowTextItems,
   TABLE_TEXT_KEYS,
 } from "./text.js";
@@ -422,6 +421,7 @@ import {
   clone,
   sharedCopy,
   undoCopy,
+  keepUnchanged,
   startDrawing,
   escape,
   COLORS,
@@ -441,6 +441,7 @@ import {
   RESIZE_HANDLES,
   resizeBounds,
   truncate,
+  MAX_OBJECTS,
 } from "./model.js";
 import { local, CloudStore } from "./storage.js";
 import { CollaborationSession } from "./collaboration/session.js";
@@ -496,6 +497,8 @@ import { bindText } from "./collaboration/text-binding.js";
 import {
   paint,
   paintPreviews,
+  holdPreviews,
+  refreshTextLayouts,
   exportPNG,
   preview,
   frameLabelAt,
@@ -2701,8 +2704,9 @@ const lockedAs = (ids, locked) =>
     .filter((i) => ids.has(i.id))
     .every((i) => !!i.locked === locked);
 // Every snapshot passed here is a copy made for this version alone, so the
-// store keeps it without copying it again.
-function checkpoint(label = "Board edit", snapshot = sharedCopy(current)) {
+// store keeps it without copying it again. Like an undo step, it may share
+// finished drawings' points with the board, which never change in place.
+function checkpoint(label = "Board edit", snapshot = undoCopy(current)) {
   if (!snapshot) return;
   queuedShared = null;
   revisionChain = revisionChain
@@ -2903,6 +2907,7 @@ function notice(el, text, kind = "") {
 // save that failed by its own notification.
 const DISRUPTIONS = {
   "Offline · changes saved on this device": ["warning", "connection"],
+  "Uploading images · waiting for the board's server": ["warning"],
   "Cannot reach the shared board · retrying · view only": [
     "warning",
     "connection",
@@ -3049,7 +3054,10 @@ function save({ outlined = false } = {}) {
     contentVersion++;
     renderOutline();
   }
-  const snapshot = sharedCopy(current);
+  // Stored, uploaded and shared copies only read the snapshot, so it shares
+  // finished drawings' points with the board as undo steps do: copying them
+  // took most of each save on a board of long drawings.
+  const snapshot = undoCopy(current);
   if (collaboration && !collaborationBusy) {
     // Plain copies, as for undo: structuredClone() takes several times as
     // long on a large board, for every edit.
@@ -3165,6 +3173,9 @@ function undoState(items = current.items) {
 function restoreUndoState(state) {
   contentVersion++;
   formatRequests++;
+  // Objects the step leaves as they are stay the board's own, with their
+  // text already laid out.
+  state.items = keepUnchanged(state.items, current.items);
   Object.assign(current, state);
   if (!current.tags?.length) delete current.tags;
   if (!current.planning) delete current.planning;
@@ -3178,7 +3189,7 @@ function mutate(fn, { mindLayout = false, continues = false } = {}) {
     recorded = !continues && !collaboration;
   // The recovery version of the board as it was is written once the change
   // has gone through: a refused change leaves none.
-  const before = continues ? null : sharedCopy(current);
+  const before = continues ? null : undoCopy(current);
   if (recorded) history.push(undoState());
   const priorMind = mindLayout
     ? []
@@ -3255,7 +3266,13 @@ function showBoardTitle(title) {
   const heading = document.querySelector("#board-heading");
   if (heading && heading.textContent !== title) heading.textContent = title;
 }
-async function home({ keepAddress = false, push = false } = {}) {
+// Without `previews`, the library's previews wait until holdPreviews(false),
+// as when the board the page's address names opens over it.
+async function home({
+  keepAddress = false,
+  push = false,
+  previews = true,
+} = {}) {
   const left = current?.id;
   flushNudgeSave();
   onboarding.close(false);
@@ -3289,6 +3306,7 @@ async function home({ keepAddress = false, push = false } = {}) {
   // Signing out or leaving the organization takes its boards list away, so
   // the library goes back to all boards.
   if (filter === "organization" && !organization.info) filter = "all";
+  holdPreviews(!previews);
   document.title = t("Your boards") + " · Whiteboard";
   // Board previews already painted move into the new cards instead of
   // being painted again, as they do when a search redraws the cards.
@@ -4518,6 +4536,7 @@ function draw() {
     quickPreview,
     marquee: drag?.marquee || exportRegion,
   });
+  warmTextLater(liveItems);
   renderOutline();
   const zoomLabel = document.querySelector(".zoom-label"),
     zoomText = Math.round(view.z * 100) + "%";
@@ -4646,81 +4665,134 @@ function writeOutline(outline, outlined) {
     !outline.contains(document.activeElement)
   )
     return writeOutlineLater(outline, outlined, relationships);
-  const parts = outlined.map((i, n) =>
-    outlineButton(i, relationships.get(i.id), n),
-  );
-  // Compare with the buttons last written: most edits change few of them,
-  // and only those are written again, so one edit on a large board neither
+  const parts = outlined.map((i) => outlineButton(i, relationships.get(i.id)));
+  // Compare with the buttons last written, object by object: most edits,
+  // adding or deleting one among thousands too, change few of them, and
+  // only those are written again, so one edit on a large board neither
   // parses nor lays out its whole list again.
-  const written = outline.renderedParts;
-  const changed =
-    written?.length === parts.length
-      ? parts.flatMap((part, n) => (part === written[n] ? [] : [n]))
-      : null;
-  if (
-    changed?.length <= 50 &&
-    rewriteOutline(outline, outlined, parts, changed)
-  )
-    return;
-  if (changed?.length !== 0) {
-    // The keyboard keeps its place in the list when the button it was on
-    // is replaced, as after deleting that object.
-    const focused = outline.contains(document.activeElement)
-      ? [...outline.querySelectorAll("button")].indexOf(document.activeElement)
-      : -1;
-    outline.renderedParts = parts;
-    outline.renderedIds = outlined.map((i) => i.id);
-    outline.innerHTML = parts.join("");
-    outline.finish = null;
-    outline.removeAttribute("aria-busy");
-    outline.removeAttribute("tabindex");
-    outline.stop = null;
-    outline.buttons = new Map();
-    outline.pressed = new Set();
-    for (const b of outline.querySelectorAll("button"))
-      outline.buttons.set(b.dataset.id, b);
-    if (focused >= 0) {
-      const buttons = outline.querySelectorAll("button");
-      (
-        buttons[Math.min(focused, buttons.length - 1)] ||
-        document.querySelector("#canvas")
-      )?.focus({ preventScroll: true });
-    }
-  }
-}
-// Writes again the buttons at the given places in the outline, each with
-// its description. Says whether it could, which it cannot when the list
-// does not hold the buttons it last wrote.
-function rewriteOutline(outline, outlined, parts, changed) {
-  const replaced = changed.map((n) =>
-    outline.buttons.get(outline.renderedIds[n]),
-  );
-  if (replaced.some((b) => !b?.isConnected)) return false;
-  const template = document.createElement("template");
-  const written = changed.map((n, k) => {
-    const old = replaced[k],
-      description =
-        old.nextElementSibling?.tagName === "SPAN"
-          ? old.nextElementSibling
-          : null,
-      focused = document.activeElement === old;
-    template.innerHTML = parts[n];
-    const button = template.content.firstElementChild;
-    old.replaceWith(template.content);
-    description?.remove();
-    if (focused) button.focus({ preventScroll: true });
-    return button;
-  });
-  // Two objects that swapped places replace each other's buttons, so every
-  // old button is let go before the new ones are kept.
-  for (const old of replaced) {
-    outline.buttons.delete(old.dataset.id);
-    outline.pressed.delete(old.dataset.id);
-  }
-  for (const button of written) outline.buttons.set(button.dataset.id, button);
+  if (outline.renderedParts && patchOutline(outline, outlined, parts)) return;
+  // The keyboard keeps its place in the list when the button it was on
+  // is replaced, as after deleting that object.
+  const focused = outline.contains(document.activeElement)
+    ? [...outline.querySelectorAll("button")].indexOf(document.activeElement)
+    : -1;
   outline.renderedParts = parts;
   outline.renderedIds = outlined.map((i) => i.id);
+  outline.innerHTML = parts.join("");
+  outline.finish = null;
+  outline.removeAttribute("aria-busy");
+  outline.removeAttribute("tabindex");
+  outline.stop = null;
+  outline.buttons = new Map();
+  outline.pressed = new Set();
+  for (const b of outline.querySelectorAll("button"))
+    outline.buttons.set(b.dataset.id, b);
+  if (focused >= 0) {
+    const buttons = outline.querySelectorAll("button");
+    (
+      buttons[Math.min(focused, buttons.length - 1)] ||
+      document.querySelector("#canvas")
+    )?.focus({ preventScroll: true });
+  }
+}
+// Brings the outline from the buttons last written to these, removing the
+// buttons of objects gone or changed and writing those of objects new or
+// changed in their places, while every other button stays as it is. An
+// object that moved in the list is written again at its new place, unless
+// the others moved around it instead. Says whether it did, which it does
+// not when so much changed that writing the whole list is quicker, or when
+// the list does not hold the buttons it last wrote.
+function patchOutline(outline, outlined, parts) {
+  const ids = outlined.map((i) => i.id),
+    oldIds = outline.renderedIds,
+    oldParts = outline.renderedParts,
+    place = new Map(ids.map((id, n) => [id, n]));
+  // Where each button that could stay is now, in the order it was written.
+  const reused = [];
+  for (let n = 0; n < oldIds.length; n++) {
+    const m = place.get(oldIds[n]);
+    if (m !== undefined && parts[m] === oldParts[n]) reused.push(m);
+  }
+  const staying = longestRise(reused);
+  if (ids.length + oldIds.length - 2 * staying.size > 100) return false;
+  if (ids.length === oldIds.length && staying.size === ids.length) return true;
+  const removed = [];
+  for (const id of oldIds)
+    if (!staying.has(place.get(id))) {
+      const button = outline.buttons.get(id);
+      if (!button?.isConnected) return false;
+      removed.push(button);
+    }
+  for (const n of staying)
+    if (!outline.buttons.get(ids[n])?.isConnected) return false;
+  // The keyboard keeps its place in the list, by position, as when the
+  // whole list is written: on the next object after deleting the one it
+  // was on.
+  const active = document.activeElement,
+    focused = outline.contains(active) ? oldIds.indexOf(active.dataset.id) : -1;
+  for (const button of removed) {
+    const description =
+      button.nextElementSibling?.tagName === "SPAN"
+        ? button.nextElementSibling
+        : null;
+    button.remove();
+    description?.remove();
+    outline.buttons.delete(button.dataset.id);
+    outline.pressed.delete(button.dataset.id);
+  }
+  // From the end, each run of new buttons goes in before the button that
+  // stays after it, or last.
+  const template = document.createElement("template");
+  let anchor = null;
+  for (let n = ids.length - 1; n >= 0;) {
+    if (staying.has(n)) {
+      anchor = outline.buttons.get(ids[n--]);
+      continue;
+    }
+    const last = n;
+    while (n >= 0 && !staying.has(n)) n--;
+    template.innerHTML = parts.slice(n + 1, last + 1).join("");
+    for (const b of template.content.querySelectorAll("button"))
+      outline.buttons.set(b.dataset.id, b);
+    outline.insertBefore(template.content, anchor);
+  }
+  // A change in how many objects the board shows sends the Tab stop back
+  // to the selection, or else the first object, as writing the whole list
+  // does.
+  if (ids.length !== oldIds.length) {
+    outline.buttons.get(outline.stop)?.setAttribute("tabindex", "-1");
+    outline.stop = null;
+  }
+  outline.renderedParts = parts;
+  outline.renderedIds = ids;
+  if (focused >= 0) {
+    const target =
+      outline.buttons.get(ids[Math.min(focused, ids.length - 1)]) ||
+      document.querySelector("#canvas");
+    if (target !== document.activeElement)
+      target?.focus({ preventScroll: true });
+  }
   return true;
+}
+// The places in the longest run of the given numbers that only rises, kept
+// in their order: the buttons that can stay while the others move.
+function longestRise(values) {
+  const tails = [],
+    previous = new Array(values.length);
+  for (let n = 0; n < values.length; n++) {
+    let low = 0,
+      high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (values[tails[middle]] < values[n]) low = middle + 1;
+      else high = middle;
+    }
+    previous[n] = low ? tails[low - 1] : -1;
+    tails[low] = n;
+  }
+  const rise = new Set();
+  for (let n = tails.at(-1) ?? -1; n >= 0; n = previous[n]) rise.add(values[n]);
+  return rise;
 }
 // Writes the outline in parts between other work, marked busy for screen
 // readers until it is whole. It is a Tab stop meanwhile: reaching it from
@@ -4747,7 +4819,7 @@ function writeOutlineLater(outline, outlined, relationships) {
         n++
       )
         html.push(
-          outlineButton(outlined[n], relationships.get(outlined[n].id), n),
+          outlineButton(outlined[n], relationships.get(outlined[n].id)),
         );
       parts.push(...html);
       const last = outline.lastElementChild;
@@ -5001,7 +5073,7 @@ function followEditedByOthers() {
   };
   return true;
 }
-function outlineButton(i, relationship, index) {
+function outlineButton(i, relationship) {
   relationship = objectDescription(i, relationship);
   const key = [
     i.id,
@@ -5016,11 +5088,18 @@ function outlineButton(i, relationship, index) {
     i.lang,
     i.textRuns,
     relationship,
-    index,
   ];
   const cached = outlineButtons.get(i);
   if (cached?.key.every((value, n) => value === key[n])) return cached.html;
-  const description = `outline-relationship-${index}`;
+  // Named after the object rather than its place, so a button stays the
+  // same when objects before it come or go. An object's id may hold spaces,
+  // which would split the reference in two, so they are written as codes.
+  const description = `outline-relationship-${escape(
+    i.id.replace(
+      /[%\t\n\f\r ]/g,
+      (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+    ),
+  )}`;
   const html = `<button data-id="${escape(i.id)}"${i.type === "frame" ? " data-frame" : ""} tabindex="-1" aria-pressed="false"${relationship ? ` aria-describedby="${description}"` : ""}>${objectNameHTML(i)}</button>${relationship ? `<span class="sr-only" id="${description}">${relationship}</span>` : ""}`;
   outlineButtons.set(i, { key, html });
   return html;
@@ -6238,36 +6317,83 @@ function pasteStyle() {
   mutate(() => changes.forEach(({ i, patch }) => applyObjectStyle(i, patch)));
   toast("Style pasted.");
 }
-function updateTextFitStatus() {
+// Whether the selected text fits is read from each object's fitted layout.
+// Layouts already made cost next to nothing, but selecting thousands of
+// notes whose text was never laid out, as at a zoom too far out to show
+// it, would fit them all at once, freezing the board for a second. A draw
+// lays out at most ten of them, enough for an edit or a small selection;
+// the rest are laid out while the browser is idle, and the status changes
+// once every one is known.
+let fitStatusLater = 0;
+function updateTextFitStatus(budget = 0) {
   const status = document.querySelector("#text-fit-status");
-  if (!status) return;
+  // While a marquee, a move or a resize goes on, the toolbar is out of
+  // sight and hearing, and the selection changes with every pointer move:
+  // the status is worked out once it ends, when the toolbar shows again.
+  if (!status || status.closest(".is-interacting")) return;
   const ctx = document.querySelector("#canvas").getContext("2d");
-  const overflow = current.items.some(
-    (i) =>
-      selection.has(i.id) &&
-      i.autoFontSize &&
-      canAutoFitText(i) &&
-      fitTextLayout(
-        i,
-        ctx,
-        editing?.item.id === i.id ? editing.input.value : i.text || "",
-        undefined,
-        editing?.item.id === i.id ? editing.input.textRuns : i.textRuns,
-        editing?.item.id === i.id ? editing.input.textBlocks : i.textBlocks,
-      ).overflow,
-  );
-  const tooTall = current.items.some(
-    (i) =>
-      selection.has(i.id) &&
-      growsWithText(i) &&
-      autoHeightLayout(
-        i,
-        ctx,
-        editing?.item.id === i.id ? editing.input.value : i.text || "",
-        editing?.item.id === i.id ? editing.input.textRuns : i.textRuns,
-        editing?.item.id === i.id ? editing.input.textBlocks : i.textBlocks,
-      ).overflow,
-  );
+  // Ten new layouts are always made, so each pass gets on, however slow.
+  const until = performance.now() + budget,
+    editingId = editing?.item.id;
+  let made = 0,
+    unknown = false,
+    overflow = false;
+  for (const i of current.items) {
+    if (!selection.has(i.id) || !i.autoFontSize || !canAutoFitText(i)) continue;
+    const own = i.id === editingId,
+      text = own ? editing.input.value : i.text || "",
+      runs = own ? editing.input.textRuns : i.textRuns,
+      blocks = own ? editing.input.textBlocks : i.textBlocks;
+    let layout = cachedFitTextLayout(i, ctx, text, undefined, runs, blocks);
+    if (!layout) {
+      if (made++ >= 10 && performance.now() > until) {
+        unknown = true;
+        continue;
+      }
+      layout = fitTextLayout(i, ctx, text, undefined, runs, blocks);
+    }
+    if (layout.overflow) {
+      overflow = true;
+      break;
+    }
+  }
+  const overflowKnown = overflow || !unknown;
+  unknown = false;
+  let tooTall = false;
+  for (const i of current.items) {
+    if (!selection.has(i.id) || !growsWithText(i)) continue;
+    const own = i.id === editingId,
+      text = own ? editing.input.value : i.text || "",
+      runs = own ? editing.input.textRuns : i.textRuns,
+      blocks = own ? editing.input.textBlocks : i.textBlocks;
+    let layout = cachedAutoHeightLayout(i, ctx, text, runs, blocks);
+    if (!layout) {
+      if (made++ >= 10 && performance.now() > until) {
+        unknown = true;
+        continue;
+      }
+      layout = autoHeightLayout(i, ctx, text, runs, blocks);
+    }
+    if (layout.overflow) {
+      tooTall = true;
+      break;
+    }
+  }
+  // Too tall is said first, so overflow alone waits until no object can
+  // be too tall. Until then the status stays as it was.
+  if (!tooTall && (unknown || !overflowKnown)) {
+    if (!fitStatusLater) {
+      const again = (deadline) => {
+        fitStatusLater = 0;
+        // An idle browser lends more time, short of a long task.
+        updateTextFitStatus(Math.min(16, deadline?.timeRemaining?.() || 0));
+      };
+      fitStatusLater = window.requestIdleCallback
+        ? requestIdleCallback(again, { timeout: 500 })
+        : setTimeout(again, 0);
+    }
+    return;
+  }
   status.hidden = !overflow && !tooTall;
   const message = tooTall
     ? t(
@@ -6280,6 +6406,99 @@ function updateTextFitStatus() {
       : "";
   if (status.textContent !== message) status.textContent = message;
 }
+// Zoomed out past the point where text is drawn, notes are painted without
+// it and their text is never laid out, so the first draw that shows text
+// again, zooming in past 15% or out to near it, would lay out every note it
+// shows at once: one frame of 200 ms on a large board of wordy notes. While
+// the browser is idle, the text such a draw would show is laid out ahead,
+// from the middle of the view outwards, as painting lays it out, so the
+// draw finds it ready and shows the same.
+const warmText = {
+  board: null,
+  items: null,
+  key: null,
+  queue: [],
+  at: 0,
+  later: 0,
+};
+function warmTextLater(items) {
+  warmText.board = current;
+  warmText.items = items;
+  if (!warmText.later && !document.hidden && window.requestIdleCallback)
+    warmText.later = requestIdleCallback(warmTextNow);
+}
+function warmTextNow(deadline) {
+  warmText.later = 0;
+  const canvas = document.querySelector("#canvas");
+  if (!canvas || !current || warmText.board !== current) {
+    // A board closed, or left for another, lets its objects go; the next
+    // board's first draw starts again.
+    Object.assign(warmText, {
+      board: null,
+      items: null,
+      key: null,
+      queue: [],
+      at: 0,
+    });
+    return;
+  }
+  // A hidden tab waits until it is seen again.
+  if (document.hidden) return;
+  // Beyond the view, what the view would show at the zoom where text
+  // begins, around its middle.
+  const shown = viewBounds(),
+    grow = Math.max(1, view.z / DETAIL_ZOOM),
+    middle = { x: shown.x + shown.w / 2, y: shown.y + shown.h / 2 },
+    area = {
+      x: middle.x - (shown.w * grow) / 2,
+      y: middle.y - (shown.h * grow) / 2,
+      w: shown.w * grow,
+      h: shown.h * grow,
+    };
+  const key = [warmText.items, area.x, area.y, area.w, area.h];
+  if (!warmText.key?.every((value, n) => value === key[n])) {
+    warmText.key = key;
+    warmText.at = 0;
+    const distance = (b) =>
+      (b.x + b.w / 2 - middle.x) ** 2 + (b.y + b.h / 2 - middle.y) ** 2;
+    const near = [];
+    for (const i of warmText.items) {
+      if (!i.text || !i.autoFontSize || !canAutoFitText(i)) continue;
+      const b = bounds([i]);
+      if (
+        b.x < area.x + area.w &&
+        b.x + b.w > area.x &&
+        b.y < area.y + area.h &&
+        b.y + b.h > area.y
+      )
+        near.push([distance(b), i]);
+    }
+    warmText.queue = near.sort((a, b) => a[0] - b[0]).map(([, i]) => i);
+  }
+  // A frame's time at most at once, so input is never kept waiting long.
+  const ctx = canvas.getContext("2d"),
+    font = ctx.font,
+    until = performance.now() + 16;
+  while (
+    warmText.at < warmText.queue.length &&
+    deadline.timeRemaining() > 1 &&
+    performance.now() < until
+  )
+    fitTextLayout(warmText.queue[warmText.at++], ctx);
+  ctx.font = font;
+  if (warmText.at < warmText.queue.length)
+    warmText.later = requestIdleCallback(warmTextNow);
+}
+document.addEventListener("visibilitychange", () => {
+  if (
+    !document.hidden &&
+    warmText.items &&
+    warmText.board === current &&
+    !warmText.later &&
+    window.requestIdleCallback
+  )
+    warmText.later = requestIdleCallback(warmTextNow);
+});
 function positionTextEditor() {
   if (!editing) return;
   const { item: i, input } = editing;
@@ -7098,7 +7317,7 @@ function reframeResized(plan, skip = facilitation.concealedIds()) {
 }
 function addObject(type, p, extra = {}, event, after) {
   if (isSharedReadOnly()) return toast("This board is read-only.");
-  if (current.items.length >= 5000)
+  if (current.items.length >= MAX_OBJECTS)
     return toast("A board can contain at most 5,000 objects.");
   p ??= openSpot(
     type,
@@ -7204,7 +7423,7 @@ const armedProps = (type) =>
     : {};
 function addShape(key, { arm = false } = {}) {
   if (!canEditSelection(new Set())) return;
-  if (current.items.length >= 5000)
+  if (current.items.length >= MAX_OBJECTS)
     return toast("A board can contain at most 5,000 objects.");
   if (arm) {
     setTool(key === "ellipse" ? "ellipse" : "rect");
@@ -7304,7 +7523,7 @@ function startQuickConnection(id, event) {
   const source = current?.items.find((i) => i.id === id);
   if (!canQuickConnect(source) || !canEditSelection(new Set([id])))
     return false;
-  if (current.items.length >= 5000) {
+  if (current.items.length >= MAX_OBJECTS) {
     toast("A board can contain at most 5,000 objects.");
     return false;
   }
@@ -7816,7 +8035,7 @@ function pointerDown(
   if (tool === "arrow" || tool === "pen") {
     // Said now, rather than drawing a stroke that is dropped on release.
     if (isSharedReadOnly()) return toast(sharedReadOnlyReason());
-    if (current.items.length >= 5000)
+    if (current.items.length >= MAX_OBJECTS)
       return toast("A board can contain at most 5,000 objects.");
     const original = undoCopy(current.items),
       previousSelection = new Set(selection);
@@ -8593,7 +8812,7 @@ function pointerUp(event) {
     clickedCell && current.items.find((i) => i.id === drag.id);
   if (
     drag.duplicate &&
-    (!drag.changed || isSharedReadOnly() || current.items.length > 5000)
+    (!drag.changed || isSharedReadOnly() || current.items.length > MAX_OBJECTS)
   )
     return cancelTransform();
   const linkedItem = drag.link && current.items.find((i) => i.id === drag.id);
@@ -10323,7 +10542,7 @@ async function startCollaboration(target, token, localTimer) {
             const present = new Set(target.items.map((i) => i.id));
             if (
               isSharedReadOnly() ||
-              target.items.length > 5000 ||
+              target.items.length > MAX_OBJECTS ||
               hasLocked(target.items, drag.duplicate.sourceSelection) ||
               [...drag.duplicate.sourceSelection].some((id) => !present.has(id))
             )
@@ -10445,7 +10664,7 @@ async function startCollaboration(target, token, localTimer) {
         renderParticipants();
         draw();
       },
-      rejected: ({ remade } = {}) => {
+      rejected: ({ remade, reason } = {}) => {
         if (collaboration !== session || current !== target) return;
         // Recovery replaced the shared document; bind the open editor to it.
         if (editing?.unbind) {
@@ -10464,7 +10683,8 @@ async function startCollaboration(target, token, localTimer) {
         // out was not lost.
         if (!remade)
           toast(
-            "Some changes could not be saved because they conflicted with the shared board.",
+            reason ||
+              "Some changes could not be saved because they conflicted with the shared board.",
           );
       },
     });
@@ -10478,7 +10698,13 @@ async function startCollaboration(target, token, localTimer) {
     });
     boardMembers = [];
     boardColleagues = [];
-    await session.start(token);
+    await session.start(token).catch((error) => {
+      // Joined and running, a session whose first upload of edits kept on
+      // this device failed shows that and retries by itself; the board is
+      // open and editable, so the rest of opening it goes on.
+      if (!session.connected || session.closed) throw error;
+      session.failure(error);
+    });
     if (collaboration !== session) return;
     refreshBoardMembers();
     if (localTimer?.state === "running" && target.timer?.id === localTimer.id) {
@@ -10490,7 +10716,7 @@ async function startCollaboration(target, token, localTimer) {
       });
       await session.publish();
       await session.queue;
-      await session.flush();
+      await session.flush().catch((error) => session.failure(error));
     }
     if (collaboration !== session || current !== target) return;
     collaborationBusy = false;
@@ -13505,14 +13731,16 @@ try {
     if (!usable) console.warn("Skipping an unreadable board record", b?.id);
     return usable;
   });
-  await home({ keepAddress: true });
+  // A board the address names opens over the library, whose previews are
+  // painted only once it is clear that the library shows.
+  const arrival = boardDestination(location.href, location.href);
+  await home({ keepAddress: true, previews: !arrival });
   account.refresh().catch(() => {});
   loadCloudIndex();
   // A shared board already on this device opens directly for a signed-in
   // account, as it does when the address changes while the page is open:
   // reloading it asks nothing. Otherwise, as for an invitation, the dialog's
   // button lets Puter's sign-in window open from a press.
-  const arrival = boardDestination(location.href, location.href);
   const known =
     arrival?.room &&
     !arrival.token &&
@@ -13528,6 +13756,7 @@ try {
   else if (readOrganizationLink(location.href))
     organizationHome.joinDialog(location.href);
   else await followBoardAddress(location.href);
+  holdPreviews(false);
   reconnectOrganization().catch(() => {});
 } catch (error) {
   console.error("Whiteboard initialization failed", error);
@@ -13587,17 +13816,14 @@ window.addEventListener("resize", () => {
   if (current) draw();
   else paintPreviews();
 });
+// Previews already painted with the loaded fonts are not painted again.
 document.fonts?.ready.then(() => {
-  clearTextLayoutCache();
-  clearTagLayouts();
-  clearConnectorLabelCache();
+  refreshTextLayouts();
   if (current) draw();
   else paintPreviews();
 });
 document.fonts?.addEventListener("loadingdone", () => {
-  clearTextLayoutCache();
-  clearTagLayouts();
-  clearConnectorLabelCache();
+  refreshTextLayouts();
   if (current) draw();
   else paintPreviews();
 });

@@ -267,6 +267,7 @@ test("an image the worker refuses is given up, and later edits still save", asyn
       : call(identity, input);
   let state,
     rejected = 0,
+    reason,
     shown;
   const session = new CollaborationSession({
     puter: env.sdk(editor),
@@ -277,7 +278,10 @@ test("an image the worker refuses is given up, and later edits still save", asyn
     changed: (next) => (state = next),
     activity() {},
     status: (text) => (shown = text),
-    rejected: () => rejected++,
+    rejected: (outcome) => {
+      rejected++;
+      reason = outcome.reason;
+    },
   });
   try {
     await session.start();
@@ -288,6 +292,11 @@ test("an image the worker refuses is given up, and later edits still save", asyn
     await session.flush();
     assert.equal(session.pendingAssets.size, 0, "The file is given up");
     assert.equal(rejected, 1, "The edit adding it is reported as refused");
+    // As a file that could not be saved, not as a conflict.
+    assert.equal(
+      reason,
+      "An image or file could not be saved to the shared board.",
+    );
     const current = structuredClone(state),
       retitled = structuredClone(state);
     retitled.items[0].text = "Saved after the image";
@@ -304,6 +313,216 @@ test("an image the worker refuses is given up, and later edits still save", asyn
     assert.equal(session.pending.size, 0, "Nothing waits to be sent");
     assert.notEqual(shown, "Offline · changes saved on this device");
   } finally {
+    session.close();
+  }
+});
+
+test("an image this device cannot store is still saved to the shared board", async () => {
+  const { SharedDocument } = await import("../src/collaboration/document.js");
+  const { encode } = await import("../src/collaboration/protocol.js");
+  const { environment } = await import("./collaboration-helpers.js");
+  const env = environment(),
+    b = board("Full device");
+  b.items = [item("note", 0, 0, { text: "x" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  // The device's storage refuses images, as when it is full.
+  const store = memoryStore(),
+    put = store.collaborationPut;
+  store.collaborationPut = async (row) => {
+    if (row.kind === "asset")
+      throw Object.assign(Error("The quota has been exceeded."), {
+        name: "QuotaExceededError",
+      });
+    return put(row);
+  };
+  let state, shown;
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store,
+    changed: (next) => (state = next),
+    activity() {},
+    status: (text) => (shown = text),
+  });
+  try {
+    await session.start();
+    const before = structuredClone(state),
+      withImage = structuredClone(state);
+    withImage.items.push(item("image", 50, 50, { src: image, w: 10, h: 10 }));
+    await session.commit(withImage, before);
+    await session.flushed();
+    const { doc } = await env.service.load(b.id);
+    const saved = doc.snapshot();
+    doc.destroy();
+    assert.ok(saved.items.some((i) => i.type === "image" && ASSET.test(i.src)));
+    assert.equal(session.pending.size, 0);
+    assert.equal(session.pendingAssets.size, 0);
+    assert.match(shown, /^Saved/);
+  } finally {
+    session.close();
+  }
+});
+
+test("images past what one person may add a minute wait for the worker without reading as offline", async () => {
+  const { SharedDocument } = await import("../src/collaboration/document.js");
+  const { encode } = await import("../src/collaboration/protocol.js");
+  const { environment } = await import("./collaboration-helpers.js");
+  const env = environment(),
+    b = board("Many pictures");
+  b.items = [item("note", 0, 0, { text: "x" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  let state, shown;
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed: (next) => (state = next),
+    activity() {},
+    status: (text) => (shown = text),
+  });
+  let uploading = 0,
+    most = 0;
+  const call = env.service.call.bind(env.service);
+  env.service.call = async (identity, input) => {
+    if (input.op !== "asset.put") return call(identity, input);
+    most = Math.max(most, ++uploading);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    try {
+      return await call(identity, input);
+    } finally {
+      uploading--;
+    }
+  };
+  try {
+    await session.start();
+    const before = structuredClone(state),
+      next = structuredClone(state);
+    for (let n = 0; n < 70; n++)
+      next.items.push(
+        item("image", n * 20, 200, {
+          src: `data:image/png;base64,${btoa(`picture ${n}`)}`,
+          w: 10,
+          h: 10,
+        }),
+      );
+    await session.commit(next, before);
+    await session.flush().catch((error) => session.failure(error));
+    assert.ok(most > 1, "Several files go up at once");
+    assert.ok(session.pendingAssets.size > 0);
+    assert.equal(shown, "Uploading images · waiting for the board's server");
+    // The next minute, the rest go up and the edit is saved.
+    env.now += 60_000;
+    await session.flushed();
+    assert.equal(session.pendingAssets.size, 0);
+    assert.equal(session.pending.size, 0);
+    assert.match(shown, /^Saved/);
+    const { doc } = await env.service.load(b.id);
+    assert.equal(
+      doc.snapshot().items.filter((i) => i.type === "image").length,
+      70,
+    );
+    doc.destroy();
+  } finally {
+    session.close();
+  }
+});
+
+test("an image added while another uploads is uploaded before the edit adding it", async () => {
+  const { SharedDocument } = await import("../src/collaboration/document.js");
+  const { encode } = await import("../src/collaboration/protocol.js");
+  const { environment } = await import("./collaboration-helpers.js");
+  const env = environment(),
+    b = board("Race");
+  b.items = [item("note", 0, 0, { text: "x" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  let state;
+  const toasts = [];
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed: (n) => (state = n),
+    activity() {},
+    status() {},
+    rejected: (r) => toasts.push(r),
+  });
+  const call = env.service.call.bind(env.service);
+  let release;
+  const held = new Promise((r) => (release = r));
+  let first = true;
+  env.service.call = async (user, input) => {
+    if (input.op === "asset.put" && first) {
+      first = false;
+      await held;
+    }
+    return call(user, input);
+  };
+  try {
+    await session.start();
+    let before = structuredClone(state),
+      next = structuredClone(state);
+    next.items.push(
+      item("image", 50, 50, {
+        src: "data:image/png;base64,AA==",
+        w: 10,
+        h: 10,
+      }),
+    );
+    await session.commit(next, before);
+    await session.queue;
+    const flushing = session.flush().catch((e) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    // While the first image uploads, a second is added.
+    before = structuredClone(state);
+    next = structuredClone(state);
+    next.items.push(
+      item("image", 90, 90, {
+        src: "data:image/png;base64,AQID",
+        w: 10,
+        h: 10,
+      }),
+    );
+    await session.commit(next, before);
+    await session.queue;
+    release();
+    await flushing;
+    await session.flushed();
+    const { doc } = await env.service.load(b.id);
+    const images = doc
+      .snapshot()
+      .items.filter((i) => i.type === "image" && ASSET.test(i.src));
+    doc.destroy();
+    assert.equal(images.length, 2);
+    assert.deepEqual(toasts, []);
+  } finally {
+    env.service.call = call;
     session.close();
   }
 });

@@ -20,6 +20,7 @@ import {
   bounds,
   validateBoard,
   keepOnBoard,
+  MAX_OBJECTS,
 } from "./model.js";
 import { externalizeObjectLinks } from "./object-link-data.js";
 import { mergeTableDraft } from "./table-draft.js";
@@ -292,7 +293,7 @@ export function createFeatures(api) {
     api.board().items.filter((i) => api.selection().has(i.id));
   // Returns false when the board is full, so a dialog can stay open.
   function add(i) {
-    if (api.board().items.length >= 5000) {
+    if (api.board().items.length >= MAX_OBJECTS) {
       api.toast("A board can contain at most 5,000 objects.");
       return false;
     }
@@ -863,7 +864,7 @@ export function createFeatures(api) {
         );
       return;
     }
-    if (["frame", "connect"].includes(value) && items.length >= 5000)
+    if (["frame", "connect"].includes(value) && items.length >= MAX_OBJECTS)
       return api.toast("A board can contain at most 5,000 objects.");
     if (value === "ungroup" && !items.some((i) => ids.has(i.id) && i.groupId))
       return;
@@ -2220,7 +2221,7 @@ export function createFeatures(api) {
     } = {},
   ) {
     if (!api.canEdit(new Set())) return api.toast("This board is read-only.");
-    if (api.board().items.length + items.length > 5000)
+    if (api.board().items.length + items.length > MAX_OBJECTS)
       return api.toast("A board can contain at most 5,000 objects.");
     close();
     const source = clone(items),

@@ -302,6 +302,29 @@ test("content placed where the document never reads it is refused", async () => 
     }),
     { status: 422, message: "Invalid shared document structure." },
   );
+  // Content hidden inside an object the same change adds.
+  await assert.rejects(
+    attempt(owner, (doc) => {
+      doc.transact(() => {
+        const entry = new Y.Map();
+        doc.getMap("items").set("hidden-inside-new", entry);
+        entry.set("text", new Y.Text());
+        entry.set("z", 1);
+        entry.set("geometry", { type: "note", x: 0, y: 0, w: 10, h: 10 });
+        new Y.Item(
+          Y.createID(doc.clientID, Y.getState(doc.store, doc.clientID)),
+          null,
+          null,
+          null,
+          null,
+          entry,
+          null,
+          new Y.ContentString(big),
+        ).integrate(doc._transaction, 0);
+      });
+    }),
+    { status: 422, message: "Invalid shared document structure." },
+  );
   // The board is as it was, and an ordinary edit still saves.
   const { update: after } = await env.service.call(owner, {
     op: "sync",
@@ -1745,4 +1768,88 @@ test("the worker tells which account owns the browser sessions that added object
   await assert.rejects(
     env.service.call(guest, { op: "creators", room: b.id, clients: [bob] }),
   );
+});
+
+test("a busy board is checkpointed once across instances, at most every five minutes", async () => {
+  const { BoardService } = await import("../worker/service.js");
+  const now = Date.UTC(2026, 9, 13, 12);
+  const minute = 60_000;
+  const records = (from, count) =>
+    new Map(
+      Array.from({ length: count }, (_, n) => [
+        `wb:room:log:${n}`,
+        from + n * 10,
+      ]),
+    );
+  const due = (entry, stored = null) =>
+    BoardService.prototype.checkpointDue.call(
+      { kv: { get: async () => stored } },
+      "room",
+      entry,
+      now,
+    );
+  // A board without a checkpoint gets one.
+  assert.equal(await due({ seen: records(now - minute, 1) }), true);
+  // 300 records past this instance's checkpoint, but another instance
+  // checkpointed after 200 of them: its checkpoint is taken up instead.
+  const entry = {
+    checkpoint: { at: now - 10 * minute, path: "old" },
+    seen: records(now - 6 * minute, 300),
+  };
+  const stored = { at: now - 6 * minute + 1995, path: "newer" };
+  assert.equal(await due(entry, stored), false);
+  assert.equal(entry.checkpoint, stored);
+  assert.equal(entry.seen.size, 100);
+  // 256 records within five minutes of the last checkpoint wait for it.
+  const recent = {
+    checkpoint: { at: now - 2 * minute, path: "recent" },
+    seen: records(now - 2 * minute + 1, 300),
+  };
+  assert.equal(await due(recent, recent.checkpoint), false);
+  // Five minutes on, or with far more records, one is written.
+  assert.equal(
+    await due({
+      checkpoint: { at: now - 6 * minute, path: "older" },
+      seen: records(now - 6 * minute + 1, 300),
+    }),
+    true,
+  );
+  assert.equal(
+    await due({
+      checkpoint: { at: now - 2 * minute, path: "recent" },
+      seen: records(now - 2 * minute + 1, 5000),
+    }),
+    true,
+  );
+});
+
+test("a loaded board's whole state is encoded once until it changes", () => {
+  const b = board("Encoded");
+  b.items = [item("note", 0, 0, { text: "One" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  const live = new SharedDocument(seed.update());
+  live.cacheItems();
+  const first = live.update();
+  assert.equal(live.update(), first, "kept while unchanged");
+  assert.deepEqual(first, Y.encodeStateAsUpdate(live.doc));
+  // A change from elsewhere, and one made here, encode it again.
+  const other = new SharedDocument(seed.update());
+  const before = other.vector(),
+    next = other.snapshot();
+  next.items[0].text = "Two";
+  other.commit(next);
+  live.apply(other.update(before));
+  const second = live.update();
+  assert.notEqual(second, first);
+  assert.equal(new SharedDocument(second).snapshot().items[0].text, "Two");
+  const mine = live.snapshot();
+  mine.items[0].text = "Three";
+  live.commit(mine);
+  assert.equal(
+    new SharedDocument(live.update()).snapshot().items[0].text,
+    "Three",
+  );
+  // Asked for what a vector lacks, it encodes just that.
+  assert.ok(live.update(other.vector()).length < live.update().length);
 });

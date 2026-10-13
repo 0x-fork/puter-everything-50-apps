@@ -28,6 +28,7 @@ import {
 } from "../rich-text.js";
 import * as Y from "yjs";
 import { validateBoard, sharedCopy } from "../model.js";
+import { sameData, sameJSON } from "../same-json.js";
 import { normalizeEmbed } from "../content/providers.js";
 import {
   commitPlanning,
@@ -62,7 +63,7 @@ import {
   readSharedTableSizes,
 } from "./table-sizes.js";
 
-const equal = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+const equal = sameJSON;
 // IDs order the same on every device, whatever its language: localeCompare
 // sorts some letter pairs differently by locale, such as "aa" in Danish.
 const byCode = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -243,6 +244,34 @@ function hiddenContent(type) {
   if (type instanceof Y.Array)
     for (const value of type.toArray())
       if (value instanceof Y.AbstractType && hiddenContent(value)) return true;
+  return false;
+}
+// Whether one update's changes, as a transaction lists them by type and key
+// (null for the sequence), put content where hiddenContent finds it. Types
+// the update created are not listed themselves but sit under a listed key,
+// so they are searched whole; content it did not touch was checked when it
+// arrived, so a large board costs no more to check than a small one.
+function hiddenChanges(changes) {
+  for (const [type, keys] of changes) {
+    if (type._item?.deleted) continue;
+    if (type instanceof Y.Map) {
+      if (keys.has(null))
+        for (let entry = type._start; entry; entry = entry.right)
+          if (!entry.deleted) return true;
+      for (const key of keys) {
+        const value = key === null ? undefined : type.get(key);
+        if (value instanceof Y.AbstractType && hiddenContent(value))
+          return true;
+      }
+      continue;
+    }
+    for (const key of keys)
+      if (key !== null && type._map.get(key)?.deleted === false) return true;
+    if (type instanceof Y.Array && keys.has(null))
+      for (const value of type.toArray())
+        if (value instanceof Y.AbstractType && hiddenContent(value))
+          return true;
+  }
   return false;
 }
 // Undo steps a shared board keeps, as History does for a personal one.
@@ -456,9 +485,12 @@ export class SharedDocument {
   // a commenter's save leaves the board's content untouched, including values
   // the snapshot projects differently from how they are stored.
   commit(board, { content = true } = {}) {
+    // Read before the change, while the stacking order kept between changes
+    // still holds; objects the change removes are left out of it.
+    const stacked = content ? this.layered() : null;
     this.doc.transact(() => {
       this.setWorkshop(board.workshop);
-      if (content) this.commitContent(board);
+      if (content) this.commitContent(board, stacked);
       for (const thread of updateCommentAnchors(board.comments, board.items)) {
         let entry = this.comments.get(thread.id);
         if (!entry) {
@@ -579,18 +611,58 @@ export class SharedDocument {
     if (this.read) return;
     this.read = new Map();
     this.doc.on("afterTransaction", (transaction) => {
+      this.encoded = null;
+      // Objects added, removed or replaced, or given another layer rank,
+      // change the stacking order; see layered.
+      if (transaction.changed.has(this.items)) this.order = null;
       if (transaction.changed.has(this.tags)) return this.read.clear();
       for (const [type, keys] of transaction.changed) {
         if (type === this.items) {
           for (const key of keys) if (key !== null) this.read.delete(key);
           continue;
         }
+        if (type._item?.parent === this.items && keys.has("z"))
+          this.order = null;
         let entry = type;
         while (entry._item && entry._item.parent !== this.items)
           entry = entry._item.parent;
         if (entry._item) this.read.delete(entry._item.parentSub);
       }
     });
+  }
+  // From the first call, keeps what every change not made here touched, as
+  // applyTracked lists it (`items` and `changes`), however it arrived, until
+  // takeArrivals hands it over: a session checks only that once it has
+  // checked the document whole.
+  watchArrivals() {
+    if (this.watching) return;
+    this.watching = true;
+    this.doc.on("afterTransaction", (transaction) => {
+      if (transaction.origin === LOCAL || transaction.origin === REPAIR) return;
+      const arrived = (this.arrivals ??= {
+        items: new Set(),
+        changes: new Map(),
+      });
+      for (const [type, keys] of transaction.changed) {
+        if (!arrived.changes.has(type)) arrived.changes.set(type, new Set());
+        for (const key of keys) arrived.changes.get(type).add(key);
+        let root = type,
+          id = null;
+        while (root._item) {
+          id = root._item.parentSub;
+          root = root._item.parent;
+        }
+        if (root !== this.items) continue;
+        if (type === this.items) {
+          for (const key of keys) if (key !== null) arrived.items.add(key);
+        } else if (id !== null) arrived.items.add(id);
+      }
+    });
+  }
+  takeArrivals() {
+    const arrived = this.arrivals || { items: new Set(), changes: new Map() };
+    this.arrivals = null;
+    return arrived;
   }
   // Writes the connectors attached to an object, and the objects at their
   // other ends, into `out` from index `n` while it has room, and returns
@@ -657,14 +729,23 @@ export class SharedDocument {
     }
     return this.deep ? sharedCopy(item) : { ...item };
   }
-  // Stored objects in stacking order: by layer rank, then ID.
+  // Stored objects in stacking order: by layer rank, then ID. Each rank is
+  // read once rather than at every comparison. A document projected after
+  // every change keeps the order until a change affects it (see
+  // cacheItems); callers must not change the list they are given.
   layered() {
-    return [...this.items]
-      .filter(([, entry]) => entry instanceof Y.Map)
-      .sort(
-        ([a, x], [b, y]) =>
-          (x.get("z") || 0) - (y.get("z") || 0) || byCode(a, b),
-      );
+    const busy = this.doc._transactionCleanups.length > 0;
+    if (this.read && this.order && !busy) return this.order;
+    const entries = [],
+      ranks = new Map();
+    for (const [id, entry] of this.items)
+      if (entry instanceof Y.Map) {
+        entries.push([id, entry]);
+        ranks.set(id, entry.get("z") || 0);
+      }
+    entries.sort(([a], [b]) => ranks.get(a) - ranks.get(b) || byCode(a, b));
+    if (this.read && !busy) this.order = entries;
+    return entries;
   }
   snapshot(id = "shared", normalizeComments = true) {
     const items = this.layered().map(([id, entry]) =>
@@ -814,7 +895,9 @@ export class SharedDocument {
   // has projected the board already passes it as `board`, which is left
   // unchanged. Given `items`, the IDs an update wrote, only those objects'
   // stored structure is checked: no other object's can have changed.
-  validate(allowed = {}, { board, items } = {}) {
+  // Given `changes`, the types and keys an update changed as applyTracked
+  // lists them, only those are searched for content nothing reads.
+  validate(allowed = {}, { board, items, changes } = {}) {
     for (const key of this.doc.share.keys())
       if (
         !["board", "items", "comments", "tags", "timer", "workshop"].includes(
@@ -825,9 +908,12 @@ export class SharedDocument {
     // Content the checks below never read, such as a sequence under a map
     // or keyed entries under a text, would be stored, counted by no limit,
     // and sent to everyone.
-    for (const root of this.doc.share.values())
-      if (hiddenContent(root))
-        throw Error("Invalid shared document structure.");
+    if (
+      changes
+        ? hiddenChanges(changes)
+        : [...this.doc.share.values()].some(hiddenContent)
+    )
+      throw Error("Invalid shared document structure.");
     // The board map holds only its title and planning settings, which
     // validateBoard checks; anything else would be stored unseen.
     for (const [key, value] of this.meta)
@@ -1040,6 +1126,8 @@ export class SharedDocument {
   // by thread).
   applyTracked(bytes, origin = "remote") {
     const roots = new Set(),
+      // Every type the update changed, with the keys it changed.
+      changes = new Map(),
       workshop = new Set(),
       items = new Set(),
       messages = new Map(),
@@ -1061,6 +1149,8 @@ export class SharedDocument {
     const names = new Map([...this.doc.share].map(([k, v]) => [v, k]));
     const track = (transaction) => {
       for (const [type, keys] of transaction.changed) {
+        if (!changes.has(type)) changes.set(type, new Set());
+        for (const key of keys) changes.get(type).add(key);
         let root = type;
         const path = [];
         while (root._item) {
@@ -1115,10 +1205,25 @@ export class SharedDocument {
     } finally {
       this.doc.off("afterTransaction", track);
     }
-    return { roots, workshop, items, messages, rewritten, rewrittenRoots };
+    return {
+      roots,
+      changes,
+      workshop,
+      items,
+      messages,
+      rewritten,
+      rewrittenRoots,
+    };
   }
+  // A document projected after every change also keeps its whole state
+  // encoded until the next change, as a worker hands it to everyone joining
+  // and keeps it after each read of the log, which usually brings nothing.
+  // Callers must not change what they are given.
   update(vector) {
-    return Y.encodeStateAsUpdate(this.doc, vector);
+    if (vector || !this.read) return Y.encodeStateAsUpdate(this.doc, vector);
+    if (this.doc._transactionCleanups.length > 0)
+      return Y.encodeStateAsUpdate(this.doc);
+    return (this.encoded ??= Y.encodeStateAsUpdate(this.doc));
   }
   vector() {
     return Y.encodeStateVector(this.doc);
@@ -1127,7 +1232,8 @@ export class SharedDocument {
     this.undo.destroy();
     this.doc.destroy();
   }
-  commitContent(board) {
+  // `stacked` is the stacking order as it stood before the change.
+  commitContent(board, stacked = this.layered()) {
     const automaticChildren = autoMindChildren(board.items);
     this.doc.transact(() => {
       this.setTimer(board.timer);
@@ -1154,9 +1260,7 @@ export class SharedDocument {
         }
       // The stored order is all that is compared, so the board is not
       // projected again for it.
-      const oldOrder = this.layered()
-        .map(([id]) => id)
-        .filter((id) => ids.has(id));
+      const oldOrder = stacked.map(([id]) => id).filter((id) => ids.has(id));
       const nextOrder = board.items.map((i) => i.id);
       const reordered = !equal(
         oldOrder,
@@ -1217,6 +1321,19 @@ export class SharedDocument {
         }
         const z = crowded ? index : ranks[index];
         if (entry.get("z") !== z) entry.set("z", z);
+        // An object exactly as last read from the document, which nothing has
+        // changed since, has nothing to write; comparing it is far cheaper
+        // than writing it, so a large board's unchanged objects cost little.
+        // Tables and images write more than they read back.
+        const read = !fresh && this.deep && this.read.get(item.id);
+        if (
+          read &&
+          item.type !== "table" &&
+          item.src === undefined &&
+          !entry.has("src") &&
+          sameData(read, item)
+        )
+          return;
         this.writeItem(entry, item, automaticChildren.has(item.id));
       });
     }, LOCAL);

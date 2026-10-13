@@ -34,6 +34,8 @@ async function setup(
     url = "https://whiteboard.test",
     indexedDB,
     preferences = {},
+    // Called with the window just before the app runs in it.
+    prepare,
   } = {},
 ) {
   const dom = new JSDOM('<div id="app"></div><div id="toast"></div>', {
@@ -112,6 +114,7 @@ async function setup(
     if (asyncDialogClose) w.setTimeout(close, 0);
     else close();
   };
+  prepare?.(w);
   await w.eval(`(async()=>{${code}\n})()`);
   const tick = () => new Promise((r) => setTimeout(r, 25));
   const click = async (selector) => {
@@ -3407,6 +3410,108 @@ test("an edit to one object writes only its button in the outline again", async 
   }
 });
 
+test("adding, deleting and reordering objects writes only their buttons in the outline, as a whole list would read", async () => {
+  const app = await setup();
+  const { doc, w, click, tick } = app;
+  try {
+    const frame = item("frame", 0, 0, { text: "Plan", w: 1000, h: 500 });
+    const held = Array.from({ length: 4 }, (_, n) =>
+      item("note", 20 + n * 220, 60, { text: `Held ${n}`, parentId: frame.id }),
+    );
+    const loose = Array.from({ length: 30 }, (_, n) =>
+      item("note", (n % 6) * 220, 700 + Math.floor(n / 6) * 220, {
+        text: `Loose ${n}`,
+      }),
+    );
+    await rotationFixture(app, [frame, ...held, ...loose]);
+    const outline = () => doc.querySelector("#board-outline");
+    const buttons = () => [...outline().querySelectorAll("button")];
+    // What a screen reader reads: each button, in order, with the
+    // description it points to right after it.
+    const reading = () =>
+      buttons().map((b) => {
+        const id = b.getAttribute("aria-describedby");
+        if (id) assert.equal(b.nextElementSibling.id, id);
+        return [
+          b.textContent,
+          b.hasAttribute("data-frame"),
+          id ? doc.getElementById(id).textContent : null,
+        ];
+      });
+    const stops = () => buttons().filter((b) => b.tabIndex === 0);
+    const named = (text) => buttons().find((b) => b.textContent.endsWith(text));
+    assert.equal(buttons().length, 35);
+    // Deleting one object keeps every other button but its frame's, whose
+    // count of what it holds changed.
+    let before = buttons();
+    await click(`#board-outline [data-id="${named("Held 2").dataset.id}"]`);
+    await click('[data-action="delete"]');
+    let after = buttons();
+    assert.equal(after.length, 34);
+    assert.deepEqual(
+      after.filter((b) => !before.includes(b)).map((b) => b.textContent),
+      ["Frame: Plan"],
+    );
+    assert.equal(
+      outline().children.length,
+      34 + after.filter((b) => b.hasAttribute("aria-describedby")).length,
+    );
+    assert.equal(stops().length, 1);
+    // Undone, it is written again at its place.
+    before = after;
+    await click('[data-action="undo"]');
+    after = buttons();
+    assert.equal(after.length, 35);
+    assert.equal(after[3].textContent, "Sticky note: Held 2");
+    assert.equal(after.filter((b) => !before.includes(b)).length, 2);
+    // Brought to the front, an object moves to the end of the list alone.
+    before = after;
+    await click(`#board-outline [data-id="${named("Loose 3").dataset.id}"]`);
+    await click('[data-action="front"]');
+    after = buttons();
+    assert.equal(after.at(-1).textContent, "Sticky note: Loose 3");
+    assert.equal(after.at(-1).getAttribute("aria-pressed"), "true");
+    assert.equal(after.filter((b) => !before.includes(b)).length, 1);
+    assert.equal(
+      buttons().filter((b) => b.getAttribute("aria-pressed") === "true").length,
+      1,
+    );
+    // The keyboard keeps its place in the list when an edit moves an object
+    // before the one it is on, as when the whole list is written.
+    const focused = buttons()[20];
+    focused.focus();
+    const ctrl = (key, shiftKey = false) =>
+      doc.activeElement.dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key,
+          ctrlKey: true,
+          shiftKey,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    ctrl("z");
+    await tick();
+    assert.equal(focused.textContent, "Sticky note: Loose 16");
+    assert.equal(buttons()[20].textContent, "Sticky note: Loose 15");
+    assert.equal(doc.activeElement, buttons()[20]);
+    ctrl("z", true);
+    await tick();
+    assert.equal(doc.activeElement, buttons()[20]);
+    assert.deepEqual(stops(), [doc.activeElement]);
+    const edited = reading();
+    // Opened again, the whole list is written at once and reads the same.
+    await click('[data-action="home"]');
+    await click("[data-open]");
+    await tick();
+    assert.deepEqual(reading(), edited);
+    const ids = buttons().map((b) => b.getAttribute("aria-describedby"));
+    assert.equal(new Set(ids.filter(Boolean)).size, ids.filter(Boolean).length);
+  } finally {
+    await app.close();
+  }
+});
+
 test("a language change keeps the chosen tool, its hint and its cursor", async () => {
   const app = await setup();
   const { w, doc, click } = app;
@@ -4588,6 +4693,63 @@ test("Frames and navigation stays open beside the board while going from frame t
   }
 });
 
+test("an edit inside one frame writes only the rows it changed in Frames and navigation again", async () => {
+  const app = await setup();
+  const { doc, click, tick } = app;
+  try {
+    const frames = ["First", "Second", "Third", "Fourth"].map((text, n) =>
+      item("frame", n * 1000, 0, { w: 800, h: 600, text, order: n }),
+    );
+    const notes = frames.map((f, n) =>
+      item("note", f.x + 100, 100, { text: `Note ${n}`, parentId: f.id }),
+    );
+    await rotationFixture(app, [...frames, ...notes]);
+    await click('[data-action="frames"]');
+    const panel = doc.querySelector("#frames-panel");
+    const rows = () => [...panel.querySelectorAll(".frame-row")];
+    const reading = () =>
+      rows().map((r) => [
+        r.textContent,
+        r.getAttribute("aria-level"),
+        [...r.querySelectorAll("button")].map((b) => b.tabIndex).join(" "),
+      ]);
+    // The keyboard moves the Tab stop to the third frame in place.
+    rows()[2].querySelector(".frame-go").focus();
+    await tick();
+    const before = rows();
+    const note = [...doc.querySelectorAll("#board-outline button")].find(
+      (b) => b.textContent === "Sticky note: Note 1",
+    );
+    await click(`#board-outline [data-id="${note.dataset.id}"]`);
+    await click('[data-action="delete"]');
+    await tick();
+    const after = rows();
+    assert.equal(after.length, 4);
+    assert.deepEqual(
+      after.map((r, n) => r === before[n]),
+      [false, false, false, true],
+      "the rows the edit or the Tab stop changed are written again",
+    );
+    assert.match(after[1].textContent, /Second 0 objects↑↓$/);
+    assert.deepEqual(
+      reading().map(([, , stops]) => stops),
+      ["-1 -1 -1 -1", "-1 -1 -1 -1", "0 0 0 0", "-1 -1 -1 -1"],
+    );
+    // Undone, the row reads as before.
+    const edited = reading();
+    await click('[data-action="undo"]');
+    await tick();
+    assert.match(rows()[1].textContent, /Second 1 object↑↓$/);
+    assert.deepEqual(
+      rows().map((r, n) => r === after[n]),
+      [true, false, true, true],
+    );
+    assert.deepEqual(reading().slice(2), edited.slice(2));
+  } finally {
+    await app.close();
+  }
+});
+
 test("going to a frame from Frames and navigation is a step Back undoes, and the address links to that frame", async () => {
   const app = await setup();
   const { doc, w, click, tick } = app;
@@ -4718,6 +4880,44 @@ test("Frames and navigation copies a link to each frame from its row", async () 
         selectedClipboard(reopened)[0].id,
         selected[1].id,
         "The link opens the board at that frame",
+      );
+    } finally {
+      await reopened.close();
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("a board opened by its address leaves the library under it unpainted until the library shows", async () => {
+  const app = await setup();
+  try {
+    await app.click('[data-action="new"]');
+    await app.click('[data-action="add-note"]');
+    const painted = [];
+    const reopened = await setup(undefined, {
+      url: app.w.location.href,
+      indexedDB: app.w.indexedDB,
+      prepare(w) {
+        const getContext = w.HTMLCanvasElement.prototype.getContext;
+        w.HTMLCanvasElement.prototype.getContext = function (...args) {
+          if (this.dataset.preview) painted.push(this.dataset.preview);
+          return getContext.apply(this, args);
+        };
+      },
+    });
+    try {
+      assert.ok(reopened.doc.querySelector("#canvas"), "The board opened");
+      await reopened.tick();
+      assert.deepEqual(painted, [], "No preview was painted unseen");
+      await reopened.click('[data-action="home"]');
+      const previews = [
+        ...reopened.doc.querySelectorAll("canvas[data-preview]"),
+      ];
+      assert.ok(previews.length > 1, "The board and templates have previews");
+      assert.ok(
+        previews.every((canvas) => canvas.dataset.painted),
+        "Every preview is painted once the library shows",
       );
     } finally {
       await reopened.close();
@@ -11472,6 +11672,195 @@ test("automatically growing text exports its final line and image copying keeps 
     await click('[data-action="home"]');
   } finally {
     releaseFonts?.();
+    await app.close();
+  }
+});
+
+test("selecting many notes never laid out says whether their text fits once each is fitted, a few at a time", async () => {
+  const app = await setup();
+  const { doc, w, click, tick } = app;
+  try {
+    await click('[data-action="new"]');
+    const notes = Array.from({ length: 80 }, (_, n) =>
+      item("note", (n % 10) * 220, Math.floor(n / 10) * 220, {
+        text: `Idea ${n} with a few words`,
+      }),
+    );
+    // The last note holds more than fits at the smallest size.
+    notes.push(
+      item("note", 0, 2000, { w: 60, h: 60, text: "many lines\n".repeat(80) }),
+    );
+    dispatchTransfer(app, "paste", transferData(clipboardFormats(notes)));
+    const status = () => doc.querySelector("#text-fit-status");
+    // Ten are laid out at once, the rest between other work.
+    for (let n = 0; n < 40 && status().hidden; n++) await tick();
+    assert.equal(status().hidden, false);
+    assert.match(status().textContent, /Enlarge/);
+    const message = status().textContent;
+    await click('[data-action="undo"]');
+    dispatchTransfer(app, "paste", transferData(clipboardFormats(notes)));
+    // Copies are laid out afresh. With every layout past its time, the
+    // first pass fits only a few, and the status waits for the rest.
+    const now = w.performance.now.bind(w.performance);
+    let clock = 0;
+    w.performance.now = () => now() + (clock += 100);
+    try {
+      doc.querySelector("#canvas").dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await tick();
+      doc.querySelector("#canvas").dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key: "a",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      assert.equal(
+        doc.querySelectorAll("#board-outline [aria-pressed='true']").length,
+        81,
+      );
+      assert.equal(status().hidden, true, "not known yet");
+      for (let n = 0; n < 40 && status().hidden; n++) await tick();
+      assert.equal(status().hidden, false);
+      assert.equal(status().textContent, message);
+    } finally {
+      w.performance.now = now;
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("text laid out ahead while the browser is idle draws the same when zooming in past 15%", async () => {
+  // Two boards alike, one of them lent idle time while zoomed out.
+  const open = async (idle) => {
+    const app = await setup();
+    const queue = [];
+    if (idle) app.w.requestIdleCallback = (f) => queue.push(f);
+    await app.click('[data-action="new"]');
+    const zoom = () =>
+      parseInt(app.doc.querySelector(".zoom-label").textContent);
+    while (zoom() >= 15) await app.click('[data-action="zoom-out"]');
+    const notes = Array.from({ length: 24 }, (_, n) =>
+      item("note", (n % 6) * 220, Math.floor(n / 6) * 220, {
+        text: `Idea ${n} needs a few more words than fit at first sight`,
+      }),
+    );
+    dispatchTransfer(app, "paste", transferData(clipboardFormats(notes)));
+    await app.tick();
+    app.doc.querySelector("#canvas").dispatchEvent(
+      new app.w.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    // A canvas of another size draws with a new context, for which no text
+    // was laid out yet: the notes were only ever drawn zoomed out.
+    const canvas = app.doc.querySelector("#canvas");
+    canvas.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      width: 800,
+      height: 600,
+    });
+    app.w.dispatchEvent(new app.w.Event("resize"));
+    for (let n = 0; n < 100 && queue.length; n++)
+      queue.shift()({ timeRemaining: () => 50, didTimeout: false });
+    assert.equal(queue.length, 0);
+    const ctx = canvas.getContext("2d");
+    const measure = ctx.measureText;
+    let measured = 0;
+    ctx.measureText = function (...args) {
+      measured++;
+      return measure.apply(this, args);
+    };
+    while (zoom() < 15) await app.click('[data-action="zoom-in"]');
+    ctx.measureText = measure;
+    return {
+      app,
+      measured,
+      picture: app.doc.querySelector("#canvas").toDataURL(),
+    };
+  };
+  const warm = await open(true);
+  const cold = await open(false);
+  try {
+    assert.ok(cold.measured > 0);
+    assert.equal(warm.measured, 0, "the notes were laid out ahead");
+    assert.equal(warm.picture, cold.picture);
+  } finally {
+    await warm.app.close();
+    await cold.app.close();
+  }
+});
+
+test("text is laid out ahead only for the open board, and not while the tab is hidden", async () => {
+  const app = await setup();
+  const { doc, w, click } = app;
+  try {
+    const queue = [];
+    w.requestIdleCallback = (f) => queue.push(f);
+    const idle = () => {
+      for (let n = 0; n < 100 && queue.length; n++)
+        queue.shift()({ timeRemaining: () => 50, didTimeout: false });
+    };
+    await click('[data-action="new"]');
+    const zoom = () => parseInt(doc.querySelector(".zoom-label").textContent);
+    while (zoom() >= 15) await click('[data-action="zoom-out"]');
+    dispatchTransfer(
+      app,
+      "paste",
+      transferData(
+        clipboardFormats(
+          Array.from({ length: 12 }, (_, n) =>
+            item("note", n * 220, 0, { text: `Idea ${n} in a few words` }),
+          ),
+        ),
+      ),
+    );
+    idle();
+    const canvas = doc.querySelector("#canvas");
+    const measured = () => {
+      const ctx = canvas.getContext("2d"),
+        measure = ctx.measureText;
+      let count = 0;
+      ctx.measureText = function (...args) {
+        count++;
+        return measure.apply(this, args);
+      };
+      return () => {
+        ctx.measureText = measure;
+        return count;
+      };
+    };
+    // Hidden, the tab schedules nothing; seen again, it goes on.
+    let hidden = true;
+    Object.defineProperty(doc, "hidden", {
+      configurable: true,
+      get: () => hidden,
+    });
+    doc.dispatchEvent(new w.Event("visibilitychange"));
+    await click('[data-action="zoom-out"]');
+    assert.equal(queue.length, 0, "nothing waits for idle time while hidden");
+    hidden = false;
+    doc.dispatchEvent(new w.Event("visibilitychange"));
+    assert.equal(queue.length, 1);
+    // A board closed before the browser is idle is not laid out.
+    await click('[data-action="home"]');
+    const stop = measured();
+    idle();
+    assert.equal(stop(), 0);
+    assert.equal(queue.length, 0, "and nothing more is scheduled");
+  } finally {
     await app.close();
   }
 });
@@ -19295,6 +19684,69 @@ async function openSelectionSettings(app, enabled) {
     await app.click("#precise-selection");
 }
 
+test("a marquee says whether the selected text fits once it ends", async () => {
+  const app = await setup(),
+    { doc, w } = app;
+  try {
+    await app.click('[data-action="new"]');
+    const canvas = doc.querySelector("#canvas");
+    canvas.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 1200,
+      height: 900,
+    });
+    dispatchTransfer(
+      app,
+      "drop",
+      transferData(
+        clipboardFormats([
+          item("note", 0, 0, { text: "Fits" }),
+          item("note", 300, 0, {
+            w: 60,
+            h: 60,
+            text: "many lines\n".repeat(80),
+          }),
+        ]),
+      ),
+      canvas,
+      { clientX: 300, clientY: 300 },
+    );
+    const [fits, full] = selectedClipboard(app),
+      view = renderedView(app);
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    const pointer = (type, x, y) =>
+      canvasPointer(app, type, 1, view.x + x * view.z, view.y + y * view.z, {
+        pointerType: "mouse",
+      });
+    const status = () => doc.querySelector("#text-fit-status");
+    pointer("pointerdown", fits.x - 20, fits.y - 20);
+    pointer("pointermove", fits.x + 50, fits.y + 50);
+    pointer("pointermove", full.x + 50, full.y + 50);
+    // Out of sight while the marquee goes on.
+    assert.ok(
+      doc
+        .querySelector("#selection-tools")
+        .classList.contains("is-interacting"),
+    );
+    pointer("pointerup", full.x + 50, full.y + 50);
+    assert.equal(
+      doc.querySelectorAll("#board-outline [aria-pressed='true']").length,
+      2,
+    );
+    assert.equal(status().hidden, false);
+    assert.match(status().textContent, /Enlarge/);
+  } finally {
+    await app.close();
+  }
+});
+
 test("marquee crossing and precise coverage retain history, Shift additions, cancellation and device preferences", async () => {
   const app = await setup(),
     { doc, w, click } = app;
@@ -23179,21 +23631,36 @@ test("a lock arriving during a shared move or resize cancels the gesture", async
 
 test("others are told a dropped move is settling until its save goes through, and a cancelled one is not", async () => {
   const hub = createPeerHub(),
-    sent = [];
+    sent = [],
+    // The tickets of the collaborator's packets, which later packets on a
+    // link name instead of carrying.
+    theirs = new Set();
   // The collaborator's presence as it leaves their device.
   const connect = hub.peer.connect;
   hub.peer.connect = async (code) => {
     const conn = await connect(code);
     for (const end of [conn, conn.other]) {
+      // A ticket, as one renewed at a check-in, may first go out on the
+      // ordered channel.
+      const send = end.send.bind(end);
+      end.send = (data) => {
+        const packet = JSON.parse(data);
+        if (packet.ticket?.user === collaborator.uuid)
+          theirs.add(`${packet.ticket.session}:${packet.ticket.expires}`);
+        return send(data);
+      };
       const channel = end.peerconnection.createDataChannel;
       end.peerconnection.createDataChannel = (...args) => {
         const made = channel(...args),
           through = made.send;
         made.send = (data) => {
           const packet = JSON.parse(data);
+          if (packet.ticket?.user === collaborator.uuid)
+            theirs.add(`${packet.ticket.session}:${packet.ticket.expires}`);
           if (
             packet.body?.kind === "presence" &&
-            packet.ticket.user === collaborator.uuid
+            (packet.ticket?.user === collaborator.uuid ||
+              theirs.has(packet.ref))
           )
             sent.push({ at: Date.now(), ...packet.body.data });
           return through(data);
@@ -28890,6 +29357,63 @@ test("a shared board whose server cannot be reached says it is retrying and why 
       () => /live/.test(state()),
       "It connects by itself once the server is back",
     );
+  } finally {
+    await shared.close();
+  }
+});
+
+test("reopening a shared board whose waiting edits cannot be saved yet keeps it editable and says why", async () => {
+  const notes = [
+    item("note", 0, 0, { text: "A" }),
+    item("note", 300, 0, { text: "B" }),
+  ];
+  const shared = await sharedEditors("first-upload-fails", notes, 1);
+  const [a] = shared.apps;
+  // The board's server is up but refuses to save edits for a while.
+  const call = shared.env.service.call.bind(shared.env.service);
+  let busy = true;
+  shared.env.service.call = (identity, input) =>
+    busy && input.op === "commit"
+      ? Promise.reject(Object.assign(Error("Worker busy"), { status: 503 }))
+      : call(identity, input);
+  const state = () => a.doc.querySelector("#save-state")?.textContent;
+  try {
+    await a.click(`#board-outline [data-id="${notes[0].id}"]`);
+    await a.click('[data-action="delete"]');
+    await shared.until(
+      () => state() === "Offline · changes saved on this device",
+      "The edit waits on this device",
+    );
+    await a.click('[data-action="home"]');
+    for (let n = 0; n < 20; n++) await a.tick();
+    a.doc.querySelector("[data-open]").click();
+    await shared.until(
+      () => a.doc.querySelector(`#board-outline [data-id="${notes[1].id}"]`),
+      "The board opens",
+    );
+    for (let n = 0; n < 40; n++) await a.tick();
+    assert.equal(state(), "Offline · changes saved on this device");
+    assert.notEqual(a.doc.querySelector("#toast").textContent, "Worker busy");
+    // Still editable: another deletion is taken.
+    await a.click(`#board-outline [data-id="${notes[1].id}"]`);
+    await a.click('[data-action="delete"]');
+    assert.equal(
+      a.doc.querySelector(`#board-outline [data-id="${notes[1].id}"]`),
+      null,
+    );
+    busy = false;
+    await shared.until(
+      () => /live/.test(state()),
+      "The waiting edits are saved once the server takes them",
+    );
+    await shared.until(async () => {
+      const { doc } = await shared.env.service.load("first-upload-fails");
+      try {
+        return doc.snapshot().items.length === 0;
+      } finally {
+        doc.destroy();
+      }
+    }, "Both deletions reach the board");
   } finally {
     await shared.close();
   }

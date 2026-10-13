@@ -13,6 +13,7 @@ import {
   imageSize,
   truncate,
   keepOnBoard,
+  MAX_OBJECTS,
 } from "./model.js";
 import {
   descendants,
@@ -397,7 +398,7 @@ export function createTransfer(api) {
   function insert(items, target, incomingTags = []) {
     if (!items.length || api.board() !== target) return;
     if (api.canAdd && !api.canAdd()) return;
-    if (target.items.length + items.length > 5000)
+    if (target.items.length + items.length > MAX_OBJECTS)
       throw Error("A board can contain up to 5,000 objects.");
     const tags = importTags(target, items, incomingTags);
     api.placeItems?.(items);
@@ -440,7 +441,7 @@ export function createTransfer(api) {
       .catch(() => {})
       .then(async () => {
         if (api.board() !== target || !canvas.isConnected) return;
-        if (target.items.length + files.length > 5000)
+        if (target.items.length + files.length > MAX_OBJECTS)
           throw Error("A board can contain up to 5,000 objects.");
         api.toast("Adding files…");
         const objects = await fileObjects(files, point, options);

@@ -1,4 +1,5 @@
 import test from "node:test";
+import * as Y from "yjs";
 import assert from "node:assert/strict";
 import { board, item } from "../src/model.js";
 import { SharedDocument } from "../src/collaboration/document.js";
@@ -341,6 +342,68 @@ test("offline edits larger than one commit are sent in several and all saved", a
     assert.equal(session.pending.size, 0, "Every edit was saved");
     const { doc } = await env.service.load(b.id);
     assert.equal(doc.snapshot().items[0].text, text(20000, 89 * 5));
+  } finally {
+    session.close();
+  }
+});
+
+test("offline edits too large to send in time over a slow connection go up in smaller batches", async () => {
+  const env = environment();
+  const b = board("Slow connection");
+  b.items = Array.from({ length: 5 }, (_, n) =>
+    item("note", n * 300, 0, { text: "x" }),
+  );
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const puter = env.sdk(owner);
+  // Requests carrying more than about 1 MB never complete in time.
+  const exec = puter.workers.exec;
+  puter.workers.exec = (url, options) =>
+    (options.body?.length || 0) > 1_000_000
+      ? Promise.reject(
+          new DOMException("The operation was aborted.", "AbortError"),
+        )
+      : exec(url, options);
+  const session = new CollaborationSession({
+    puter,
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed() {},
+    activity() {},
+    status() {},
+  });
+  const text = (n, seed) =>
+    Array.from({ length: n }, (_, k) =>
+      ((k * 7919 + seed) % 36).toString(36),
+    ).join("");
+  try {
+    await session.start();
+    env.offline = true;
+    for (let n = 0; n < 20; n++) {
+      const before = session.shared.snapshot(),
+        next = structuredClone(before);
+      next.items.forEach((i, k) => (i.text = text(20000, n * 5 + k)));
+      await session.commit(next, before);
+    }
+    await session.queue;
+    env.offline = false;
+    const deadline = Date.now() + 60_000;
+    while (session.pending.size && Date.now() < deadline) {
+      await session.flush().catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(session.pending.size, 0, "Every edit was saved");
+    const { doc } = await env.service.load(b.id);
+    assert.equal(doc.snapshot().items[0].text, text(20000, 19 * 5));
+    doc.destroy();
   } finally {
     session.close();
   }
@@ -839,7 +902,7 @@ test("a board's owner who is not an administrator can bring it back from the tra
   assert.ok(synced.update, "The restored board is read again");
 });
 
-test("edits the worker keeps refusing as out of order are rebuilt on its state instead of waiting forever", async () => {
+test("edits the worker keeps refusing as out of order are made again on its state instead of waiting forever or being lost", async () => {
   const env = environment();
   const b = board("Conflicts");
   b.items = [item("note", 0, 0, { text: "Hi" })];
@@ -881,17 +944,27 @@ test("edits the worker keeps refusing as out of order are rebuilt on its state i
     next.items[0].text = "Changed";
     await session.commit(next, before);
     await session.queue;
+    const [first] = session.pending.keys();
     for (let n = 0; n < 7; n++) {
       await session.flush();
       assert.equal(session.pending.size, 1, `still waiting after ${n + 1}`);
       assert.equal(statuses.at(-1), "Saving shared changes…");
     }
     await session.flush();
-    assert.equal(session.pending.size, 0, "The refused edit is given up");
-    assert.notEqual(statuses.at(-1), "Saving shared changes…");
     assert.equal(commits, 8);
-    // The session follows the worker's state and saves again afterwards.
+    // The refused row is given up, and its change made again on the
+    // worker's state rather than lost.
+    await session.queue;
+    assert.equal(session.pending.size, 1);
+    assert.notEqual([...session.pending.keys()][0], first);
+    assert.equal(session.shared.snapshot().items[0].text, "Changed");
     env.service.call = call;
+    await session.flush();
+    assert.equal(session.pending.size, 0);
+    const { doc: saved } = await env.service.load(b.id);
+    assert.equal(saved.snapshot().items[0].text, "Changed");
+    saved.destroy();
+    // The session follows the worker's state and saves again afterwards.
     const again = session.shared.snapshot(),
       after = structuredClone(again);
     after.items[0].text = "Later";
@@ -902,6 +975,79 @@ test("edits the worker keeps refusing as out of order are rebuilt on its state i
     const { doc } = await env.service.load(b.id);
     assert.equal(doc.snapshot().items[0].text, "Later");
     doc.destroy();
+  } finally {
+    env.service.call = call;
+    session.close();
+  }
+});
+
+test("an edit refused as out of order that cannot be made again on the worker's state is reported, not lost silently", async () => {
+  const env = environment();
+  const b = board("Conflicts");
+  b.items = [item("note", 0, 0, { text: "Hi" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const rejections = [];
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed() {},
+    activity() {},
+    status() {},
+    rejected: (r) => rejections.push(r),
+  });
+  const call = env.service.call.bind(env.service);
+  try {
+    await session.start();
+    // The state a lagging instance holds: from before this device's first edit.
+    const stale = (await call(owner, { op: "sync", room: b.id })).update;
+    // R1, saved through another instance.
+    let before = session.shared.snapshot(),
+      next = structuredClone(before);
+    next.items[0].text = "Hi there";
+    await session.commit(next, before);
+    await session.queue;
+    await session.flush();
+    assert.equal(session.pending.size, 0);
+    // R2 builds on R1; the lagging instance keeps refusing it and syncs stale.
+    env.service.call = async (user, input) => {
+      if (input.op === "commit")
+        throw Object.assign(
+          Error("This change depends on edits that have not arrived yet."),
+          { status: 409 },
+        );
+      if (input.op === "sync")
+        return { ...(await call(user, input)), update: stale };
+      return call(user, input);
+    };
+    before = session.shared.snapshot();
+    next = structuredClone(before);
+    next.items[0].text = "Hi there, world";
+    await session.commit(next, before);
+    await session.queue;
+    for (let n = 0; n < 8; n++) await session.flush();
+    await session.queue;
+    env.service.call = call;
+    await session.flushed();
+    await session.synchronize();
+    const text = session.shared.snapshot().items[0].text;
+    const { doc } = await env.service.load(b.id);
+    const saved = doc.snapshot().items[0].text;
+    doc.destroy();
+    // Either the edit is saved, or the person is told it was not.
+    assert.ok(
+      saved === "Hi there, world" || rejections.some((r) => !r.remade),
+      "edit lost without a word",
+    );
   } finally {
     env.service.call = call;
     session.close();
@@ -943,10 +1089,148 @@ test("a board holding what only a newer app writes asks for a reload instead of 
     );
     assert.equal(session.readOnly, true);
     assert.equal(session.contentReadOnly, true);
+    // A check-in confirming the role does not make it editable again, so
+    // this older copy cannot save over what it cannot read.
+    await session.heartbeat();
+    assert.equal(session.readOnly, true);
+    assert.equal(session.contentReadOnly, true);
+    const next = session.shared.snapshot(b.id);
+    next.items[0].text = "Written by the older app";
+    await session.commit(next, session.shared.snapshot(b.id));
+    await session.flushed();
+    const { doc } = await env.service.load(b.id);
+    assert.equal(doc.snapshot().items[0].text, "Hi");
+    doc.destroy();
+    // Once it can read the board again, it edits again.
+    delete session.shared.validate;
+    await session.synchronize();
+    assert.equal(session.readOnly, false);
+    assert.equal(session.contentReadOnly, false);
   } finally {
     session.close();
   }
 });
+
+test("what only a newer app writes is noticed when a later synchronization brings it", async () => {
+  const env = environment();
+  const b = board("Later");
+  b.items = [item("note", 0, 0, { text: "Hi" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const statuses = [];
+  const session = new CollaborationSession({
+    puter: env.sdk(owner),
+    server: "https://whiteboard-test.puter.work",
+    room: b.id,
+    user: owner,
+    store: memoryStore(),
+    changed() {},
+    activity() {},
+    status: (s) => statuses.push(s),
+  });
+  try {
+    await session.start();
+    await session.synchronize();
+    // The worker, newer than this app, saved a property it does not know.
+    const newer = new SharedDocument(session.shared.update()),
+      vector = newer.vector();
+    newer.doc.transact(() =>
+      newer.items.get(b.items[0].id).set("sparkle", true),
+    );
+    const update = encode(newer.update(vector));
+    newer.destroy();
+    const request = session.request.bind(session);
+    session.request = async (op, input) =>
+      op === "sync"
+        ? { ...(await request(op, input)), update }
+        : request(op, input);
+    await session.synchronize().catch((e) => session.failure(e));
+    assert.equal(
+      statuses.at(-1),
+      "This board needs a newer version of the app · reload",
+    );
+    assert.equal(session.readOnly, true);
+    // The next synchronization brings nothing new; the property is still
+    // there, so the board stays read-only.
+    session.request = request;
+    await session.synchronize().catch((e) => session.failure(e));
+    assert.equal(session.readOnly, true);
+  } finally {
+    session.close();
+  }
+});
+
+for (const path of ["a peer", "a save's response"])
+  test(`what only a newer app writes is noticed when ${path} brings it`, async () => {
+    const env = environment();
+    const b = board("Arrived");
+    b.items = [item("note", 0, 0, { text: "Hi" })];
+    const seed = new SharedDocument();
+    seed.commit(b);
+    await env.service.call(owner, {
+      op: "create",
+      room: b.id,
+      update: encode(seed.update()),
+    });
+    seed.destroy();
+    const statuses = [];
+    const session = new CollaborationSession({
+      puter: env.sdk(owner),
+      server: "https://whiteboard-test.puter.work",
+      room: b.id,
+      user: owner,
+      store: memoryStore(),
+      changed() {},
+      activity() {},
+      status: (s) => statuses.push(s),
+    });
+    try {
+      await session.start();
+      await session.synchronize();
+      const newer = new SharedDocument(session.shared.update()),
+        vector = newer.vector();
+      newer.doc.transact(() =>
+        newer.items.get(b.items[0].id).set("sparkle", true),
+      );
+      const update = newer.update(vector);
+      newer.destroy();
+      if (path === "a peer")
+        // As a receipted peer edit is applied.
+        session.shared.apply(update);
+      else {
+        const request = session.request.bind(session);
+        session.request = async (op, input) => {
+          const result = await request(op, input);
+          return op === "commit"
+            ? {
+                ...result,
+                update: encode(Y.mergeUpdates([decode(result.update), update])),
+              }
+            : result;
+        };
+        const before = session.shared.snapshot(b.id),
+          next = structuredClone(before);
+        next.items[0].x = 50;
+        await session.commit(next, before);
+        await session.flushed();
+        session.request = request;
+      }
+      await session.synchronize().catch((e) => session.failure(e));
+      assert.equal(
+        statuses.at(-1),
+        "This board needs a newer version of the app · reload",
+      );
+      assert.equal(session.readOnly, true);
+    } finally {
+      session.close();
+    }
+  });
 
 test("a queued edit that no longer fits the board is uploaded and settled before the board is called too new", async () => {
   const env = environment();
@@ -1059,6 +1343,98 @@ test("an upload keeps the shared state on this device once", async () => {
     cached.destroy();
   } finally {
     session.close();
+  }
+});
+
+test("a device that cannot keep its copy of the board still saves, shows others' edits, and joins", async () => {
+  const env = environment();
+  const b = board("Full device");
+  b.items = [item("note", 0, 0, { text: "Hi" })];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  // The device's storage refuses the copy of the board, as when it is full.
+  const store = memoryStore(),
+    put = store.collaborationPut;
+  store.collaborationPut = async (row) => {
+    if (row.kind === "snapshot")
+      throw Object.assign(Error("The quota has been exceeded."), {
+        name: "QuotaExceededError",
+      });
+    return put(row);
+  };
+  const open = (user, rows = store) => {
+    const statuses = [];
+    const session = new CollaborationSession({
+      puter: env.sdk(user),
+      server: "https://whiteboard-test.puter.work",
+      room: b.id,
+      user,
+      store: rows,
+      changed() {},
+      activity() {},
+      status(s) {
+        statuses.push(s);
+      },
+    });
+    return { session, statuses };
+  };
+  const first = open(owner),
+    other = open(editor, memoryStore());
+  await env.service
+    .call(owner, {
+      op: "invite",
+      room: b.id,
+      role: "editor",
+    })
+    .then(({ token }) =>
+      env.service.call(editor, { op: "join", room: b.id, token }),
+    );
+  let again;
+  try {
+    await first.session.start();
+    await other.session.start();
+    for (const text of ["One", "Two", "Three"]) {
+      const before = first.session.shared.snapshot(b.id),
+        next = structuredClone(before);
+      next.items[0].text = text;
+      await first.session.commit(next, before);
+      await first.session.flushed();
+    }
+    assert.equal(first.session.pending.size, 0);
+    assert.match(first.statuses.at(-1), /^Saved/);
+    const { doc } = await env.service.load(b.id);
+    assert.equal(doc.snapshot().items[0].text, "Three");
+    doc.destroy();
+    // Another person's edit is shown.
+    const before = other.session.shared.snapshot(b.id),
+      next = structuredClone(before);
+    next.items[0].text = "From Bob";
+    await other.session.synchronize();
+    await other.session.commit(next, other.session.shared.snapshot(b.id));
+    await other.session.flushed();
+    await first.session.synchronize();
+    assert.equal(first.session.shared.snapshot(b.id).items[0].text, "From Bob");
+    assert.match(first.statuses.at(-1), /^Saved/);
+    first.session.close();
+    // Reloading keeps the edits the missing copy could not hold, sends
+    // them again as nothing new, and joins.
+    assert.ok([...store.rows.values()].some((r) => r.kind === "update"));
+    again = open(owner);
+    await again.session.start();
+    await again.session.flushed();
+    assert.equal(again.session.pending.size, 0);
+    assert.equal(again.session.shared.snapshot(b.id).items[0].text, "From Bob");
+    assert.match(again.statuses.at(-1), /^Saved/);
+  } finally {
+    first.session.close();
+    other.session.close();
+    again?.session.close();
   }
 });
 

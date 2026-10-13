@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
 import { local } from "../src/storage.js";
-import { board, item } from "../src/model.js";
+import { board, item, undoCopy } from "../src/model.js";
 
 test("storage upgrades preserve boards and bound isolated recovery snapshots", async (t) => {
   globalThis.indexedDB = new IDBFactory();
@@ -144,6 +144,26 @@ test("after a burst of edits, versions from earlier in the day can still be rest
   assert.ok(earlier.length >= 7, earlier.join(", "));
   assert.ok(earlier.includes("At 10:2"), "the end of the first quarter hour");
   assert.ok(!earlier.includes("At 10:1"));
+});
+
+test("recovery versions sharing a drawing's points measure them at their written size", async () => {
+  globalThis.indexedDB = new IDBFactory();
+  const b = board("Drawings");
+  const points = Array.from({ length: 500 }, (_, k) => [k * 0.5, k % 7]);
+  b.items.push(
+    item("pen", 0, 0, { w: 250, h: 6, points }),
+    item("note", 0, 0, { text: "Plain words" }),
+  );
+  const first = await local.checkpoint(undoCopy(b), "First", { owned: true });
+  b.items[1].text = "Longer words than before";
+  const second = await local.checkpoint(undoCopy(b), "Second", {
+    owned: true,
+  });
+  assert.equal(second.board.items[0].points, first.board.items[0].points);
+  for (const revision of [first, second]) {
+    const { bytes, ...written } = revision;
+    assert.equal(bytes, JSON.stringify(written).length * 2);
+  }
 });
 
 test("a recovery version is measured without writing the board out as JSON, and a copy handed over is not copied again", async (t) => {

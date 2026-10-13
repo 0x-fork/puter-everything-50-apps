@@ -15,6 +15,7 @@ import {
   workshopEvents,
 } from "../src/facilitation/model.js";
 import { SharedDocument } from "../src/collaboration/document.js";
+import { sameJSON } from "../src/same-json.js";
 import { ListingQueue } from "./listings.js";
 import { oversized } from "../src/model.js";
 import { providerGroup } from "../src/content/providers.js";
@@ -105,6 +106,9 @@ const boardFeatures = (policy) => ({
 const LOG_OVERLAP = 120_000;
 // Refreshing a cached state reads a shorter overlap.
 const REFRESH_OVERLAP = 15_000;
+// A busy board is checkpointed at most this often, unless records build up
+// far past the usual count; each checkpoint is a copy of the whole board.
+const CHECKPOINT_GAP = 5 * 60_000;
 // How long a cached board state is used without checking for new records.
 const FRESH = 1500;
 // How long after a save's record is written a listing surely shows it, and
@@ -219,6 +223,9 @@ const due = (hit, now) => {
 };
 // Each board's presence being checked or listed by this instance.
 const ROSTERS = new Map();
+// Each board's member records as last listed; see members().
+const MEMBER_LISTS = new Map();
+const MEMBERS_FRESH = 5000;
 // This instance's listings in flight, by when each began, and those waiting
 // their turn. Puter allows a worker five at once on paid plans and three on
 // free ones, across all its instances, so each instance runs two. Puter's
@@ -287,14 +294,15 @@ const UPDATE_LIMIT = 8_000_000;
 // Everything a commenter must not change. Comments and workshop registers
 // (votes, poll answers, reactions) are excluded here and checked per author
 // by validateCommentChanges and validateWorkshopChanges instead.
-const contentSignature = (board) =>
-  JSON.stringify([
-    board.title,
-    board.items,
-    board.tags || [],
-    board.timer || null,
-    board.planning || null,
-  ]);
+// Whether two projections of a board hold the same content, as their JSON
+// would say, comparing object by object.
+const sameContent = (a, b) =>
+  sameJSON(
+    [a.title, a.tags || [], a.timer || null, a.planning || null],
+    [b.title, b.tags || [], b.timer || null, b.planning || null],
+  ) &&
+  a.items.length === b.items.length &&
+  a.items.every((item, n) => sameJSON(item, b.items[n]));
 
 export function appUid(token) {
   try {
@@ -772,7 +780,8 @@ export class BoardService {
       return cached.loading;
     const entry = {
       snapshot: meta.snapshot,
-      seen: new Set(),
+      // Records read past the checkpoint, with the time each was saved.
+      seen: new Map(),
       recent: new Set(reload && cached?.recent ? cached.recent : []),
       signal: reload ? cached?.signal : undefined,
       checkpoint: undefined,
@@ -827,7 +836,7 @@ export class BoardService {
       if (!entry.checkpoint)
         for (const { key, value } of await this.list(`wb:${room}:op:`)) {
           await this.applyRecord(doc, value);
-          entry.seen.add(key);
+          entry.seen.set(key, 0);
         }
       since = entry.checkpoint ? entry.checkpoint.at - LOG_OVERLAP : 0;
     }
@@ -844,7 +853,8 @@ export class BoardService {
     )) {
       records.push(await this.recordUpdate(value));
       newest = Math.max(newest, value.at || 0);
-      if (value.at > covered && entry.seen.size < 100_000) entry.seen.add(key);
+      if (value.at > covered && entry.seen.size < 100_000)
+        entry.seen.set(key, value.at);
       recent(entry, key.slice(key.lastIndexOf(":") + 1));
     }
     if (doc) {
@@ -872,13 +882,7 @@ export class BoardService {
       DOCS.delete(key);
       if (value === entry) DOCS.set(key, value);
     }
-    // A checkpoint over a week old makes each load read the whole log, so
-    // a quiet board's checkpoint is renewed too.
-    if (
-      entry.seen.size >= 256 ||
-      (entry.seen.size && (!entry.checkpoint || started - covered > DAY)) ||
-      (entry.checkpoint && started - covered > 6 * DAY)
-    )
+    if (await this.checkpointDue(room, entry, started))
       // The copy holds the records just read and the edits saved through
       // this instance while they were read, so the checkpoint is stamped no
       // earlier than the newest of them: a version as of a moment before
@@ -890,10 +894,38 @@ export class BoardService {
       )
         .then((checkpoint) => {
           entry.checkpoint = checkpoint;
+          entry.checkpointAfter = checkpoint.at + CHECKPOINT_GAP;
           entry.seen.clear();
         })
         .catch(() => {});
     return { entry, rows: records.length };
+  }
+  // Whether to save this copy as the board's checkpoint, once 256 records
+  // were read past the last one, or a day has passed (a checkpoint over a
+  // week old makes each load read the whole log, so a quiet board's is
+  // renewed too). Each instance counts what it read past the checkpoint it
+  // knows, so one another instance wrote since is taken up first: otherwise
+  // every instance of a busy board saved its own copy of the whole board,
+  // and none is ever removed. A busy board is checkpointed at most every
+  // five minutes, unless far more records build up, and the latest
+  // checkpoint is read only when one could be due.
+  async checkpointDue(room, entry, started) {
+    const covered = () => entry.checkpoint?.at || 0;
+    const due = () =>
+      entry.seen.size >= 256 ||
+      (entry.seen.size && (!entry.checkpoint || started - covered() > DAY)) ||
+      (entry.checkpoint && started - covered() > 6 * DAY);
+    const crowded = () => entry.seen.size >= 4096;
+    if (!due() || (started < (entry.checkpointAfter || 0) && !crowded()))
+      return false;
+    const stored = await this.kv.get(`wb:${room}:cp`).catch(() => null);
+    if (stored?.at > covered()) {
+      entry.checkpoint = stored;
+      for (const [key, at] of entry.seen)
+        if (!(at > stored.at)) entry.seen.delete(key);
+    }
+    if (entry.checkpoint) entry.checkpointAfter = covered() + CHECKPOINT_GAP;
+    return !!due() && (started >= (entry.checkpointAfter || 0) || crowded());
   }
   // What a caller with this state vector lacks of the board's saved state,
   // from the loaded document unless it holds a commit not yet saved.
@@ -1172,6 +1204,17 @@ export class BoardService {
   // membership again.
   async setRecord(room, key, value, options, added = false) {
     await this.kv.set(key, value, options);
+    // The members listed here take the record written, so it is not
+    // listed again for each person joining.
+    const listed = MEMBER_LISTS.get(room);
+    if (listed && key.startsWith(`wb:${room}:member:`)) {
+      listed.rows = listed.rows.then((rows) => [
+        ...rows.filter((m) => `wb:${room}:member:${m?.uuid}` !== key),
+        value,
+      ]);
+      // A failed listing is the callers' to handle, not this write's.
+      listed.rows.catch(() => {});
+    }
     keepWritten(RECORDS, this.stampOf(room), key, value, this.now());
     this.access?.clear();
     if (!added) await accessChanged(this.kv, room);
@@ -1292,8 +1335,32 @@ export class BoardService {
       await this.notify(room);
     }
   }
-  async members(room) {
-    return (await this.list(`wb:${room}:member:`)).map((r) => r.value);
+  // Each board's member records. With `shared`, as for the member list a
+  // participant's editor asks for and for comment notifications (which
+  // check each recipient's access), a listing is used for every request on
+  // this instance within a few seconds: a workshop's participants joining
+  // together, and opening its comments, would otherwise list them once
+  // each, using up the worker's listing quota. A member record written
+  // here is seen at once (see setRecord), one written elsewhere within
+  // those seconds. Counts, indexes and notifications that act on
+  // membership read it afresh.
+  async members(room, { shared = false } = {}) {
+    const now = this.now(),
+      hit = MEMBER_LISTS.get(room);
+    if (shared && hit && now - hit.at < MEMBERS_FRESH && now >= hit.at)
+      return [...(await hit.rows)];
+    const rows = this.list(`wb:${room}:member:`).then((list) =>
+      list.map((r) => r.value),
+    );
+    const entry = { at: now, rows };
+    MEMBER_LISTS.delete(room);
+    if (MEMBER_LISTS.size >= 500)
+      MEMBER_LISTS.delete(MEMBER_LISTS.keys().next().value);
+    MEMBER_LISTS.set(room, entry);
+    rows.catch(() => {
+      if (MEMBER_LISTS.get(room) === entry) MEMBER_LISTS.delete(room);
+    });
+    return [...(await rows)];
   }
   // Check-ins arriving together share one check.
   async present(room) {
@@ -2002,7 +2069,7 @@ export class BoardService {
         }
         return m.accessEnds !== undefined && m.accessEnds < now;
       };
-      const records = await this.members(room);
+      const records = await this.members(room, { shared: true });
       // Their records are read together first, so an instance that has
       // read none of them reads them in a request or two, not one each.
       await this.org.users(records.map((m) => m.uuid));
@@ -2563,7 +2630,11 @@ export class BoardService {
     let after;
     try {
       const raw = doc.snapshot("shared", false);
-      doc.validate(allowed, { board: raw, items: written.items });
+      doc.validate(allowed, {
+        board: raw,
+        items: written.items,
+        changes: written.changes,
+      });
       after = raw.comments
         ? {
             ...raw,
@@ -2599,7 +2670,7 @@ export class BoardService {
       ([...written.roots].some(
         (root) => root !== "comments" && root !== "workshop",
       ) ||
-        contentSignature(before) !== contentSignature(after))
+        !sameContent(before, after))
     )
       fail(422, "Commenters can add comments but cannot change board content.");
     // The next commit starts from this projection.
@@ -3390,7 +3461,7 @@ export class BoardService {
         if (only.size) added.push({ thread, message, only });
       }
     if (!added.length) return;
-    const records = await this.members(room),
+    const records = await this.members(room, { shared: true }),
       members = records.filter((m) => m.role !== "removed"),
       removed = new Set(
         records.filter((m) => m.role === "removed").map((m) => m.uuid),
@@ -3489,35 +3560,61 @@ export class BoardService {
         const tag = canonicalLanguage(run.style.lang);
         if (tag) appendRun(runs, run.start, run.end, { lang: tag });
       }
+      // A reply in a long discussion reaches everyone who wrote in it.
+      // Their access is checked and their notifications written twenty at a
+      // time, as one at a time a hundred-person discussion kept each reply's
+      // save waiting seconds; who is told, and of what, is unchanged.
+      const chosen = [];
       for (const [uuid, type] of recipients) {
         if (index >= 20 || notified.has(uuid)) continue;
         notified.add(uuid);
-        if (
-          !colleagues.has(uuid) &&
-          !(await this.canOpen(room, people.get(uuid)))
-        )
-          continue;
+        chosen.push([uuid, type]);
+      }
+      const reach = [];
+      for (let n = 0; n < chosen.length; n += 20)
+        reach.push(
+          ...(await Promise.all(
+            chosen
+              .slice(n, n + 20)
+              .map(
+                ([uuid]) =>
+                  colleagues.has(uuid) || this.canOpen(room, people.get(uuid)),
+              ),
+          )),
+        );
+      const sends = [];
+      for (const [n, [uuid, type]] of chosen.entries()) {
+        if (!reach[n]) continue;
         const channel = type === "mention" && !posted;
         posted ||= channel;
-        await this.org.notify(uuid, {
-          type,
-          board: room,
-          boardTitle: after.title,
-          thread: thread.id,
-          item: thread.anchorId || null,
-          url: await this.org.boardLink(room, thread.anchorId, thread.id),
-          actor: { uuid: user.uuid, username: user.username },
-          subject:
-            type === "mention"
-              ? `${user.username} mentioned you on ${after.title}`
-              : `${user.username} replied on ${after.title}`,
-          text: `${user.username}: ${excerpt}`,
-          excerpt,
-          ...(lang ? { excerptLang: lang } : {}),
-          ...(runs.length ? { excerptRuns: runs } : {}),
-          channel,
-        });
+        sends.push([uuid, type, channel]);
       }
+      const url = sends.length
+        ? await this.org.boardLink(room, thread.anchorId, thread.id)
+        : null;
+      for (let n = 0; n < sends.length; n += 20)
+        await Promise.all(
+          sends.slice(n, n + 20).map(([uuid, type, channel]) =>
+            this.org.notify(uuid, {
+              type,
+              board: room,
+              boardTitle: after.title,
+              thread: thread.id,
+              item: thread.anchorId || null,
+              url,
+              actor: { uuid: user.uuid, username: user.username },
+              subject:
+                type === "mention"
+                  ? `${user.username} mentioned you on ${after.title}`
+                  : `${user.username} replied on ${after.title}`,
+              text: `${user.username}: ${excerpt}`,
+              excerpt,
+              ...(lang ? { excerptLang: lang } : {}),
+              ...(runs.length ? { excerptRuns: runs } : {}),
+              channel,
+            }),
+          ),
+        );
       // An edit is not a new comment.
       if (only) continue;
       const mentioned = [...recipients.values()].filter(

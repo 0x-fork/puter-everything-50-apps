@@ -18,6 +18,7 @@ import {
   PEN_POINTS,
   sharedCopy,
   undoCopy,
+  keepUnchanged,
   assertImagePixels,
   truncate,
 } from "../src/model.js";
@@ -422,12 +423,20 @@ test("copies and undo steps share a drawing's points, but not one still being dr
   const history = new History();
   history.push([drawing]);
   history.push([drawing]);
-  assert.equal(history.past[0][0].points, points);
-  assert.equal(history.past[1][0].points, points);
+  // The drawing takes the packed copy its undo steps share: the same points.
+  assert.deepEqual(drawing.points, points);
+  assert.equal(history.past[0][0].points, drawing.points);
+  assert.equal(history.past[1][0].points, drawing.points);
   assert.notEqual(history.past[0][0], drawing);
-  assert.equal(undoCopy([drawing])[0].points, points);
+  assert.equal(undoCopy([drawing])[0].points, drawing.points);
   // Other copies, as of a shared board, stay wholly their own.
-  assert.notEqual(sharedCopy(drawing).points, points);
+  assert.notEqual(sharedCopy(drawing).points, drawing.points);
+  // Points read back from storage are shared once they are copied too.
+  const stored = structuredClone(drawing);
+  const step = undoCopy(stored);
+  assert.deepEqual(stored.points, points);
+  assert.equal(undoCopy(stored).points, step.points);
+  assert.equal(stored.points, step.points);
   // A drawing in progress grows in place, so an undo step keeps what it had.
   const growing = item("pen", 0, 0, { points: startDrawing() });
   const before = undoCopy(growing);
@@ -435,6 +444,34 @@ test("copies and undo steps share a drawing's points, but not one still being dr
   assert.equal(before.points.length, 1);
   assert.equal(growing.points.length, 2);
   assert.notEqual(undoCopy(growing).points, growing.points);
+});
+
+test("an undo step keeps the board's own objects for those it leaves unchanged", () => {
+  const runs = [{ start: 0, end: 4, style: { bold: true } }];
+  const board = [
+    item("note", 0, 0, { text: "Same", textRuns: runs }),
+    item("note", 10, 0, { text: "Moved" }),
+    item("note", 20, 0, { text: "Bold", textRuns: runs }),
+    item("note", 30, 0, { text: "Reordered", color: "#fff" }),
+  ];
+  const history = new History();
+  history.push(board);
+  board[1].x = 99;
+  board[2].textRuns = [{ start: 0, end: 4, style: { bold: false } }];
+  const [x, y, ...rest] = Object.keys(board[3]);
+  board[3] = Object.fromEntries(
+    [y, x, ...rest].map((key) => [key, board[3][key]]),
+  );
+  const added = item("note", 40, 0, { text: "Added" });
+  const step = history.undo([...board, added]);
+  const restored = keepUnchanged(step, [...board, added]);
+  assert.deepEqual(restored, step);
+  assert.equal(restored[0], board[0], "unchanged, nested values included");
+  assert.equal(restored[1], step[1], "moved since");
+  assert.equal(restored[1].x, 10);
+  assert.equal(restored[2], step[2], "formatted since");
+  assert.equal(restored[3], step[3], "its keys in another order");
+  assert.equal(restored.length, 4, "the object added since is left out");
 });
 
 test("the pixel limit applies to photos whose metadata fills their first 256 KB", () => {

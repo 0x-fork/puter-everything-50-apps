@@ -1,4 +1,4 @@
-import { clone } from "../model.js";
+import { clone, MAX_OBJECTS } from "../model.js";
 import { addTranslations } from "../i18n.js";
 import { repairMindTrees } from "../mind-map.js";
 
@@ -123,7 +123,7 @@ function restack(items, version, before) {
 // A restoration that would take the board past its size is refused before
 // any of it is applied.
 function withinLimit(result) {
-  if (result.items.length > 5000)
+  if (result.items.length > MAX_OBJECTS)
     throw Error("A board can contain at most 5,000 objects.");
   return result;
 }

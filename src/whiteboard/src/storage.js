@@ -1,4 +1,4 @@
-import { validateBoard } from "./model.js";
+import { sharedPoints, validateBoard } from "./model.js";
 const DB = "whiteboard-v1";
 let dbPromise;
 function db() {
@@ -340,6 +340,9 @@ export const local = {
     return revision;
   },
 };
+// A drawing's points, shared by the board's copies and never changed in
+// place, are counted once rather than for each recovery version.
+const pointLengths = new WeakMap();
 // How many characters a value takes as JSON, counted without writing it
 // out: a board with pictures is megabytes of text for each edit. Characters
 // JSON escapes, as quotes and line breaks in text, count once.
@@ -364,7 +367,13 @@ function jsonLength(value) {
       for (const key of Object.keys(value)) {
         const v = value[key];
         if (v === undefined || typeof v === "function") continue;
-        n += key.length + 3 + jsonLength(v);
+        let length;
+        if (key === "points" && sharedPoints(v)) {
+          length = pointLengths.get(v);
+          if (length === undefined)
+            pointLengths.set(v, (length = jsonLength(v)));
+        } else length = jsonLength(v);
+        n += key.length + 3 + length;
         fields++;
       }
       return n + (fields || 1);

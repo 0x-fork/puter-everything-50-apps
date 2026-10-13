@@ -6,7 +6,7 @@ import {
   layoutUnits,
   selectionGroupId,
 } from "./scene.js";
-import { resizeBounds } from "./model.js";
+import { resizeBounds, MAX_OBJECTS } from "./model.js";
 import { rotationBox } from "./rotation.js";
 import { canSwitchShape, SHAPES } from "./shapes.js";
 import { canEditText, canAutoFitText, formatsText } from "./text.js";
@@ -85,7 +85,9 @@ export function commandEntries({
         ? "Unlock protected objects before changing this selection."
         : "");
     const capacity =
-      items.length >= 5000 ? "A board can contain at most 5,000 objects." : "";
+      items.length >= MAX_OBJECTS
+        ? "A board can contain at most 5,000 objects."
+        : "";
     const create = edit || capacity;
     for (const [type, label, shortcut, aliases] of [
       [
@@ -381,7 +383,7 @@ export function commandEntries({
       "Ctrl/Cmd+D",
       edit ||
         selected ||
-        (items.length + duplicateCount > 5000
+        (items.length + duplicateCount > MAX_OBJECTS
           ? "A board can contain at most 5,000 objects."
           : ""),
     );
@@ -399,7 +401,7 @@ export function commandEntries({
         `Alt/Option+${arrow}`,
         edit ||
           selected ||
-          (items.length + duplicateCount > 5000
+          (items.length + duplicateCount > MAX_OBJECTS
             ? "A board can contain at most 5,000 objects."
             : ""),
       );
@@ -846,7 +848,7 @@ export function commandEntries({
     "",
     board
       ? edit ||
-          (board.items.length >= 5000
+          (board.items.length >= MAX_OBJECTS
             ? "A board can contain at most 5,000 objects."
             : "")
       : "",
@@ -871,7 +873,7 @@ export function commandEntries({
         words,
         "",
         edit ||
-          (board.items.length >= 5000
+          (board.items.length >= MAX_OBJECTS
             ? "A board can contain at most 5,000 objects."
             : ""),
       );

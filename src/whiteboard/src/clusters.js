@@ -1,4 +1,4 @@
-import { item, uid, bounds, COLORS } from "./model.js";
+import { item, uid, bounds, COLORS, MAX_OBJECTS } from "./model.js";
 import { assertUnlocked } from "./locking.js";
 import { remapObjectLink } from "./object-link-data.js";
 import { nextFrameOrder, updateConnectors } from "./scene.js";
@@ -144,7 +144,7 @@ export function planClusters(
       );
     });
   const copies = entries.reduce((n, g) => n + g.notes.length, 0) - notes.length;
-  if (board.items.length + entries.length + copies > 5000)
+  if (board.items.length + entries.length + copies > MAX_OBJECTS)
     throw Error(
       "These clusters would exceed the board limit of 5,000 objects.",
     );
@@ -292,7 +292,7 @@ export function applyClusters(board, plan) {
     board.items,
     new Set(plan.groups.flatMap((g) => g.members.map((m) => m.id))),
   );
-  if (board.items.length + plan.groups.length + plan.copies > 5000)
+  if (board.items.length + plan.groups.length + plan.copies > MAX_OBJECTS)
     throw Error(
       "These clusters would exceed the board limit of 5,000 objects.",
     );

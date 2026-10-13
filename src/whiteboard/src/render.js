@@ -62,6 +62,26 @@ const canvasFonts = new WeakMap();
 // repaint: a board pans at sixty repaints a second.
 const fontFailures = new Map();
 const FONT_RETRY_MS = 30_000;
+// Text measured before a font loaded is measured again once it has. One
+// load is reported to each canvas that asked for it, to the font set's
+// `loadingdone` and to `fonts.ready`, and each of them cleared every layout,
+// which painted every library preview again each time. The layouts are
+// cleared only when a font face has loaded since they last were; a font set
+// that cannot be counted clears them every time. Says whether they were.
+let facesMeasured = -1;
+export function refreshTextLayouts(fontSet = globalThis.document?.fonts) {
+  let loaded = -1;
+  if (typeof fontSet?.[Symbol.iterator] === "function") {
+    loaded = 0;
+    for (const face of fontSet) if (face.status === "loaded") loaded++;
+    if (loaded === facesMeasured) return false;
+  }
+  facesMeasured = loaded;
+  clearTextLayoutCache();
+  clearTagLayouts();
+  clearConnectorLabelCache();
+  return true;
+}
 const fontWaits = (id) =>
   Date.now() - (fontFailures.get(id) ?? -Infinity) < FONT_RETRY_MS;
 function fontFailed(ids) {
@@ -802,9 +822,7 @@ export function paint(canvas, items, view, options = {}) {
       if (needed.some((id) => !fontFamilyReady(id)))
         Promise.all(needed.map((id) => loadFontFamily(id)))
           .then(() => {
-            clearTextLayoutCache();
-            clearTagLayouts();
-            clearConnectorLabelCache();
+            refreshTextLayouts();
             state.repaint();
           })
           .catch(() => {
@@ -829,10 +847,14 @@ export function paint(canvas, items, view, options = {}) {
   // Zoomed far out, text a few pixels tall is left out, as Miro does: it
   // cannot be read, and a whole large board in view would set every line.
   const coarse = options.coarse && view.z < DETAIL_ZOOM;
-  const unreadable = (i) =>
+  const textSize = (i) =>
     (i.fontSize || (i.type === "text" ? 28 : i.type === "arrow" ? 16 : 19)) *
-      view.z <
-    4;
+    view.z;
+  const unreadable = (i) => textSize(i) < 4;
+  // Text less than a pixel tall shows no letters, only a faint tint. A
+  // library preview leaves it out: a large board's preview laid out every
+  // line of thousands of notes for it, more than once while fonts loaded.
+  const speck = (i) => options.tinyText === false && textSize(i) * dpr < 1;
   // Zoomed far out, an unrotated sticky note or plain rectangle a few
   // pixels across is a block of its colour: its corners, border and text
   // cannot be seen, and a large board seen whole has thousands of them.
@@ -904,6 +926,7 @@ export function paint(canvas, items, view, options = {}) {
       repaint,
       options.editingId === i.id ||
         (coarse && unreadable(i)) ||
+        speck(i) ||
         labelled.has(i.id),
       tags,
       options.shadows !== false,
@@ -1288,11 +1311,33 @@ function paintPreview(canvas, rect = canvas.getBoundingClientRect()) {
       y: height / 2 - (a.y + a.h / 2) * z,
       z,
     },
-    { comments: b.comments, tags: b.tags, textColor: canvas.dataset.ink },
+    {
+      comments: b.comments,
+      tags: b.tags,
+      textColor: canvas.dataset.ink,
+      tinyText: false,
+      // Painted again through here once its fonts or pictures load, so
+      // the picture is noted as painted with those fonts: the library's
+      // own repaint for a font load then finds it painted already.
+      repaint: () => {
+        delete canvas.dataset.painted;
+        paintPreview(canvas);
+      },
+    },
   );
   canvas.dataset.painted = painted;
 }
+// A board named in the page's address opens over the library at once; the
+// library's previews wait meanwhile, unseen, rather than taking a second
+// or more of a library of large boards before the board shows.
+let previewsHeld = false;
+export function holdPreviews(held) {
+  const released = previewsHeld && !held;
+  previewsHeld = held;
+  if (released) paintPreviews();
+}
 export function paintPreviews() {
+  if (previewsHeld) return;
   const active = new Set();
   const Observer = window.IntersectionObserver;
   // Cards replaced since the last pass are let go.
