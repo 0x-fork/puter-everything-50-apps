@@ -3,6 +3,7 @@
 import { registerEffect } from '../registry.js';
 import { num, db, hz, bool, choice, section, preset, packCurve, dataId } from './util.js';
 import * as F from './filter-math.js';
+import { renderEnvelope } from '../envelope.js';
 
 const GROUP = 'Filter and EQ';
 
@@ -23,7 +24,7 @@ const BAND_FREQS = [120, 400, 1000, 3000, 8000];
 
 const parametricParams = [
   db('gain', 'Master Gain', -24, 24, 0),
-  choice('qMode', 'Band Shape', ['Constant Q', 'Proportional Q'], 0),
+  choice('qMode', 'Constant', ['Q', 'Width'], 0),
   ...section('High Pass', 'hp', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 60), choice('slope', 'Slope', SLOPES, 2)]),
   ...section('Low Shelf', 'ls', [bool('on', 'On', false), hz('freq', 'Frequency', 10, 20000, 100), db('gain', 'Gain', -30, 30, 0), qParam(0.7071, 4)]),
   ...BAND_FREQS.flatMap((f, i) => section(`Band ${i + 1}`, `band${i + 1}`, [bool('on', 'On', true), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -30, 30, 0), qParam(1)])),
@@ -53,6 +54,26 @@ registerEffect({
   group: GROUP,
   kind: 10,
   params: parametricParams,
+  about: 'Shapes the tone with up to five bell bands, low and high shelves, and steep high-pass and low-pass filters. Drag the numbered handles on the graph; the wheel or Alt with the arrow keys changes a band\'s Q.',
+  layout: {
+    table: {
+      label: 'Bands',
+      columns: [
+        { section: 'High Pass', label: 'HP' },
+        { section: 'Low Shelf', label: 'L' },
+        ...BAND_FREQS.map((_, i) => ({ section: `Band ${i + 1}`, label: String(i + 1) })),
+        { section: 'High Shelf', label: 'H' },
+        { section: 'Low Pass', label: 'LP' },
+      ],
+      rows: [
+        { label: 'Frequency', suffix: ['Freq'] },
+        { label: 'Gain', suffix: ['Gain'] },
+        { label: 'Q / Slope', suffix: ['Q', 'Slope'] },
+        { label: 'Band', suffix: ['On'] },
+      ],
+    },
+    wide: true,
+  },
   response: (v, freqs, rate) => F.cascadeDb(parametricSections(v, rate), freqs, rate, v.gain),
   presets: [
     preset('Flat', {}),
@@ -73,12 +94,18 @@ function freqLabel(f) {
   return f >= 1000 ? `${Number((f / 1000).toFixed(2))} kHz` : `${f} Hz`;
 }
 
+/** Compact band label for a slider column ("<31", "1.25k", ">16k"). */
+function shortLabel(f, i, n) {
+  const t = f >= 1000 ? `${Number((f / 1000).toFixed(2))}k` : String(Math.floor(f));
+  return i === 0 ? `<${t}` : i === n - 1 ? `>${t}` : t;
+}
+
 function graphicDef(id, name, kind, centres, octaves) {
   const q = F.bandQ(octaves);
   const params = [
     db('gain', 'Master Gain', -24, 24, 0),
     choice('accuracy', 'Accuracy', ['Standard', 'High'], 1),
-    ...centres.map((f, i) => db(`band${i + 1}`, freqLabel(f), -24, 24, 0, { section: 'Bands' })),
+    ...centres.map((f, i) => db(`band${i + 1}`, freqLabel(f), -24, 24, 0, { section: 'Bands', short: shortLabel(f, i, centres.length) })),
   ];
   const shape = (fn) => Object.fromEntries(centres.map((f, i) => [`band${i + 1}`, Math.round(fn(f) * 10) / 10]));
   const lg = (f) => Math.log2(f / 1000);
@@ -89,6 +116,8 @@ function graphicDef(id, name, kind, centres, octaves) {
     kind,
     params,
     bands: centres,
+    about: `Boosts or cuts ${centres.length} fixed frequency bands. High accuracy corrects for the overlap between neighbouring bands so the curve follows the sliders.`,
+    layout: { vertical: ['Bands'], order: ['Bands', null], wide: centres.length > 10 },
     response: (v, freqs, rate) => {
       const want = centres.map((_, i) => v[`band${i + 1}`] ?? 0);
       const gains = v.accuracy === 1 ? F.correctGraphic(want, centres, q, rate) : want.map((g, i) => (centres[i] <= F.MAX_CENTRE * rate ? g : 0));
@@ -116,8 +145,10 @@ const NOTCH_Q = [60, 20, 8, 3];
 const notchParams = [
   db('gain', 'Master Gain', -24, 24, 0),
   choice('width', 'Notch Width', ['Super Narrow', 'Narrow', 'Medium', 'Wide'], 1),
-  bool('fixGains', 'Fix Gains', false),
-  ...[60, 120, 180, 240, 300, 360].flatMap((f, i) => section(`Notch ${i + 1}`, `band${i + 1}`, [bool('on', 'On', i === 0), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -90, 0, -30)])),
+  bool('fixGains', 'Fix Gains to Notch 1', false),
+  ...[60, 120, 180, 240, 300, 360].flatMap((f, i) =>
+    section(`Notch ${i + 1}`, `band${i + 1}`, [bool('on', 'On', i === 0), hz('freq', 'Frequency', 10, 20000, f), db('gain', 'Gain', -90, 0, -30, i ? { enabledIf: (v) => !v.fixGains } : {})]),
+  ),
 ];
 
 const notchSet = (freqs, gain, width = 1) => ({
@@ -131,6 +162,18 @@ registerEffect({
   group: GROUP,
   kind: 14,
   params: notchParams,
+  about: 'Removes up to six narrow frequency bands, such as mains hum and its harmonics or a whistle. Fix Gains applies the first notch\'s depth to all of them.',
+  layout: {
+    table: {
+      label: 'Notches',
+      columns: [1, 2, 3, 4, 5, 6].map((i) => ({ section: `Notch ${i}`, label: String(i) })),
+      rows: [
+        { label: 'Frequency', suffix: ['Freq'] },
+        { label: 'Gain', suffix: ['Gain'] },
+        { label: 'Enable', suffix: ['On'] },
+      ],
+    },
+  },
   response: (v, freqs, rate) => {
     const q = NOTCH_Q[v.width] ?? 20;
     const secs = [];
@@ -158,10 +201,13 @@ registerEffect({
     choice('mode', 'Mode', ['Low Pass', 'High Pass', 'Band Pass', 'Band Stop'], 0),
     num('order', 'Order', 1, 8, 4, '', { step: 1 }),
     hz('cutoff', 'Cutoff', 10, 20000, 1000),
-    hz('highCutoff', 'High Cutoff', 10, 20000, 4000),
-    db('ripple', 'Passband Ripple', 0.01, 6, 1, { step: 0.01 }),
+    hz('highCutoff', 'High Cutoff', 10, 20000, 4000, { enabledIf: (v) => v.mode >= 2 }),
+    db('ripple', 'Passband Ripple', 0.01, 6, 1, { step: 0.01, enabledIf: (v) => v.type === 1 }),
     db('gain', 'Master Gain', -24, 24, 0),
   ],
+  display: 'scientific',
+  about: 'Classic analog filter designs: Butterworth for the flattest passband, Chebyshev for a steeper edge at the cost of ripple, Bessel for the most even delay. Switch the graph to phase or group delay to compare them.',
+  layout: { wide: true },
   response: (v, freqs, rate) => F.cascadeDb(F.scientificSections(v, rate), freqs, rate, v.gain),
   presets: [
     preset('Smooth Low Pass 8 kHz', { type: 2, mode: 0, order: 4, cutoff: 8000 }),
@@ -174,6 +220,24 @@ registerEffect({
 
 // ------------------------------------------------------------- FFT Filter
 
+const SPLINE_POINTS = 192;
+
+/**
+ * The FFT Filter's curve as sent to the processor: the drawn points, or with
+ * Spline Curves a dense resampling of the eased curve the editor draws
+ * (eased on a log-frequency axis between neighbouring points).
+ */
+export function fftCurve(v) {
+  const pts = [...(v.curve || [])].sort((a, b) => a.f - b.f);
+  if (!v.spline || pts.length < 3) return pts;
+  const lo = Math.log(pts[0].f);
+  const hi = Math.log(pts[pts.length - 1].f);
+  const span = hi - lo || 1;
+  const env = pts.map((p) => ({ t: (Math.log(p.f) - lo) / span, v: p.g }));
+  const g = renderEnvelope(env, SPLINE_POINTS, { smooth: true });
+  return Array.from(g, (y, k) => ({ f: Math.exp(lo + (span * k) / (SPLINE_POINTS - 1)), g: y }));
+}
+
 const FFT_SIZES = [512, 1024, 2048, 4096, 8192, 16384, 32768].map((v) => ({ value: v, label: String(v) }));
 const curve = (pts) => pts.map(([f, g]) => ({ f, g }));
 
@@ -183,14 +247,26 @@ registerEffect({
   group: GROUP,
   kind: 16,
   params: [
-    choice('fftSize', 'FFT Size', FFT_SIZES, 4096),
+    choice('fftSize', 'FFT Size', FFT_SIZES, 4096, { section: 'Advanced' }),
     choice('scale', 'Scale', ['Logarithmic', 'Linear'], 0),
-    db('gain', 'Master Gain', -24, 24, 0),
-    { id: 'curve', label: 'Curve', type: 'curve', default: curve([[20, 0], [20000, 0]]), min: -60, max: 24, unit: 'dB' },
+    db('gain', 'Master Gain', -24, 24, 0, { section: 'Advanced' }),
+    { id: 'curve', label: 'Curve', type: 'curve', default: curve([[20, 0], [20000, 0]]), min: -60, max: 24, unit: 'dB', order: -1 },
+    // Smooths the drawn curve between its points; the processor receives the smoothed curve.
+    bool('spline', 'Spline Curves', false),
   ],
+  about: 'Draw any frequency curve and the filter follows it, from gentle tone shaping to steep notches. Click to add points, drag them, and double-click to remove one. Larger FFT sizes give sharper edges at the cost of latency and smearing.',
+  // The drawn curve is the graph; no separate response plot.
+  display: 'none',
+  layout: { collapsed: ['Advanced'], order: [null, 'Advanced'] },
   latency: (v) => F.fftSize(v.fftSize, 256, 32768),
-  data: (v) => [{ slot: 0, id: dataId(v.curve), values: packCurve(v.curve) }],
-  response: (v, freqs) => Float32Array.from(freqs, (f) => F.curveAt(v.curve, f, v.scale !== 1) + v.gain),
+  data: (v) => {
+    const pts = fftCurve(v);
+    return [{ slot: 0, id: dataId([v.spline, v.curve]), values: packCurve(pts) }];
+  },
+  response: (v, freqs) => {
+    const pts = fftCurve(v);
+    return Float32Array.from(freqs, (f) => F.curveAt(pts, f, v.spline || v.scale !== 1) + v.gain);
+  },
   presets: [
     preset('Flat', {}),
     preset('Telephone Voice', { curve: curve([[20, -60], [250, -60], [400, 0], [3000, 0], [4000, -60], [20000, -60]]) }),

@@ -63,7 +63,7 @@ describe('drawn distortion curves', () => {
     const dlg = document.querySelector('.fx-dialog');
     expect(dlg.querySelectorAll('.dist-graph')).toHaveLength(2);
     // The generated grid is empty: the view lays out every parameter.
-    expect(dlg.querySelector('.fx-dialog-body > .fx-params').children).toHaveLength(0);
+    expect(dlg.querySelector('.fx-dialog-body > .fx-controls').querySelectorAll('.fx-row')).toHaveLength(0);
     const handle = dlg.querySelector('.dist-graph .fx-point');
     handle.focus();
     handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
@@ -135,12 +135,12 @@ describe('doppler path', () => {
     const { app, doc } = setup();
     const p = openEffectDialog(app, getEffect('dopplerShifter'), { doc, values: { path: 0 } });
     const dlg = document.querySelector('.fx-dialog');
-    const radius = [...dlg.querySelectorAll('.fx-label')].find((l) => l.textContent === 'Radius');
-    expect(radius.closest('.fx-params').hidden).toBe(true);
+    const radius = [...dlg.querySelectorAll('.fx-label')].find((l) => l.textContent.replace(/:$/, '') === 'Radius');
+    expect(radius.closest('.fx-controls').hidden).toBe(true);
     const circle = [...dlg.querySelectorAll('.fx-radio input')].find((i) => i.value === '1');
     circle.checked = true;
     circle.dispatchEvent(new Event('change'));
-    expect(radius.closest('.fx-params').hidden).toBe(false);
+    expect(radius.closest('.fx-controls').hidden).toBe(false);
     expect(dlg.querySelector('.dp-status').textContent).toMatch(/semitones/);
     dlg.querySelector('.dialog-head .icon-btn').click();
     await p;
@@ -155,7 +155,7 @@ describe('registered views', () => {
     const { app, doc } = setup();
     const p = openEffectDialog(app, getEffect('guitarSuite'), { doc });
     const dlg = document.querySelector('.fx-dialog');
-    const box = [...dlg.querySelectorAll('.fx-group')].find((g) => g.querySelector('legend').textContent === 'Distortion');
+    const box = [...dlg.querySelectorAll('.fx-group')].find((g) => g.querySelector('legend')?.textContent === 'Distortion');
     const bypass = [...box.querySelectorAll('.fx-bypass input')][0];
     bypass.checked = true;
     bypass.dispatchEvent(new Event('change'));

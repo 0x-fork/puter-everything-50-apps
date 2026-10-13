@@ -3,7 +3,9 @@
 // extends the selection and Ctrl/Cmd-click toggles. Name, start, end,
 // duration, type and description edit in place (double-click, or Enter/F2 on
 // a row for the name); column headers sort; the filter menu limits the list
-// to some marker types. Delete removes the selected markers.
+// to some marker types. Delete removes the selected markers. The toolbar also
+// merges markers, exports range audio, adds markers to the playlist and sends
+// range audio to Batch Process.
 
 import { h } from '../lib/dom.js';
 import { icon } from '../ui/icons.js';
@@ -63,6 +65,7 @@ export function markersPanel(app) {
   const ids = () => ({ ids: [...selected] });
   const tbtn = (cmd, ic, label) => h('button.icon-btn', { type: 'button', 'aria-label': label, title: label, onclick: () => app.commands.run(cmd, ids()), dataset: { cmd } }, icon(ic, 15));
   const playlistBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Add to Playlist', title: 'Add Selected Markers to the Playlist', onclick: () => addToPlaylist() }, icon('list-plus', 15));
+  const batchBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Send Ranges to Batch Process', title: 'Send the audio of the selected range markers (or of all of them) to Batch Process', onclick: () => sendToBatch() }, icon('layers', 15));
   const filterBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Filter by type', title: 'Show Marker Types', 'aria-haspopup': 'menu', onclick: () => filterMenu() }, icon('list-filter', 15));
   const toolbar = h(
     'div.panel-toolbar',
@@ -71,6 +74,7 @@ export function markersPanel(app) {
     tbtn('marker.merge', 'link', 'Merge Selected Markers'),
     tbtn('file.exportRanges', 'file-audio', 'Export Audio within Range Markers'),
     playlistBtn,
+    batchBtn,
     tbtn('file.exportMarkers', 'upload', 'Export Markers'),
     search,
     filterBtn,
@@ -242,6 +246,7 @@ export function markersPanel(app) {
   const updateButtons = () => {
     for (const b of toolbar.querySelectorAll('[data-cmd]')) b.disabled = !app.commands.isEnabled(b.dataset.cmd, ids());
     playlistBtn.disabled = !doc() || !selected.size || !app.panels.has('playlist');
+    batchBtn.disabled = !app.panels.has('batch') || !batchRanges().length;
   };
 
   const addToPlaylist = () => {
@@ -252,6 +257,24 @@ export function markersPanel(app) {
     app.emit('playlist', d);
     app.dock?.openPanel('playlist', { focus: false });
     app.setStatus(`Added ${order.length} marker${order.length === 1 ? '' : 's'} to the playlist`);
+  };
+
+  /** Range markers to batch: the selected ones, or every range marker when none is selected. */
+  const batchRanges = () => {
+    const d = doc();
+    if (!d || d.kind !== 'audio') return [];
+    const ranges = d.state.markers.filter((m) => m.duration > 0);
+    const picked = ranges.filter((m) => selected.has(m.id));
+    return selected.size ? picked : ranges;
+  };
+  const sendToBatch = () => {
+    const d = doc();
+    const ranges = batchRanges();
+    if (!d || !ranges.length || !app.panels.has('batch')) return;
+    const stem = d.name.replace(/\.[a-z0-9]{1,5}$/i, '');
+    const sources = ranges.map((m, i) => ({ type: 'range', doc: d, start: m.start, end: m.start + m.duration, name: `${stem} ${m.name || `Range ${i + 1}`}` }));
+    app.dock?.openPanel('batch');
+    app.dock?.instances.get('batch')?.api?.add(sources);
   };
 
   const filterMenu = () => {
@@ -288,6 +311,7 @@ export function markersPanel(app) {
         item('marker.convertRange'),
         { type: 'sep' },
         { type: 'cmd', label: 'Add to Playlist', enabled: !playlistBtn.disabled, run: addToPlaylist },
+        { type: 'cmd', label: 'Send Ranges to Batch Process', enabled: !batchBtn.disabled, run: sendToBatch },
         item('file.exportRanges'),
         { type: 'sep' },
         item('marker.deleteSelected'),

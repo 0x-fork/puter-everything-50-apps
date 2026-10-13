@@ -95,6 +95,43 @@ export function magnitude(c, f, rate) {
   return Math.sqrt((nr * nr + ni * ni) / Math.max(dr * dr + di * di, 1e-30));
 }
 
+/** Phase in radians of one biquad at f. */
+export function phase(c, f, rate) {
+  const x = (TAU * f) / rate;
+  const nr = c.b0 + c.b1 * Math.cos(x) + c.b2 * Math.cos(2 * x);
+  const ni = -c.b1 * Math.sin(x) - c.b2 * Math.sin(2 * x);
+  const dr = 1 + c.a1 * Math.cos(x) + c.a2 * Math.cos(2 * x);
+  const di = -c.a1 * Math.sin(x) - c.a2 * Math.sin(2 * x);
+  return Math.atan2(ni, nr) - Math.atan2(di, dr);
+}
+
+/** Phase of a cascade in degrees, wrapped to [-180, 180), at each frequency. */
+export function cascadePhase(coefs, freqs, rate) {
+  return Float32Array.from(freqs, (f) => {
+    let ph = 0;
+    for (const c of coefs) ph += phase(c, f, rate);
+    const deg = (ph * 180) / Math.PI;
+    return ((((deg + 180) % 360) + 360) % 360) - 180;
+  });
+}
+
+/**
+ * Group delay of a cascade in milliseconds at each frequency: the negative
+ * slope of the (unwrapped) phase, measured over a small frequency step.
+ */
+export function cascadeGroupDelay(coefs, freqs, rate) {
+  return Float32Array.from(freqs, (f) => {
+    const df = Math.max(0.01, f * 1e-4);
+    let d = 0;
+    for (const c of coefs) {
+      let dp = phase(c, f + df, rate) - phase(c, f - df, rate);
+      dp -= TAU * Math.round(dp / TAU);
+      d += -dp / ((TAU * 2 * df) / rate);
+    }
+    return (d / rate) * 1000;
+  });
+}
+
 const toDb = (g) => 20 * Math.log10(Math.max(Math.abs(g), 1e-10));
 
 /** Summed dB response of a list of biquads at each frequency, plus `offsetDb`. */

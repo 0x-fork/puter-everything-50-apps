@@ -109,6 +109,7 @@
 .video-frame {
   position: relative;
   flex: none;
+  container-type: size;
   /* Centered while it fits, scrollable from its top-left corner when zoomed past the panel. */
   margin: auto;
 }
@@ -136,15 +137,44 @@
   left: 50%;
   bottom: 8px;
   transform: translateX(-50%);
-  padding: 1px 6px;
+  padding: 0.05em 0.4em;
   border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--tc-bg, rgba(0, 0, 0, 0.65));
   color: #fff;
   font-family: var(--font-mono);
   font-size: var(--fs-lg);
+  /* Preferences > Video: size is a share of the frame's smaller side. */
+  font-size: max(9px, calc(var(--tc-size, 0.3) * 20cqmin));
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   pointer-events: none;
+}
+
+.video-timecode[data-pos^='t'] {
+  top: 8px;
+  bottom: auto;
+}
+
+.video-timecode[data-pos^='m'] {
+  top: 50%;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+}
+
+.video-timecode[data-pos$='l'] {
+  left: 8px;
+  transform: none;
+}
+
+.video-timecode[data-pos$='r'] {
+  left: auto;
+  right: 8px;
+  transform: none;
+}
+
+.video-timecode[data-pos='ml'],
+.video-timecode[data-pos='mr'] {
+  transform: translateY(-50%);
 }
 
 .video-timecode:empty {

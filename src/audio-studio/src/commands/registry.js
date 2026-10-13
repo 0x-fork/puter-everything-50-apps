@@ -143,10 +143,23 @@ export class CommandRegistry {
     return this.byShortcut.get(eventShortcut(ev)) || null;
   }
 
+  /** Menu label: the first key the browser lets the page have. */
   shortcutLabel(id) {
-    const keys = this.keysFor(id);
-    return keys.length ? formatShortcut(keys[0]) : '';
+    const key = this.keysFor(id).find((k) => !browserReserved(k));
+    return key ? formatShortcut(key) : '';
   }
+}
+
+// Keys a browser tab never receives (new/close tab or window, quit, tab
+// switching; on macOS also minimize, hide and window cycling).
+const RESERVED = new Set(['mod+n', 'mod+shift+n', 'mod+t', 'mod+shift+t', 'mod+w', 'mod+shift+w', 'mod+q', 'f11']);
+const RESERVED_MAC = new Set(['ctrl+tab', 'ctrl+shift+tab', 'mod+m', 'mod+h', 'mod+alt+h', 'mod+`', 'mod+shift+`']);
+const RESERVED_OTHER = new Set(['mod+tab', 'mod+shift+tab', 'mod+pageup', 'mod+pagedown', 'mod+shift+q', 'alt+f4']);
+
+/** Whether the browser keeps this shortcut for itself, so a page cannot use it. */
+export function browserReserved(shortcut, mac = IS_MAC) {
+  const k = normalizeShortcut(shortcut);
+  return RESERVED.has(k) || (mac ? RESERVED_MAC.has(k) : RESERVED_OTHER.has(k));
 }
 
 const KEY_ALIASES = { esc: 'escape', del: 'delete', space: ' ', plus: '+', return: 'enter' };

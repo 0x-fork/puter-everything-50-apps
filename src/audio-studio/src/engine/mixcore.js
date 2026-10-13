@@ -158,6 +158,33 @@ export class ChunkStore {
 }
 
 /**
+ * Runs a track's effect chain in place. With `fxMix` < 1 the first `fxWet`
+ * specs (the effects rack: input gain and slots) are blended with the dry
+ * signal (scaled by `fxDry`, the rack input gain) before the rest of the chain.
+ */
+function runChain(track, buf, frames, scratch, runFx) {
+  const mix = track.fxMix ?? 1;
+  const n = track.fxWet || 0;
+  if (mix >= 1 || !n) {
+    runFx(track.fx, buf, frames);
+    return;
+  }
+  if (track.fxParts?.src !== track.fx) track.fxParts = { src: track.fx, wet: track.fx.slice(0, n), rest: track.fx.slice(n) };
+  const dry = clipBuffer(scratch, '\u0000dry', frames);
+  dry[0].set(buf[0].subarray(0, frames));
+  dry[1].set(buf[1].subarray(0, frames));
+  runFx(track.fxParts.wet, buf, frames);
+  const d = (1 - Math.max(0, mix)) * (track.fxDry ?? 1);
+  const w = Math.max(0, mix);
+  for (let c = 0; c < 2; c++) {
+    const b = buf[c];
+    const x = dry[c];
+    for (let i = 0; i < frames; i++) b[i] = b[i] * w + x[i] * d;
+  }
+  if (track.fxParts.rest.length) runFx(track.fxParts.rest, buf, frames);
+}
+
+/**
  * Renders one block of `frames` frames starting at timeline frame `pos` into
  * `master` (stereo planar Float32Array[2]). Per-track peaks are written into
  * `meters` (Map track id -> [l, r]) when given. `runFx(slots, buf, frames)`
@@ -362,8 +389,16 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
       const R = tbuf[1];
       for (let i = 0; i < frames; i++) L[i] = R[i] = (L[i] + R[i]) * 0.5;
     }
+    if (track.invert && active) {
+      const L = tbuf[0];
+      const R = tbuf[1];
+      for (let i = 0; i < frames; i++) {
+        L[i] = -L[i];
+        R[i] = -R[i];
+      }
+    }
     if (track.fx && track.fx.length && runFx) {
-      runFx(track.fx, tbuf, frames);
+      runChain(track, tbuf, frames, scratch, runFx);
       active = true;
     }
     if (!active) {
@@ -417,13 +452,16 @@ export function renderBlock(graph, store, pos, frames, master, scratch, { meters
     }
   }
   const m = graph.master || {};
-  if (m.fx && m.fx.length && runFx) runFx(m.fx, master, frames);
-  const mg = (m.gain ?? 1) * (m.volumeEnv ? envelopeAt(m.volumeEnv, pos) : 1);
+  if (m.fx && m.fx.length && runFx) runChain(m, master, frames, scratch, runFx);
+  const mg = (m.invert ? -1 : 1) * (m.gain ?? 1) * (m.volumeEnv ? envelopeAt(m.volumeEnv, pos) : 1);
   if (mg !== 1) {
     for (let i = 0; i < frames; i++) {
       master[0][i] *= mg;
       master[1][i] *= mg;
     }
+  }
+  if (m.mono) {
+    for (let i = 0; i < frames; i++) master[0][i] = master[1][i] = (master[0][i] + master[1][i]) * 0.5;
   }
 }
 

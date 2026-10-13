@@ -112,3 +112,30 @@ describe('mixcore routing', () => {
     expect(render(seg)[0][0]).toBeCloseTo(0.5 * (100 / 150));
   });
 });
+
+describe('mixcore polarity and rack mix', () => {
+  it('inverts a track and the master', () => {
+    const { store, graph, master } = setup({ invert: true });
+    renderBlock(graph, store, 0, 128, master, createScratch(128));
+    expect(master[0][20]).toBeCloseTo(-0.5);
+    graph.master.invert = true;
+    renderBlock(graph, store, 0, 128, master, createScratch(128));
+    expect(master[0][20]).toBeCloseTo(0.5);
+  });
+  it('blends the wet part of a track chain with the dry signal before the rest', () => {
+    // Chain: [wet x4] then [post +1]; mix 25% wet, dry scaled by 2 (rack input gain).
+    const wet = { name: 'wet' };
+    const post = { name: 'post' };
+    const runFx = (chain, buf, frames) => {
+      for (const slot of chain) for (const ch of buf) for (let i = 0; i < frames; i++) ch[i] = slot === wet ? ch[i] * 4 : ch[i] + 1;
+    };
+    const { store, graph, master } = setup({ fx: [wet, post], fxWet: 1, fxMix: 0.25, fxDry: 2 });
+    renderBlock(graph, store, 0, 128, master, createScratch(128), { runFx });
+    // 0.5 * 4 * 0.25 + 0.5 * 2 * 0.75 + 1
+    expect(master[0][20]).toBeCloseTo(0.5 + 0.75 + 1);
+    // Fully wet runs the whole chain in one go.
+    const full = setup({ fx: [wet, post], fxWet: 1, fxMix: 1 });
+    renderBlock(full.graph, full.store, 0, 128, full.master, createScratch(128), { runFx });
+    expect(full.master[0][20]).toBeCloseTo(3);
+  });
+});

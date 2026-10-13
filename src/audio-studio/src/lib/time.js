@@ -9,17 +9,17 @@
 export const TIME_FORMATS = [
   { id: 'decimal', label: 'Decimal (mm:ss.ddd)' },
   { id: 'compact', label: 'Compact (hh:mm:ss.ddd)' },
-  { id: 'samples', label: 'Samples' },
-  { id: 'smpte5994df', label: 'SMPTE 59.94 fps Drop' },
   { id: 'smpte5994', label: 'SMPTE 59.94 fps' },
+  { id: 'smpte5994df', label: 'SMPTE 59.94 fps Drop' },
   { id: 'smpte30', label: 'SMPTE 30 fps' },
-  { id: 'smpte2997df', label: 'SMPTE 29.97 fps Drop' },
   { id: 'smpte2997', label: 'SMPTE 29.97 fps' },
-  { id: 'smpte25', label: 'SMPTE 25 fps' },
-  { id: 'smpte24', label: 'SMPTE 24 fps' },
+  { id: 'smpte2997df', label: 'SMPTE 29.97 fps Drop' },
+  { id: 'smpte25', label: 'SMPTE 25 fps (EBU)' },
+  { id: 'smpte24', label: 'SMPTE 24 fps (Film)' },
   { id: 'smpte2398', label: 'SMPTE 23.976 fps' },
-  { id: 'frames', label: 'Custom Frame Rate (hh:mm:ss:ff)' },
+  { id: 'samples', label: 'Samples' },
   { id: 'bars', label: 'Bars and Beats' },
+  { id: 'frames', label: 'Custom Frame Rate (hh:mm:ss:ff)' },
 ];
 
 /** Seconds per beat: tempo counts quarter notes, the beat note sets the beat length. */

@@ -6,6 +6,7 @@
 //! Params: 0 mode (0 broadband, 1 multiband), 1 centre frequency Hz,
 //!   2 bandwidth Hz, 3 threshold dB, 4 maximum reduction dB,
 //!   5 output sibilance only (outputs just what is being removed).
+//! Readout: [deepest reduction dB since the last read].
 
 use super::common::{db_lin, lin_db, Detector, GainSmoother};
 use crate::fx::util::{Biquad, Coefs};
@@ -29,6 +30,8 @@ pub struct DeEsser {
     gr: GainSmoother,
     /// Last reduction in dB (for tests and metering).
     pub reduction: f32,
+    /// Deepest reduction since the last readout.
+    meter: f32,
 }
 
 impl DeEsser {
@@ -45,6 +48,7 @@ impl DeEsser {
             det: Detector::default(),
             gr: GainSmoother::default(),
             reduction: 0.0,
+            meter: 0.0,
         };
         d.det.set(rate, 0.1, 20.0, false);
         d.gr.set(rate, 0.5, 60.0);
@@ -92,6 +96,7 @@ impl Effect for DeEsser {
                 let over = level - self.threshold;
                 let target = if over > 0.0 { -(over * SLOPE).min(self.max_red) } else { 0.0 };
                 let red = self.gr.next(target);
+                self.meter = self.meter.min(red);
                 let g = db_lin(red);
                 for c in 0..channels {
                     let x = &mut buf[c * frames + i];
@@ -119,6 +124,15 @@ impl Effect for DeEsser {
         }
         self.det.reset();
         self.gr.reset();
+        self.meter = 0.0;
+    }
+    fn readout(&mut self, out: &mut [f32]) -> usize {
+        if out.is_empty() {
+            return 0;
+        }
+        out[0] = self.meter;
+        self.meter = 0.0;
+        1
     }
 }
 

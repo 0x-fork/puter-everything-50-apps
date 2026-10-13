@@ -2,13 +2,13 @@
 // adjustment, Rename, Extract Channels to Mono Files and the Frequency Band
 // Splitter.
 
-import { h } from '../lib/dom.js';
 import { AudioFile } from '../model/audio-file.js';
 import { Channel } from '../audio/channel.js';
 import { biquadCoefficients } from '../effects/biquad.js';
 import { baseName } from '../audio/decode.js';
-import { openDialog, promptDialog } from '../ui/dialog.js';
+import { promptDialog } from '../ui/dialog.js';
 import { createMarker, nextMarkerName, sortMarkers } from '../model/markers.js';
+import { bandSplitterDialog } from './band-splitter.js';
 
 const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
 const hasAudio = (app) => Boolean(audio(app));
@@ -59,8 +59,22 @@ const ZERO_COMMANDS = [
 
 // --------------------------------------------------------- band splitting
 
-/** Fourth-order Linkwitz-Riley section: two identical Butterworth biquads. */
-function lr4(type, freq, rate) {
+/** Crossover steepness choices: Linkwitz-Riley 4th order (24 dB/oct) or 8th order (48 dB/oct). */
+export const CROSSOVER_SLOPES = [
+  { id: 24, label: '24 dB/octave' },
+  { id: 48, label: '48 dB/octave (steeper)' },
+];
+
+/**
+ * Linkwitz-Riley section: a Butterworth filter applied twice. 24 dB/oct
+ * squares a 2nd-order Butterworth; 48 dB/oct a 4th-order one.
+ */
+function lr4(type, freq, rate, slope = 24) {
+  if (slope === 48) {
+    const a = biquadCoefficients(type, freq, 0, 0.5411961, rate);
+    const b = biquadCoefficients(type, freq, 0, 1.3065630, rate);
+    return [a, b, a, b];
+  }
   const c = biquadCoefficients(type, freq, 0, Math.SQRT1_2, rate);
   return [c, c];
 }
@@ -87,21 +101,21 @@ function runBiquads(sections, x) {
  * same phase response and add back up to an allpassed copy of the input with
  * a flat magnitude.
  */
-export function splitBands(x, crossovers, rate) {
+export function splitBands(x, crossovers, rate, slope = 24) {
   const freqs = crossovers.slice().sort((p, q) => p - q);
   const bands = [];
   let rest = x;
   for (let i = 0; i < freqs.length; i++) {
-    const low = runBiquads(lr4('lowpass', freqs[i], rate), rest);
-    rest = runBiquads(lr4('highpass', freqs[i], rate), rest);
+    const low = runBiquads(lr4('lowpass', freqs[i], rate, slope), rest);
+    rest = runBiquads(lr4('highpass', freqs[i], rate, slope), rest);
     bands.push(low);
   }
   bands.push(rest);
   // Phase-align lower bands to the higher crossovers they skipped.
   for (let i = 0; i < freqs.length; i++) {
     for (let j = i + 1; j < freqs.length; j++) {
-      const lo = runBiquads(lr4('lowpass', freqs[j], rate), bands[i]);
-      const hi = runBiquads(lr4('highpass', freqs[j], rate), bands[i]);
+      const lo = runBiquads(lr4('lowpass', freqs[j], rate, slope), bands[i]);
+      const hi = runBiquads(lr4('highpass', freqs[j], rate, slope), bands[i]);
       for (let k = 0; k < lo.length; k++) lo[k] += hi[k];
       bands[i] = lo;
     }
@@ -127,51 +141,14 @@ export function crossoverProblem(crossovers, rate) {
   return '';
 }
 
-async function bandSplitterDialog(app) {
+async function bandSplitter(app) {
   const doc = audio(app);
+  const r = await bandSplitterDialog(app, doc);
+  if (!r) return;
   const rate = doc.sampleRate;
-  let crossovers = defaultCrossovers(3, rate);
-  const count = h('select.select', { 'aria-label': 'Number of bands' }, [2, 3, 4, 5, 6, 7, 8].map((n) => h('option', { value: n, selected: n === 3 }, `${n} bands`)));
-  const fields = h('div.form-grid', { style: { marginTop: '8px' } });
-  const error = h('div.faint', { role: 'alert', style: { minHeight: '1em', color: 'var(--danger)' } });
-  const render = () => {
-    fields.replaceChildren(
-      ...crossovers.flatMap((f, i) => {
-        const input = h('input.input.num', { type: 'number', min: 20, max: Math.floor(rate / 2) - 1, step: 1, value: f, 'aria-label': `Crossover ${i + 1} (Hz)` });
-        input.addEventListener('input', () => (crossovers[i] = Number(input.value)));
-        return [h('label', `Crossover ${i + 1}:`), h('div.row', input, h('span.muted', 'Hz'))];
-      }),
-    );
-  };
-  count.addEventListener('change', () => {
-    crossovers = defaultCrossovers(Number(count.value), rate);
-    render();
-  });
-  render();
-  const scope = doc.hasSelection ? 'the selection' : 'the whole file';
-  const r = await openDialog({
-    title: 'Frequency Band Splitter',
-    body: h(
-      'div',
-      h('p.muted', { style: { margin: '0 0 10px' } }, `Splits ${scope} into separate files, one per frequency band. The bands add back up to the original sound.`),
-      h('div.form-grid', h('label', 'Bands:'), count),
-      fields,
-      error,
-    ),
-    buttons: [
-      { label: 'Cancel', value: null },
-      { label: 'Split', value: 'ok', primary: true },
-    ],
-    onSubmit: () => {
-      const msg = crossoverProblem(crossovers, rate);
-      error.textContent = msg;
-      return !msg;
-    },
-  });
-  if (r !== 'ok') return;
-  const freqs = crossovers.slice().sort((a, b) => a - b);
+  const freqs = r.crossovers.slice().sort((a, b) => a - b);
   const [a, b] = doc.editRange();
-  const perChannel = doc.state.channels.map((c) => splitBands(c.toArray(a, b), freqs, rate));
+  const perChannel = doc.state.channels.map((c) => splitBands(c.toArray(a, b), freqs, rate, r.slope));
   const edges = [0, ...freqs, Math.round(rate / 2)];
   const fmt = (f) => (f >= 1000 ? `${+(f / 1000).toFixed(1)} kHz` : `${f} Hz`);
   const base = baseName(doc.name);
@@ -250,6 +227,6 @@ export function installEditExtraCommands(app) {
     },
     { id: 'marker.addSubclip', label: 'Add Subclip Marker', enabled: hasSel, run: () => addTypedMarker(app, 'subclip') },
     { id: 'marker.addCart', label: 'Add Cart Timer Marker', enabled: hasAudio, run: () => addTypedMarker(app, 'cart') },
-    { id: 'edit.bandSplitter', label: 'Frequency Band Splitter...', enabled: hasAudio, run: () => bandSplitterDialog(app) },
+    { id: 'edit.bandSplitter', label: 'Frequency Band Splitter...', enabled: hasAudio, run: () => bandSplitter(app) },
   ]);
 }

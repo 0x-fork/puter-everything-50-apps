@@ -12,10 +12,11 @@ import { icon } from '../ui/icons.js';
 import { openDialog } from '../ui/dialog.js';
 import { formatShortcut, eventShortcut, normalizeShortcut } from '../commands/registry.js';
 import { getEffect } from './registry.js';
-import { normalizeValues } from './params.js';
+import { normalizeValues, formatValue } from './params.js';
 import { lastValues } from './presets.js';
 import { openEffectDialog } from './dialog.js';
 import { groupedEffects } from './rack.js';
+import { showNotice } from '../ui/notices.js';
 
 let nextFav = 1;
 const favId = () => `fav${Date.now().toString(36)}${nextFav++}`;
@@ -181,6 +182,22 @@ export function describeFavorite(app, fav) {
   return '';
 }
 
+/** The settings a favorite applies, as [label, text] pairs (effect parameters or command arguments). */
+export function favoriteSettings(app, fav) {
+  const a = fav.action || {};
+  if (a.type === 'effect') {
+    const def = getEffect(a.effect);
+    if (!def) return [];
+    const v = normalizeValues(def, a.values);
+    return (def.params || []).filter((p) => p.label && p.id in v).map((p) => [p.label, formatValue(p, v[p.id])]);
+  }
+  if (a.type === 'command' && a.args && typeof a.args === 'object') {
+    const words = (k) => k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+    return Object.entries(a.args).map(([k, v]) => [words(k), typeof v === 'number' && /peak|gain|db/i.test(k) ? `${v} dB` : String(v)]);
+  }
+  return [];
+}
+
 // -------------------------------------------------- shortcuts (commands)
 
 function syncShortcutCommands(app) {
@@ -322,7 +339,35 @@ export function favoritesPanel(app) {
     body,
   );
   const status = h('div.panel-footer.fav-status', { role: 'status' });
-  const el = h('div.favorites-panel', toolbar, h('div.table-scroll', table), status);
+  // Details of the selected favorite: what it runs and with which settings (wide frames only).
+  const details = h('div.fav-details', { 'aria-live': 'polite' });
+  const el = h('div.favorites-panel', toolbar, h('div.fav-split', h('div.table-scroll', table), details), status);
+
+  const renderDetails = (f) => {
+    if (!f) {
+      details.replaceChildren(h('div.empty-state', 'Select a favorite to see what it does.'));
+      return;
+    }
+    const settings = favoriteSettings(app, f);
+    const problem = favoriteProblem(app, f);
+    const parts = [
+      h(
+        'table.data-table.fav-actions',
+        { 'aria-label': `${f.name} actions` },
+        h('thead', h('tr', h('th', { scope: 'col' }, 'Action Name'), h('th', { scope: 'col' }, 'Applies To'))),
+        h('tbody', h('tr', h('td', describeFavorite(app, f)), h('td', 'Selection, or the whole file')))),
+      settings.length
+        ? h(
+            'table.data-table.fav-settings',
+            { 'aria-label': 'Settings' },
+            h('thead', h('tr', h('th', { scope: 'col' }, 'Setting'), h('th', { scope: 'col' }, 'Value'))),
+            h('tbody', ...settings.map(([k, v]) => h('tr', h('td', k), h('td.tabular', v)))),
+          )
+        : h('p.muted.fav-note', 'Runs with no settings to adjust.'),
+      problem ? h('p.muted.fav-note', problem) : null,
+    ];
+    details.replaceChildren(...parts.filter(Boolean));
+  };
 
   const current = () => loadFavorites(app.prefs).find((f) => f.id === selectedId) || null;
 
@@ -368,6 +413,7 @@ export function favoritesPanel(app) {
     }
     if (hadFocus) body.querySelector('tr[aria-selected="true"]')?.focus();
     const f = current();
+    renderDetails(f);
     applyBtn.disabled = !f || Boolean(favoriteProblem(app, f));
     editBtn.disabled = !f;
     deleteBtn.disabled = !f;
@@ -424,7 +470,22 @@ export function installFavorites(app) {
   app.commands.register([
     { id: 'fav.add', label: 'New Favorite...', run: () => newFavoriteDialog(app) },
     { id: 'fav.edit', label: 'Edit Favorites...', run: () => app.dock?.openPanel('favorites') },
-    { id: 'fav.recordStart', label: 'Start Recording Favorite', enabled: () => !fav.recording, run: () => setRecording(true) },
+    {
+      id: 'fav.recordStart',
+      label: 'Start Recording Favorite',
+      enabled: () => !fav.recording,
+      run: async () => {
+        const go = await showNotice(app, {
+          id: 'favoriteRecording',
+          title: 'Recording a Favorite',
+          message: [
+            'Audio Studio is recording a favorite. Apply an effect in the Waveform editor and its settings are saved as a favorite you can run from the Favorites menu, the Favorites panel or a batch process.',
+            'To stop without saving, choose Favorites > Stop Recording Favorite.',
+          ],
+        });
+        if (go) setRecording(true);
+      },
+    },
     { id: 'fav.recordStop', label: 'Stop Recording Favorite', enabled: () => fav.recording, run: () => setRecording(false) },
   ]);
 

@@ -56,6 +56,57 @@ describe('multitrack view', () => {
     expect(view.el.querySelector('.mt-th.master .mt-tb-arm')).toBeNull();
   });
 
+  it('inverts polarity from the header and hides effects power without effects', () => {
+    const { view, doc } = ctx;
+    const hd = view.el.querySelector('.mt-th');
+    expect(hd.querySelector('.mt-tb-fx').hidden).toBe(true);
+    hd.querySelector('.mt-tb-invert').click();
+    expect(doc.state.tracks[0].invert).toBe(true);
+    expect(view.el.querySelector('.mt-th .mt-tb-invert').getAttribute('aria-pressed')).toBe('true');
+    expect([...hd.querySelectorAll('.mt-th-select option')].map((o) => o.textContent)).toContain('Default Stereo Input');
+  });
+
+  it('offers Add Video Track while the session has no video', async () => {
+    const { app, doc } = ctx;
+    const { MENUS } = await import('../src/ui/menus.js');
+    const tracks = MENUS.find((m) => m.label === 'Multitrack').submenu.find((x) => x.label === 'Tracks').submenu;
+    expect(tracks).toContain('mt.addVideoTrack');
+    expect(app.commands.isEnabled('mt.addVideoTrack')).toBe(true);
+    doc.amendView((st) => ({ ...st, video: { id: 'v1', sourceId: 'x', name: 'V', start: 0, offset: 0, length: 10 } }));
+    expect(app.commands.isEnabled('mt.addVideoTrack')).toBe(false);
+  });
+
+  it('switches single effects from the header in effects mode', () => {
+    const { app, view, doc } = ctx;
+    const id = doc.state.tracks[0].id;
+    doc.apply('Track Effects', S.updateTrack(doc.state, id, { fx: [{ id: 'e1', effect: 'amplify', values: {}, enabled: true }] }));
+    app.prefs.set('mtHeaderMode', 'fx');
+    view.syncHeaders();
+    const chip = view.el.querySelector('.mt-th .mt-th-fxname');
+    expect(chip.textContent).toBe('Amplify');
+    chip.querySelector('.mt-th-fxpower').click();
+    expect(doc.state.tracks[0].fx[0].enabled).toBe(false);
+    view.syncHeaders();
+    expect(view.el.querySelector('.mt-th .mt-th-fxname').classList.contains('off')).toBe(true);
+  });
+
+  it('shows every visible track in the navigator and scrolls with it', () => {
+    const { view, doc } = ctx;
+    const segs = () => [...view.el.querySelectorAll('.mt-vnav-seg')];
+    expect(segs()).toHaveLength(doc.state.tracks.length + 1);
+    view.height = 200;
+    view.computeRows();
+    const thumb = view.el.querySelector('.mt-vnav-thumb');
+    const span = view.contentHeight;
+    expect(parseFloat(thumb.style.height)).toBeCloseTo((200 / span) * 100, 1);
+    view.el.querySelector('.mt-vnav').dispatchEvent(new WheelEvent('wheel', { deltaY: 100, cancelable: true }));
+    expect(view.scrollY).toBe(100);
+    expect(parseFloat(thumb.style.top)).toBeCloseTo((100 / span) * 100, 1);
+    doc.amendView((st) => ({ ...st, tracks: st.tracks.map((t, i) => (i === 1 ? { ...t, hidden: true } : t)) }));
+    view.computeRows();
+    expect(segs()).toHaveLength(doc.state.tracks.length);
+  });
+
   it('toggles mute from the header as one undo step and updates the button', () => {
     const { view, doc } = ctx;
     const btn = view.el.querySelector('.mt-th .mt-tb-mute');
@@ -177,6 +228,49 @@ describe('mixer panel', () => {
     expect(f.getAttribute('aria-valuetext')).toBe('-3.0 dB');
     strips[1].querySelector('.mt-tb-solo').click();
     expect(doc.state.tracks[1].solo).toBe(true);
+  });
+
+  it('has polarity, automation mode and collapsible sections', () => {
+    const { app, doc } = setup();
+    const panel = mixerPanel(app);
+    document.body.append(panel.el);
+    panel.show();
+    const strip = panel.el.querySelector('.mx-strip');
+    strip.querySelector('.mt-tb-invert').click();
+    expect(doc.state.tracks[0].invert).toBe(true);
+    expect(doc.history.undoLabel).toBe('Invert Polarity On');
+    expect(strip.querySelector('.mt-tb-invert').getAttribute('aria-pressed')).toBe('true');
+    const mode = strip.querySelector('.mx-mode');
+    mode.value = 'touch';
+    mode.dispatchEvent(new Event('change'));
+    expect(doc.state.tracks[0].mode).toBe('touch');
+    // The gutter collapses a section in every strip and remembers it.
+    const btn = panel.el.querySelector(".mx-gutter-btn[data-sec='sends']");
+    btn.click();
+    expect(app.prefs.get('mixerCollapsed')).toEqual(['sends']);
+    expect(panel.el.classList.contains('mx-hide-sends')).toBe(true);
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+    btn.click();
+    expect(panel.el.classList.contains('mx-hide-sends')).toBe(false);
+    panel.el.remove();
+  });
+
+  it('turns a single track effect on and off from its strip', () => {
+    const { app, doc } = setup();
+    const id = doc.state.tracks[0].id;
+    doc.apply('Track Effects', S.updateTrack(doc.state, id, { fx: [null, { id: 'e1', effect: 'amplify', values: {}, enabled: true }] }));
+    const panel = mixerPanel(app);
+    document.body.append(panel.el);
+    panel.show();
+    const strip = panel.el.querySelector('.mx-strip');
+    expect([...strip.querySelectorAll('.mx-fx-slot')]).toHaveLength(4);
+    strip.querySelector('.mx-fx-power').click();
+    expect(doc.state.tracks[0].fx[1].enabled).toBe(false);
+    expect(doc.history.undoLabel).toBe('Effect Off');
+    expect(panel.el.querySelector('.mx-strip .mx-fx-slot').classList.contains('off')).toBe(true);
+    panel.el.querySelector('.mx-strip .mx-fx-power').click();
+    expect(doc.state.tracks[0].fx[1].enabled).toBe(true);
+    panel.el.remove();
   });
 
   it('fader keys reach silence and back', () => {

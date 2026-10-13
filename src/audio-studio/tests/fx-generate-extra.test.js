@@ -125,7 +125,7 @@ describe('generator dialog bodies', () => {
   it('noise body shows the delay only for the spatial style', () => {
     const ctx = generatorContext(NOISE_DEF, {});
     const el = noiseBody(ctx);
-    const delayRow = [...el.querySelectorAll('.fx-label')].find((l) => l.textContent === 'Delay').closest('.fx-params');
+    const delayRow = [...el.querySelectorAll('.fx-label')].find((l) => l.textContent.replace(/:$/, '') === 'Delay').closest('.fx-controls');
     expect(delayRow.hidden).toBe(true);
     ctx.set('style', 'spatial');
     expect(delayRow.hidden).toBe(false);

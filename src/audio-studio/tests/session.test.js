@@ -375,3 +375,31 @@ describe('session files', () => {
     expect([...files.get('dir/b.bin')]).toEqual([1, 2, 3]);
   });
 });
+
+describe('track rack levels and polarity in the graph', () => {
+  it('adds rack gains, the dry/wet split and polarity to tracks and the master', async () => {
+    const { trackRackSpecs } = await import('../src/model/session-graph.js');
+    const { makeSlot } = await import('../src/effects/rack.js');
+    const doc = { sampleRate: 48000 };
+    const t = S.createTrack({ id: 'tA', fx: [makeSlot('amplify', { left: 1, right: 1 })], fxIn: 6, fxOut: -3, fxMix: 0.4 });
+    const r = trackRackSpecs(t, doc);
+    expect(r.fx.map((x) => x.key)).toEqual(['trk:tA:in', `trk:tA:${t.fx[0].id}`, 'trk:tA:out']);
+    expect(r.fxWet).toBe(2);
+    expect(r.fxMix).toBeCloseTo(0.4);
+    expect(r.fxDry).toBeCloseTo(Math.pow(10, 6 / 20));
+    // Gains need effects to run; power off bypasses everything.
+    expect(trackRackSpecs({ ...t, fx: [] }, doc)).toEqual({ fx: [] });
+    expect(trackRackSpecs({ ...t, fxPower: false }, doc)).toEqual({ fx: [] });
+    expect(trackRackSpecs({ ...t, fxIn: 0, fxOut: 0, fxMix: 1 }, doc).fx).toHaveLength(1);
+
+    let s = S.createSessionState({ sampleRate: 48000, tracks: 1 });
+    s = S.updateTrack(s, s.tracks[0].id, { invert: true });
+    s = { ...s, master: { ...s.master, invert: true } };
+    const { graph } = buildSessionGraph(s, new Map());
+    expect(graph.tracks[0].invert).toBe(true);
+    expect(graph.master.invert).toBe(true);
+    // New fields survive a save.
+    const back = S.createTrack(JSON.parse(JSON.stringify(t)));
+    expect([back.fxIn, back.fxOut, back.fxMix, back.invert]).toEqual([6, -3, 0.4, false]);
+  });
+});

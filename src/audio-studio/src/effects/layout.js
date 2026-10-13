@@ -80,7 +80,7 @@ export function vSlider(ctx, id, { label } = {}) {
   const p = param(ctx, id);
   const name = p.label;
   const shown = label ?? p.label;
-  const slider = h('input.slider.fx-vslider', {
+  const slider = h('input.slider.fx-vrange', {
     type: 'range',
     min: 0,
     max: 1000,

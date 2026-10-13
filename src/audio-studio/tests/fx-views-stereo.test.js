@@ -59,7 +59,7 @@ describe('center channel extractor', () => {
     target.value = '4';
     target.dispatchEvent(new Event('change'));
     expect(pan.disabled).toBe(false);
-    expect(dlg.querySelectorAll('.cce-levels .fx-vslider')).toHaveLength(2);
+    expect(dlg.querySelectorAll('.cce-levels .fx-vrange')).toHaveLength(2);
     dlg.querySelector('.btn.primary').click();
     expect((await p).target).toBe(4);
   });

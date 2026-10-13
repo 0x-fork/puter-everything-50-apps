@@ -16,7 +16,7 @@ import { SpectrogramRenderer } from './renderer.js';
 import { TileCache, planTiles, chooseHop, readTileSamples, FLOOR_DB } from './tiles.js';
 import { makeScale, frequencyTicks, formatHzLong, noteName } from './freq-scale.js';
 import { buildLut } from './colormaps.js';
-import { settings, setSettings, displayOn, pitchOn, logScale, docState, visibleBand, setSpectralSelection, SPECTRAL_TOOLS } from './state.js';
+import { settings, setSettings, displayOn, pitchOn, logScale, docState, visibleBand, setSpectralSelection, SPECTRAL_TOOLS, pitchSettings } from './state.js';
 import { addBrushDot, dotOutline, shapeIntervals } from './mask.js';
 import { analysisPool } from '../analysis/pool.js';
 import { sourceKey } from '../engine/engine.js';
@@ -454,7 +454,8 @@ export class SpectralLayer {
   #updatePitch() {
     const doc = this.doc;
     const v = doc.view;
-    const key = `${sourceKey(doc.state.channels)}|${Math.round(v.start)}|${Math.round(v.end)}|${this.rect.width}`;
+    const p = this.app.prefs;
+    const key = `${sourceKey(doc.state.channels)}|${Math.round(v.start)}|${Math.round(v.end)}|${this.rect.width}|${p.get('pitchWindow')}|${p.get('pitchMinHz')}|${p.get('pitchMaxHz')}`;
     if (this.pitch?.key === key || this.pitch?.loading === key) return;
     clearTimeout(this.pitchTimer);
     this.pitchTimer = setTimeout(() => this.#computePitch(key), 120);
@@ -463,7 +464,7 @@ export class SpectralLayer {
   async #computePitch(key) {
     const doc = this.doc;
     const v = doc.view;
-    const n = doc.sampleRate > 64000 ? 4096 : 2048;
+    const { n, fmin, fmax } = pitchSettings(this.app.prefs, doc.sampleRate);
     const points = Math.max(16, Math.min(1200, Math.floor(this.rect.width / 3)));
     const start = Math.max(0, v.start);
     const end = Math.min(doc.length, v.end);
@@ -478,7 +479,7 @@ export class SpectralLayer {
         chans.map((ch) => {
           const samples = new Float32Array(frames * n);
           for (let i = 0; i < frames; i++) ch.read(Math.round(start + i * hop), samples, i * n, n);
-          return analysisPool().call({ op: 'pitch', samples, rate: doc.sampleRate, n, hop: n, frames, fmin: 50, fmax: 2000, threshold: 0.15 }, [samples.buffer]);
+          return analysisPool().call({ op: 'pitch', samples, rate: doc.sampleRate, n, hop: n, frames, fmin, fmax, threshold: 0.15 }, [samples.buffer]);
         }),
       );
       this.pitch = { key, f0s, start, hop, n };

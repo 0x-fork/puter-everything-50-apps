@@ -11,6 +11,7 @@ import { withProgress } from './progress.js';
 import { openEffectDialog } from './dialog.js';
 import * as E from '../model/edits.js';
 import { editSmoothFrames } from '../editor/view-prefs.js';
+import { routeMask } from './routing.js';
 
 const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
 
@@ -18,7 +19,7 @@ const audio = (app) => (app.active?.kind === 'audio' ? app.active : null);
  * Applies `def` with `values` to the active audio file's selection (or the
  * whole file), honouring the enabled channels. Returns true when applied.
  */
-export async function applyEffectToDoc(app, doc, def, values, { applyChain = lazyApplyChain, quiet = false } = {}) {
+export async function applyEffectToDoc(app, doc, def, values, { applyChain = lazyApplyChain, quiet = false, route = null } = {}) {
   values = normalizeValues(def, values);
   const [start, end] = doc.editRange();
   if (end <= start) {
@@ -37,10 +38,10 @@ export async function applyEffectToDoc(app, doc, def, values, { applyChain = laz
   const before = doc.state;
   try {
     let { state, length } = await withProgress(app, `Applying ${def.name}`, (signal, onProgress) =>
-      renderEffect({ def, values, state: before, start, end, mask: doc.channelMask, signal, onProgress, doc, app, applyChain }),
+      renderEffect({ def, values, state: before, start, end, mask: doc.channelMask, route, signal, onProgress, doc, app, applyChain }),
     );
     // Preferences > Data: crossfade the processed range into the audio around it.
-    if (length === end - start) state = E.smoothBoundaries(before, state, start, end, editSmoothFrames(app, before.sampleRate), doc.channelMask);
+    if (length === end - start) state = E.smoothBoundaries(before, state, start, end, editSmoothFrames(app, before.sampleRate), route ? routeMask(route, before.channels.length, doc.channelMask) : doc.channelMask);
     if (doc.state !== before) {
       app.notify(`${def.name} was not applied because the file changed while it was processing.`, { error: true });
       return false;
@@ -65,12 +66,15 @@ export async function runEffect(app, id, args = {}) {
   const doc = audio(app);
   if (!def || !doc) return false;
   let values = args.values;
+  let route = null;
   if (!values && (args.repeat || !def.params.length)) values = lastValues(app.prefs, def);
   if (!values) {
-    values = await openEffectDialog(app, def, { mode: 'apply', doc });
+    const routing = {};
+    values = await openEffectDialog(app, def, { mode: 'apply', doc, routing });
     if (!values) return false;
+    route = routing.route || null;
   }
-  return applyEffectToDoc(app, doc, def, values);
+  return applyEffectToDoc(app, doc, def, values, { route });
 }
 
 /** Registers fx.<id> for one definition unless another feature owns that command. */

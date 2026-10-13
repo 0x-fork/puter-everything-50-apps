@@ -80,7 +80,7 @@ describe('effect dialog', () => {
     app.syncGraph = () => synced++;
     const p = openEffectDialog(app, getEffect('dlgEq'), { doc });
     const dlg = document.querySelector('.fx-dialog');
-    expect([...dlg.querySelectorAll('.fx-section')].map((e) => e.textContent)).toEqual(['Band 1']);
+    expect([...dlg.querySelectorAll('.fx-group > legend')].map((e) => e.textContent)).toEqual(['Band 1']);
     expect(dlg.querySelector('.fx-eq')).not.toBeNull();
     expect(dlg.querySelectorAll('.fx-eq .fx-handle')).toHaveLength(1);
     expect(dlg.querySelector('.fx-envelope')).not.toBeNull();

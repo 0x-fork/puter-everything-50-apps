@@ -3,7 +3,8 @@
 // a favorite, encode, write), so the logic is testable without workers.
 //
 // Item: { id, name, source: { type: 'doc', doc } | { type: 'local', file } |
-//         { type: 'puter', path, item }, status, progress, message, output }
+//         { type: 'puter', path, item } | { type: 'range', doc, start, end, name },
+//         status, progress, message, output }  (range: part of an open file, from the Markers panel)
 // status: 'ready' | 'waiting' | 'running' | 'done' | 'error' | 'cancelled' | 'skipped'
 
 import { withExtension, sanitizeFileName, getFormat, conformOptions } from '../export/formats.js';
@@ -23,13 +24,14 @@ export const STATUS_LABELS = {
 /** A stable identity so the same file is not queued twice. */
 export function sourceIdentity(source) {
   if (source.type === 'doc') return `doc:${source.doc.id}`;
+  if (source.type === 'range') return `range:${source.doc.id}:${source.start}:${source.end}`;
   if (source.type === 'puter') return `puter:${source.path}`;
   const f = source.file;
   return `local:${f.name}:${f.size}:${f.lastModified || 0}`;
 }
 
 export function makeItem(source, name) {
-  return { id: `b${nextItem++}`, name: name || source.doc?.name || source.file?.name || source.path?.split('/').pop() || 'Untitled', source, status: 'ready', progress: 0, message: '', output: '' };
+  return { id: `b${nextItem++}`, name: name || (source.type === 'range' ? source.name : null) || source.doc?.name || source.file?.name || source.path?.split('/').pop() || 'Untitled', source, status: 'ready', progress: 0, message: '', output: '' };
 }
 
 /** Adds sources (skipping ones already listed). Returns { items, added }. */
@@ -118,6 +120,20 @@ export function uniqueName(name, taken) {
 export function plannedNames(items, settings) {
   const taken = new Set();
   return items.map((i) => uniqueName(outputName(i.name, settings), taken));
+}
+
+/** Sample type of a queued source when known without decoding: open files, and local files once probed (item.probe). */
+export function sourceSampleType(item) {
+  const d = item.source.doc;
+  if (d) {
+    const bits = d.info?.bitDepth;
+    const ch = d.channelCount === 1 ? 'Mono' : d.channelCount === 2 ? 'Stereo' : `${d.channelCount} ch`;
+    return [`${d.sampleRate} Hz`, bits ? (bits === 32 ? '32-bit float' : `${bits}-bit`) : '', ch].filter(Boolean).join(', ');
+  }
+  const p = item.probe;
+  if (!p?.sampleRate) return '';
+  const ch = p.channels === 1 ? 'Mono' : p.channels === 2 ? 'Stereo' : p.channels ? `${p.channels} ch` : '';
+  return [`${p.sampleRate} Hz`, p.bitDepth && /WAV|AIFF|FLAC/.test(p.format || '') ? `${p.bitDepth}-bit` : '', ch].filter(Boolean).join(', ');
 }
 
 /** Short text for the settings summary. */

@@ -8,7 +8,7 @@ import { engine, sourceKey } from './engine/engine.js';
 import { applyTheme } from './ui/theme.js';
 import { toast } from './ui/toast.js';
 import { openMenu } from './ui/menubar.js';
-import { WORKSPACES, TABLET, PHONE, DEFAULT_WORKSPACE } from './ui/workspaces.js';
+import { WORKSPACES, TABLET, PHONE, DEFAULT_WORKSPACE, LAYOUT_VERSION } from './ui/workspaces.js';
 import { saveChangesDialog } from './ui/dialog.js';
 import { formatTime, beatSeconds } from './lib/time.js';
 
@@ -36,6 +36,7 @@ export class App extends Emitter {
     this.layoutMode = 'desktop';
     this.statusMessage = '';
     applyTheme(this.prefs.get('theme'));
+    this.#migrateLayouts();
     this.pendingReturn = null; // second-stop mode: where the next Stop returns to
     this.prefs.on('change', (key) => {
       if (key === 'theme') applyTheme(this.prefs.get('theme'));
@@ -356,6 +357,17 @@ export class App extends Emitter {
     const kept = this.prefs.get('savedLayouts')?.[name] || this.prefs.get('customWorkspaces')?.[name];
     if (kept) return structuredClone(kept);
     return (WORKSPACES[name] || WORKSPACES[DEFAULT_WORKSPACE])();
+  }
+
+  /** Forgets panel arrangements made on top of an older version of the built-in workspaces. */
+  #migrateLayouts() {
+    if (this.prefs.get('layoutVersion') === LAYOUT_VERSION) return;
+    const layouts = { ...(this.prefs.get('layouts') || {}) };
+    const stale = Object.keys(layouts).filter((name) => WORKSPACES[name] && !this.prefs.get('savedLayouts')?.[name]);
+    for (const name of stale) delete layouts[name];
+    if (stale.length) this.prefs.set('layouts', layouts);
+    if (!WORKSPACES[this.prefs.get('workspace')] && !this.prefs.get('customWorkspaces')?.[this.prefs.get('workspace')]) this.prefs.set('workspace', DEFAULT_WORKSPACE);
+    this.prefs.set('layoutVersion', LAYOUT_VERSION);
   }
 
   setWorkspace(name, { reset = false } = {}) {

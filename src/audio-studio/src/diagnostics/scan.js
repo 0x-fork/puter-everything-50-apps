@@ -306,9 +306,14 @@ export function shiftProblems(problems, removed, deletedIds) {
     });
 }
 
+/** Adds a range marker for each problem (or audio region), named "<prefix> NN". */
+export function markProblems(state, problems, prefix = 'Audio') {
+  const existing = state.markers.length;
+  const markers = problems.map((p, i) => ({ start: p.start, duration: Math.max(1, p.end - p.start), name: `${prefix} ${String(existing + i + 1).padStart(2, '0')}`, type: 'cue' }));
+  return addMarkers(state, 0, markers);
+}
+
 /** Adds a range marker for each audio region. */
 export function markAudio(state, problems) {
-  const existing = state.markers.length;
-  const markers = problems.map((p, i) => ({ start: p.start, duration: p.end - p.start, name: `Audio ${String(existing + i + 1).padStart(2, '0')}`, type: 'cue' }));
-  return addMarkers(state, 0, markers);
+  return markProblems(state, problems, 'Audio');
 }

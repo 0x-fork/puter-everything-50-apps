@@ -7,12 +7,14 @@
 // view.layers entries { id, el, layout(rect), draw(), pointer(e, phase) }.
 
 import { h, announce } from '../lib/dom.js';
-import { TimeRuler } from './time-ruler.js';
+import { TimeRuler, rulerTicks } from './time-ruler.js';
 import { Overview } from './overview.js';
 import { WaveformRenderer } from '../render/waveform-gl.js';
 import { channelColumns } from '../audio/peaks.js';
 import { cssVar, CANVAS_FONT, parseColor } from '../ui/theme.js';
+import { markerColor } from '../ui/appearance.js';
 import { icon } from '../ui/icons.js';
+import './editor-icons.js';
 import { gainRange, fadeRange, fadeCurve, smoothBoundaries } from '../model/edits.js';
 import { WAVEFORM_CONTEXT } from '../ui/menus.js';
 import { contextMenu } from '../ui/menubar.js';
@@ -31,6 +33,9 @@ function withAlpha(color, alpha) {
   return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a * alpha})`;
 }
 
+/** Levels the amplitude ruler can label, loudest first. */
+const DB_LADDER = [0, -1, -3, -6, -9, -12, -18, -24, -30, -36, -42, -48, -54, -60, -72, -84, -96];
+
 /**
  * dB values shown on a lane's amplitude ruler, spaced so labels do not
  * collide: [{ db, y, y2 }] with y above the centre line and y2 its mirror
@@ -41,17 +46,40 @@ export function dbTicks(lane, amp) {
   const half = (lane.bottom - lane.top) / 2;
   const out = [];
   let lastY = -Infinity;
-  for (const db of [0, -1, -2, -3, -4.5, -6, -9, -12, -18, -24, -30, -40, -50, -60]) {
+  for (const db of DB_LADDER) {
     const v = dbToGain(db) * amp;
     if (v > 1.0001) continue;
     const y = mid - v * half;
     // Leave room for the "dB" caption at the top and the -inf label at the centre.
-    if (y - lastY < 13 || mid - y < 12 || y < lane.top + 18) continue;
+    if (y - lastY < 13 || mid - y < 12 || y < lane.top + 15) continue;
     const y2 = mid + v * half;
     out.push({ db, y, y2: y2 < lane.bottom - 6 ? y2 : null });
     lastY = y;
   }
   return out;
+}
+
+/** y positions of the amplitude ruler's unlabelled 1 dB ticks (both halves of the lane). */
+export function dbMinorTicks(lane, amp) {
+  const mid = (lane.top + lane.bottom) / 2;
+  const half = (lane.bottom - lane.top) / 2;
+  const out = [];
+  let last = -Infinity;
+  for (let db = 0; db >= -96; db--) {
+    const v = dbToGain(db) * amp;
+    if (v > 1.0001) continue;
+    const y = mid - v * half;
+    if (mid - y < 10) break;
+    if (y - last < 4) continue;
+    out.push(y, mid + v * half);
+    last = y;
+  }
+  return out;
+}
+
+/** Keeps a w x h box at (x, y) inside a W x H area. */
+export function clampHud(x, y, w, h, W, H) {
+  return { x: Math.round(Math.max(0, Math.min(W - w, x))), y: Math.round(Math.max(0, Math.min(H - h, y))) };
 }
 
 export class WaveformView {
@@ -68,6 +96,8 @@ export class WaveformView {
     this.offDoc = doc.on('change', (e) => this.#onDocChange(e));
     this.offPrefs = app.on('prefs', (key) => {
       if (key === 'waveLayered' || key === 'waveUniqueColors') this.#buildChannelButtons();
+      if (key === 'waveLayered') this.overview.peaksFor = null;
+      if (key === 'hudPinned') this.syncHudPin?.();
       this.invalidate();
     });
     this.onTheme = () => this.invalidate();
@@ -149,7 +179,14 @@ export class WaveformView {
     this.status = h('div#wf-help.sr-only', 'Arrow keys move the playhead. Shift with arrows extends the selection. Space plays.');
     this.el = h(
       'div.wf.editor-view',
-      h('div.wf-top', this.overview.el, h('div.wf-top-corner')),
+      h(
+        'div.wf-top',
+        this.overview.el,
+        h(
+          'div.wf-top-corner',
+          h('button.icon-btn.sm', { type: 'button', 'aria-label': 'Zoom Out Full (All Axes)', title: 'Zoom Out Full (All Axes)', onclick: () => app.commands.run('view.zoomFull') }, icon('zoom-full', 14)),
+        ),
+      ),
       h('div.wf-ruler-row', this.ruler.el, h('div.wf-ruler-corner', this.snapBtn, this.markerBtn)),
       h('div.wf-main', this.surface, this.amp),
       this.status,
@@ -164,12 +201,26 @@ export class WaveformView {
   }
 
   #buildHud() {
-    const valueEl = h('span.hud-value', '+0 dB');
-    const knobEl = h('button.hud-knob', { type: 'button', role: 'slider', 'aria-label': 'Adjust amplitude', 'aria-valuemin': '-60', 'aria-valuemax': '30', 'aria-valuenow': '0' }, icon('gauge', 16));
-    const hud = h('div.hud', { title: 'Adjust Amplitude: drag the knob, release to apply' }, h('span.hud-icon', icon('volume-2', 14)), knobEl, valueEl);
+    const valueEl = h('span.hud-value', '+0');
+    const knobEl = h('button.hud-knob', { type: 'button', role: 'slider', 'aria-label': 'Adjust amplitude', title: 'Adjust Amplitude: drag the knob, release to apply', 'aria-valuemin': '-60', 'aria-valuemax': '30', 'aria-valuenow': '0' }, icon('hud-knob', 18));
+    const grip = h('span.hud-grip', { title: 'Drag to move the HUD. Double-click to put it back.', 'aria-hidden': 'true' });
+    const pinBtn = h(
+      'button.icon-btn.hud-pin',
+      { type: 'button', 'aria-label': 'Pin HUD', title: 'Keep the HUD visible when the pointer leaves the editor', onclick: () => this.app.prefs.toggle('hudPinned') },
+      icon('pin', 12),
+    );
+    const hud = h('div.hud', grip, h('span.hud-icon', icon('hud-level', 14)), knobEl, valueEl, h('span.hud-unit', 'dB'), h('span.hud-sep'), pinBtn);
+    const syncPin = () => {
+      const on = Boolean(this.app.prefs.get('hudPinned'));
+      pinBtn.setAttribute('aria-pressed', String(on));
+      hud.classList.toggle('pinned', on);
+    };
+    syncPin();
+    this.syncHudPin = syncPin;
+    this.#bindHudGrip(hud, grip);
     const setGain = (db) => {
       this.hudGain = Math.max(-60, Math.min(30, Math.round(db * 10) / 10));
-      valueEl.textContent = formatDb(this.hudGain);
+      valueEl.textContent = formatDb(this.hudGain).replace(/ dB$/, '');
       knobEl.setAttribute('aria-valuenow', String(this.hudGain));
       knobEl.setAttribute('aria-valuetext', formatDb(this.hudGain));
       this.app.previewFx = this.hudGain ? [{ key: 'hud', kind: 1, params: [this.hudGain, this.hudGain, 1], enabled: true, mix: 1 }] : null;
@@ -219,6 +270,44 @@ export class WaveformView {
     return hud;
   }
 
+  /** Dragging the grip moves the HUD within the editor (kept per view); double-click resets it. */
+  #bindHudGrip(hud, grip) {
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      grip.setPointerCapture(e.pointerId);
+      const box = this.surface.getBoundingClientRect();
+      const r = hud.getBoundingClientRect();
+      const dx = e.clientX - r.left;
+      const dy = e.clientY - r.top;
+      const move = (ev) => {
+        this.hudPos = clampHud(ev.clientX - box.left - dx, ev.clientY - box.top - dy, r.width, r.height, box.width, box.height);
+        this.#placeHud();
+      };
+      const up = () => {
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', up);
+        grip.removeEventListener('pointercancel', up);
+      };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+      grip.addEventListener('pointercancel', up);
+    });
+    grip.addEventListener('dblclick', () => {
+      this.hudPos = null;
+      this.#placeHud();
+    });
+  }
+
+  #placeHud() {
+    const p = this.hudPos;
+    if (p) {
+      const c = clampHud(p.x, p.y, this.hud.offsetWidth, this.hud.offsetHeight, this.width, this.height);
+      Object.assign(this.hud.style, { left: `${c.x}px`, top: `${c.y}px`, transform: 'none' });
+    } else Object.assign(this.hud.style, { left: '', top: '', transform: '' });
+  }
+
   // ----------------------------------------------------------------- layout
 
   layout() {
@@ -252,6 +341,7 @@ export class WaveformView {
       y += hh;
     }
     this.#buildChannelButtons();
+    this.#placeHud();
     this.invalidate();
   }
 
@@ -286,7 +376,7 @@ export class WaveformView {
       b.setAttribute('aria-pressed', String(on));
       b.title = on ? `Channel ${name} enabled for editing. Click to disable.` : `Channel ${name} disabled. Click to enable.`;
       const stack = this.app.prefs.get('waveLayered') && lanes.length > 1 ? (i - (lanes.length - 1) / 2) * 22 : 0;
-      b.style.top = `${(lane.top + lane.bottom) / 2 - 9 + stack}px`;
+      b.style.top = `${(lane.top + lane.bottom) / 2 - 8 + stack}px`;
       b.style.color = this.app.prefs.get('waveUniqueColors') && on ? channelColor(i) : '';
     });
   }
@@ -467,6 +557,9 @@ export class WaveformView {
         if (t.y2 !== null) ctx.fillRect(0, Math.round(t.y2), W, 1);
       }
     }
+    // Time grid: a line under each labelled ruler tick.
+    ctx.fillStyle = cssVar('--wave-grid');
+    for (const x of this.#gridXs()) ctx.fillRect(x, 0, 1, this.waveHeight ?? H);
     if (lanes.length > 1) {
       ctx.fillStyle = cssVar('--divider');
       for (let i = 1; i < lanes.length; i++) ctx.fillRect(0, Math.round(lanes[i].top) - 1, W, 1);
@@ -488,7 +581,7 @@ export class WaveformView {
         }
       }
       if (x < 0 || x > W) continue;
-      ctx.strokeStyle = cssVar('--marker');
+      ctx.strokeStyle = markerColor(m.type);
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(x, 0);
@@ -545,6 +638,22 @@ export class WaveformView {
     this.hud.style.display = hudOn ? '' : 'none';
   }
 
+  /** x positions (CSS px) of the labelled time ruler ticks. */
+  #gridXs() {
+    const v = this.doc.view;
+    const rate = this.doc.sampleRate;
+    const W = this.width;
+    if (this.app.prefs.get('timeFormat') === 'bars') {
+      const step = musicalStep(this.fpp, rate, this.app.timeOptions(), 70);
+      const out = [];
+      for (let f = Math.ceil(v.start / step - 1e-9) * step; f <= v.end && out.length < 1000; f += step) out.push(Math.round(this.xOf(f)));
+      return out;
+    }
+    const t0 = v.start / rate;
+    const t1 = v.end / rate;
+    return rulerTicks(t0, t1, W).ticks.map((sec) => Math.round(((sec - t0) / (t1 - t0)) * W));
+  }
+
   #drawAmp() {
     const ctx = this.ampCanvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
@@ -556,8 +665,13 @@ export class WaveformView {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = cssVar('--text-dim');
     const amp = this.doc.view.amp;
+    const faint = cssVar('--text-faint');
     for (const lane of this.lanes()) {
       const mid = (lane.top + lane.bottom) / 2;
+      // Minor ticks every dB while they stay a few pixels apart.
+      ctx.fillStyle = faint;
+      for (const y of dbMinorTicks(lane, amp)) ctx.fillRect(0, Math.round(y), 2, 1);
+      ctx.fillStyle = cssVar('--text-dim');
       for (const { db, y, y2 } of dbTicks(lane, amp)) {
         const text = db === 0 ? '0' : String(db);
         ctx.fillRect(0, Math.round(y), 4, 1);
@@ -568,17 +682,19 @@ export class WaveformView {
         }
       }
       ctx.fillText('-\u221e', 6, mid);
-      ctx.fillText('dB', 6, lane.top + 7);
+      ctx.fillText('dB', 6, lane.top + 6);
     }
   }
 
+  /** Overview peaks: one strip per channel, like the lanes (merged when layered). */
   #overviewPeaks(cols, total) {
     const ch = this.doc.state.channels;
     if (!ch.length || !this.doc.length) return null;
     const fpp = total / cols;
-    const out = channelColumns(ch[0], 0, fpp, cols);
-    for (let i = 1; i < ch.length; i++) {
-      const o = channelColumns(ch[i], 0, fpp, cols);
+    const strips = ch.map((c) => channelColumns(c, 0, fpp, cols));
+    if (strips.length === 1 || !this.app.prefs.get('waveLayered')) return strips.length === 1 ? strips[0] : strips;
+    const out = strips[0];
+    for (const o of strips.slice(1)) {
       for (let c = 0; c < cols; c++) {
         if (o[2 * c] < out[2 * c]) out[2 * c] = o[2 * c];
         if (o[2 * c + 1] > out[2 * c + 1]) out[2 * c + 1] = o[2 * c + 1];

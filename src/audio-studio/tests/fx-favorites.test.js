@@ -76,10 +76,37 @@ describe('applying favorites', () => {
   });
 });
 
+// Starting a recording first explains it; OK goes ahead.
+async function startRecording(app, { never = false } = {}) {
+  const run = app.commands.run('fav.recordStart');
+  await tick();
+  const dialog = [...document.querySelectorAll('.dialog')].pop();
+  if (never) dialog.querySelector('input[type="checkbox"]').checked = true;
+  dialog.querySelector('.btn.primary').click();
+  await run;
+}
+
 describe('recording favorites', () => {
+  it('explains recording once the notice is turned off, until warnings are reset', async () => {
+    const { app } = setup();
+    await startRecording(app, { never: true });
+    expect(app.favorites.recording).toBe(true);
+    await app.commands.run('fav.recordStop');
+    await app.commands.run('fav.recordStart');
+    expect(app.favorites.recording).toBe(true);
+    expect(document.querySelector('.dialog')).toBeNull();
+    await app.commands.run('fav.recordStop');
+    app.prefs.reset(['dismissedNotices']);
+    const run = app.commands.run('fav.recordStart');
+    await tick();
+    expect(document.querySelector('.dialog').textContent).toContain("Don't show this again");
+    [...document.querySelectorAll('.dialog .btn')].find((b) => b.textContent === 'Cancel').click();
+    await run;
+    expect(app.favorites.recording).toBe(false);
+  });
   it('captures the next applied effect with its values', async () => {
     const { app } = setup();
-    await app.commands.run('fav.recordStart');
+    await startRecording(app);
     expect(app.favorites.recording).toBe(true);
     expect(app.commands.isEnabled('fav.recordStart')).toBe(false);
     await app.runEffect('favFx', { values: { gain: 1.5 } });
@@ -96,7 +123,7 @@ describe('recording favorites', () => {
   });
   it('stops recording without saving', async () => {
     const { app } = setup();
-    await app.commands.run('fav.recordStart');
+    await startRecording(app);
     await app.commands.run('fav.recordStop');
     expect(app.favorites.recording).toBe(false);
   });

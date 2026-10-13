@@ -23,15 +23,26 @@ export function feedbackTail(delay, g, rate) {
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+/** Most negative Delay time (fx/delay/simple.rs MAX_NEG_MS). */
+const MAX_NEG_MS = 500;
+
+/** Rust util::ms_frames in f32 arithmetic. */
+function msFrames(msValue, rate) {
+  return Math.round(Math.fround(Math.fround(Math.fround(Math.max(0, msValue)) * Math.fround(0.001)) * Math.fround(rate)));
+}
+
 registerEffect({
   id: 'delay',
   name: 'Delay',
   group: GROUP,
   kind: 60,
+  about: 'Delays each channel on its own. A negative time moves that channel earlier than the other; the mix blends the delayed copy with the original.',
   params: [
-    ...section('Left Channel', 'left', [ms('delay', 'Delay Time', 0, 2000, 250, { scale: 'linear' }), pct('mix', 'Mix', 50), bool('invert', 'Invert')]),
-    ...section('Right Channel', 'right', [ms('delay', 'Delay Time', 0, 2000, 250, { scale: 'linear' }), pct('mix', 'Mix', 50), bool('invert', 'Invert')]),
+    ...section('Left Channel', 'left', [ms('delay', 'Delay Time', -MAX_NEG_MS, 2000, 250, { scale: 'linear', step: 0.1 }), pct('mix', 'Mix', 50, { ends: ['Dry', 'Wet'] }), bool('invert', 'Invert')]),
+    ...section('Right Channel', 'right', [ms('delay', 'Delay Time', -MAX_NEG_MS, 2000, 250, { scale: 'linear', step: 0.1 }), pct('mix', 'Mix', 50, { ends: ['Dry', 'Wet'] }), bool('invert', 'Invert')]),
   ],
+  // Negative times hold every path back by the earliest one (fx/delay/simple.rs).
+  latency: (v, rate) => msFrames(-Math.min(clamp(v.leftDelay, -MAX_NEG_MS, 2000), clamp(v.rightDelay, -MAX_NEG_MS, 2000), 0), rate),
   presets: [
     preset('Default', { leftDelay: 250, leftMix: 50, leftInvert: false, rightDelay: 250, rightMix: 50, rightInvert: false }),
     preset('Quick Slapback', { leftDelay: 90, leftMix: 35, leftInvert: false, rightDelay: 105, rightMix: 35, rightInvert: false }),
@@ -39,6 +50,7 @@ registerEffect({
     preset('Haas Widener', { leftDelay: 0, leftMix: 0, leftInvert: false, rightDelay: 18, rightMix: 100, rightInvert: false }),
     preset('Long Throw', { leftDelay: 500, leftMix: 40, leftInvert: false, rightDelay: 750, rightMix: 40, rightInvert: false }),
     preset('Flip Right Polarity', { leftDelay: 0, leftMix: 0, leftInvert: false, rightDelay: 0, rightMix: 100, rightInvert: true }),
+    preset('Left Leads by 15 ms', { leftDelay: -15, leftMix: 100, leftInvert: false, rightDelay: 0, rightMix: 100, rightInvert: false }),
   ],
   tail: (v, rate) => Math.round((Math.max(clamp(v.leftDelay, 0, 2000), clamp(v.rightDelay, 0, 2000)) / 1000) * rate),
 });
@@ -54,12 +66,15 @@ registerEffect({
   kind: 61,
   params: [
     ...section('Left Channel', 'left', [ms('delay', 'Delay Time', 1, 5000, 300), pct('feedback', 'Feedback', 40), pct('level', 'Echo Level', 60)]),
-    ...section('Right Channel', 'right', [ms('delay', 'Delay Time', 1, 5000, 300), pct('feedback', 'Feedback', 40), pct('level', 'Echo Level', 60)]),
+    // Locked, the right channel follows the left settings.
+    ...section('Right Channel', 'right', [ms('delay', 'Delay Time', 1, 5000, 300), pct('feedback', 'Feedback', 40), pct('level', 'Echo Level', 60)]).map((p) => ({ ...p, enabledIf: (v) => !v.lock })),
     bool('lock', 'Lock Left and Right', true),
     bool('bounce', 'Echo Bounce', false),
-    ...ECHO_BANDS.map((f, i) => db(`eq${i}`, bandLabel(f), -24, 12, 0, { section: 'Successive Echo Equalizer' })),
+    ...ECHO_BANDS.map((f, i) => db(`eq${i}`, bandLabel(f), -24, 12, 0, { section: 'Successive Echo Equalizer', short: bandLabel(f).replace(' Hz', '').replace(' kHz', 'k') })),
     pct('dry', 'Dry Level', 100),
   ],
+  about: 'Repeats the sound with each echo quieter than the last. The equalizer shapes every repeat again, so echoes darken or thin out as they fade; Echo Bounce alternates them between the channels.',
+  layout: { wide: true, columns: [['Left Channel', 'Right Channel'], ['Successive Echo Equalizer']], vertical: ['Successive Echo Equalizer'] },
   presets: [
     preset('Default', { leftDelay: 300, leftFeedback: 40, leftLevel: 60, lock: true, bounce: false, dry: 100, ...eqValues([0, 0, 0, 0, 0, 0, 0, 0]) }),
     preset('Canyon Call', { leftDelay: 700, leftFeedback: 55, leftLevel: 50, lock: true, bounce: true, dry: 100, ...eqValues([-2, 0, 0, 0, -1, -3, -6, -9]) }),
@@ -85,6 +100,7 @@ registerEffect({
   name: 'Analog Delay',
   group: GROUP,
   kind: 62,
+  about: 'A delay with the character of tape and bucket-brigade units: repeats lose highs and pick up grit (Trash) as they feed back, and Spread pulls the channels apart in time.',
   params: [
     choice('mode', 'Mode', ['Tape', 'Tape and Tube', 'Analog'], 0),
     pct('dry', 'Dry Out', 80, { max: 200 }),

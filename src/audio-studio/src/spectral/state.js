@@ -45,6 +45,20 @@ export function pitchOn(app) {
   return app.prefs.get('spectralPitch') === true;
 }
 
+/**
+ * Pitch contour analysis from Preferences > Spectral Displays: window size
+ * (0 picks one by sample rate) and the pitch range searched, in Hz.
+ */
+export function pitchSettings(prefs, rate) {
+  const w = Number(prefs.get('pitchWindow'));
+  const n = [1024, 2048, 4096, 8192].includes(w) ? w : rate > 64000 ? 4096 : 2048;
+  const lo = Number(prefs.get('pitchMinHz'));
+  const hi = Number(prefs.get('pitchMaxHz'));
+  const fmin = Math.max(20, Math.min(1000, Number.isFinite(lo) ? lo : 50));
+  const fmax = Math.max(fmin * 2, Math.min(rate / 2, Number.isFinite(hi) ? hi : 2000));
+  return { n, fmin, fmax };
+}
+
 export function logScale(app) {
   return app.prefs.get('spectralLog') !== false;
 }

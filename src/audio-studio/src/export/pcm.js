@@ -12,7 +12,7 @@ import { ByteSink, ascii, concatBytes } from './sink.js';
 import { Quantizer } from '../audio/quantize.js';
 import { buildCue } from '../audio/wav.js';
 import { writeExtended } from '../audio/aiff.js';
-import { riffInfoChunk, aiffMetaChunks } from '../audio/meta.js';
+import { riffInfoChunk, bextChunk, cartChunk, aiffMetaChunks, concatChunks } from '../audio/meta.js';
 
 const SUBFORMAT_TAIL = [0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
 
@@ -64,7 +64,8 @@ export class WavWriter {
     const bytes = bitDepth / 8;
     this.dataSize = frames * channels * bytes;
     this.sink = new ByteSink();
-    const info = riffInfoChunk(meta);
+    // LIST/INFO, bext and cart chunks, all before the audio data.
+    const info = concatChunks([bextChunk(meta), riffInfoChunk(meta), cartChunk(meta)]);
     const cue = markers.length ? new Uint8Array(buildCue(markers.map((m) => ({ ...m, start: Math.min(m.start, frames), duration: Math.max(0, Math.min(m.duration || 0, frames - m.start)) })))) : null;
     this.tail = cue;
     const extensible = channels > 2;

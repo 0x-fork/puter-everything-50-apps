@@ -4,7 +4,10 @@
 //!
 //! Params: 0 target level dB (RMS), 1 leveling amount %, 2 noise gate on,
 //!   3 noise gate threshold dB, 4 attack ms (gain falling), 5 release ms
-//!   (gain rising), 6 maximum boost dB, 7 maximum cut dB.
+//!   (gain rising), 6 maximum boost dB, 7 maximum cut dB, 8 target dynamic
+//!   range dB (passages further than this below the target are background:
+//!   their gain is held instead of raised), 9 boost low signals (level those
+//!   passages too).
 
 use super::common::{db_lin, frame_peak, lin_db, Detector, GainSmoother};
 use crate::fx::util::{expand_db, ms_coef};
@@ -22,6 +25,8 @@ pub struct Leveler {
     gate_thr: f32,
     max_boost: f32,
     max_cut: f32,
+    range: f32,
+    boost_low: bool,
     det: Detector,
     agc: GainSmoother,
     gate: GainSmoother,
@@ -39,6 +44,8 @@ impl Leveler {
             gate_thr: -50.0,
             max_boost: 15.0,
             max_cut: 15.0,
+            range: 45.0,
+            boost_low: false,
             det: Detector::default(),
             agc: GainSmoother::default(),
             gate: GainSmoother::default(),
@@ -63,6 +70,8 @@ impl Effect for Leveler {
             5 => self.agc.rel = ms_coef(v.max(1.0), self.rate),
             6 => self.max_boost = v.clamp(0.0, 48.0),
             7 => self.max_cut = v.clamp(0.0, 48.0),
+            8 => self.range = v.clamp(1.0, 120.0),
+            9 => self.boost_low = v >= 0.5,
             _ => {}
         }
     }
@@ -70,7 +79,8 @@ impl Effect for Leveler {
         for i in 0..frames {
             let p = frame_peak(buf, channels, frames, i);
             let level = lin_db(self.det.next(p) + 1e-10);
-            let quiet = self.gate_on && level < self.gate_thr;
+            let background = !self.boost_low && level < self.target - self.range;
+            let quiet = (self.gate_on && level < self.gate_thr) || background;
             let g = if quiet {
                 // Hold the speech gain through pauses.
                 self.agc.db
@@ -133,6 +143,15 @@ mod tests {
     fn gate_does_not_raise_noise() {
         let gated = out_level(0.0005, &[(0, -20.0), (1, 100.0), (3, -50.0)]);
         assert!(gated < -70.0, "{gated}");
+    }
+
+    #[test]
+    fn dynamic_range_holds_background_unless_boosting_low_signals() {
+        // -57 dB RMS speech-like tone, 37 dB below the target: background with a 20 dB range.
+        let held = out_level(0.002, &[(0, -20.0), (1, 100.0), (3, -90.0), (5, 500.0), (6, 40.0), (8, 20.0)]);
+        assert!((held + 57.0).abs() < 1.0, "{held}");
+        let boosted = out_level(0.002, &[(0, -20.0), (1, 100.0), (3, -90.0), (5, 500.0), (6, 40.0), (8, 20.0), (9, 1.0)]);
+        assert!((boosted + 20.0).abs() < 1.0, "{boosted}");
     }
 
     #[test]

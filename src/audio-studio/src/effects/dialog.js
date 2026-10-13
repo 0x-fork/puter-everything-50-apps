@@ -7,107 +7,30 @@
 // mode 'edit' (rack slots): changes go live through onChange; only Close.
 
 import { h, announce } from '../lib/dom.js';
-import { icon } from '../ui/icons.js';
+import { icon, registerIcons } from '../ui/icons.js';
 import { openDialog } from '../ui/dialog.js';
-import { hotNumber, select } from '../ui/controls.js';
 import { slotSpec } from './registry.js';
-import { normalizeValues, paramType, toPosition, fromPosition, formatValue, parseValue, setLinked, linkGroups, coerce } from './params.js';
+import { normalizeValues, paramType, setLinked, linkGroups, coerce } from './params.js';
+import { paramControls as buildControls } from './param-ui.js';
+import { channelNames, defaultRoute, routeSummary, rememberRoute, recallRoute, sameRoute } from './routing.js';
 import { allPresets, savePreset, deletePreset, matchPreset, lastValues } from './presets.js';
-import { autoEditor, envelopeControl, curveControl } from './editors.js';
+import { editorFor } from './displays.js';
 import { isRealtime } from './apply.js';
 
 const CUSTOM = '\u0000custom';
 
+registerIcons({
+  // Two inputs crossing to two outputs: the channel map.
+  'channel-map': [['path', { d: 'M3 6h4c3 0 4 3 5 6s2 6 5 6h4' }], ['path', { d: 'M3 18h4c3 0 4-3 5-6s2-6 5-6h4' }], ['circle', { cx: '3', cy: '6', r: '1' }], ['circle', { cx: '3', cy: '18', r: '1' }]],
+});
+
 /**
- * Generated controls for a definition. Returns { el, refresh(values) }.
- * onSet(id, value) is called for user changes.
+ * Generated controls for a definition (param-ui.js): tick-scaled sliders,
+ * radio and dropdown choices, checkboxes and data editors, framed by section.
+ * Returns { el, refresh(values, from) }; onSet(id, value) reports user changes.
  */
-export function paramControls(def, getValues, onSet, { doc = null, range = null, smooth } = {}) {
-  const grid = h('div.fx-params');
-  const refreshers = [];
-  let section = null;
-  for (const p of def.params) {
-    if (p.hidden) continue;
-    const type = paramType(p);
-    const label = p.label || p.id;
-    if ((p.section || null) !== section) {
-      section = p.section || null;
-      if (section) grid.append(h('div.fx-section', { role: 'heading', 'aria-level': '3' }, section));
-    }
-    if (type === 'bool') {
-      const box = h('input', { type: 'checkbox', checked: Boolean(getValues()[p.id]), onchange: () => onSet(p.id, box.checked) });
-      grid.append(h('label.check.fx-bool', box, label));
-      refreshers.push((v) => (box.checked = Boolean(v[p.id])));
-    } else if (type === 'choice') {
-      const sel = select({ value: getValues()[p.id], options: p.options || [], label, onChange: (val) => onSet(p.id, coerce(p, val)) });
-      grid.append(h('div.fx-row', h('label.fx-label', label), h('div.fx-choice', sel)));
-      refreshers.push((v) => (sel.value = String(v[p.id])));
-    } else if (type === 'curve') {
-      const env = curveControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points) });
-      grid.append(h('div.fx-envelope-row', h('div.fx-label', label), env));
-      refreshers.push((v, from) => {
-        if (from !== p.id) env.setPoints(v[p.id]);
-        else env.redraw();
-      });
-    } else if (type === 'envelope') {
-      const env = envelopeControl({ param: p, value: getValues()[p.id], onChange: (points) => onSet(p.id, points), doc, range, smooth: () => Boolean(smooth?.(getValues())) });
-      grid.append(h('div.fx-envelope-row', h('div.fx-label', label), env));
-      refreshers.push((v, from) => {
-        if (from !== p.id) env.setPoints(v[p.id]);
-        else env.redraw();
-      });
-    } else {
-      const log = p.scale === 'log' && p.min > 0;
-      const min = p.min ?? 0;
-      const max = p.max ?? 1;
-      const step = p.step || (max - min) / 1000;
-      const slider = h('input.slider.fx-slider', {
-        type: 'range',
-        min: log ? 0 : min,
-        max: log ? 1000 : max,
-        step: log ? 1 : step,
-        'aria-label': label,
-        oninput: () => onSet(p.id, log ? fromPosition(p, Number(slider.value) / 1000) : Number(slider.value)),
-      });
-      const hot = log
-        ? hotNumber({
-            value: toPosition(p, getValues()[p.id]),
-            min: 0,
-            max: 1,
-            step: 0.0025,
-            label,
-            pixelsPerStep: 0.75,
-            format: (x) => formatValue(p, fromPosition(p, x)),
-            parse: (s) => toPosition(p, parseValue(p, s)),
-            onInput: (x) => onSet(p.id, fromPosition(p, x)),
-            onChange: (x) => onSet(p.id, fromPosition(p, x)),
-            defaultValue: toPosition(p, p.default),
-          })
-        : hotNumber({
-            value: getValues()[p.id],
-            min,
-            max,
-            step,
-            label,
-            pixelsPerStep: Math.max(0.01, (240 * step) / (max - min || 1)),
-            format: (x) => formatValue(p, x),
-            parse: (s) => parseValue(p, s),
-            onInput: (x) => onSet(p.id, x),
-            onChange: (x) => onSet(p.id, x),
-            defaultValue: p.default,
-          });
-      const show = (v) => {
-        const val = v[p.id];
-        slider.value = String(log ? Math.round(toPosition(p, val) * 1000) : val);
-        slider.setAttribute('aria-valuetext', formatValue(p, val));
-        hot.setValue(log ? toPosition(p, val) : val);
-      };
-      show(getValues());
-      grid.append(h('div.fx-row', h('label.fx-label', { onclick: () => hot.focus() }, label), slider, h('div.fx-value', hot)));
-      refreshers.push(show);
-    }
-  }
-  return { el: grid, refresh: (values, from) => refreshers.forEach((f) => f(values, from)) };
+export function paramControls(def, getValues, onSet, opts = {}) {
+  return buildControls(def, getValues, onSet, opts);
 }
 
 /**
@@ -189,11 +112,16 @@ function inputPeak(doc, at, frames = 2048) {
  * Opens the effect dialog. Options:
  *  mode 'apply' | 'edit', values, title, applyLabel, enabled (power state),
  *  onChange(values), onPower(enabled), doc, slotId (the rack or track slot
- *  being edited, so editors can show that slot's live readouts)
+ *  being edited, so editors can show that slot's live readouts), routing
+ *  (an object that receives the chosen channel `route` on Apply)
  */
-export function openEffectDialog(app, def, { mode = 'apply', values: initial, title, applyLabel = 'Apply', enabled = true, onChange, onPower, doc = app.active?.kind === 'audio' ? app.active : null, slotId = null } = {}) {
+export function openEffectDialog(app, def, { mode = 'apply', values: initial, title, applyLabel = 'Apply', enabled = true, onChange, onPower, doc = app.active?.kind === 'audio' ? app.active : null, slotId = null, routing = null } = {}) {
   let values = normalizeValues(def, initial || lastValues(app.prefs, def));
   let power = enabled;
+  const channelCount = doc ? doc.state.channels.length : 2;
+  // The channel map applies to effects run on a stereo file from the Effects menu.
+  const routable = mode === 'apply' && Boolean(routing) && channelCount === 2;
+  let route = routable ? recallRoute(def.id) || defaultRoute(doc.channelMask) : null;
   let previewing = false;
   const realtime = isRealtime(def);
   const groups = linkGroups(def);
@@ -302,18 +230,105 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
         });
       } }, icon('star', 15))
     : null;
-  const presetBar = h('div.fx-presetbar', h('span.fx-label', 'Presets:'), presetSel, saveBtn, delBtn, favBtn);
+  // Channel map: which channels feed the effect and which receive its output.
+  const mapPanel = h('div.fx-popover.fx-chmap', { hidden: true, role: 'group', 'aria-label': 'Channel map' });
+  const summary = h('div.fx-route-summary');
+  const showRoute = () => (summary.textContent = routeSummary(route, channelCount));
+  const mapBtn = h('button.icon-btn.fx-map-btn', { type: 'button', 'aria-label': 'Channel map', 'aria-expanded': 'false', title: routable ? 'Channel map: choose the channels the effect reads and writes' : 'Channel routing is available for stereo files from the Effects menu', disabled: !routable, onclick: () => toggle(mapPanel, mapBtn, buildMap) }, icon('channel-map', 16));
+  function buildMap() {
+    const names = channelNames(2);
+    const full = ['Left', 'Right'];
+    const pick = (value, options, onPick, label) => {
+      const sel = h('select.select', { 'aria-label': label, onchange: () => onPick(Number(sel.value)) }, options.map(([v, text]) => h('option', { value: String(v) }, text)));
+      sel.value = String(value);
+      return sel;
+    };
+    const set = (next) => {
+      route = next;
+      showRoute();
+      if (previewing) pushPreview();
+    };
+    const inputs = [0, 1].map((c) => h('label.fx-chmap-cell', h('span.faint', full[c]), pick(route.in[c], [[0, `File ${names[0]}`], [1, `File ${names[1]}`], [-1, 'Silence']], (v) => set({ ...route, in: route.in.map((x, i) => (i === c ? v : x)) }), `Effect ${full[c].toLowerCase()} input`)));
+    const outputs = [0, 1].map((c) => h('label.fx-chmap-cell', h('span.faint', full[c]), pick(route.out[c], [[0, `Effect ${names[0]}`], [1, `Effect ${names[1]}`], [-1, 'Unprocessed']], (v) => set({ ...route, out: route.out.map((x, i) => (i === c ? v : x)) }), `File ${full[c].toLowerCase()} channel output`)));
+    mapPanel.replaceChildren(
+      h('div.fx-chmap-row', h('span.fx-label', 'Effect inputs:'), inputs),
+      h('div.fx-chmap-row', h('span.fx-label', 'File channels get:'), outputs),
+      h('div.fx-chmap-row', h('button.btn', { type: 'button', onclick: () => {
+        set({ in: [0, 1], out: [0, 1] });
+        buildMap();
+      } }, 'Reset')),
+    );
+  }
+
+  // Info: what the effect does and how the controls work.
+  const infoPanel = h('div.fx-popover.fx-info', { hidden: true, role: 'note' });
+  const infoBtn = h('button.icon-btn.fx-info-btn', { type: 'button', 'aria-label': 'About this effect', 'aria-expanded': 'false', title: 'About this effect', onclick: () => toggle(infoPanel, infoBtn, buildInfo) }, icon('info', 16));
+  function buildInfo() {
+    const facts = [];
+    if (def.about) facts.push(h('p', def.about));
+    facts.push(h('p.faint', realtime ? 'Plays live while you preview, and works in the Effects Rack and on tracks.' : 'Processes the selection when you apply it; it cannot be previewed live.'));
+    facts.push(
+      h(
+        'ul.fx-tips',
+        h('li', 'Drag a blue value sideways to change it, or click it to type a value with units (2k, 150 ms).'),
+        h('li', 'Arrow keys step a focused slider or value; Shift steps further.'),
+        h('li', 'Double-click a slider or value to return it to its default.'),
+      ),
+    );
+    infoPanel.replaceChildren(...facts);
+  }
+  function toggle(panel, btn, build) {
+    const open = panel.hidden;
+    for (const [pnl, b] of [[mapPanel, mapBtn], [infoPanel, infoBtn]]) {
+      pnl.hidden = true;
+      b.setAttribute('aria-expanded', 'false');
+    }
+    if (open) {
+      build();
+      panel.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+    }
+  }
+
+  const presetBar = h('div.fx-presetbar', h('span.fx-label', 'Presets:'), presetSel, saveBtn, delBtn, h('span.fx-bar-sep', { 'aria-hidden': 'true' }), favBtn, h('span.spacer'), mapBtn, infoBtn);
   syncPresetSelect();
 
   // ------------------------------------------------------------ body
-  const editor = autoEditor(def);
+  const editor = editorFor(def);
   const editorEl = editor ? editor(ctx) : null;
   const smoothParam = def.params.find((p) => paramType(p) === 'bool' && /spline|smooth|curve/i.test(p.id));
-  // Params a custom editor lays out itself stay out of the generated grid.
+  const set = (id, v) => setValue(id, v);
+  // Params a custom editor lays out itself (views/*.js `hides`) stay out of the generated grid.
   const hides = editor?.hides;
   const gridDef = hides ? { ...def, params: def.params.map((p) => (hides === true || hides.includes(p.id) ? { ...p, hidden: true } : p)) } : def;
-  controls = paramControls(gridDef, () => values, (id, v) => setValue(id, v), { doc, range, smooth: (v) => smoothParam && v[smoothParam.id] });
-  const body = h('div.fx-dialog-body', presetBar, nameBar, editorEl ? h('div.fx-editor', editorEl) : null, controls.el);
+  const ctlOpts = { doc, range, smooth: (v) => smoothParam && v[smoothParam.id], onReadout: def.readout ? ctx.onReadout : null };
+  const tabs = def.layout?.tabs || null;
+  let main;
+  if (tabs) {
+    // Tabbed pages: each holds its sections (and the graphical editor when `editor` is set).
+    const parts = [];
+    const tabBtns = [];
+    const pages = tabs.map((t, i) => {
+      const c = paramControls(def, () => values, set, { ...ctlOpts, sections: t.sections || [] });
+      parts.push(c);
+      const page = h('div.fx-tabpage', { role: 'tabpanel', hidden: i > 0, 'aria-label': t.label }, t.editor && editorEl ? h('div.fx-editor', editorEl) : null, c.el);
+      tabBtns.push(h('button.fx-tab', { type: 'button', role: 'tab', 'aria-selected': String(i === 0), onclick: () => {
+        pages.forEach((pg, k) => (pg.hidden = k !== i));
+        tabBtns.forEach((b, k) => b.setAttribute('aria-selected', String(k === i)));
+      } }, t.label));
+      return page;
+    });
+    const inTabs = new Set(tabs.flatMap((t) => t.sections || []));
+    const restSections = [...new Set(def.params.filter((p) => !p.hidden).map((p) => p.section || null))].filter((n) => !inTabs.has(n));
+    const rest = restSections.length ? paramControls(def, () => values, set, { ...ctlOpts, sections: restSections }) : null;
+    if (rest) parts.push(rest);
+    controls = { refresh: (v, from) => parts.forEach((c) => c.refresh(v, from)) };
+    main = h('div.fx-tabs', h('div.fx-tabbar', { role: 'tablist' }, tabBtns), pages, rest?.el);
+  } else {
+    controls = paramControls(gridDef, () => values, set, ctlOpts);
+    main = [editorEl ? h('div.fx-editor', editorEl) : null, controls.el];
+  }
+  const body = h('div.fx-dialog-body', presetBar, nameBar, mapPanel, infoPanel, main);
 
   // ---------------------------------------------------------- footer
   const powerBtn = h('button.icon-btn.fx-power', { type: 'button', 'aria-pressed': String(power), 'aria-label': 'Effect power', title: 'Turn the effect on or off (bypass) while previewing', onclick: () => {
@@ -334,11 +349,12 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
     }
   } }, icon('transport-loop', 15));
   const meters = meterStrip();
-  const footerStart = h('div.fx-footer-tools', powerBtn, playBtn, loopBtn, meters.el);
+  showRoute();
+  const footerStart = h('div.fx-footer', summary, h('div.fx-footer-tools', powerBtn, playBtn, loopBtn, meters.el));
 
   function pushPreview() {
     if (mode !== 'apply') return;
-    app.previewFx = previewing && realtime ? [slotSpec(def, values, { key: `preview:${def.id}`, enabled: power })] : null;
+    app.previewFx = previewing && realtime ? [slotSpec(def, values, { key: `preview:${def.id}`, enabled: power, doc, route })] : null;
     app.syncGraph();
   }
   function startPlayback() {
@@ -401,11 +417,11 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
   announceValues(values);
   return openDialog({
     title: title || `Effect - ${def.name}`,
-    className: editor?.dialogClass ? `fx-dialog.${editor.dialogClass}` : 'fx-dialog',
+    className: `fx-dialog${def.layout?.wide ? ' fx-wide' : ''}${editor?.dialogClass ? ` ${editor.dialogClass}` : ''}`,
     body,
     footerStart,
     buttons,
-    initialFocus: '.fx-params input, .fx-params .hot, .fx-params select',
+    initialFocus: '.fx-controls input, .fx-controls .hot, .fx-controls select, .fx-editor button',
   }).then((r) => {
     cancelAnimationFrame(previewTimer);
     announceValues(null);
@@ -414,6 +430,10 @@ export function openEffectDialog(app, def, { mode = 'apply', values: initial, ti
     if (mode === 'apply' && app.previewFx?.some((s) => s.key === `preview:${def.id}`)) {
       app.previewFx = null;
       app.syncGraph();
+    }
+    if (r === 'apply' && routable) {
+      routing.route = route;
+      rememberRoute(def.id, sameRoute(route, defaultRoute(doc.channelMask)) ? null : route);
     }
     return r === 'apply' ? values : null;
   });

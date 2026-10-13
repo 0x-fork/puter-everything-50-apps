@@ -6,7 +6,8 @@
 //
 // In a multitrack session the panel edits a chain of the session instead,
 // chosen with the target switch: the selected clip's effects (clip.fx) or
-// the selected track's (track.fx, with the track's effects power). Those
+// the selected track's (track.fx, with the track's effects power, input and
+// output gain and dry/wet mix). Rack presets load into either chain. Those
 // chains play live in the session mix; edits are undoable session steps.
 // Effects > Edit Clip / Track Effects in Effects Rack open it that way.
 
@@ -98,7 +99,8 @@ export function setRackTarget(app, kind) {
 /**
  * The session chain the panel edits, or { kind, doc, missing } when nothing
  * suitable is selected:
- *   { kind, doc, id, name, slots(), set(slots), power?(), setPower?(on) }
+ *   { kind, doc, id, name, slots(), set(slots), power?(), setPower?(on),
+ *     levels?(), setLevels?({ input, output, mix }) }
  */
 export function sessionRackTarget(doc, kind) {
   if (kind === 'clip') {
@@ -125,6 +127,16 @@ export function sessionRackTarget(doc, kind) {
     name: track.name || (track.type === 'master' ? 'Mix' : 'Track'),
     slots: () => findTrack(doc.state, id)?.fx || [],
     set: (slots) => doc.apply('Track Effects', updateTrack(doc.state, id, { fx: slots }), { coalesce: `fx:${id}` }),
+    // Rack input/output gain (dB) and dry/wet mix (0..1).
+    levels: () => {
+      const t = findTrack(doc.state, id);
+      return { input: t?.fxIn ?? 0, output: t?.fxOut ?? 0, mix: t?.fxMix ?? 1 };
+    },
+    setLevels: (patch) => {
+      const keys = { input: 'fxIn', output: 'fxOut', mix: 'fxMix' };
+      const out = Object.fromEntries(Object.entries(patch).map(([k, v]) => [keys[k], v]));
+      doc.apply('Track Effects', updateTrack(doc.state, id, out), { coalesce: `fx-levels:${id}` });
+    },
     power: () => findTrack(doc.state, id)?.fxPower !== false,
     setPower: (on) => {
       doc.endGesture();
@@ -166,6 +178,19 @@ export function effectsRackPanel(app) {
   /** The session chain being edited (null for audio files). */
   const chain = () => (sessionDoc() ? sessionRackTarget(sessionDoc(), rackTargetKind(app)) : null);
   const rack = () => rackFor(audioDoc());
+  /** What the presets, gains and mix show: the file's rack or the session chain as a rack. */
+  const current = () => {
+    const c = chain();
+    if (!c) return rack();
+    if (c.missing) return null;
+    return { ...createRack(), slots: fitSlots(c.slots()), ...(c.levels ? c.levels() : {}), power: c.power ? c.power() : true };
+  };
+  /** Sets rack gains or mix on the file's rack or the session track. */
+  const setLevel = (key, v) => {
+    const c = chain();
+    if (c) c.setLevels?.({ [key]: v });
+    else update((r) => ({ ...r, [key]: v }));
+  };
   const update = (fn, message) => {
     const doc = audioDoc();
     if (!doc) return;
@@ -176,11 +201,20 @@ export function effectsRackPanel(app) {
   // Toolbar: presets and master power.
   const presetSel = h('select.select.rack-preset', { 'aria-label': 'Rack presets', onchange: () => {
     const name = presetSel.value;
-    if (name === '(Default)') update((r) => ({ ...createRack(), power: r.power, process: r.process }), 'Rack cleared');
-    else {
-      const p = rackPresets(app.prefs).find((x) => x.name === name);
-      if (p) update((r) => rackFromSnapshot(p.rack, r), `Rack preset ${name}`);
-    }
+    const p = name === '(Default)' ? null : rackPresets(app.prefs).find((x) => x.name === name);
+    if (name !== '(Default)' && !p) return;
+    const c = chain();
+    if (c && !c.missing) {
+      // A session chain takes the preset's slots (and, on tracks, its gains and mix).
+      const r = p ? rackFromSnapshot(p.rack) : createRack();
+      sessionDoc().endGesture();
+      c.set(r.slots);
+      c.setLevels?.({ input: r.input, output: r.output, mix: r.mix });
+      sessionDoc().endGesture();
+      announce(p ? `Rack preset ${name}` : 'Effects cleared');
+      render();
+    } else if (!p) update((r) => ({ ...createRack(), power: r.power, process: r.process }), 'Rack cleared');
+    else update((r) => rackFromSnapshot(p.rack, r), `Rack preset ${name}`);
   } });
   const nameRow = h('div.fx-namebar.rack-namebar', { hidden: true });
   const saveBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Save rack as a preset', title: 'Save rack as a preset', onclick: () => askName() }, icon('save', 15));
@@ -211,7 +245,7 @@ export function effectsRackPanel(app) {
 
   function askName() {
     inlinePrompt(nameRow, { label: 'Preset name:', value: 'My Rack', returnFocus: saveBtn, onSave: (n) => {
-      saveRackPreset(app.prefs, n, rack());
+      saveRackPreset(app.prefs, n, current());
       renderPresets(n.trim());
       announce(`Rack preset ${n.trim()} saved`);
     } });
@@ -219,15 +253,15 @@ export function effectsRackPanel(app) {
 
   function renderPresets(selectName) {
     const list = rackPresets(app.prefs);
-    const r = rack();
-    const current = selectName || list.find((p) => r && JSON.stringify(p.rack) === JSON.stringify(rackSnapshot(r)))?.name || (r && !r.slots.some(Boolean) ? '(Default)' : '');
+    const r = current();
+    const shown = selectName || list.find((p) => r && JSON.stringify(p.rack) === JSON.stringify(rackSnapshot(r)))?.name || (r && !r.slots.some(Boolean) ? '(Default)' : '');
     presetSel.replaceChildren(
-      ...(current ? [] : [h('option', { value: '' }, '(Custom)')]),
+      ...(shown ? [] : [h('option', { value: '' }, '(Custom)')]),
       h('option', { value: '(Default)' }, '(Default)'),
       ...list.map((p) => h('option', { value: p.name }, p.name)),
     );
-    presetSel.value = current;
-    delBtn.disabled = !list.some((p) => p.name === current);
+    presetSel.value = shown;
+    delBtn.disabled = !list.some((p) => p.name === shown);
   }
 
   // Slot list.
@@ -268,7 +302,7 @@ export function effectsRackPanel(app) {
     const set = (v) => {
       k.setValue(v);
       hot.setValue(v);
-      update((r) => ({ ...r, [key]: v }));
+      setLevel(key, v);
     };
     k = knob({ value: 0, min: -60, max: 30, step: 0.1, defaultValue: 0, label, bipolar: true, size: 26, format: (v) => `${v.toFixed(1)} dB`, onInput: (v) => set(v), onChange: (v) => set(v) });
     return { el: h('div.rack-knob', k, h('div.rack-knob-text', h('span.rack-knob-label', label), hot)), set: (v) => (k.setValue(v), hot.setValue(v)) };
@@ -280,7 +314,7 @@ export function effectsRackPanel(app) {
   const setMix = (v) => {
     mixKnob.setValue(v);
     mixHot.setValue(v);
-    update((r) => ({ ...r, mix: v / 100 }));
+    setLevel('mix', v / 100);
   };
   mixKnob = knob({ value: 100, min: 0, max: 100, step: 1, defaultValue: 100, label: 'Mix (dry to wet)', size: 26, format: (v) => `${Math.round(v)}% wet`, onInput: (v) => setMix(v), onChange: (v) => setMix(v) });
   const mix = h('div.rack-knob', mixKnob, h('div.rack-knob-text', h('span.rack-knob-label', 'Mix'), mixHot));
@@ -294,7 +328,9 @@ export function effectsRackPanel(app) {
     onChange: (v) => update((r) => ({ ...r, process: v })),
   });
   const applyBtn = h('button.btn.primary.rack-apply', { type: 'button', onclick: () => applyRack(app) }, 'Apply');
-  const footer = h('div.rack-footer', h('div.rack-knobs', input.el, output.el, mix), h('div.rack-process', h('label.rack-toolbar-label', 'Process:'), processSel, h('div.spacer'), applyBtn));
+  const knobs = h('div.rack-knobs', input.el, output.el, mix);
+  const processRow = h('div.rack-process', h('label.rack-toolbar-label', 'Process:'), processSel, h('div.spacer'), applyBtn);
+  const footer = h('div.rack-footer', knobs, processRow);
 
   const empty = h('div.empty-state.rack-empty', icon('fx-rack', 28), h('p', 'Open an audio file or a multitrack session to add effects.'));
   const scroll = h('div.rack-scroll', editor.el);
@@ -314,6 +350,13 @@ export function effectsRackPanel(app) {
     }
   }
 
+  function showLevels(r) {
+    input.set(r.input ?? 0);
+    output.set(r.output ?? 0);
+    mixKnob.setValue(Math.round((r.mix ?? 1) * 100));
+    mixHot.setValue(Math.round((r.mix ?? 1) * 100));
+  }
+
   function render() {
     const c = chain();
     if (c) {
@@ -323,9 +366,12 @@ export function effectsRackPanel(app) {
       targetName.textContent = c.missing ? '' : `${c.kind === 'clip' ? 'Clip' : 'Track'}: ${c.name}`;
       missing.textContent = c.missing || '';
       missing.hidden = !c.missing;
-      // Presets, gains, mix and Apply belong to a file's rack.
-      for (const x of [presetSel, saveBtn, delBtn, footer]) x.hidden = true;
-      nameRow.hidden = true;
+      // Presets apply to both chains; gains and mix belong to tracks; Apply
+      // and the process range to a file's rack.
+      for (const x of [presetSel, saveBtn, delBtn]) x.hidden = Boolean(c.missing);
+      footer.hidden = Boolean(c.missing) || !c.levels;
+      processRow.hidden = true;
+      if (c.missing) nameRow.hidden = true;
       powerBtn.hidden = !c.power;
       if (c.power) {
         powerBtn.setAttribute('aria-pressed', String(c.power()));
@@ -333,6 +379,8 @@ export function effectsRackPanel(app) {
         powerBtn.title = 'Turn the track\'s effects on or off';
       }
       editor.render();
+      if (c.levels) showLevels(c.levels());
+      if (!c.missing) renderPresets();
       return;
     }
     const r = rack();
@@ -342,16 +390,13 @@ export function effectsRackPanel(app) {
     renderTarget('file');
     targetName.textContent = audioDoc()?.name || '';
     missing.hidden = true;
-    for (const x of [presetSel, saveBtn, delBtn, footer]) x.hidden = false;
+    for (const x of [presetSel, saveBtn, delBtn, footer, processRow]) x.hidden = false;
     powerBtn.hidden = false;
     powerBtn.setAttribute('aria-label', 'Effects Rack power');
     powerBtn.title = 'Turn the whole rack on or off';
     editor.render();
     powerBtn.setAttribute('aria-pressed', String(r.power !== false));
-    input.set(r.input);
-    output.set(r.output);
-    mixKnob.setValue(Math.round((r.mix ?? 1) * 100));
-    mixHot.setValue(Math.round((r.mix ?? 1) * 100));
+    showLevels(r);
     processSel.value = r.process;
     applyBtn.disabled = !rackActive(r);
     renderPresets();
