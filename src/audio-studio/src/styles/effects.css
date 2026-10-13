@@ -1974,3 +1974,15 @@ input[type='range'].fx-slider:disabled {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.rv-impulse-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.rv-impulse-file .select {
+  width: auto;
+  max-width: 100%;
+}
