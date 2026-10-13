@@ -594,3 +594,17 @@ input[type='range'].slider.fx-vrange::-moz-range-track {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.gen-columns > .gen-col:first-child {
+  flex: 1 1 360px;
+  min-width: 340px;
+}
+
+.gen-comps {
+  grid-template-columns: max-content repeat(5, 62px);
+}
+
+.dialog.fx-dialog.gen-tones {
+  width: min(1000px, 100%);
+  max-width: min(1000px, 100%);
+}
