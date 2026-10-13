@@ -76,6 +76,16 @@ pub extern "C" fn rs_click_detect(buf: u32, len: u32, k: f32, disc: f32, max_run
     runs.len() as u32
 }
 
+/// Rebuilds `buf[start .. start + gap]` (of `len` samples) by least-squares
+/// AR interpolation from up to 512 samples of context on each side (Fill
+/// Single Click, and the Click/Pop Eliminator's repair of chosen clicks).
+/// Returns 1 when the gap was filled, 0 when the context is too short.
+#[no_mangle]
+pub extern "C" fn rs_fill_gap(buf: u32, len: u32, start: u32, gap: u32) -> u32 {
+    let x = unsafe { slice_mut(buf, len) };
+    click::fill_gap(x, start as usize, gap as usize) as u32
+}
+
 /// Declipping in place over `len` samples; returns repaired runs.
 #[no_mangle]
 pub extern "C" fn rs_declip(buf: u32, len: u32, level: f32, min_run: u32, method: u32) -> u32 {

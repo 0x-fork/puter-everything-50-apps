@@ -4,6 +4,8 @@
 // the DeClicker and DeClipper effects (wasm/dsp/src/fx/restore); window
 // peaks are the kernel behind Delete Silence and Mark Audio.
 
+import { aroundDb, LEVEL_WINDOW } from '../effects/defs/click-thresholds.js';
+
 const MAX_CLICKS = 1 << 16;
 
 /** DeClicker parameters (effect values) to kernel settings, as the effect maps them. */
@@ -21,6 +23,37 @@ export const ops = {
     const result = out.view().slice(0, Math.min(n, MAX_CLICKS) * 3);
     buf.free();
     out.free();
+    return result;
+  },
+
+  /**
+   * Click runs with the level of the audio around each: Float32Array of
+   * (start, length, peak, dB) quadruples (Click/Pop Eliminator).
+   */
+  clickLevels(d, { samples, k, maxRun, oversample }) {
+    const t = ops.clicks(d, { samples, k, disc: k, maxRun, oversample });
+    const out = new Float32Array((t.length / 3) * 4);
+    for (let i = 0, j = 0; i < t.length; i += 3, j += 4) {
+      const [start, len] = [t[i], t[i + 1]];
+      out.set([start, len, t[i + 2], aroundDb(samples, start - LEVEL_WINDOW, start, start + len, start + len + LEVEL_WINDOW)], j);
+    }
+    return out;
+  },
+
+  /** RMS level in dB of each window of `win` samples. */
+  levels(d, { samples, win }) {
+    const n = Math.floor(samples.length / win);
+    const out = new Float32Array(n);
+    for (let w = 0; w < n; w++) out[w] = aroundDb(samples, w * win, (w + 1) * win, 0, 0);
+    return out;
+  },
+
+  /** Rebuilds samples[start, start + len) from the audio around it; returns the samples. */
+  fill(d, { samples, start, len }) {
+    const buf = d.copyIn(samples);
+    d.x.rs_fill_gap(buf.ptr, samples.length, start, len);
+    const result = buf.view().slice();
+    buf.free();
     return result;
   },
 
