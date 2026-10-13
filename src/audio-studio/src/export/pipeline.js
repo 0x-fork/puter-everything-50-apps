@@ -26,9 +26,9 @@ export function mapChannels(src, count, n = src[0]?.length ?? 0) {
 
 /** Streaming sample-rate converter for one channel on the WASM kernel. */
 export class StreamResampler {
-  constructor(dsp, from, to, maxIn = BLOCK) {
+  constructor(dsp, from, to, maxIn = BLOCK, { quality = 50, filter = true } = {}) {
     this.x = dsp.x;
-    this.h = this.x.rs_new(from, to);
+    this.h = this.x.rs_new_q ? this.x.rs_new_q(from, to, quality, filter ? 1 : 0) : this.x.rs_new(from, to);
     this.maxIn = maxIn;
     this.cap = Math.ceil((maxIn * to) / from) + 1024;
     this.inPtr = this.x.mem_alloc(maxIn * 4);
@@ -77,11 +77,12 @@ function concatFloats(parts) {
  * @param {object[]} [job.markers] already in output frames
  * @param {object} [job.meta]
  * @param {object} [job.dsp]     Dsp instance (needed for FLAC and rate conversion)
+ * @param {{ quality?: number, filter?: boolean }} [job.resampler] sample-rate conversion settings
  * @param {(fraction: number) => void} [job.onProgress]
  * @param {() => boolean} [job.cancelled]
  * @returns {Promise<Blob>}
  */
-export async function runExport({ options, sourceRate, frames, read, markers = [], meta = {}, dsp, onProgress, cancelled = () => false }) {
+export async function runExport({ options, sourceRate, frames, read, markers = [], meta = {}, dsp, resampler, onProgress, cancelled = () => false }) {
   const rate = options.sampleRate;
   const nch = options.channels;
   const total = outputFrames(frames, sourceRate, rate);
@@ -101,7 +102,7 @@ export async function runExport({ options, sourceRate, frames, read, markers = [
   });
   const resample = rate !== sourceRate;
   if (resample && !dsp) throw new Error('Sample rate conversion needs the DSP module.');
-  const resamplers = resample ? Array.from({ length: nch }, () => new StreamResampler(dsp, sourceRate, rate)) : null;
+  const resamplers = resample ? Array.from({ length: nch }, () => new StreamResampler(dsp, sourceRate, rate, BLOCK, resampler)) : null;
   let written = 0;
   const emit = async (planar) => {
     const n = Math.min(planar[0].length, total - written);

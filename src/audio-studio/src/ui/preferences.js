@@ -154,6 +154,13 @@ export const CATEGORIES = [
           { type: 'checkNumber', key: 'smoothEdits', numKey: 'smoothEditsMs', label: 'Crossfade the edges of processed audio over', min: 0.5, max: 200, step: 0.5, unit: 'ms', help: 'Applies to effects, the Effects Rack and the amplitude HUD when they process part of a file.' },
         ],
       },
+      {
+        title: 'Sample Rate Conversion',
+        items: [
+          slider('srcQuality', 'Quality', { min: 0, max: 100, step: 1, unit: '%', keywords: 'resample resampling src filter length', help: 'Higher quality uses a longer filter: cleaner conversion, slower processing. Used by Convert Sample Type, exports, recording and inserting files at another rate.' }),
+          check('srcFilter', 'Pre/post filter', { keywords: 'resample anti-alias aliasing imaging lowpass', help: 'Rolls off the top of the band just below the new Nyquist frequency so nothing folds back. Off keeps a little more treble but lets some of it alias.' }),
+        ],
+      },
     ],
   },
   {

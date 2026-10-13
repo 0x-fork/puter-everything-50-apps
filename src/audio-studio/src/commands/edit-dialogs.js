@@ -267,8 +267,8 @@ export function convertProblem({ rate }) {
 }
 
 /**
- * The state converted to { rate, channels, bits, mix: { left, right }, dither }.
- * `resample(samples, from, to)` does band-limited rate conversion.
+ * The state converted to { rate, channels, bits, mix: { left, right }, dither, quality, filter }.
+ * `resample(samples, from, to, { quality, filter })` does band-limited rate conversion.
  */
 export function convertState(state, target, resample) {
   const from = state.sampleRate;
@@ -276,7 +276,7 @@ export function convertState(state, target, resample) {
   let data = state.channels.map((c) => c.toArray());
   let markers = state.markers;
   if (rate !== from) {
-    data = data.map((c) => resample(c, from, rate));
+    data = data.map((c) => resample(c, from, rate, { quality: target.quality, filter: target.filter }));
     const k = rate / from;
     markers = markers.map((m) => ({ ...m, start: Math.round(m.start * k), duration: Math.round(m.duration * k) }));
   }
@@ -308,6 +308,18 @@ export async function convertSampleTypeDialog(app, doc) {
   dither.value = app.prefs.get('convertDither') || 'triangular';
   const result = h('p.dlg-note', { role: 'status' });
   const error = h('div.dlg-error', { role: 'alert' });
+  const srcSaved = app.prefs.get('convertSrc') || {};
+  const quality = h('input.slider', { type: 'range', min: 0, max: 100, step: 1, value: srcSaved.quality ?? app.prefs.get('srcQuality') ?? 50, 'aria-label': 'Conversion quality' });
+  const qualityNum = h('input.input.num', { type: 'number', min: 0, max: 100, step: 1, value: quality.value, 'aria-label': 'Conversion quality (percent)' });
+  const filter = h('input', { type: 'checkbox', checked: srcSaved.filter ?? app.prefs.get('srcFilter') !== false });
+  quality.addEventListener('input', () => (qualityNum.value = quality.value));
+  qualityNum.addEventListener('change', () => (quality.value = qualityNum.value = clampNum(qualityNum.value, 0, 100, 50)));
+  const rateAdv = h(
+    'details.dlg-adv',
+    h('summary', 'Advanced'),
+    h('div.form-grid', h('label', 'Quality:'), h('div.row.mixpaste-slider', quality, qualityNum, h('span.muted', '%')), h('span'), h('label.check', filter, 'Pre/Post Filter')),
+    h('p.dlg-note', 'Higher quality uses a longer filter and takes longer. The pre/post filter keeps the top of the band from folding back as aliasing.'),
+  );
   const mixAdv = h('details.dlg-adv', h('summary', 'Advanced'), h('div.form-grid', h('label', 'Left Mix:'), h('div.row', left, h('span.muted', '%')), h('label', 'Right Mix:'), h('div.row', right, h('span.muted', '%'))), mixNote);
   const bitAdv = h('details.dlg-adv', h('summary', 'Advanced'), h('div.form-grid', h('label', 'Dither:'), dither), h('p.dlg-note', 'Dither replaces the distortion of rounding to fewer bits with low, even noise; noise shaping moves that noise toward high frequencies where it is harder to hear.'));
 
@@ -323,6 +335,7 @@ export async function convertSampleTypeDialog(app, doc) {
     const b = Number(bits.value);
     bitAdv.hidden = b >= 32;
   };
+
   const syncResult = () => {
     const r = Math.round(Number(rate.value));
     result.textContent = `${describe(doc.sampleRate, doc.channelCount, srcBits)}  →  ${Number.isFinite(r) ? describe(r, Number(channels.value), Number(bits.value)) : '?'}`;
@@ -354,12 +367,14 @@ export async function convertSampleTypeDialog(app, doc) {
     channels.value = String(p.channels ?? Math.min(2, doc.channelCount));
     bits.value = String(p.bits ?? srcBits);
     if (p.dither) dither.value = p.dither;
+    if (p.quality != null) quality.value = qualityNum.value = p.quality;
+    if (p.filter != null) filter.checked = p.filter;
     sync();
   });
   save.addEventListener('click', async () => {
     const name = await promptDialog({ title: 'Save Preset', label: 'Preset name:', value: describe(current().rate, current().channels, current().bits), validate: (v) => (!v.trim() ? 'Enter a name.' : CONVERT_PRESETS.some((p) => p.name.toLowerCase() === v.trim().toLowerCase()) ? 'A built-in preset has that name.' : '') });
     if (!name) return;
-    const p = { name: name.trim(), ...current(), dither: dither.value };
+    const p = { name: name.trim(), ...current(), dither: dither.value, quality: Number(quality.value), filter: filter.checked };
     app.prefs.set('convertPresets', [...userPresets().filter((x) => x.name !== p.name), p]);
     sync();
     announce(`Saved preset ${p.name}`);
@@ -380,7 +395,7 @@ export async function convertSampleTypeDialog(app, doc) {
     body: h(
       'div.dlg-stack',
       h('div.row.dlg-presets', h('label', 'Presets:'), presetSel, save, del),
-      group('Sample Rate Conversion', h('div.form-grid', h('label', 'Sample Rate:'), h('div.row', rate, rates, h('span.muted', 'Hz'))), h('p.dlg-note', 'Converted with band-limited resampling; markers keep their times.')),
+      group('Sample Rate Conversion', h('div.form-grid', h('label', 'Sample Rate:'), h('div.row', rate, rates, h('span.muted', 'Hz'))), rateAdv),
       group('Channels', h('div.form-grid', h('label', 'Channels:'), channels), mixAdv),
       group('Bit Depth', h('div.form-grid', h('label', 'Bit Depth:'), h('div.row', bits, h('span.muted', 'bits'))), bitAdv),
       result,
@@ -398,14 +413,17 @@ export async function convertSampleTypeDialog(app, doc) {
   });
   if (r !== 'ok') return null;
   app.prefs.set('convertDither', dither.value);
+  app.prefs.set('convertSrc', { quality: Number(quality.value), filter: filter.checked });
   const toMono = Number(channels.value) === 1;
   const target = {
     ...current(),
     mix: { left: clampNum(left.value, 0, 200, toMono ? 50 : 100) / 100, right: clampNum(right.value, 0, 200, toMono ? 50 : 100) / 100 },
     dither: dither.value,
+    quality: Number(quality.value),
+    filter: filter.checked,
   };
   const d = target.rate !== doc.sampleRate ? await dsp() : null;
-  const state = convertState({ ...doc.state, bitDepth: srcBits }, target, (x, from, to) => d.resample(x, from, to));
+  const state = convertState({ ...doc.state, bitDepth: srcBits }, target, (x, from, to, o) => d.resample(x, from, to, undefined, o));
   return state;
 }
 
