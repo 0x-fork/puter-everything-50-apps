@@ -186,7 +186,7 @@ export function generatorContext(def, initial) {
 export const PREVIEW_SECONDS = 20;
 
 /**
- * Play/stop and loop buttons that audition generated audio in a dialog.
+ * Play/stop and loop buttons that preview generated audio in a dialog.
  * render() returns (or resolves) { outs: Float32Array[], rate } or null.
  * While playing, refresh() renders again and carries on from the same spot,
  * so changes are heard as they are made. Returns { el, play, stop, refresh,
