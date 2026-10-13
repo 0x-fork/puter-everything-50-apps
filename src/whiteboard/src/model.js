@@ -687,6 +687,30 @@ export const sharedPoints = (points) => packed.has(points);
 // drawings' points with the board: copying a board of long drawings on
 // every step and press took tens of megabytes each time.
 export const undoCopy = (value) => sharedCopy(value, true);
+// An undo step's objects, each one the board holds unchanged being the
+// board's own object instead: what is measured for an object, as its text's
+// layout, is kept per object, and undoing on a board of thousands of notes
+// laid out all their text again. Unchanged means the same keys in the same
+// order with the same values.
+export function keepUnchanged(items, board) {
+  const live = new Map(board.map((i) => [i.id, i]));
+  return items.map((i) => {
+    const was = live.get(i.id);
+    return was && sameData(was, i) ? was : i;
+  });
+}
+function sameData(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a),
+    others = Object.keys(b);
+  if (keys.length !== others.length) return false;
+  for (let n = 0; n < keys.length; n++)
+    if (keys[n] !== others[n] || !sameData(a[keys[n]], b[keys[n]]))
+      return false;
+  return true;
+}
 export class History {
   constructor() {
     this.past = [];

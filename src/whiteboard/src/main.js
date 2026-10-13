@@ -419,6 +419,7 @@ import {
   clone,
   sharedCopy,
   undoCopy,
+  keepUnchanged,
   startDrawing,
   escape,
   COLORS,
@@ -3170,6 +3171,9 @@ function undoState(items = current.items) {
 function restoreUndoState(state) {
   contentVersion++;
   formatRequests++;
+  // Objects the step leaves as they are stay the board's own, with their
+  // text already laid out.
+  state.items = keepUnchanged(state.items, current.items);
   Object.assign(current, state);
   if (!current.tags?.length) delete current.tags;
   if (!current.planning) delete current.planning;

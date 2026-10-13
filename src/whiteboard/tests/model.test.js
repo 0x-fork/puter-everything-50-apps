@@ -18,6 +18,7 @@ import {
   PEN_POINTS,
   sharedCopy,
   undoCopy,
+  keepUnchanged,
   assertImagePixels,
   truncate,
 } from "../src/model.js";
@@ -443,6 +444,34 @@ test("copies and undo steps share a drawing's points, but not one still being dr
   assert.equal(before.points.length, 1);
   assert.equal(growing.points.length, 2);
   assert.notEqual(undoCopy(growing).points, growing.points);
+});
+
+test("an undo step keeps the board's own objects for those it leaves unchanged", () => {
+  const runs = [{ start: 0, end: 4, style: { bold: true } }];
+  const board = [
+    item("note", 0, 0, { text: "Same", textRuns: runs }),
+    item("note", 10, 0, { text: "Moved" }),
+    item("note", 20, 0, { text: "Bold", textRuns: runs }),
+    item("note", 30, 0, { text: "Reordered", color: "#fff" }),
+  ];
+  const history = new History();
+  history.push(board);
+  board[1].x = 99;
+  board[2].textRuns = [{ start: 0, end: 4, style: { bold: false } }];
+  const [x, y, ...rest] = Object.keys(board[3]);
+  board[3] = Object.fromEntries(
+    [y, x, ...rest].map((key) => [key, board[3][key]]),
+  );
+  const added = item("note", 40, 0, { text: "Added" });
+  const step = history.undo([...board, added]);
+  const restored = keepUnchanged(step, [...board, added]);
+  assert.deepEqual(restored, step);
+  assert.equal(restored[0], board[0], "unchanged, nested values included");
+  assert.equal(restored[1], step[1], "moved since");
+  assert.equal(restored[1].x, 10);
+  assert.equal(restored[2], step[2], "formatted since");
+  assert.equal(restored[3], step[3], "its keys in another order");
+  assert.equal(restored.length, 4, "the object added since is left out");
 });
 
 test("the pixel limit applies to photos whose metadata fills their first 256 KB", () => {
