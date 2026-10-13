@@ -61,20 +61,11 @@ function intersect(a: Rect, b: Rect): Rect | null {
 }
 const fits = (r: Rect) => r.width <= 8192 && r.height <= 8192 && r.width * r.height <= 24_000_000;
 
-/** Layer → Embedded Objects → Convert to Embedded Object. */
-export async function convertToEmbedded(e: Editor) {
-  const doc = e.doc;
-  const roots = e.selectedLayers;
-  if (!roots.length) {
-    e.message('Select the layers to convert.');
-    return;
-  }
-  assertEditable(doc, roots);
-  const list = containerOf(doc.layers, roots[0].id)!;
-  if (roots.some((l) => containerOf(doc.layers, l.id) !== list)) {
-    e.message('Move the selected layers into the same group before converting them.');
-    return;
-  }
+/** A nested document holding copies of `roots` (layers of one container),
+ * cropped to what they draw, with its composite. `undefined` after a message
+ * when the layers are empty or too large. Used by Convert to Embedded Object
+ * and by library graphics. */
+export async function nestedFromLayers(e: Editor, roots: Layer[], doc: PhotoDocument = e.doc) {
   let area = roots.reduce<Rect | null>((r, l) => unionRect(r, contentBounds(doc, l)), null);
   if (!area) {
     e.message('The selected layers are empty.');
@@ -120,6 +111,26 @@ export async function convertToEmbedded(e: Editor) {
     samples = cropSamples(samples, tight);
     area = { x: area.x + tight.x, y: area.y + tight.y, width: tight.width, height: tight.height };
   }
+  return { nested, area, name, samples, lifted, top };
+}
+
+/** Layer → Embedded Objects → Convert to Embedded Object. */
+export async function convertToEmbedded(e: Editor) {
+  const doc = e.doc;
+  const roots = e.selectedLayers;
+  if (!roots.length) {
+    e.message('Select the layers to convert.');
+    return;
+  }
+  assertEditable(doc, roots);
+  const list = containerOf(doc.layers, roots[0].id)!;
+  if (roots.some((l) => containerOf(doc.layers, l.id) !== list)) {
+    e.message('Move the selected layers into the same group before converting them.');
+    return;
+  }
+  const built = await nestedFromLayers(e, roots, doc);
+  if (!built) return;
+  const { nested, area, name, samples, lifted, top } = built;
   const c = await contentsFromDocument(e, doc, e.assets, nested, e.assets, { name, samples });
   const inst = instanceLayer(c, name, { ...area, rotation: 0 });
   if (lifted) Object.assign(inst, lifted);
@@ -296,29 +307,40 @@ export async function replaceContents(e: Editor, file?: File) {
 
 const extensions: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif' };
 /** Save the content as a file: the original file, the layered project, or a PNG. */
-export async function exportContents(e: Editor) {
-  const l = selectedObject(e);
-  if (!l) return;
-  const c: EmbeddedContents = contentsOf(e.doc, l) ?? plainContents(l, e.assets);
+/** Formats the contents can be written in: the original file while it is
+ * still the content, the layered project, or a flattened PNG. */
+export function contentsFormats(c: EmbeddedContents): [string, string][] {
   const options: [string, string][] = [];
   if (c.source) options.push(['source', `Original file${c.sourceName ? ` (${c.sourceName})` : ''}`]);
   if (c.project) options.push(['project', 'Layered project (.photo)']);
   options.push(['png', 'Flattened image (.png)']);
+  return options;
+}
+/** The contents as a file in one of `contentsFormats`. */
+export async function contentsFile(e: Editor, c: EmbeddedContents, format: string): Promise<{ blob: Blob; name: string }> {
+  const name = baseName(c.sourceName ?? c.name);
+  if (format === 'source' && c.source) {
+    const blob = e.assets.blob(c.source);
+    return { blob: new Blob([blob], { type: extensions[blob.type] ? blob.type : 'application/octet-stream' }), name: c.sourceName ?? `${name}.${extensions[blob.type] ?? 'bin'}` };
+  }
+  if (format === 'project' && c.project) return { blob: new Blob([e.assets.blob(c.project)], { type: 'application/octet-stream' }), name: `${name}.photo` };
+  const img = await assetRGBA(e, e.doc, e.assets, c.composite, c.colorSpace, c.width, c.height);
+  return { blob: new Blob([encodePng({ width: img.width, height: img.height, data: img.data, channels: 4 }).slice()], { type: 'image/png' }), name: `${name}.png` };
+}
+
+export async function exportContents(e: Editor) {
+  const l = selectedObject(e);
+  if (!l) return;
+  const c: EmbeddedContents = contentsOf(e.doc, l) ?? plainContents(l, e.assets);
+  const options = contentsFormats(c);
   let pick = options[0][0];
   if (options.length > 1) {
     const v = await formDialog('Export Contents', [{ name: 'format', label: 'Save as', type: 'select', value: pick, options }], 'Export', `Contents of “${c.name}”, ${c.width} × ${c.height} px.`);
     if (!v) return;
     pick = v.format;
   }
-  const name = baseName(c.sourceName ?? c.name);
-  if (pick === 'source') {
-    const blob = e.assets.blob(c.source!);
-    download(new Blob([blob], { type: extensions[blob.type] ? blob.type : 'application/octet-stream' }), c.sourceName ?? `${name}.${extensions[blob.type] ?? 'bin'}`);
-  } else if (pick === 'project') download(e.assets.blob(c.project!), `${name}.photo`);
-  else {
-    const img = await assetRGBA(e, e.doc, e.assets, c.composite, c.colorSpace, c.width, c.height);
-    download(new Blob([encodePng({ width: img.width, height: img.height, data: img.data, channels: 4 }).slice()], { type: 'image/png' }), `${name}.png`);
-  }
+  const file = await contentsFile(e, c, pick);
+  download(file.blob, file.name);
   e.message(`Exported the contents of “${c.name}”.`);
 }
 

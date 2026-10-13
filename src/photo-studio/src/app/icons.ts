@@ -3,6 +3,7 @@ import {
   ChevronFirst, ChevronLast, StepBack, StepForward,
   AppWindow, PanelsTopLeft, Wrench, FileCog, ImageDown, Gauge, MousePointerClick, Package, FileClock, ArchiveRestore, Smartphone, Monitor, Clapperboard, Globe, Clock, RotateCcwSquare, Star, Scaling,
   SquareCode, Braces,
+  CloudOff,
 } from 'lucide';
 
 // Interface icons are inline SVG strings: Lucide (ISC) plus original glyphs
@@ -11,6 +12,7 @@ import {
 type Node = readonly [string, Record<string, string | number>];
 type IconNode = readonly [string, Record<string, string | number>, Node[]?];
 const lucide: Record<string, IconNode> = {
+  'cloud-off': CloudOff as unknown as IconNode,
   'move': Move as unknown as IconNode,
   'square-dashed': SquareDashed as unknown as IconNode,
   'circle-dashed': CircleDashed as unknown as IconNode,
@@ -238,6 +240,9 @@ const custom: Record<string, Node[]> = {
   'red-eye': [p('M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z'), ['circle', { cx: 12, cy: 12, r: 3.4 }], p('M12 10.6v2.8M10.6 12h2.8')],
   'remove-tool': [['circle', { cx: 9.5, cy: 14.5, r: 5.5, 'stroke-dasharray': '2.2 2' }], p('M4 21 17 8'), p('m15.5 6.5 2-2a1.4 1.4 0 0 1 2 2l-2 2'), p('M19.5 13v4M17.5 15h4')],
   'context-move': [p('M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3'), ['rect', { x: 8, y: 8, width: 8, height: 8, rx: 1, 'stroke-dasharray': '2 2' }]],
+  // Before/after compare modes: a frame split by a movable divider, and two frames side by side.
+  'compare-split': [['rect', { x: 3, y: 4, width: 18, height: 16, rx: 2 }], p('M12 2v20'), p('m8 10-2 2 2 2'), p('m16 10 2 2-2 2')],
+  'compare-side': [['rect', { x: 2, y: 5, width: 9, height: 14, rx: 1.5 }], ['rect', { x: 13, y: 5, width: 9, height: 14, rx: 1.5 }], p('M5 15l2-3 2 3M16 15l2-3 2 3')],
   'color-replace': [p('m14.6 5.6 3.8 3.8'), p('M18 2.5a2.1 2.1 0 0 1 3 3L9.5 17l-4-4Z'), p('M5.5 13 3 21l8-2.5'), ['circle', { cx: 18.5, cy: 18.5, r: 3 }]],
   'mixer-brush': [p('M9 11 3 21'), p('M13.5 6.5a3 3 0 1 1 4 4l-6 6-4-4Z'), p('M18 2c2 1 3 3 3 5'), p('M15 2c1 .5 1.5 1.5 1.5 2.5')],
   'brush-load': [p('M8 13 3 21'), p('M12 8.5a3 3 0 1 1 4 4l-5.5 5.5-4-4Z'), p('M19 2c1.4 1.8 2.4 3 2.4 4.3a2.4 2.4 0 0 1-4.8 0C16.6 5 17.6 3.8 19 2Z')],
@@ -362,6 +367,15 @@ const custom: Record<string, Node[]> = {
   'keyframe': [['path', { d: 'M12 4l8 8-8 8-8-8Z', fill: 'currentColor', 'fill-opacity': 0.35 }]],
   'split-clip': [['rect', { x: 2.5, y: 7, width: 8, height: 10, rx: 1.5 }], ['rect', { x: 13.5, y: 7, width: 8, height: 10, rx: 1.5 }], p('M12 3v2.5M12 18.5V21')],
   'transition': [['rect', { x: 2.5, y: 7, width: 11, height: 10, rx: 1.5 }], ['rect', { x: 10.5, y: 7, width: 11, height: 10, rx: 1.5, 'stroke-dasharray': '2 2' }], ['path', { d: 'M10.5 8.5 13.5 15.5', opacity: 0.6 }]],
+  // Timeline audio (original glyphs): a loudspeaker with sound waves or
+  // crossed out, ear cups for solo, level bars for sound, bars with a plus
+  // for adding sound, and a chain broken in two for unlinking.
+  'speaker': [p('M4 9.5h3.5L12 5.5v13l-4.5-4H4Z'), p('M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11')],
+  'speaker-off': [p('M4 9.5h3.5L12 5.5v13l-4.5-4H4Z'), p('M16 9.5l5 5M21 9.5l-5 5')],
+  'headphones': [p('M4 15v-3a8 8 0 0 1 16 0v3'), ['rect', { x: 3, y: 14, width: 4, height: 6.5, rx: 1.5 }], ['rect', { x: 17, y: 14, width: 4, height: 6.5, rx: 1.5 }]],
+  'audio-wave': [p('M3 11.5v1M6.5 9v6M10 5v14M13.5 8v8M17 10.5v3M20.5 11.5v1')],
+  'audio-add': [p('M3 11v2M6.5 8.5v7M10 5.5v13M13.5 9v6'), p('M19 13.5v7M15.5 17h7')],
+  'unlink': [p('M9.5 14.5 7 17a3.2 3.2 0 0 1-4.5-4.5L5 10'), p('M14.5 9.5 17 7a3.2 3.2 0 0 1 4.5 4.5L19 14'), p('M8 3v2.5M3 8h2.5M16 21v-2.5M21 16h-2.5')],
   // Embedded object (original glyph): a frame holding a nested page.
   'embedded-object': [['rect', { x: 3, y: 3, width: 18, height: 18, rx: 3 }], ['rect', { x: 9.5, y: 9.5, width: 8, height: 8, rx: 1.5, fill: 'currentColor', 'fill-opacity': 0.35 }]],
   'path-op-exclude': [['path', { d: 'M3 3h12v6H9v6H3Z', fill: 'currentColor', 'fill-opacity': 0.4 }], ['path', { d: 'M15 9h6v12H9v-6h6Z', fill: 'currentColor', 'fill-opacity': 0.4 }], ['rect', { x: 9, y: 9, width: 6, height: 6 }]],
@@ -375,7 +389,28 @@ const custom: Record<string, Node[]> = {
   'straighten-vertical': [['path', { d: 'M9 3 6 21', 'stroke-dasharray': '2 2.4' }], p('M17 3v18'), p('M9.5 12h4.5M12.5 10l1.8 2-1.8 2')],
   'straighten-horizontal': [['path', { d: 'M3 15l18-3', 'stroke-dasharray': '2 2.4' }], p('M3 7h18'), p('M12 14.5V10M10 11.5l2-1.8 2 1.8')],
   'straighten-both': [['path', { d: 'M6 4l14 2-2 14-14-2Z', 'stroke-dasharray': '2 2.4' }], ['rect', { x: 6, y: 6, width: 12, height: 12 }]],
+  // Review and collaboration (original glyphs): a speech bubble, a bubble
+  // with a plus, two people, a person with a plus, a bubble with an eye and a
+  // view frame with a person in it (following someone's view).
+  'comment': [p('M4 4.5h16a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5h-9.5L6 21.5v-4H4A1.5 1.5 0 0 1 2.5 16V6A1.5 1.5 0 0 1 4 4.5Z'), p('M7 9.5h10M7 13h6')],
+  'comment-add': [p('M4 4.5h16a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5h-9.5L6 21.5v-4H4A1.5 1.5 0 0 1 2.5 16V6A1.5 1.5 0 0 1 4 4.5Z'), p('M12 8v6M9 11h6')],
+  'people': [['circle', { cx: 9, cy: 8, r: 3.2 }], p('M3 20c0-3.6 2.7-6 6-6s6 2.4 6 6'), p('M15.5 4.9a3.2 3.2 0 0 1 0 6.2'), p('M17.5 14.3c2 .7 3.5 2.8 3.5 5.7')],
+  'invite-edit': [['circle', { cx: 9, cy: 8, r: 3.5 }], p('M2.5 20.5c0-3.8 2.9-6.5 6.5-6.5 1.6 0 3 .5 4.1 1.4'), p('M18.5 13v8M14.5 17h8')],
+  'share-review': [p('M4 4.5h16a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5h-9.5L6 21.5v-4H4A1.5 1.5 0 0 1 2.5 16V6A1.5 1.5 0 0 1 4 4.5Z'), p('M6.5 11s2-3 5.5-3 5.5 3 5.5 3-2 3-5.5 3-5.5-3-5.5-3Z'), ['circle', { cx: 12, cy: 11, r: 1.2, fill: 'currentColor' }]],
+  'follow-view': [p('M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3'), ['circle', { cx: 12, cy: 10, r: 2.5 }], p('M7.5 17c.6-2.2 2.4-3.5 4.5-3.5s3.9 1.3 4.5 3.5')],
   'protect-skin': [['circle', { cx: 12, cy: 7.5, r: 3.2 }], p('M5.5 20.5c0-4.2 2.9-6.5 6.5-6.5s6.5 2.3 6.5 6.5'), p('M3 3.5v4M21 3.5v4')],
+  // Assistant (original glyph): a speech bubble holding a four-point spark.
+  'assistant': [p('M5 3.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6.5L7 20.5v-4H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z'), p('M12 6.5c.35 1.9 1.1 2.65 3 3-1.9.35-2.65 1.1-3 3-.35-1.9-1.1-2.65-3-3 1.9-.35 2.65-1.1 3-3Z')],
+  // Generation History (original glyph): stacked pictures, the front one with a spark.
+  'generation-history': [['rect', { x: 3, y: 7, width: 14, height: 14, rx: 2 }], p('M7 3.5h12a2 2 0 0 1 2 2v12'), p('m3.5 18.5 4-4 3 3 2-2 4 4'), p('M12.5 9c.2 1.05.65 1.5 1.7 1.7-1.05.2-1.5.65-1.7 1.7-.2-1.05-.65-1.5-1.7-1.7 1.05-.2 1.5-.65 1.7-1.7Z')],
+  // Libraries (original glyph): three item cards standing on a shelf.
+  'libraries': [['rect', { x: 3, y: 4, width: 5, height: 14, rx: 1 }], ['rect', { x: 9.5, y: 6, width: 5, height: 12, rx: 1 }], p('M15.2 8.8l4.4-1.2 2.6 9.6-4.4 1.2Z'), p('M2 21h20')],
+  // Provenance (original glyph): a page whose history runs down a timeline.
+  'provenance': [p('M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z'), p('M14 3v6h6'), p('M9 11v6'), ['circle', { cx: 9, cy: 11, r: 1.3, fill: 'currentColor' }], ['circle', { cx: 9, cy: 17, r: 1.3, fill: 'currentColor' }], p('M12 11h3M12 17h4')],
+  // Inspect provenance: the provenance page under a magnifier.
+  'provenance-inspect': [p('M12 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5'), p('M12 3l6 6v2'), p('M8 9v5'), ['circle', { cx: 8, cy: 9, r: 1.2, fill: 'currentColor' }], ['circle', { cx: 16.5, cy: 16.5, r: 3.5 }], p('m19 19 2.5 2.5')],
+  // Image Assets (original glyph): a layer sheet exported down into a file.
+  'image-assets': [p('M3 7l6-3 6 3-6 3Z'), p('M9 10v6M6.5 13.5 9 16l2.5-2.5'), p('M13 12h5l3 3v6h-8Z'), p('M18 12v3h3')],
 };
 const attrs = (a: Record<string, string | number>) =>
   Object.entries(a)

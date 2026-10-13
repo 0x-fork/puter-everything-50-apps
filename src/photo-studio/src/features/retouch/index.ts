@@ -7,6 +7,7 @@ import type { Editor } from '../../editor';
 import { contributeMenu, registerCommand, registerOverlay, registerTool, type Tool } from '../../app/registry';
 import { lazy, lazyRun, lazyTool } from '../../app/lazy';
 import { installTaskbar } from './taskbar';
+import { hasMask } from '../../model/masks';
 
 const selectTools = lazy(() => import('./tools-select'));
 const healTools = lazy(() => import('./tools-heal'));
@@ -16,6 +17,7 @@ const focusArea = lazy(() => import('./focus-area'));
 const selectAndMask = lazy(() => import('./select-mask'));
 const contextFill = lazy(() => import('./context-fill'));
 const ai = lazy(() => import('./ai'));
+const refineMask = lazy(() => import('./refine-mask'));
 
 type ToolMeta = Parameters<typeof lazyTool>[0];
 const tool = (meta: ToolMeta, list: typeof selectTools | typeof healTools) =>
@@ -53,6 +55,13 @@ export function installRetouch(e: Editor) {
       enabled: (e) => !!e.layer && e.layer.kind !== 'group' && e.layer.kind !== 'adjustment',
       ...lazyRun(commands, (m, e) => m.removeBackground(e)),
     },
+    {
+      id: 'layer.mask-refine-edge',
+      label: 'Refine Mask Edge…',
+      description: 'Re-estimate the layer mask near its edge from the layer’s pixels, so hair and soft outlines follow the image.',
+      enabled: (e) => !!e.layer && e.layer.kind !== 'group' && e.layer.kind !== 'adjustment' && (hasMask(e.layer) || !!e.layer.maskGrid),
+      ...lazyRun(refineMask, (m, e) => m.refineMaskEdge(e)),
+    },
     { id: 'layer.defringe', label: 'Defringe…', enabled: pixel, ...lazyRun(commands, (m, e) => m.runMatting(e, 'defringe')) },
     { id: 'layer.color-decontaminate', label: 'Color Decontaminate…', enabled: pixel, ...lazyRun(commands, (m, e) => m.runMatting(e, 'decontaminate')) },
     { id: 'layer.remove-black-matte', label: 'Remove Black Matte', enabled: pixel, ...lazyRun(commands, (m, e) => m.runMatting(e, 'black')) },
@@ -69,8 +78,8 @@ export function installRetouch(e: Editor) {
     },
     { id: 'edit.context-fill', label: 'Context Fill…', description: 'Fill the selection with texture and structure from elsewhere in the image.', enabled: sel, ...lazyRun(contextFill, (m, e) => m.openContextFill(e)) },
     { id: 'edit.context-fill-apply', label: 'Context Fill', hidden: true, enabled: sel, ...lazyRun(contextFill, (m, e) => m.quickContextFill(e)) },
-    { id: 'edit.ai-fill', label: 'AI Fill…', description: 'Generate new content in the selection with Puter AI (needs a Puter account).', enabled: sel, ...lazyRun(ai, (m, e) => m.openAIFill(e)), recordable: false },
-    { id: 'edit.ai-expand', label: 'AI Expand…', description: 'Extend the canvas and generate the new area with Puter AI (needs a Puter account).', enabled: doc, ...lazyRun(ai, (m, e) => m.openAIExpand(e)), recordable: false },
+    { id: 'edit.ai-fill', label: 'AI Fill…', description: 'Generate new content in the selection with Puter AI (needs a Puter account).', enabled: sel, ...lazyRun(ai, (m, e, arg) => m.openAIFill(e, arg)), recordable: false },
+    { id: 'edit.ai-expand', label: 'AI Expand…', description: 'Extend the canvas and generate the new area with Puter AI (needs a Puter account).', enabled: doc, ...lazyRun(ai, (m, e, arg) => m.openAIExpand(e, arg)), recordable: false },
   );
   // Live previews of the Color Range and Focus Area dialogs.
   registerOverlay('color-range-preview', () => colorRange.loaded?.previewOverlay() ?? '');

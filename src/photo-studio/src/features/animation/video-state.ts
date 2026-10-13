@@ -31,12 +31,58 @@ export type VideoView = {
   expanded: Set<string>;
   // Playback loops over the work area.
   loop: boolean;
+  // Selected audio clips (clip commands act on them while any is selected)
+  // and the audio track that receives new clips. Selecting other layers
+  // (anywhere: the Layers panel, the canvas, undo) drops the clips, so clip
+  // commands then act on the layers.
+  audioClips: string[];
+  audioTrack: string;
+  // Play short snippets of sound while scrubbing.
+  scrubAudio: boolean;
 };
 const views = new WeakMap<DocumentSession, VideoView>();
 export function videoView(e: Editor): VideoView {
   let v = views.get(e.session);
-  if (!v) views.set(e.session, (v = { zoom: 0, keys: [], expanded: new Set(), loop: true }));
+  if (!v) views.set(e.session, (v = newView(e.session)));
   return v;
+}
+function newView(s: DocumentSession): VideoView {
+  // The layer selection the audio clips were selected with.
+  const layers = () => [...s.selectedIds].sort().join('\n');
+  let clips: string[] = [];
+  let selectedWith = '';
+  return {
+    zoom: 0,
+    keys: [],
+    expanded: new Set(),
+    loop: true,
+    get audioClips() {
+      if (clips.length && layers() !== selectedWith) clips = [];
+      return clips;
+    },
+    set audioClips(ids: string[]) {
+      clips = ids;
+      selectedWith = layers();
+    },
+    audioTrack: '',
+    scrubAudio: false,
+  };
+}
+/** The selected audio clips that still exist. */
+export function selectedAudioClips(e: Editor) {
+  const tl = timelineOf(e);
+  if (!tl?.audio) return [];
+  const ids = new Set(tl.audio.flatMap((t) => t.clips.map((c) => c.id)));
+  return videoView(e).audioClips.filter((id) => ids.has(id));
+}
+/** The selected audio track (the first track when none is selected). */
+export function selectedAudioTrack(e: Editor) {
+  const tl = timelineOf(e);
+  if (!tl) return undefined;
+  const tracks = tl.audio?.length ? tl.audio : undefined;
+  if (!tracks) return undefined;
+  const id = videoView(e).audioTrack;
+  return tracks.find((t) => t.id === id) ?? tracks.find((t) => t.clips.some((c) => videoView(e).audioClips.includes(c.id))) ?? tracks[0];
 }
 
 // Playback (set by the playback module while a timeline plays).

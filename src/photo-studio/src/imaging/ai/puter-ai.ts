@@ -319,6 +319,46 @@ export async function describeImage(img: RGBA8, opts: { model?: string; testMode
   return text.trim();
 }
 
+// Match Font: ask which of the listed font families is closest to the text in
+// a crop. Sends only the crop (at most MAX_SIDE pixels on the longer side) and
+// the names; returns the listed names the answer mentions, best first.
+export async function matchFontWithAI(img: RGBA8, families: string[], opts: { model?: string; testMode?: boolean; signal?: AbortSignal } = {}): Promise<string[]> {
+  const p = api();
+  checkAbort(opts.signal);
+  const s = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
+  const small = resample(img, Math.max(1, Math.round(img.width * s)), Math.max(1, Math.round(img.height * s)));
+  const uri = await toDataUri(small);
+  const file = new File([await (await fetch(uri)).blob()], 'text.png', { type: 'image/png' });
+  const list = families.map((f, i) => `${i + 1}. ${f}`).join('\n');
+  let res: unknown;
+  try {
+    res = await p.ai.chat(
+      `The image shows a piece of text. Which of these font families is the closest match to its typeface?\n${list}\n` +
+        'Answer with up to five family names copied exactly from the list, best match first, one per line. No other text.',
+      file,
+      !!opts.testMode,
+      opts.model ? { model: opts.model } : {},
+    );
+  } catch (e) {
+    throw toAIError(e);
+  }
+  checkAbort(opts.signal);
+  const content = (res as { message?: { content?: unknown } })?.message?.content ?? res;
+  const text = (Array.isArray(content) ? content.map((c) => (typeof c === 'string' ? c : (c as { text?: string })?.text ?? '')).join('') : String(content ?? '')).toLowerCase();
+  // Order by first mention; longer names first so "Inter Display" is not read as "Inter".
+  const found: [string, number][] = [];
+  const taken: [number, number][] = [];
+  for (const f of [...families].sort((a, b) => b.length - a.length)) {
+    const needle = f.toLowerCase();
+    let at = text.indexOf(needle);
+    while (at >= 0 && taken.some(([a, b]) => at < b && at + needle.length > a)) at = text.indexOf(needle, at + 1);
+    if (at < 0) continue;
+    taken.push([at, at + needle.length]);
+    found.push([f, at]);
+  }
+  return found.sort((a, b) => a[1] - b[1]).map(([f]) => f);
+}
+
 // ---------------------------------------------------------------------------
 // Generate Image, Edit with Prompt and the AI detail pass of Upscale.
 
@@ -437,4 +477,106 @@ export async function aiUpscale(img: RGBA8, targetW: number, targetH: number, op
   }
   checkAbort(opts.signal);
   return fromResult(res);
+}
+
+// ---------------------------------------------------------------------------
+// The Assistant: chat with tool calling (puter.ai.chat with `tools`,
+// OpenAI-style function definitions; Puter returns tool calls in
+// `message.tool_calls` with JSON-encoded arguments, and takes results back as
+// `{ role: 'tool', tool_call_id, content }` messages).
+
+export type ChatPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+export type ChatToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
+export type ChatMessage =
+  | { role: 'system' | 'user'; content: string | ChatPart[] }
+  | { role: 'assistant'; content?: string; tool_calls?: ChatToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
+export type ChatTool = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
+export type ChatReply = { text: string; calls: { id: string; name: string; args: unknown }[] };
+export type ChatOptions = { model?: string; tools?: ChatTool[]; signal?: AbortSignal };
+
+/** Normalize a chat response (OpenAI-style `tool_calls`, or content blocks
+ * with `tool_use`) into text and tool calls with parsed arguments. */
+export function parseChatReply(res: unknown): ChatReply {
+  const msg = ((res as { message?: unknown })?.message ?? res) as { content?: unknown; tool_calls?: unknown } | string | null;
+  if (typeof msg === 'string') return { text: msg, calls: [] };
+  const calls: ChatReply['calls'] = [];
+  const parse = (v: unknown) => {
+    if (typeof v !== 'string') return v ?? {};
+    try {
+      return JSON.parse(v || '{}');
+    } catch {
+      return { __unparsed: v };
+    }
+  };
+  let n = 0;
+  for (const c of Array.isArray(msg?.tool_calls) ? (msg!.tool_calls as Record<string, unknown>[]) : []) {
+    const f = (c.function ?? {}) as { name?: unknown; arguments?: unknown };
+    const name = String(f.name ?? c.name ?? '');
+    if (name) calls.push({ id: String(c.id ?? `call_${++n}`), name, args: parse(f.arguments ?? c.input ?? c.arguments) });
+  }
+  let text = '';
+  const content = msg?.content;
+  if (typeof content === 'string') text = content;
+  else if (Array.isArray(content))
+    for (const part of content as Record<string, unknown>[]) {
+      if (typeof part === 'string') text += part;
+      else if (part?.type === 'text' && typeof part.text === 'string') text += part.text;
+      else if (part?.type === 'tool_use' && typeof part.name === 'string') calls.push({ id: String(part.id ?? `call_${++n}`), name: part.name, args: parse(part.input) });
+    }
+  return { text: text.trim(), calls };
+}
+
+/** One chat turn with tools. Sends exactly the messages given (the caller
+ * decides what document information and pixels they contain). */
+export async function chatWithTools(messages: ChatMessage[], opts: ChatOptions = {}): Promise<ChatReply> {
+  const p = (globalThis as unknown as { puter?: PuterAI }).puter;
+  if (!p?.ai?.chat) throw new AIError('unavailable', 'The Assistant needs Puter. Check your connection and try again.');
+  checkAbort(opts.signal);
+  const options: Record<string, unknown> = {};
+  if (opts.model) options.model = opts.model;
+  if (opts.tools?.length) options.tools = opts.tools;
+  if (opts.signal) options.signal = opts.signal;
+  let res: unknown;
+  try {
+    res = await (p.ai.chat as unknown as (m: ChatMessage[], test: boolean, o: Record<string, unknown>) => Promise<unknown>)(messages, false, options);
+  } catch (e) {
+    throw toAIError(e);
+  }
+  checkAbort(opts.signal);
+  const err = (res as { error?: unknown; success?: boolean })?.error;
+  if (err && (res as { success?: boolean }).success === false) throw toAIError(err);
+  return parseChatReply(res);
+}
+
+export type TransformOptions = { model?: string; quality?: string; reference?: RGBA8; testMode?: boolean; signal?: AbortSignal };
+
+/** One image-to-image result for a complete instruction (the caller writes
+ * the whole prompt), returned at the input's size. An optional reference
+ * image (a style or color example) is sent as a second input image. Used by
+ * Portrait & Restore (AI colors, AI style, Scene Changer). */
+export async function transformImage(img: RGBA8, instruction: string, opts: TransformOptions = {}): Promise<RGBA8> {
+  if (!instruction.trim()) throw new AIError('bad-request', 'Describe the change first.');
+  const p = api();
+  checkAbort(opts.signal);
+  const s = Math.min(1, EDIT_MAX_SIDE / Math.max(img.width, img.height));
+  const sw = Math.max(1, Math.round(img.width * s)), sh = Math.max(1, Math.round(img.height * s));
+  const uri = await toDataUri(resample(img, sw, sh));
+  let refUri: string | undefined;
+  if (opts.reference) {
+    const r = opts.reference, rs = Math.min(1, EDIT_MAX_SIDE / Math.max(r.width, r.height));
+    refUri = await toDataUri(resample(r, Math.max(1, Math.round(r.width * rs)), Math.max(1, Math.round(r.height * rs))));
+  }
+  checkAbort(opts.signal);
+  const options = baseOptions(opts, sw, sh);
+  if (refUri) options.input_images = [uri, refUri];
+  else options.input_image = uri;
+  let res: PuterImage;
+  try {
+    res = await p.ai.txt2img(instruction.trim(), options);
+  } catch (e) {
+    throw toAIError(e);
+  }
+  checkAbort(opts.signal);
+  return fromResult(res, img.width, img.height);
 }

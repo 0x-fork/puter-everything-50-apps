@@ -1,3 +1,4 @@
+import { isDocumentId } from './ids';
 import { allLayers, assertSize, blends, type Layer, type PhotoDocument } from "./document";
 import { Assets } from "./assets";
 import { rasterMimeType } from './raster';
@@ -13,9 +14,11 @@ import { isVectorPattern } from './vector-pattern';
 import { packGrid, tilePackMimeType, unpackGrid, type TileGrid } from './tiles';
 import { validDocumentPatterns, validLayerFill } from './fill-layer';
 import { validateAnnotations } from './annotations';
+import { validateComments } from '../collab/comments';
 import { validateAnimation } from './animation';
 import { validateTimeline } from './video-timeline';
 import { validateVideoLayer } from './video-layer';
+import { allAudioClips } from './audio-timeline';
 import { validateArtboard } from './artboard';
 import { validateFrame } from './frame';
 import { validateLayerComps } from './layer-comps';
@@ -26,18 +29,30 @@ import { migratePinWarps, validatePinWarp } from './pin-warp';
 import { validTextStyles } from '../imaging/text/styles';
 import { validateHdrPreview } from './hdr-preview';
 import { validateBlending } from './blending';
+import { migrateGuides } from './guides';
 // Tile grids are stored as one packed asset each; the saved JSON names the pack
 // in place of the live tile map.
 type PackedRef = { pack: string };
 const maxLayers = 1000;
+/** Data kept beside a document's history that its saved project includes
+ * (review comments), by the session's asset store; given the document being
+ * saved, so documents made from it (embedded contents) do not take it along. */
+export const projectExtras = new WeakMap<Assets, (doc: PhotoDocument) => Record<string, unknown>>();
 // A portable binary bundle: magic, JSON byte length, metadata, then original image blobs.
 const magic = new TextEncoder().encode("PHOTO001");
+/** Project data kept beside the document rather than in it (state outside
+ * the undo history, such as the provenance record), stored under `key` in
+ * the project's "sidecars" object. `write` returns undefined for nothing;
+ * `read` failures are ignored (the project still opens). */
+export type ProjectSidecar = { key: string; write(doc: PhotoDocument): unknown; read(doc: PhotoDocument, value: unknown): void };
+export const projectSidecars: ProjectSidecar[] = [];
 export async function serialize(
   live: PhotoDocument,
   assets: Assets,
 ): Promise<Blob> {
   const packs = new Map<string, Blob>();
   const doc = structuredClone(live);
+  for (const [k, v] of Object.entries(projectExtras.get(assets)?.(live) ?? {})) (doc as unknown as Record<string, unknown>)[k] = v;
   const pack = async (grid: TileGrid): Promise<PackedRef> => {
     const id = crypto.randomUUID();
     packs.set(id, await packGrid(assets.tiles, grid));
@@ -62,6 +77,37 @@ export async function serialize(
   for (const l of allLayers(doc.layers)) if (l.embed && !doc.embeds?.[l.embed.contents]) delete l.embed;
   const blobOf = (id: string) => packs.get(id) ?? assets.blob(id);
   const ids = [
+    ...documentAssetIds(doc),
+    ...packs.keys(),
+  ];
+  const records = ids.map((id) => ({
+    id,
+    size: blobOf(id).size,
+    type: blobOf(id).type,
+  }));
+  const sidecars: Record<string, unknown> = {};
+  for (const s of projectSidecars) {
+    const v = s.write(live);
+    if (v !== undefined) sidecars[s.key] = v;
+  }
+  const json = new TextEncoder().encode(
+    JSON.stringify({ document: doc, assets: records, ...(Object.keys(sidecars).length ? { sidecars } : {}) }),
+  );
+  const header = new Uint8Array(12);
+  if (
+    json.length > 16 * 1024 * 1024 ||
+    12 + json.length + records.reduce((sum, a) => sum + a.size, 0) > 512 * 1024 * 1024
+  )
+    throw new Error('This project exceeds the 512 MB file or 16 MB metadata limit.');
+  header.set(magic);
+  new DataView(header.buffer).setUint32(8, json.length, true);
+  return new Blob([header, json, ...ids.map(blobOf)], {
+    type: "application/x-photo-editor",
+  });
+}
+/** Asset IDs a document refers to (the files a saved project carries). */
+export function documentAssetIds(doc: PhotoDocument): string[] {
+  return [
     ...new Set(
       [
         doc.psdMetadataAsset,
@@ -76,30 +122,13 @@ export async function serialize(
           isVectorPattern(l.vector?.fill) ? l.vector!.fill.asset : undefined,
         ]),
         ...Object.values(doc.embeds ?? {}).flatMap(embedAssetIds),
+        ...audioAssetIds(doc),
       ].filter((id): id is string => !!id),
     ),
-    ...packs.keys(),
   ];
-  const records = ids.map((id) => ({
-    id,
-    size: blobOf(id).size,
-    type: blobOf(id).type,
-  }));
-  const json = new TextEncoder().encode(
-    JSON.stringify({ document: doc, assets: records }),
-  );
-  const header = new Uint8Array(12);
-  if (
-    json.length > 16 * 1024 * 1024 ||
-    12 + json.length + records.reduce((sum, a) => sum + a.size, 0) > 512 * 1024 * 1024
-  )
-    throw new Error('This project exceeds the 512 MB file or 16 MB metadata limit.');
-  header.set(magic);
-  new DataView(header.buffer).setUint32(8, json.length, true);
-  return new Blob([header, json, ...ids.map(blobOf)], {
-    type: "application/x-photo-editor",
-  });
 }
+/** Audio files of the timeline's clips (footage sound is the footage asset). */
+const audioAssetIds = (doc: PhotoDocument) => (doc.timeline ? allAudioClips(doc.timeline).flatMap((c) => (c.source ? [c.source.asset] : [])) : []);
 // Live Filters: a pixel layer with an unfiltered source and a list of filter
 // settings. Operation IDs are checked when rendering, so unknown filters from
 // newer versions load and are reported instead of failing the whole project.
@@ -186,6 +215,7 @@ export function validateDocument(value: unknown): PhotoDocument {
     throw new Error("Invalid selection.");
   validateDocumentPaths(doc.paths, doc.workPath);
   validateAnnotations(doc.annotations);
+  validateComments((doc as { comments?: unknown }).comments);
   const ids = new Set<string>();
   let count = 0;
   const walk = (layers: PhotoDocument["layers"], depth: number) => {
@@ -193,7 +223,7 @@ export function validateDocument(value: unknown): PhotoDocument {
     for (const l of layers) {
       if (
         ++count > maxLayers ||
-        typeof l.id !== "string" ||
+        !isDocumentId(l.id) ||
         ids.has(l.id) ||
         !["image", "paint", "text", "group", "solid", "vector", "pixel", "adjustment"].includes(l.kind) ||
         !(blends.includes(l.blend) || (l.blend === "pass through" && l.kind === "group")) ||
@@ -252,7 +282,7 @@ export function validateDocument(value: unknown): PhotoDocument {
       validateFrame(l);
       validatePinWarp(l);
       const gen = l.generated;
-      if (gen !== undefined && (!gen || typeof gen !== 'object' || !['generate', 'edit', 'upscale'].includes(gen.kind) || typeof gen.prompt !== 'string' || gen.prompt.length > 4000 ||
+      if (gen !== undefined && (!gen || typeof gen !== 'object' || !['generate', 'edit', 'upscale', 'fill', 'expand'].includes(gen.kind) || typeof gen.prompt !== 'string' || gen.prompt.length > 4000 ||
         (gen.model !== undefined && typeof gen.model !== 'string') || (gen.style !== undefined && typeof gen.style !== 'string')))
         throw new Error('Invalid generated layer information.');
       if (l.assetColorSpace !== undefined && !['document', 'srgb'].includes(l.assetColorSpace))
@@ -281,7 +311,7 @@ export function validateDocument(value: unknown): PhotoDocument {
           (l.pixelMask.vectorMaskDensity !== undefined && l.pixelMask.vectorMaskDensity !== 1))
           throw new Error('Pixel mask rendering parameters are not yet supported.');
       }
-      if (l.linkGroup !== undefined && (typeof l.linkGroup !== 'string' || !l.linkGroup || l.linkGroup.length > 64))
+      if (l.linkGroup !== undefined && (!isDocumentId(l.linkGroup) || l.linkGroup.length > 64))
         throw new Error('Invalid layer link.');
       for (const flag of [l.maskDisabled, l.maskInverted, l.maskUnlinked, l.background])
         if (flag !== undefined && typeof flag !== "boolean")
@@ -335,6 +365,14 @@ export function validateDocument(value: unknown): PhotoDocument {
     }
   };
   walk(doc.layers, 0);
+  if (doc.channels !== undefined) {
+    const channelIds = new Set<string>();
+    if (!Array.isArray(doc.channels)) throw new Error('Invalid channels.');
+    for (const c of doc.channels) {
+      if (!c || typeof c !== 'object' || !isDocumentId(c.id) || channelIds.has(c.id)) throw new Error('Invalid channel.');
+      channelIds.add(c.id);
+    }
+  }
   validateLayerComps(doc.layerComps, doc.lastComp);
   if (doc.globalLight !== undefined && !(finite(doc.globalLight, ['angle', 'altitude']) && Math.abs(doc.globalLight.angle) <= 360 && doc.globalLight.altitude >= 0 && doc.globalLight.altitude <= 90))
     throw new Error('Invalid global light.');
@@ -346,13 +384,17 @@ export function validateDocument(value: unknown): PhotoDocument {
   if (doc.timeline !== undefined) {
     if (doc.animation !== undefined) throw new Error('A document has either a frame animation or a video timeline.');
     validateTimeline(doc.timeline);
+    if (!Object.keys(doc.timeline.clips).every(isDocumentId)) throw new Error('Invalid video timeline.');
   }
   if (doc.textStyles !== undefined && !validTextStyles(doc.textStyles)) throw new Error('Invalid text styles.');
+  if (doc.imageAssets !== undefined && typeof doc.imageAssets !== 'boolean') throw new Error('Invalid Image Assets setting.');
   if (
     doc.perspectivePlanes !== undefined &&
     !(Array.isArray(doc.perspectivePlanes) && doc.perspectivePlanes.length <= 64 && doc.perspectivePlanes.every((q) => Array.isArray(q) && q.length === 4 && q.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))))
   )
     throw new Error('Invalid perspective planes.');
+  // Canvas guides of older projects stay canvas guides; invalid entries go.
+  migrateGuides(doc);
   return doc;
 }
 /** Read a .photo project. With `into`, its assets are added to an existing
@@ -371,17 +413,28 @@ export async function deserialize(
   const data = JSON.parse(await blob.slice(12, 12 + length).text()) as {
     document: unknown;
     assets: { id: string; size: number; type: string }[];
+    sidecars?: Record<string, unknown>;
   };
   const document = validateDocument(data.document),
     assets = into ?? new Assets();
+  if (data.sidecars && typeof data.sidecars === 'object')
+    for (const s of projectSidecars)
+      if (data.sidecars[s.key] !== undefined)
+        try {
+          s.read(document, data.sidecars[s.key]);
+        } catch {
+          /* Optional data from a damaged or newer project is left out. */
+        }
   let offset = 12 + length;
   const packs = new Map<string, Blob>();
   try {
     // Up to two image/mask assets per supported layer, plus three document
     // assets and three per embedded object.
     // Altered video frames are one tile pack each.
+    // Audio clips add at most one file each.
     const altered = allLayers(document.layers).reduce((n, l) => n + Object.keys(l.video?.altered ?? {}).length, 0);
-    if (!Array.isArray(data.assets) || data.assets.length > maxLayers * 3 + 64 + Object.keys(document.embeds ?? {}).length * 3 + altered)
+    const audio = document.timeline ? allAudioClips(document.timeline).length : 0;
+    if (!Array.isArray(data.assets) || data.assets.length > maxLayers * 3 + 64 + Object.keys(document.embeds ?? {}).length * 3 + altered + audio)
       throw new Error("Invalid asset table.");
     const assetIds = new Set<string>();
     for (const a of data.assets) {
@@ -481,6 +534,7 @@ export async function deserialize(
           throw new Error('Pixel mask dimensions do not match its coverage asset.');
       }
     }
+    for (const id of audioAssetIds(document)) if (assets.blob(id).type !== sourceMimeType) throw new Error('Invalid audio asset.');
     for (const c of Object.values(document.embeds ?? {})) {
       const { width, height } = assets.dimensions(c.composite);
       if (width !== c.width || height !== c.height) throw new Error('Embedded object size does not match its content.');

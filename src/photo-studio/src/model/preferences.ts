@@ -55,6 +55,11 @@ export type Preferences = {
   lockSlices?: boolean;
   snapSlices?: boolean;
   showArtboardNames?: boolean;
+  showCanvasGuides?: boolean;
+  showArtboardGuides?: boolean;
+  showMesh?: boolean;
+  showEditPins?: boolean;
+  showPatternTileBounds?: boolean;
   windowLayout?: LayoutKind;
   rotateAllWindows?: boolean;
   aspectCorrection?: boolean;
@@ -109,6 +114,9 @@ export type Preferences = {
   // ----- Export -----
   quickExportFormat: 'png' | 'jpeg' | 'webp' | 'gif' | 'tiff';
   quickExportLocation: 'download' | 'ask' | 'beside';
+  // Provenance attached to exported PNG, JPEG, WebP and TIFF files.
+  provenanceAttach: 'none' | 'record' | 'signed';
+  provenancePrompts: boolean;
   // ----- Performance -----
   gpuBackend: 'auto' | 'webgpu' | 'webgl2';
   videoCacheSize: number;
@@ -267,6 +275,8 @@ export const SETTINGS: SettingDef[] = [
   // ----- Export -----
   { page: 'export', section: 'Quick export', type: 'choice', key: 'quickExportFormat', label: 'Quick export format', default: 'png', options: [['png', 'PNG'], ['jpeg', 'JPEG'], ['webp', 'WebP'], ['gif', 'GIF'], ['tiff', 'TIFF']] },
   { page: 'export', section: 'Quick export', type: 'choice', key: 'quickExportLocation', label: 'Quick export location', default: 'download', options: [['download', 'Download to this device'], ['ask', 'Ask for a Puter folder each time'], ['beside', 'Beside the document in Puter']], help: 'Documents not yet saved to Puter download when “beside the document” is chosen.' },
+  { page: 'export', section: 'Provenance', type: 'choice', key: 'provenanceAttach', label: 'Attach provenance to exports', default: 'none', options: [['none', 'Do not attach'], ['record', 'How the image was made (XMP record)'], ['signed', 'Record plus a self-signed C2PA manifest']], help: 'Adds the sources, edit steps, AI use and a hash of the pixels to PNG, JPEG, WebP and TIFF exports. The signature uses a key made in this browser and is not vouched for by anyone.', keywords: 'c2pa history origin xmp signature authenticity' },
+  { page: 'export', section: 'Provenance', type: 'boolean', key: 'provenancePrompts', label: 'Record AI prompts', default: false, help: 'Keep the prompts of AI commands in the provenance record. Off: only that an AI command was used.', keywords: 'privacy generate' },
   // ----- Performance -----
   { page: 'performance', section: 'Memory', type: 'info', id: 'memory', label: 'Memory usage' },
   { page: 'performance', section: 'History', type: 'number', key: 'historyStates', label: 'History states', default: 60, min: 1, max: 1000, integer: true, keywords: 'undo levels' },
@@ -325,7 +335,7 @@ export const STORED: Extract<SettingDef, { key: Key }>[] = (() => {
 export const settingFor = (key: string) => STORED.find((s) => s.key === (key as Key));
 
 // Menu state that has no row in the window: type checks only.
-const STATE_BOOLEANS = ['showRulers', 'showGuides', 'showGrid', 'snap', 'guidesLocked', 'showPixelGrid', 'showLayerEdges', 'showAlignmentGuides', 'showBrushPreview', 'showSlices', 'lockSlices', 'snapSlices', 'showArtboardNames', 'rotateAllWindows', 'aspectCorrection'] as const;
+const STATE_BOOLEANS = ['showRulers', 'showGuides', 'showGrid', 'snap', 'guidesLocked', 'showPixelGrid', 'showLayerEdges', 'showAlignmentGuides', 'showBrushPreview', 'showSlices', 'lockSlices', 'snapSlices', 'showArtboardNames', 'showCanvasGuides', 'showArtboardGuides', 'showMesh', 'showEditPins', 'showPatternTileBounds', 'rotateAllWindows', 'aspectCorrection'] as const;
 const STATE_DEFAULTS = { showRulers: true, showGuides: true, showGrid: false, snap: true };
 const LAYOUTS = ['tabs', 'tile-grid', 'tile-vertical', 'tile-horizontal', '2-up-vertical', '2-up-horizontal', '3-up-vertical', '3-up-horizontal', '3-up-stacked', '4-up', '6-up'];
 

@@ -49,12 +49,12 @@ import {
   setInterpolation,
   setTimelineFps,
   splitClip,
+  splitLayers,
   timecode,
   timelineToAnimation,
   toggleKeyAtCurrent,
   toggleStopwatch,
-  trimClipEnd,
-  trimClipStart,
+  trimLayers,
   workArea,
   neededFrames,
 } from '../../model/video-timeline-ops';
@@ -62,6 +62,8 @@ import { maxFrames } from '../../model/animation';
 import { addFootage, editTimeline, footageGrid, placer, forgetFrames, purgeVideoCache, setTime } from './video-frames';
 import { isVideoLayer, timelineOf, videoLayerOf, videoView, type VideoLayer } from './video-state';
 import { setSelectedFrames } from './state';
+import { footageSound, purgeAudioCache } from './audio-media';
+import { allAudioClips, linkFootageAudio } from '../../model/audio-timeline';
 
 const tlOf = (e: Editor) => timelineOf(e)!;
 const clampTime = (tl: VideoTimeline, t: number) => Math.max(0, Math.min(tl.duration - 1, Math.round(t)));
@@ -80,7 +82,7 @@ const titleOf = (name: string) => name.replace(/\.[^.]+$/, '') || 'Video';
 
 /** Give a document a video timeline (converting its frame animation).
  * Returns true when the timeline is new. */
-function prepareTimeline(d: PhotoDocument, fps: number, seconds = 5) {
+export function prepareTimeline(d: PhotoDocument, fps: number, seconds = 5) {
   if (d.timeline) return false;
   if (hasArtboards(d)) throw new Error(artboardConflict);
   if (d.animation) animationToTimeline(d, fps);
@@ -132,7 +134,7 @@ export async function convertToFrames(e: Editor) {
       { name: 'range', label: 'Range', type: 'select', value: tl.work ? 'work' : 'all', options: [['all', `Whole timeline (${timecode(tl.duration, tl.fps)})`], ['work', `Work area (${timecode(we - ws, tl.fps)})`]] },
     ],
     'Convert',
-    'Each frame shows the timeline at its time. Video layers become one layer per frame.',
+    `Each frame shows the timeline at its time. Video layers become one layer per frame.${tl.audio?.some((t) => t.clips.length) ? ' Frame animations have no sound: the audio tracks are removed.' : ''}`,
   );
   if (!v) return;
   const rate = Math.max(1, Math.min(tl.fps, Number(v.fps) || 10));
@@ -243,6 +245,8 @@ export async function newVideoLayerFromFile(e: Editor, arg?: unknown) {
     const footage = await addFootage(s, file, name);
     assertSize(footage.width, footage.height);
     const video = footageVideo(footage);
+    const sound = await footageSound(file, name, footage.type, footage.asset);
+    if (sound) video.audio = sound;
     const grid = await footageGrid(s, video, 0);
     const doc: PhotoDocument = { ...s.doc, name: titleOf(name), width: footage.width, height: footage.height, layers: [], selection: null };
     const l = newPixelLayer(titleOf(name), doc, grid);
@@ -252,6 +256,7 @@ export async function newVideoLayerFromFile(e: Editor, arg?: unknown) {
     const clip = naturalClip(doc.timeline, l);
     doc.timeline.clips[l.id] = clip;
     doc.timeline.duration = Math.min(maxTimelineFrames, clipEnd(clip));
+    if (sound) linkFootageAudio(doc.timeline, l.id);
     s.history.reset(doc);
     s.hasDocument = true;
     s.storage.reset();
@@ -262,6 +267,9 @@ export async function newVideoLayerFromFile(e: Editor, arg?: unknown) {
     const s = e.session;
     const footage = await addFootage(s, file, name);
     const video = footageVideo(footage);
+    // The footage's sound plays from a linked clip (added by the history hook).
+    const sound = await footageSound(file, name, footage.type, footage.asset);
+    if (sound) video.audio = sound;
     const grid = await footageGrid(s, video, 0);
     const x = Math.round((e.doc.width - footage.width) / 2),
       y = Math.round((e.doc.height - footage.height) / 2);
@@ -386,9 +394,15 @@ export async function replaceFootage(e: Editor, arg?: unknown) {
   const name = file instanceof File ? file.name : 'Video.webm';
   e.message(`Reading ${name}…`);
   const footage = await addFootage(e.session, file, name);
+  const sound = await footageSound(file, name, footage.type, footage.asset);
   await editTimeline(e, 'Replace Footage', (d) => {
     const l = findLayer(d.layers, sel.id) as VideoLayer;
     const v: VideoLayerData = { ...footageVideo(footage, l.video.x, l.video.y), alpha: l.video.alpha, loops: l.video.loops };
+    if (sound) {
+      v.audio = sound;
+      if (l.video.muted) v.muted = true;
+      if (!allAudioClips(d.timeline!).some((c) => c.link === l.id)) linkFootageAudio(d.timeline!, l.id);
+    }
     const altered = Object.fromEntries(Object.entries(l.video.altered ?? {}).filter(([k]) => Number(k) < v.frames));
     if (Object.keys(altered).length) v.altered = altered;
     l.video = v;
@@ -431,6 +445,7 @@ export async function interpretFootage(e: Editor) {
 
 export function purgeCache(e: Editor) {
   purgeVideoCache();
+  purgeAudioCache();
   for (const s of e.sessions) s.collectTiles();
   e.message('Video cache purged.');
 }
@@ -439,69 +454,25 @@ export function purgeCache(e: Editor) {
 
 const selectedClipIds = (e: Editor) => allLayers(e.selectedLayers).map((l) => l.id);
 
-export function splitAtPlayhead(e: Editor) {
+export function splitAtPlayhead(e: Editor, layerIds = selectedClipIds(e)) {
   const tl = tlOf(e);
   const t = tl.current;
-  const ids = selectedClipIds(e).filter((id) => splitClip(ownClipCopy(tl, id), t));
+  const ids = layerIds.filter((id) => splitClip(ownClipCopy(tl, id), t));
   if (!ids.length) return e.message('Move the playhead inside a selected clip to split it.');
-  const made: string[] = [];
+  let made: string[] = [];
   return editTimeline(e, 'Split at Playhead', (d) => {
-    made.length = 0;
-    const t2 = d.timeline!;
-    for (const id of ids) {
-      const parts = splitClip(ownClip(t2, id), t);
-      if (!parts) continue;
-      const container = containerList(d.layers, id);
-      if (!container) continue;
-      const i = container.findIndex((l) => l.id === id);
-      const copy = cloneLayer(container[i]);
-      container.splice(i + 1, 0, copy);
-      t2.clips[id] = parts[0];
-      t2.clips[copy.id] = parts[1];
-      made.push(copy.id);
-    }
+    made = splitLayers(d, ids, t);
   }).then(() => {
     if (made.length) e.selectLayers(made);
     e.update();
   });
 }
 const ownClipCopy = (tl: VideoTimeline, id: string): Clip => structuredClone(tl.clips[id] ?? { start: 0, in: 0, length: tl.duration });
-function containerList(layers: Layer[], id: string): Layer[] | undefined {
-  if (layers.some((l) => l.id === id)) return layers;
-  for (const l of layers) {
-    const found = containerList(l.children, id);
-    if (found) return found;
-  }
-  return undefined;
-}
-/** A copy of a layer (and its children) with new IDs; tiles are shared. */
-function cloneLayer(l: Layer): Layer {
-  const copy = structuredClone(l);
-  const renew = (x: Layer) => {
-    x.id = crypto.randomUUID();
-    delete x.psdId;
-    x.children.forEach(renew);
-  };
-  renew(copy);
-  return copy;
-}
 
-export function trimToPlayhead(e: Editor, edge: 'start' | 'end') {
-  const tl = tlOf(e);
-  const t = tl.current;
-  const ids = selectedClipIds(e);
+export function trimToPlayhead(e: Editor, edge: 'start' | 'end', ids = selectedClipIds(e)) {
+  const t = tlOf(e).current;
   return editTimeline(e, edge === 'start' ? 'Trim Start to Playhead' : 'Trim End to Playhead', (d) => {
-    const t2 = d.timeline!;
-    let changed = false;
-    for (const id of ids) {
-      const l = findLayer(d.layers, id)!;
-      const c = ownClip(t2, id);
-      const limit = contentLength(l, t2.fps);
-      const next = edge === 'start' ? trimClipStart(c, t - c.start, limit) : trimClipEnd(c, t + 1 - clipEnd(c), limit);
-      if (JSON.stringify(next) !== JSON.stringify(c)) changed = true;
-      t2.clips[id] = next;
-    }
-    if (!changed) return false;
+    if (!trimLayers(d, ids, edge, t)) return false;
   });
 }
 export function setWorkArea(e: Editor, edge: 'start' | 'end' | 'clear') {

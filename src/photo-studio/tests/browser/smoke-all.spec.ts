@@ -155,9 +155,14 @@ async function buildDocument(s: Smoke) {
     const { allLayers } = await import('/src/model/document.ts');
     const { defaultDropShadow } = await import('/src/imaging/effects/types.ts');
     const { newLayerComp } = await import('/src/model/layer-comps.ts');
+    const { emptyGrid, writeRect } = await import('/src/model/tiles.ts');
     const pixelId = e.selected;
     await e.runCommand('path.from-selection');
     const shape = allLayers(e.doc.layers).find((l) => l.kind === 'vector')!;
+    // A layer mask with an edge on the embedded object (Refine Mask Edge).
+    const reveal = new Uint8Array(320 * 240);
+    for (let y = 30; y < 210; y++) reveal.fill(255, y * 320 + 40, y * 320 + 280);
+    const maskGrid = writeRect(e.assets.tiles, emptyGrid(1), 0, 0, { width: 320, height: 240, data: reveal });
     e.command('Smoke fixture', (d) => {
       d.paths = [{ id: 'smoke-path', name: 'Path 1', mask: structuredClone(d.workPath!) }];
       d.guides = [{ orientation: 'vertical', position: 100 }, { orientation: 'horizontal', position: 80 }];
@@ -165,6 +170,7 @@ async function buildDocument(s: Smoke) {
       d.layerComps = [newLayerComp(d, 'Comp 1', { visibility: true, position: true, appearance: true })];
       const target = allLayers(d.layers).find((l) => l.id === shape.id)!;
       target.style = { enabled: true, dropShadow: [defaultDropShadow()] };
+      allLayers(d.layers).find((l) => l.embed)!.maskGrid = maskGrid;
     });
     e.selectLayers([pixelId]);
     await e.runCommand('filter.convert-live');
@@ -228,6 +234,8 @@ async function restoreDocument(s: Smoke, withDocument: boolean) {
     e.selectLayers(w.__smokeSelected as string[]);
     // Selected timeline keyframes are view state of the session.
     if (w.__smokeKeys) (await import('/src/features/animation/video-state.ts')).videoView(e).keys = structuredClone(w.__smokeKeys as never);
+    // So are the selected audio clips.
+    if (w.__smokeKeys) (await import('/src/features/animation/video-state.ts')).videoView(e).audioClips = structuredClone((w.__smokeAudio ?? []) as never);
     e.update();
   }, withDocument);
 }
@@ -364,8 +372,9 @@ async function smokePanels(s: Smoke, withDocument: boolean) {
 }
 
 /** Convert the test document's frame animation to a video timeline with a
- * video layer from a small generated WebM (painted on one frame, opacity
- * keyframed, a keyframe selected, a work area set) and keep it as the base state. */
+ * video layer from a small generated WebM with sound (painted on one frame,
+ * opacity keyframed, a keyframe selected, a work area set) and an audio clip
+ * from a WAV file, and keep it as the base state. */
 async function videoContext(s: Smoke) {
   await restoreDocument(s, true);
   await s.page.evaluate(async () => {
@@ -389,7 +398,10 @@ async function videoContext(s: Smoke) {
       frame.close();
     }
     await encoder.flush();
-    await e.runCommand('layer.video-new-file', new File([muxWebm(chunks, { width: 32, height: 32, codec: 'V_VP8', frameRate: 10 })], 'smoke.webm', { type: 'video/webm' }));
+    const { encodeOpus } = await import('/src/features/animation/audio-export.ts');
+    const tone = Float32Array.from({ length: 19200 }, (_, i) => 0.3 * Math.sin(i / 10));
+    const audio = await encodeOpus(e, [tone, tone]);
+    await e.runCommand('layer.video-new-file', new File([muxWebm(chunks, { width: 32, height: 32, codec: 'V_VP8', frameRate: 10, audio })], 'smoke.webm', { type: 'video/webm' }));
     const { writeRect } = await import('/src/model/tiles.ts');
     const id = e.selected;
     const data = new Uint8ClampedArray(16 * 16 * 4).fill(200);
@@ -399,6 +411,10 @@ async function videoContext(s: Smoke) {
     });
     await e.runCommand('timeline.animate-opacity');
     await e.runCommand('timeline.work-end');
+    const { encodeWav } = await import('/src/imaging/codecs/wav.ts');
+    await e.runCommand('timeline.audio-add', new File([encodeWav([tone], 48000)], 'smoke.wav', { type: 'audio/wav' }));
+    // The linked clip of the video layer is the audio clip later commands get.
+    w.__smokeLinked = [e.doc.timeline!.audio![0].clips.find((c) => c.link)!.id];
     const { videoView } = await import('/src/features/animation/video-state.ts');
     videoView(e).keys = [{ id, prop: 'opacity', t: 0 }];
     w.__smokeKeys = videoView(e).keys;
@@ -437,7 +453,7 @@ async function selectContext(s: Smoke, context: string) {
 
 for (const withDocument of [false, true]) {
   test(`every command, tool and panel runs cleanly ${withDocument ? 'with a document' : 'in an empty workspace'}`, async ({ page, context }) => {
-    test.setTimeout(Number(process.env.SMOKE_TIMEOUT) || (withDocument ? 300_000 : 180_000));
+    test.setTimeout(Number(process.env.SMOKE_TIMEOUT) || (withDocument ? 480_000 : 240_000));
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     const s = new Smoke(page);
     await s.boot();
@@ -463,6 +479,14 @@ for (const withDocument of [false, true]) {
         // The video commands get a document with a video timeline and a video layer.
         await videoContext(s);
         rest = await smokeCommands(s, withDocument, rest, 'video layer');
+        // The audio clip commands get a selected audio clip.
+        await s.page.evaluate(() => {
+          const w = window as unknown as Record<string, unknown>;
+          w.__smokeAudio = w.__smokeLinked;
+        });
+        await restoreDocument(s, true);
+        rest = await smokeCommands(s, withDocument, rest, 'audio clip');
+        await s.page.evaluate(() => delete (window as unknown as Record<string, unknown>).__smokeAudio);
         await selectContext(s, 'pixel layer');
       }
     }

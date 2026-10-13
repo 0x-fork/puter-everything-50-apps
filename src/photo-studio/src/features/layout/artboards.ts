@@ -30,6 +30,7 @@ import {
   type ArtboardLayer,
 } from '../../model/artboard';
 import { frameAt } from '../../model/frame';
+import { setArtboardRect } from '../../model/guides';
 import { closestSnap, handles, snapTargets, snapTranslation, transformSelection, type ResizeHandle } from '../../model/transform';
 import { layerLock } from '../../model/locks';
 import { layerMoveHooks, pickFallbacks } from '../../ui/transform';
@@ -201,7 +202,7 @@ function pointerMove(e: Editor, p: CanvasPointer) {
   const draft = structuredClone(e.doc);
   const a = findLayer(draft.layers, drag.id);
   if (isArtboard(a)) {
-    a.artboard.rect = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+    setArtboardRect(a, { x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
     a.artboard.preset = matchingPreset(x1 - x0, y1 - y0, a.artboard.preset)?.id;
   }
   drag.draft = draft;
@@ -292,7 +293,7 @@ export function resizeArtboard(e: Editor, id: string, rect: Rect, preset?: strin
   layoutCommand(e, 'Resize Artboard', (d) => {
     const a = findLayer(d.layers, id);
     if (!isArtboard(a)) return;
-    a.artboard.rect = { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.max(1, Math.round(rect.width)), height: Math.max(1, Math.round(rect.height)) };
+    setArtboardRect(a, { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.max(1, Math.round(rect.width)), height: Math.max(1, Math.round(rect.height)) });
     a.artboard.preset = matchingPreset(a.artboard.rect.width, a.artboard.rect.height, preset)?.id;
   });
 }
@@ -321,7 +322,7 @@ function artboardOverlay(e: Editor) {
       html += `<rect class="artboard-outline ${active ? 'active' : ''}" x="${r.x}" y="${r.y}" width="${r.width}" height="${r.height}" stroke-width="${(active ? 1.5 : 1) / z}"/>`;
     if (names) {
       const label = `${a.name}`;
-      html += `<text class="artboard-name canvas-ui ${active ? 'active' : ''}" data-artboard-name="${a.id}" x="${r.x}" y="${r.y - 6 / z}" font-size="${12 / z}" stroke-width="${3 / z}">${escapeXML(label)}</text>`;
+      html += `<text class="artboard-name canvas-ui ${active ? 'active' : ''}" data-artboard-name="${escapeXML(a.id)}" x="${r.x}" y="${r.y - 6 / z}" font-size="${12 / z}" stroke-width="${3 / z}">${escapeXML(label)}</text>`;
     }
   }
   const sel = toolActive ? selectedArtboard(e) : undefined;
@@ -342,7 +343,7 @@ function artboardOverlay(e: Editor) {
         ['left', r.x - off, r.y + r.height / 2],
       ];
       for (const [side, cx, cy] of sides)
-        html += `<g class="artboard-add canvas-ui" data-artboard-add="${side}" data-artboard-id="${live.id}"><title>Add an artboard ${side === 'top' ? 'above' : side === 'bottom' ? 'below' : `to the ${side}`}</title><circle cx="${cx}" cy="${cy}" r="${9 / z}" stroke-width="${1 / z}"/><path d="M${cx - 4 / z} ${cy}h${8 / z}M${cx} ${cy - 4 / z}v${8 / z}" stroke-width="${1.5 / z}"/></g>`;
+        html += `<g class="artboard-add canvas-ui" data-artboard-add="${side}" data-artboard-id="${escapeXML(live.id)}"><title>Add an artboard ${side === 'top' ? 'above' : side === 'bottom' ? 'below' : `to the ${side}`}</title><circle cx="${cx}" cy="${cy}" r="${9 / z}" stroke-width="${1 / z}"/><path d="M${cx - 4 / z} ${cy}h${8 / z}M${cx} ${cy - 4 / z}v${8 / z}" stroke-width="${1.5 / z}"/></g>`;
     }
   }
   if (drag?.kind === 'create' && toolActive) {
@@ -599,7 +600,7 @@ export function installArtboards(e: Editor) {
   );
   contributeMenu('layer.new-menu', ['layer.new-artboard', 'layer.artboard-from-group', 'layer.artboard-from-layers'], 'layer.group-from-layers');
   contributeMenu('view', ['view.fit-artboard'], 'view.fill');
-  contributeMenu('view.show', ['view.show-artboard-names'], 'view.show-guides');
+  contributeMenu('view.show', ['view.show-artboard-names'], 'view.show-artboard-guides');
   registerOverlay('artboards', artboardOverlay);
   // Layers dropped onto another artboard join it; artboards grow the canvas.
   layerMoveHooks.push((doc, ids) => {

@@ -98,6 +98,10 @@ Options-bar controls get tooltips from `src/app/option-tips.ts` when they have n
 - Selections: `doc.selectionMask` (1-channel grid, origin 0) and `doc.selection` (its
   bounds). Use `selectionGrid`, `applySelection`, `commitSelectionMask(e, mask, op, label)`.
 - Layer masks painted in the app are `layer.maskGrid` (fill 255 = reveal all).
+- Identifiers of layers, channels, embedded objects, audio tracks and clips, comps,
+  slices, paths, frames and annotations are made with `crypto.randomUUID()` and must
+  match `ID_PATTERN` (`src/model/ids.ts`); `validateDocument` refuses others. Still
+  escape them with `escapeXML` wherever they go into markup.
 
 ## Document windows and views (`src/app/views.ts`)
 
@@ -171,6 +175,15 @@ Options-bar controls get tooltips from `src/app/option-tips.ts` when they have n
 
 ## Artboards, frames, comps and slices (`src/features/layout/`)
 
+- Guides (`src/model/guides.ts`, `src/features/guides.ts`): canvas guides are
+  `doc.guides` in document coordinates; artboard guides are
+  `layer.artboard.guides`, offsets from the artboard's corner, so they move,
+  duplicate and disappear with it. `placedGuides` lists both in document
+  coordinates with selection keys (`c:<i>`, `a:<artboard>:<i>`); snapping uses
+  `guideLines`. A guide dropped on an artboard joins it. `migrateGuides` checks
+  guide lists when a project is read; older projects keep their guides as
+  canvas guides.
+
 - Artboards and frames are groups with `layer.artboard` / `layer.frame` data
   (`src/model/artboard.ts`, `src/model/frame.ts`). Artboards stay at the top level.
   The compositor (`Renderer.groupSource`) draws an artboard's background and clips
@@ -230,12 +243,29 @@ Options-bar controls get tooltips from `src/app/option-tips.ts` when they have n
   on, the position, opacity or style they change becomes a keyframe.
 - Artboards and a video timeline do not mix: the history hook refuses an edit
   that would combine them, and the artboard commands say so up front.
+- Audio (`src/model/audio-timeline.ts`): `timeline.audio` lists audio tracks
+  (absent: one empty default track, created by `ownTracks` on the first edit)
+  with clips in seconds (`start`, `in`, `length`), a gain in dB and fade
+  lengths; tracks have a volume, mute and solo. A clip plays an audio file
+  (`source`, an opaque source asset) or, with `link`, the sound of a video
+  layer (`video.audio`, the footage asset) and then takes its times from that
+  layer's clip (`clipSpan`), so edits of a linked clip edit the video clip.
+  `syncAudio` (part of `syncTimeline`) drops linked clips of deleted layers
+  and links the sound of video layers that are new in an edit (imports,
+  splits, duplicates). `audioPlan` is what plays after mute and solo.
+- Sound decodes with Web Audio at 48 kHz (`audio-media.ts`, cached by asset,
+  waveform peaks at several block sizes from `imaging/audio/peaks.ts`).
+  `imaging/audio/mix.ts` mixes a plan offline, sample accurately, for Render
+  Video (Opus through WebCodecs into the WebM writer's second track, or WAV)
+  and tests; playback (`audio-playback.ts`) schedules the same plan on an
+  `AudioContext` with gain ramps, and its clock drives the frame shown.
+  Audio clip commands act on `videoView(e).audioClips` while any is selected.
 
 ## Assisted editing (`src/features/assist/`)
 
 - Puter AI calls live only in `src/imaging/ai/puter-ai.ts` and run only from an
-  explicit button press in a dialog that states what is sent (prompt, pixels)
-  and that it needs a Puter account. Results become new layers; the prompt is
+  explicit button press in a dialog (or the Assistant's Send) that states what is
+  sent (prompt, pixels, document description) and that it needs a Puter account. Results become new layers; the prompt is
   kept in `layer.generated` and shown in Properties. Tests replace `aiCodec`
   and stub `globalThis.puter`.
 - Classical counterparts run in the assist worker (`worker.ts`): Enhanced
@@ -245,7 +275,79 @@ Options-bar controls get tooltips from `src/app/option-tips.ts` when they have n
 - `commitResampled` (`features/transform/image-size.ts`) stores resampled
   layer, mask, live-filter, channel and selection grids as one history step.
 
+## Assistant and Generation History (`src/features/assistant/`, `src/features/generations/`)
+
+- The Assistant turns a request into a plan of registry commands and its own
+  operations (`ops.ts`: select, crop to an aspect ratio, adjustment layers
+  with settings, layer styles, text, layer properties). The model gets a
+  fixed system prompt (operations and common commands) and four tools
+  (`model.ts`): `search_catalog` (ranked one-line matches from `catalog.ts`,
+  built from the live command, tool and panel registries with menu paths),
+  `get_details` (settings schemas on demand: filter `ParamSpec`s, adjustment
+  defaults, AI dialog prefills), `propose_plan` and `answer`. Chat goes through
+  `chatWithTools` in `imaging/ai/puter-ai.ts`; tests pass a scripted chat
+  function (`setChat`, or a stubbed `puter.ai.chat` in the browser).
+- `plan.ts` resolves and checks every step against a `PlanEnv` (registry,
+  preloaded settings schemas, whether a command needs a selection, document
+  state): arguments are coerced with `params.ts`, and selection effects are
+  carried from step to step. Problems are plain sentences on the step; a plan
+  with any does not run.
+- `runner.ts` runs steps through a `ScriptHost` (commands with their recorded
+  `{ params }`, AI commands with `{ prefill }` so only their dialog opens), and
+  `host.finish` squashes the run into one undo step named after the request.
+  A step-by-step run closes its undo step at each pause (`PlanRun.pause`), so
+  edits made while it waits stay their own steps; going on from an unchanged
+  document continues the same step (`History.resume`).
+  Commands that apply settings directly without a dialog can declare them in
+  `catalog.ts` (`SETTINGS_PARAMS`).
+- Generation History stores results in its own IndexedDB database
+  (`persistence/generations.ts`, bounded by count and bytes). Dialogs that
+  generate call `recordGeneration` (`features/generations/record.ts`) with
+  every image that arrived; Reuse Settings reopens the dialog with `{ prefill }`.
+- `MenuBar.reveal(id)` opens the menus leading to a command and highlights it
+  (the Assistant's Show me). A feature can register its own `window.panel.<id>`
+  command (listed directly in the Window menu); the dock keeps it.
+
+## Portrait & Restore (`src/imaging/restore/`, `src/features/restore/`)
+
+- One pseudo-operation (`RESTORE_ID`, like the Filter Gallery) whose settings
+  list the eight filters (`defs.ts`: groups, `ParamSpec`s, `normalizeRestore`).
+  `pipeline.ts` runs the enabled ones in `RUN_ORDER` and limits the result by
+  the selection; the filter worker runs it for Live Filters and actions
+  (`runOperation` loads it on first use).
+- Pixels that settings cannot carry (AI results, a depth layer) are named
+  extras (`entry.aux`) that only the workspace's own worker has; `replayable()`
+  turns them off for Live Filters and recorded steps, and `isDeterministic()`
+  decides whether Live Filter output is offered.
+- The workspace worker (`features/restore/worker.ts`) keeps a source pyramid and
+  a cache of stage results keyed by everything a stage depends on, so moving a
+  slider of a later filter reuses earlier stages. A newer run supersedes an
+  older one between stages. Previews render a coarse level, then a level
+  matching the zoom; zooming past it renders full size on a second worker,
+  which Stop terminates.
+- AI filters are sent the stack's result at their own input (the filters
+  before them in `RUN_ORDER`), rendered on a third worker and kept per
+  setting of those filters, so generating again sends the same pixels. AI
+  stages keep the layer's alpha. While OK applies, the settings are snapshot
+  and the controls inert; previews pause and arriving AI results wait.
+- Live output adds the filter to the layer's own stack (`LiveTarget` in
+  `filters/apply.ts`), also while its mask or Quick Mask is edited. Its
+  preview follows the layer's Live Filter mask; with a selection it is offered
+  only when the selection would become a mask for this filter alone.
+- Global estimates (skin regions, depth, colorization) run at a working size
+  relative to the image so previews match the full-size result; JPEG cleanup
+  as the first filter cleans the full-resolution source even for previews,
+  because block edges exist only on the original pixel grid.
+
 ## Type on paths and variables
+
+- Block text (`textData.block`) is laid out as point text and then each line is
+  scaled about its left end to one width and stacked by capital height
+  (`imaging/text/block-text.ts`), so shaping and carets are unchanged.
+- In vertical text `CharStyle.vertical` sets Latin and digits upright, rotated
+  sideways (runs with `angle`, advancing by their width) or, for 'combine', runs
+  of up to three characters set horizontally in one cell (`verticalForms` in
+  `layout.ts`); ideographs always stay upright.
 
 - Path and area text keep their path in `textData.path` (`TypePath`, local text space).
   `layoutText` lays path text out straight and bends it onto the path
@@ -254,6 +356,10 @@ Options-bar controls get tooltips from `src/app/option-tips.ts` when they have n
   and hit testing reuse the straight geometry. Area text breaks lines into the spans of
   the shape. The path is also a `PathTarget` of kind `text`, so the pen and path
   selection tools edit it; `selectHooks` let the type feature claim its markers.
+- Match Font measures text with pure functions (`src/imaging/text/match-font.ts`:
+  binarizing, deskewing, glyph segmentation, gradient-histogram descriptors, ranking)
+  and draws candidates through an injected renderer: canvas text in the dialog
+  (`features/type/match-font.ts`), glyph outlines from the font files in tests.
 - `doc.variables` binds layers to variables and holds data sets (`src/model/variables.ts`).
   `documentWithSet` (`src/features/variables/apply.ts`) builds the document a set
   produces without committing it, for previews, Apply Data Set and batch export.
@@ -274,6 +380,43 @@ Options-bar controls get tooltips from `src/app/option-tips.ts` when they have n
   `photo-studio-scripts`); enabled scripts register `script.run.<id>` commands with
   `menu: 'file.scripts'`. A new API method is one entry in `ScriptHost.table`, one wrapper in
   `runtime.js` and a line in `docs/scripting.md`.
+
+## Libraries, provenance and image assets
+
+- Libraries (`src/features/libraries/`): `model.ts` is the index format and
+  the edit operations (`LibraryOp`), which are idempotent and refer to IDs, so
+  replaying queued edits on a newer index merges concurrent changes (item
+  operations find an item in any library; moves and renames carry times so
+  an older replayed edit never undoes a newer one).
+  `storage.ts` keeps the working copy in IndexedDB (`photo-studio-libraries`:
+  index, queued edits, content-addressed asset blobs) and, while signed in,
+  syncs with the app's Puter folder (`libraries/index.json`,
+  `libraries/assets/<sha256>`): read, replay, write with a new revision and
+  writer nonce, read back to confirm, retry otherwise; recently written edits
+  are replayed for a while so a writer that missed them cannot drop them.
+  Queued edits stay queued until a cloud write takes them (also while signed
+  out) and long queues are compacted (`compactOps`), never truncated.
+  Tabs hear about changes through a BroadcastChannel. Placements made with
+  Place Linked are embedded objects whose `link.kind` is `library`
+  (`linkReaders` in `embedded/link-state.ts` reads them).
+- Provenance (`src/features/provenance/`, codecs in `src/imaging/provenance/`):
+  the recorder watches new history states of the active document (labels,
+  `e.currentCommand` / `e.lastCommand`), placed embedded contents and
+  `openedFiles` (`app/app-events.ts`), and keeps one `ProvenanceRecord`
+  (`model/provenance.ts`) per session. Steps form a tree (each step's parent
+  is the state it was made from, looked up weakly from document states), so
+  non-linear history keeps the steps leading to the latest edit; projections
+  of shared documents (`SharedBinding.project`) map onto the state they show
+  and are never steps. Projects store it as a sidecar
+  (`projectSidecars` in `model/serialization.ts`: data beside the document,
+  outside the undo history). `attachProvenance` writes the XMP packet, then
+  the C2PA-format store with a hard binding found by fixed-point layout;
+  `inspectProvenance` never throws. Reading uses only assertions the claim
+  lists by hash and binds only the active manifest to the file; no trust
+  list is checked, so the report never names a verified signer.
+- Image Assets (`src/features/image-assets/`): `names.ts` parses layer names,
+  `plan.ts` turns a document into outputs, `generate.ts` renders, encodes
+  (export worker) and writes them; see `docs/image-assets.md`.
 
 ## Preferences, versions and recovery
 
@@ -314,6 +457,27 @@ Options-bar controls get tooltips from `src/app/option-tips.ts` when they have n
 Pure functions on `RGBA8`/`Mask8` (`src/imaging/types.ts`), straight alpha,
 deterministic, no DOM. Operations with parameters implement `ImageOperation` so the
 UI can generate dialogs, presets, recorded actions and live filters from `params`.
+
+## Tutorials and user activity (`src/features/help/`)
+
+- `src/app/activity.ts` announces what the user did: `emitActivity({ kind: 'command', id })`
+  after `runCommand` finishes a command and `{ kind: 'tool', id }` from `setTool`.
+  `onActivity(listener)` returns an unsubscribe function; with no listeners it costs nothing.
+- A tutorial (`tutorials.ts`) is a list of steps with a card text, an anchor (selector,
+  tool, panel, top-level menu, command button or the canvas) and how it completes:
+  `commands` (one of them ran), `tool` (it is active) or `check(now, base)`, which
+  compares the workspace with its state when the step began (`checks` in `tour.ts`:
+  layer added, pixels or mask changed, selection made, opacity lowered and so on).
+  History states are deep copies, so checks compare content (tile IDs), never
+  object identity. A step counts only work in the document it began in.
+  Steps without any of these are read and continued with Next.
+- `TourMachine` (`tour.ts`, pure) holds the step index, completed steps, back, skip and
+  restart; `tour-ui.ts` draws the card and the ring around the anchor and evaluates the
+  current step on activity, on editor updates and on a short timer (zoom changes and
+  layout moves do not announce themselves, and background tabs get no animation frames).
+- Each tutorial opens a procedurally generated sample (`samples.ts`, seeded, no downloads).
+  What's New entries (`whats-new-data.ts`) name a command, tool, panel or tutorial; the
+  window hides "Try it" when the target is not registered.
 
 ## Legal
 

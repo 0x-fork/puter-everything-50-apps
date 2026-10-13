@@ -10,6 +10,7 @@ import { documentThumbnail } from '../versions/thumbs';
 import { onRecentChange, onRecentNoted, openRecent, recentEntries, thumbKey, type RecentEntry } from './recent';
 import { PRESETS, defaultSpec, specFromPreset } from '../../model/document-presets';
 import { createDocument } from './new-document';
+import { sentNote } from '../assistant/settings';
 
 // A few common starting points; File → New lists every preset.
 const QUICK_PRESETS = ['web-large', 'web-post', 'print-a4', 'photo-4x6', 'mobile-standard'];
@@ -75,8 +76,81 @@ function renderPresets(e: Editor) {
   host.querySelector('.start-head')?.after(section);
 }
 
+/** Describe an edit: a prompt with an optional image. Submitting opens the
+ * image (or creates a document) and hands the prompt to the Assistant. */
+function renderDescribe(e: Editor) {
+  const host = e.root.querySelector<HTMLElement>('#empty');
+  if (!host || host.querySelector('.start-describe')) return;
+  const section = document.createElement('section');
+  section.className = 'start-describe';
+  section.setAttribute('aria-label', 'Describe an edit');
+  section.innerHTML = `<h2>Describe an edit</h2><form class="start-describe-form" novalidate>
+<textarea name="prompt" rows="2" aria-label="Describe an edit" placeholder="For example: brighten this photo, crop it to a square and add a soft vignette"></textarea>
+<div class="start-describe-bar"><button type="button" class="secondary" data-describe-pick>${svg('image-plus', 15)}Choose image…</button><span class="start-describe-file" aria-live="polite">Without an image, a new document is created</span><button type="button" class="icon-button" data-describe-clear aria-label="Remove the chosen image" title="Remove the image" hidden>${svg('x', 14)}</button><span class="start-describe-spacer"></span><button type="submit" class="primary">${svg('assistant', 15)}Start</button></div>
+<input type="file" accept="image/*,.psd,.psb,.photo,.tif,.tiff,.tga,.bmp,.ico" hidden>
+<p class="start-describe-note">The Assistant plans the edit with Photo Studio’s own commands for you to review before anything changes. <span class="start-describe-sent"></span></p></form>`;
+  const form = section.querySelector('form')!;
+  // The request runs with a document, so it says what the Assistant panel
+  // says then (the preview follows the Share Image Preview setting).
+  const sent = form.querySelector<HTMLElement>('.start-describe-sent')!;
+  const note = () => (sent.textContent = sentNote(true));
+  note();
+  for (const type of ['focusin', 'pointerenter']) form.addEventListener(type, note);
+  const text = form.querySelector('textarea')!;
+  const input = form.querySelector<HTMLInputElement>('input[type=file]')!;
+  const label = form.querySelector<HTMLElement>('.start-describe-file')!;
+  const clear = form.querySelector<HTMLButtonElement>('[data-describe-clear]')!;
+  let file: File | undefined;
+  const show = () => {
+    label.textContent = file ? file.name : 'Without an image, a new document is created';
+    clear.hidden = !file;
+  };
+  form.querySelector('[data-describe-pick]')!.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => {
+    file = input.files?.[0] ?? file;
+    input.value = '';
+    show();
+  });
+  clear.addEventListener('click', () => {
+    file = undefined;
+    show();
+    text.focus();
+  });
+  text.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
+      ev.preventDefault();
+      form.requestSubmit();
+    }
+    ev.stopPropagation();
+  });
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const prompt = text.value.trim();
+    if (!prompt) {
+      e.message('Describe the edit first.');
+      text.focus();
+      return;
+    }
+    const chosen = file;
+    void e.run(async () => {
+      if (chosen) {
+        const { openFile } = await import('./open');
+        if (!(await openFile(e, chosen, chosen.name))) return;
+      } else await createDocument(e, { ...defaultSpec(), name: 'Untitled' });
+      text.value = '';
+      file = undefined;
+      show();
+      const { openAssistant } = await import('../assistant');
+      // The request runs after this task, so the workspace is not left busy.
+      window.setTimeout(() => void openAssistant(e, prompt), 0);
+    });
+  });
+  (host.querySelector('.start-presets') ?? host.querySelector('.start-head'))?.[host.querySelector('.start-presets') ? 'before' : 'after'](section);
+}
+
 export function installStartScreen(e: Editor) {
   renderPresets(e);
+  renderDescribe(e);
   onRecentChange(() => void render(e));
   // Capture a thumbnail once the opened or saved document has drawn.
   onRecentNoted((entry) => {

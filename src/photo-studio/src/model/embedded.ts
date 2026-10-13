@@ -4,6 +4,7 @@
 // names it is an instance, so duplicating a layer shares the content and
 // editing it updates all instances. Assets are immutable, so history states
 // share them and undo is a reference swap like everywhere else.
+import { isDocumentId } from './ids';
 import { allLayers, type Layer, type PhotoDocument, type Rect } from './document';
 import { validatePinFrame } from './pin-warp';
 
@@ -30,9 +31,10 @@ export const stackModes: [StackMode, string][] = [
 ];
 
 /** Where linked content comes from. Local files can be re-read only while the
- * page keeps the file handle; Puter files are re-read from their path. */
+ * page keeps the file handle; Puter files are re-read from their path;
+ * library graphics from the library item named by `path`. */
 export type EmbedLink = {
-  kind: 'local' | 'puter';
+  kind: 'local' | 'puter' | 'library';
   name: string;
   path?: string;
   size: number;
@@ -102,6 +104,7 @@ export function copyContents(c: EmbeddedContents): EmbeddedContents {
 }
 
 const isId = (v: unknown) => typeof v === 'string' && v.length > 0 && v.length <= 128;
+// Embedded object IDs appear in markup (see ids.ts); asset references only need isId.
 const finite = (...v: unknown[]) => v.every((n) => typeof n === 'number' && Number.isFinite(n));
 /** Structural validation of saved embedded objects (asset types are checked
  * when the assets load). */
@@ -111,7 +114,7 @@ export function validateEmbeds(doc: PhotoDocument) {
     if (!embeds || typeof embeds !== 'object' || Array.isArray(embeds) || Object.keys(embeds).length > 1000)
       throw new Error('Invalid embedded objects.');
     for (const [key, c] of Object.entries(embeds)) {
-      if (!c || typeof c !== 'object' || c.id !== key || !isId(c.id) || typeof c.name !== 'string' || c.name.length > 512 ||
+      if (!c || typeof c !== 'object' || c.id !== key || !isDocumentId(c.id) || typeof c.name !== 'string' || c.name.length > 512 ||
         !Number.isInteger(c.width) || !Number.isInteger(c.height) || c.width < 1 || c.height < 1 || c.width > 8192 || c.height > 8192 ||
         !isId(c.composite) || (c.project !== undefined && !isId(c.project)) || (c.source !== undefined && !isId(c.source)) ||
         (c.sourceName !== undefined && (typeof c.sourceName !== 'string' || c.sourceName.length > 512)) ||
@@ -119,7 +122,7 @@ export function validateEmbeds(doc: PhotoDocument) {
         (c.stack !== undefined && !stackModes.some(([m]) => m === c.stack)))
         throw new Error('Invalid embedded object contents.');
       const link = c.link;
-      if (link !== undefined && (!link || typeof link !== 'object' || !['local', 'puter'].includes(link.kind) ||
+      if (link !== undefined && (!link || typeof link !== 'object' || !['local', 'puter', 'library'].includes(link.kind) ||
         typeof link.name !== 'string' || link.name.length > 512 || (link.path !== undefined && (typeof link.path !== 'string' || link.path.length > 4096)) ||
         !finite(link.size, link.modified) || typeof link.hash !== 'string' || !/^[0-9a-f]{64}$/.test(link.hash)))
         throw new Error('Invalid linked object.');
@@ -128,7 +131,7 @@ export function validateEmbeds(doc: PhotoDocument) {
   for (const l of allLayers(doc.layers)) {
     const e = l.embed;
     if (e === undefined) continue;
-    if (l.kind !== 'image' || !e || typeof e !== 'object' || !isId(e.contents) || !embeds?.[e.contents])
+    if (l.kind !== 'image' || !e || typeof e !== 'object' || !isDocumentId(e.contents) || !embeds?.[e.contents])
       throw new Error('Invalid embedded object layer.');
     const f = e.frame;
     if (f === undefined) continue;

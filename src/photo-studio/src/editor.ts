@@ -15,6 +15,7 @@ import { brushSizeStep, eventShortcut, platformShortcut } from './app/shortcuts'
 import { watchOptionTips } from './app/option-tips';
 import { svg } from './app/icons';
 import { startIdleWork } from './app/lazy';
+import { emitActivity } from './app/activity';
 import { rulerTicks, rulerUnitScale } from './ui/rulers';
 import { DocumentView, WindowManager } from './app/views';
 import { applyAffine, centerPoint, fitZoom, invertAffine, panToCenter, stageTransform, viewMatrix, zoomAround } from './app/view-transform';
@@ -293,7 +294,7 @@ export class Editor {
     return findLayer(this.doc.layers, this.selected);
   }
   get dirty() {
-    return this.hasDocument && (this.doc !== this.saved || this.transform.changed);
+    return this.hasDocument && (this.doc !== this.saved || this.session.unsavedExtras || this.transform.changed);
   }
   get activeTool() {
     return tools.get(this.tool);
@@ -383,10 +384,21 @@ export class Editor {
       this.modal?.apply();
     }
     this.recorder?.(id, arg);
-    await this.run(async () => {
-      await c.run(this, arg);
-    });
+    const outer = this.currentCommand;
+    this.currentCommand = this.lastCommand = id;
+    try {
+      await this.run(async () => {
+        await c.run(this, arg);
+        emitActivity({ kind: 'command', id: c.id, arg });
+      });
+    } finally {
+      this.currentCommand = outer;
+    }
   }
+  // The command running now, and the last one run (provenance attributes
+  // history steps to them).
+  currentCommand?: string;
+  lastCommand?: string;
   // The Actions panel installs a recorder while recording.
   recorder?: (id: string, arg?: unknown) => void;
   command(label: string, edit: (doc: PhotoDocument) => void, opts: { coalesce?: boolean } = {}) {
@@ -511,6 +523,7 @@ export class Editor {
     this.overlay();
     // Tool-dependent panels (brush settings, character) follow the active tool.
     this.dock?.update();
+    emitActivity({ kind: 'tool', id });
   }
   // ----- Colors -----
   setForeground(hex: string) {

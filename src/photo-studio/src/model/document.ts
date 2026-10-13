@@ -8,6 +8,7 @@ import type { TextLayerData } from '../imaging/text/model';
 import type { DocumentPath, LayerVectorMask } from './paths';
 import { mapAnnotations, type Annotations } from './annotations';
 import { mapLayoutGeometry } from './layout-geometry';
+import { mapGuide } from './guides';
 import { matrixOfMap, transformVideo } from './video-layer';
 
 // Values match the PSD blend-mode names used by ag-psd. The order of `blends`
@@ -155,7 +156,7 @@ export interface Layer {
   // current time); see model/video-layer.
   video?: import('./video-layer').VideoLayerData;
 }
-export type GeneratedInfo = { kind: 'generate' | 'edit' | 'upscale'; prompt: string; model?: string; style?: string };
+export type GeneratedInfo = { kind: 'generate' | 'edit' | 'upscale' | 'fill' | 'expand'; prompt: string; model?: string; style?: string };
 // One Live Filter: an operation ID from the filter catalog with its settings
 // and blending options. `seed` keeps noise-like filters stable on re-render.
 export type LiveFilter = {
@@ -251,6 +252,9 @@ export interface PhotoDocument {
   globalLight?: { angle: number; altitude: number };
   // Variables bound to layers and the data sets that fill them (Image > Variables).
   variables?: import('./variables').DocumentVariables;
+  // File → Generate → Image Assets: layers named like files are written as
+  // image files after edits (see features/image-assets).
+  imageAssets?: boolean;
 }
 export type DocumentInfo = { title?: string; author?: string; copyright?: string; description?: string; contact?: string; keywords?: string };
 export const blends: Blend[] = [
@@ -419,17 +423,7 @@ export function mapDocumentGeometry(doc: PhotoDocument, f: (x: number, y: number
   mapAnnotations(doc.annotations, f);
   mapLayoutGeometry(doc, f);
   doc.perspectivePlanes = doc.perspectivePlanes?.map((q) => q.map(([px, py]) => f(px, py)));
-  if (doc.guides) {
-    const eps = 1e-6;
-    doc.guides = doc.guides.flatMap((g): Guide[] => {
-      const v = g.orientation === 'vertical';
-      const a = f(v ? g.position : 0, v ? 0 : g.position),
-        b = f(v ? g.position : 1, v ? 1 : g.position);
-      if (Math.abs(a[0] - b[0]) < eps) return [{ ...g, orientation: 'vertical', position: a[0] }];
-      if (Math.abs(a[1] - b[1]) < eps) return [{ ...g, orientation: 'horizontal', position: a[1] }];
-      return [];
-    });
-  }
+  if (doc.guides) doc.guides = doc.guides.flatMap((g) => mapGuide(g, f) ?? []);
   // Offsets are vectors: they turn and scale with the image but do not shift.
   const [ox, oy] = f(0, 0);
   const vector = (v: [number, number]): [number, number] => {

@@ -10,6 +10,7 @@ import type { BlendMode } from '../../imaging/blend';
 import type { IRect, ParamValues } from '../../imaging/types';
 import { hexRgb, pixelTarget, previewTarget, type PixelTarget } from '../pixels';
 import { GALLERY_ID, filterOp, normalizeFor, stackMargin } from './catalog';
+import { filterLabel } from './menu';
 import { Lane, isCancel, registerSource, releaseSource } from './client';
 import type { StackContext, StackEntry } from './stack';
 import { gridPayload, mergeTiles, type TileResult } from './tilepack';
@@ -35,7 +36,7 @@ export const randomSeed = () => (Math.random() * 0xffffffff) >>> 0;
 export const toMode = (b: Blend) => (b === 'pass through' ? 'normal' : b.replace(/ /g, '-')) as BlendMode;
 export const fromMode = (m: BlendMode) => m.replace(/-/g, ' ') as Blend;
 export function opLabel(opId: string) {
-  return opId === GALLERY_ID ? 'Filter Gallery' : (filterOp(opId)?.label ?? opId);
+  return opId === GALLERY_ID ? 'Filter Gallery' : (filterOp(opId)?.label ?? filterLabel(opId));
 }
 export function filterContext(e: Editor, s: Session): StackContext {
   return { foreground: hexRgb(e.color), background: hexRgb(e.background), seed: s.seed };
@@ -84,11 +85,17 @@ export function ensureRect(s: Session, entries: StackEntry[]) {
   return true;
 }
 
+/** Which Live Filter stack a session works on: re-editing filter `index` of
+ * the layer, or (without an index) adding a filter to the layer's stack even
+ * while its mask or Quick Mask is being edited. */
+export type LiveTarget = { layerId: string; index?: number };
+
 /** Start a session for applying `opId` (or re-editing Live Filter `edit`). */
-export async function openSession(e: Editor, opId: string, params: ParamValues, edit?: { layerId: string; index: number }): Promise<Session | undefined> {
+export async function openSession(e: Editor, opId: string, params: ParamValues, edit?: LiveTarget): Promise<Session | undefined> {
   const doc = e.doc;
   const quick = !!e.settings.quickMask;
   const layer = edit ? findLayer(doc.layers, edit.layerId) : e.layer;
+  const editing = edit?.index !== undefined;
   if (edit || (isLiveLayer(layer) && !e.editingMask && !quick && e.selectedIds.size === 1)) {
     if (!isLiveLayer(layer)) return;
     if (!layer.visible) {
@@ -96,14 +103,14 @@ export async function openSession(e: Editor, opId: string, params: ParamValues, 
       return;
     }
     const filters = layer.liveFilters.map((f) => ({ ...f, params: { ...f.params } }));
-    const index = edit ? edit.index : filters.length;
-    if (!edit) filters.push({ id: opId, params: { ...params }, enabled: true, opacity: 1, blend: 'normal', seed: randomSeed() });
+    const index = editing ? edit!.index! : filters.length;
+    if (!editing) filters.push({ id: opId, params: { ...params }, enabled: true, opacity: 1, blend: 'normal', seed: randomSeed() });
     // A disabled filter mask is kept but not applied.
     let mask = layer.liveMaskDisabled ? undefined : layer.liveMask;
     let newMask: TileGrid | undefined;
     // A selection made before the first masked filter becomes the filter mask.
     const sel = selectionGrid(doc, e.assets.tiles);
-    if (!edit && !layer.liveMask && sel && selectionBounds(doc, sel)) mask = newMask = sel;
+    if (!editing && !layer.liveMask && sel && selectionBounds(doc, sel)) mask = newMask = sel;
     const s: Session = { e, target: { kind: 'pixels', layer, grid: layer.pixels! }, base: layer.liveSource, rect: canvasRect(doc), key: '', selection: null, selBounds: null, seed: filters[index].seed, live: { layerId: layer.id, filters, index, mask, newMask } };
     load(s);
     return s;
@@ -182,7 +189,7 @@ export function closeSession(s: Session) {
 
 const applyLane = new Lane('apply');
 /** Apply without a dialog (immediate filters, recorded actions, Last Filter). */
-export async function applyDirect(e: Editor, opId: string, params: ParamValues, edit?: { layerId: string; index: number }) {
+export async function applyDirect(e: Editor, opId: string, params: ParamValues, edit?: LiveTarget) {
   const s = await openSession(e, opId, params, edit);
   if (!s) return false;
   const label = opLabel(opId);

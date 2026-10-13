@@ -5,6 +5,7 @@
 import type { Editor } from '../../editor';
 import { registerCommand, registerOverlay, type Command } from '../../app/registry';
 import type { ColorMode } from '../../model/document';
+import { installSwatchLibraries } from './swatches';
 
 type Mod = typeof import('./lazy');
 let mod: Mod | undefined;
@@ -106,10 +107,20 @@ export function installColor(e: Editor) {
     run: async (e) => (await import('./hdr-preview')).hdrPreviewDialog(e),
   });
   cmd('view.proof-monitor-rgb', 'Monitor RGB', (m, e) => m.setProof(e, { ...m.workingCmykSetup(), kind: 'monitor', ref: 'builtin:srgb' }), { enabled: hasDoc, checked: setupIs('monitor'), recordable: false });
+  for (const [id, ref, label, description] of [
+    ['view.proof-srgb', 'builtin:srgb', 'Standard Web RGB (sRGB)', 'Preview the document numbers as an sRGB display shows them, as in browsers that ignore embedded profiles.'],
+    ['view.proof-legacy-rgb', 'builtin:legacy-rgb-18', 'Legacy RGB (Gamma 1.8)', 'Preview the document numbers as an older gamma 1.8 display showed them: lighter midtones and softer colors.'],
+  ] as const)
+    cmd(id, label, (m, e) => m.setProof(e, m.rgbSetup(ref)), {
+      enabled: hasDoc,
+      checked: (e) => !!mod && mod.proofState(e.session).setup.kind === 'rgb' && mod.proofState(e.session).setup.ref === ref,
+      recordable: false,
+      description,
+    });
   cmd('view.proof-colors', 'Proof Colors', (m, e) => m.toggleProof(e), { shortcut: 'Mod+Y', enabled: hasDoc, checked: proofOn, recordable: false });
   cmd('view.gamut-warning', 'Gamut Warning', (m, e) => m.toggleGamut(e), {
     shortcut: 'Mod+Shift+Y',
-    enabled: (e) => e.hasDocument && !setupIs('monitor')(e) && !setupIs('vision')(e),
+    enabled: (e) => e.hasDocument && !setupIs('monitor')(e) && !setupIs('vision')(e) && !setupIs('rgb')(e),
     checked: (e) => !!mod && mod.proofState(e.session).gamut,
     recordable: false,
   });
@@ -120,7 +131,7 @@ export function installColor(e: Editor) {
   cmd('file.export-mode-png', 'Export PNG in Image Mode', (m, e) => m.exportModePng(e), { enabled: (e) => e.hasDocument && ['grayscale', 'bitmap', 'indexed'].includes(e.doc.mode ?? ''), menu: 'file.export', recordable: false });
 
   // Swatch libraries register synchronously so the panel menu lists them.
-  void import('./swatches').then((m) => m.installSwatchLibraries());
+  installSwatchLibraries();
 
   registerOverlay('color.gamut-warning', (e) => (mod ? mod.gamutOverlaySvg(e) : ''));
   e.tabBadges.push((s) => (mod ? mod.proofBadge(s) : ''));
