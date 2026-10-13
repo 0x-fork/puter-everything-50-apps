@@ -298,9 +298,17 @@ input[type='range'].fx-slider:disabled {
 .fx-ends {
   display: flex;
   justify-content: space-between;
+  height: 13px;
   padding: 0 2px;
   color: var(--text-dim);
   font-size: var(--fs-xs);
+  line-height: 13px;
+}
+
+/* Keep the label and value on the slider line when end labels sit below it. */
+.fx-row:has(.fx-ends) > .fx-label,
+.fx-row:has(.fx-ends) > .fx-value {
+  margin-bottom: 13px;
 }
 
 .fx-value {

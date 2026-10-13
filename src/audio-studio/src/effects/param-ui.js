@@ -27,8 +27,9 @@
 //   }
 // Per param: `ends: ['Dry', 'Wet']` labels the slider's ends; `enabledIf(values)`
 // greys a control out while it has no effect; `control: 'select' | 'radio'`
-// overrides the choice rendering; `short` is a compact label for vertical sliders
-// and knobs; `order` moves a param within its frame.
+// overrides the choice rendering (and shows a whole-number param as a
+// dropdown); `short` is a compact label for vertical sliders and knobs;
+// `order` moves a param within its frame.
 
 import { h } from '../lib/dom.js';
 import { hotNumber, select, knob } from '../ui/controls.js';
@@ -168,6 +169,13 @@ export function paramControl(p, getValues, onSet, { doc = null, range = null, sm
     };
     const reset = h('button.icon-btn.fx-reset', { type: 'button', 'aria-label': `Reset ${label.toLowerCase()}`, title: `Reset ${label.toLowerCase()}`, onclick: () => onSet(p.id, structuredClone(p.default)) }, icon('rotate-ccw', 14));
     return { kind: 'wide', cells: [h('div.fx-envelope-row', h('div.fx-envelope-head', h('div.fx-label', label), reset), env)], show, setDisabled: () => {} };
+  }
+  if (p.control === 'select') {
+    // A small whole-number range as a dropdown (voices, stages).
+    const options = [];
+    for (let v = p.min ?? 0; v <= (p.max ?? 0); v += p.step || 1) options.push({ value: v, label: String(v) });
+    const sel = select({ value: getValues()[p.id], options, label, onChange: (val) => onSet(p.id, Number(val)) });
+    return { kind: 'row', cells: [h('label.fx-label', `${label}:`), h('div.fx-choice', sel)], show: (v) => (sel.value = String(v[p.id])), setDisabled: (off) => (sel.disabled = off) };
   }
   const c = numberControl(p, getValues, onSet);
   const lab = h('label.fx-label', { onclick: () => c.hot.focus() }, `${label}:`);
