@@ -9,6 +9,7 @@
 import { registerEffect } from '../registry.js';
 import { offloaded } from '../offline-fx.js';
 import { num, hz, bool, choice, preset, pause, checkAbort } from './util.js';
+import { valueAt } from '../envelope.js';
 
 const GROUP = 'Time and Pitch';
 
@@ -89,8 +90,22 @@ export async function runTimePitch(dsp, channels, rate, { mode, precision = 1, s
   return channels.length > ch ? [...out, ...channels.slice(ch).map(() => new Float32Array(outLen))] : out;
 }
 
+/** Points of a spline (eased) envelope, sampled densely so straight segments follow the curve the graph draws. */
+function eased(points, n = 96) {
+  const sorted = [...(points || [])].sort((a, b) => a.t - b.t);
+  if (sorted.length < 2) return sorted;
+  return Array.from({ length: n + 1 }, (_, i) => ({ t: i / n, v: valueAt(sorted, i / n, true) }));
+}
+
+/** Pitch Bender range in semitones: the semitone range, or the shift a tempo change of `bpmRange` makes at `tempo`. */
+export function bendRange(v) {
+  if (v.rangeMode === 1) return Math.min(48, 12 * Math.log2((Math.max(1, v.tempo) + Math.max(0, v.bpmRange)) / Math.max(1, v.tempo)));
+  return v.range;
+}
+
 /** Envelope points [{ t, v }] to flat (input frame, value) pairs. */
-function envelopeCurve(points, len, map) {
+function envelopeCurve(points, len, map, spline = false) {
+  if (spline) points = eased(points);
   const sorted = [...(points || [])].sort((a, b) => a.t - b.t);
   const flat = new Float32Array(sorted.length * 2);
   sorted.forEach((p, i) => {
@@ -147,6 +162,8 @@ registerEffect({
     preset('G Major Robotic', { scale: 0, key: 7, attack: 10, sensitivity: 80 }),
   ],
   latency: (v, rate) => pitchFftSize(1024, v.fftSize, rate),
+  // Live [correction cents, detected Hz, target MIDI note] while previewing.
+  readout: true,
 });
 
 registerEffect({
@@ -195,8 +212,12 @@ registerEffect({
   group: GROUP,
   kind: null,
   params: [
-    { id: 'envelope', label: 'Pitch', type: 'envelope', default: [{ t: 0, v: 0 }, { t: 1, v: 0 }], min: -24, max: 24, unit: 'st' },
-    num('range', 'Range', 1, 24, 2, 'st', { step: 1, description: 'Vertical range of the pitch graph' }),
+    { id: 'envelope', label: 'Pitch', type: 'envelope', default: [{ t: 0, v: 0 }, { t: 1, v: 0 }], min: -48, max: 48, unit: 'st' },
+    num('range', 'Range', 1, 48, 2, 'st', { step: 1, description: 'Vertical range of the pitch graph' }),
+    choice('rangeMode', 'Range In', ['Semitones', 'Tempo'], 0),
+    num('bpmRange', 'Tempo Range', 1, 200, 40, 'BPM', { step: 1 }),
+    num('tempo', 'At a Tempo Of', 20, 300, 90, 'BPM', { step: 1 }),
+    bool('spline', 'Spline Curves', false),
   ],
   presets: [
     preset('Flat', { envelope: [{ t: 0, v: 0 }, { t: 1, v: 0 }], range: 2 }),
@@ -208,8 +229,8 @@ registerEffect({
     preset('Warble', { envelope: [{ t: 0, v: 0 }, { t: 0.25, v: 0.5 }, { t: 0.5, v: -0.5 }, { t: 0.75, v: 0.5 }, { t: 1, v: 0 }], range: 2 }),
   ],
   run: async ({ channels, rate, values: v, dsp, onProgress, signal }) => {
-    const range = v.range;
-    const curve = envelopeCurve(v.envelope, channels[0].length, (semis) => 2 ** (Math.max(-range, Math.min(range, semis)) / 12));
+    const range = bendRange(v);
+    const curve = envelopeCurve(v.envelope, channels[0].length, (semis) => 2 ** (Math.max(-range, Math.min(range, semis)) / 12), v.spline);
     return runTimePitch(dsp, channels, rate, { mode: 2, pitch: 1, curve }, { onProgress, signal });
   },
   process: offloaded('pitchBender'),
@@ -225,6 +246,7 @@ registerEffect({
     choice('precision', 'Precision', PRECISION, 1),
     bool('formants', 'Preserve Formants', true),
     bool('lockChannels', 'Lock Stereo Channels', true),
+    bool('spline', 'Spline Curves', false),
   ],
   presets: [
     preset('No Change', { envelope: [{ t: 0, v: 0 }, { t: 1, v: 0 }] }),
@@ -234,7 +256,7 @@ registerEffect({
     preset('Lower a Quarter Tone', { envelope: [{ t: 0, v: -50 }, { t: 1, v: -50 }] }),
   ],
   run: async ({ channels, rate, values: v, dsp, onProgress, signal }) => {
-    const curve = envelopeCurve(v.envelope, channels[0].length, (cents) => 2 ** (Math.max(-2400, Math.min(2400, cents)) / 1200));
+    const curve = envelopeCurve(v.envelope, channels[0].length, (cents) => 2 ** (Math.max(-2400, Math.min(2400, cents)) / 1200), v.spline);
     const flags = (v.lockChannels ? 1 : 0) | (v.formants ? 2 : 0);
     return runTimePitch(dsp, channels, rate, { mode: 0, precision: v.precision, stretch: 1, pitch: 1, flags, curve }, { onProgress, signal });
   },

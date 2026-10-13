@@ -481,3 +481,79 @@ input[type='range'].slider.fx-vslider::-moz-range-track {
 .fx-plot.gps-plot {
   height: 260px;
 }
+
+/* Time and Pitch views. */
+.sp-durations {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 4px 0;
+}
+
+.sp-ratio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.pb-graph .fx-envelope {
+  height: 180px;
+}
+
+.pb-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+}
+
+.fx-split.apc-split {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.apc-side {
+  display: grid;
+  grid-template-columns: auto 28px;
+  grid-template-rows: auto 200px;
+  gap: 6px;
+  min-width: 170px;
+}
+
+.apc-text {
+  grid-column: 1 / -1;
+  font-variant-numeric: tabular-nums;
+}
+
+.apc-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+}
+
+.apc-meter {
+  position: relative;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-editor);
+}
+
+.apc-zero {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--grid-strong);
+}
+
+.apc-fill {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  height: 0;
+}
