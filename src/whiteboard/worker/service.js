@@ -223,6 +223,9 @@ const due = (hit, now) => {
 };
 // Each board's presence being checked or listed by this instance.
 const ROSTERS = new Map();
+// Each board's member records as last listed; see members().
+const MEMBER_LISTS = new Map();
+const MEMBERS_FRESH = 5000;
 // This instance's listings in flight, by when each began, and those waiting
 // their turn. Puter allows a worker five at once on paid plans and three on
 // free ones, across all its instances, so each instance runs two. Puter's
@@ -1201,6 +1204,17 @@ export class BoardService {
   // membership again.
   async setRecord(room, key, value, options, added = false) {
     await this.kv.set(key, value, options);
+    // The members listed here take the record written, so it is not
+    // listed again for each person joining.
+    const listed = MEMBER_LISTS.get(room);
+    if (listed && key.startsWith(`wb:${room}:member:`)) {
+      listed.rows = listed.rows.then((rows) => [
+        ...rows.filter((m) => `wb:${room}:member:${m?.uuid}` !== key),
+        value,
+      ]);
+      // A failed listing is the callers' to handle, not this write's.
+      listed.rows.catch(() => {});
+    }
     keepWritten(RECORDS, this.stampOf(room), key, value, this.now());
     this.access?.clear();
     if (!added) await accessChanged(this.kv, room);
@@ -1321,8 +1335,29 @@ export class BoardService {
       await this.notify(room);
     }
   }
+  // Each board's member records, listed once for every request on this
+  // instance within a few seconds: a workshop's participants joining
+  // together, and opening its comments, would otherwise list them once
+  // each, using up the worker's listing quota. A member record written
+  // here is seen at once (see setRecord), one written elsewhere within
+  // those seconds.
   async members(room) {
-    return (await this.list(`wb:${room}:member:`)).map((r) => r.value);
+    const now = this.now(),
+      hit = MEMBER_LISTS.get(room);
+    if (hit && now - hit.at < MEMBERS_FRESH && now >= hit.at)
+      return [...(await hit.rows)];
+    const rows = this.list(`wb:${room}:member:`).then((list) =>
+      list.map((r) => r.value),
+    );
+    const entry = { at: now, rows };
+    MEMBER_LISTS.delete(room);
+    if (MEMBER_LISTS.size >= 500)
+      MEMBER_LISTS.delete(MEMBER_LISTS.keys().next().value);
+    MEMBER_LISTS.set(room, entry);
+    rows.catch(() => {
+      if (MEMBER_LISTS.get(room) === entry) MEMBER_LISTS.delete(room);
+    });
+    return [...(await rows)];
   }
   // Check-ins arriving together share one check.
   async present(room) {

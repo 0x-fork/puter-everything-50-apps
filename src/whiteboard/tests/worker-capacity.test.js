@@ -417,8 +417,37 @@ test("listings read in full take one request per thousand rows", async () => {
   assert.equal((await env.service.members("room")).length, 0);
   for (let n = 0; n < 600; n++)
     env.data.set(`wb:room:member:u${n}`, { uuid: `u${n}`, role: "editor" });
+  // Members written elsewhere show once the shared listing is five
+  // seconds old.
+  env.now += 5000;
   assert.equal((await env.service.members("room")).length, 600);
   assert.equal(counts.list, 3);
+});
+
+test("people joining together share one listing of the board's members", async () => {
+  const env = environment();
+  const { counts } = instrument(env);
+  for (let n = 0; n < 50; n++)
+    env.data.set(`wb:room:member:u${n}`, { uuid: `u${n}`, role: "editor" });
+  const lists = await Promise.all(
+    Array.from({ length: 20 }, () => env.service.members("room")),
+  );
+  assert.ok(lists.every((list) => list.length === 50));
+  env.now += 2000;
+  assert.equal((await env.service.members("room")).length, 50);
+  assert.equal(counts.list, 1);
+  // A member added or changed through this instance shows at once,
+  // without listing them again.
+  await env.service.setMember("room", { uuid: "u50", role: "viewer" });
+  await env.service.setMember("room", { uuid: "u3", role: "removed" });
+  const members = await env.service.members("room");
+  assert.equal(members.length, 51);
+  assert.equal(members.find((m) => m.uuid === "u3").role, "removed");
+  assert.equal(counts.list, 1);
+  // Five seconds on, they are listed again.
+  env.now += 3000;
+  assert.equal((await env.service.members("room")).length, 51);
+  assert.equal(counts.list, 2);
 });
 
 // A board on its own worker instance, with an editor whose edits each add a
