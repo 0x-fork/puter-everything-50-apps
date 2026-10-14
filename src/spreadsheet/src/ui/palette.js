@@ -3,9 +3,11 @@
  * (or Alt+/) opens it; typing filters, arrows move, Enter runs.
  */
 
+import { SAMPLE_SCRIPTS } from '../core/scripts.js';
 import { isComposing, el, MOD_KEY, IS_MAC } from './dom.js';
 import { icon } from './icons.js';
 import { ariaKeyShortcuts } from './menu.js';
+import { GROUP_BLOCKED_COMMANDS } from '../core/sheet-group.js';
 
 /**
  * The actions the palette offers. `flags` gates the context-dependent ones
@@ -32,8 +34,11 @@ export function paletteCommands(flags = {}) {
     c('Save a copy…', 'File', 'duplicate', 'saveAs'),
     c('Rename spreadsheet…', 'File', 'pencil', 'rename'),
     flags.share && c('Share…', 'File', 'share', 'share', null, { keywords: 'invite collaborate people access permission send email username' }),
+    flags.mail && c('Send a copy…', 'File', 'sendCopy', 'sendCopy', null, { keywords: 'email mail attachment attach send xlsx pdf csv' }),
+    flags.mail && flags.share && c('Send a link…', 'File', 'sendLink', 'sendLink', null, { keywords: 'email mail link invite share view edit' }),
     c('Document details…', 'File', 'info', 'docInfo', null, { keywords: 'info size path statistics' }),
     c('Version history…', 'File', 'clock', 'versions', null, { keywords: 'snapshots restore backup earlier revert undo save version' }),
+    c(flags.changesPane ? 'Hide changes' : 'Show changes', 'File', 'showChanges', 'showChanges', null, { keywords: 'track changes edits history who changed audit log recent review' }),
     c(flags.saving ? 'Export as .xlsx…' : 'Download .xlsx', 'File', 'fileDown', 'downloadXlsx', null, { keywords: 'excel export' }),
     c(flags.saving ? 'Export as .ods…' : 'Download .ods', 'File', 'fileDown', 'downloadOds', null, { keywords: 'libreoffice export' }),
     c(flags.saving ? 'Export sheet as .csv…' : 'Download sheet as .csv', 'File', 'fileDown', 'downloadCsv', null, { keywords: 'export' }),
@@ -42,6 +47,7 @@ export function paletteCommands(flags = {}) {
     c('Download selection as .csv', 'File', 'fileDown', 'downloadRangeCsv', null, { keywords: 'export range' }),
     c('Save as PDF…', 'File', 'fileDown', 'exportPdf', null, { keywords: 'export print' }),
     c('Print…', 'File', 'printer', 'print', null, { shortcut: `${M}+P` }),
+    c('Options…', 'File', 'options', 'options', null, { shortcut: `${M}+,`, keywords: 'preferences settings enter direction fill handle autosave' }),
     c('Back to all spreadsheets', 'File', 'back', 'home'),
 
     flags.canUndo !== false && c('Undo', 'Edit', 'undo', 'undo', null, { shortcut: `${M}+Z` }),
@@ -80,10 +86,27 @@ export function paletteCommands(flags = {}) {
     c('Row and column headers', 'View', 'borders', 'toggleHeaders', null, { keywords: 'toggle hide show' }),
     c('Focus mode', 'View', 'eyeOff', 'focusMode', null, { keywords: 'toolbar hide distraction' }),
     c('Check spelling as you type', 'View', 'text', 'toggleSpellcheck', null, { keywords: 'spellcheck toggle' }),
+    c('AutoCorrect Options…', 'Tools', 'autoCorrect', 'autoCorrectOptions', null, { keywords: 'autocorrect replace text typing typos capitals capitalize symbols' }),
+    c('Customize the Ribbon…', 'Tools', 'customizeRibbon', 'options', 'ribbon', { keywords: 'ribbon tabs groups custom hide rename' }),
+    c('Customize Quick Access Toolbar…', 'Tools', 'customizeQuickAccess', 'options', 'quickAccess', { keywords: 'quick access toolbar qat' }),
+    c('Customize Keyboard…', 'Tools', 'customizeKeyboard', 'options', 'keyboard', { keywords: 'keyboard shortcuts keys hotkeys' }),
+    c('Spelling…', 'Tools', 'spell', 'spelling', null, { shortcut: 'F7', keywords: 'spell check spellcheck proofing dictionary typos misspelled' }),
+    c('Thesaurus', 'Tools', 'thesaurus', 'thesaurus', null, { shortcut: 'Shift+F7', keywords: 'synonyms antonyms words meaning alternative' }),
+    c('Translate', 'Tools', 'translate', 'translatePane', null, { keywords: 'translator language translation convert' }),
     flags.fullscreen && c('Full screen', 'View', 'monitor', 'fullscreen'),
     c('Zoom in', 'View', 'zoomIn', 'zoom', 0.1),
     c('Zoom out', 'View', 'zoomOut', 'zoom', -0.1),
     c('Custom zoom…', 'View', 'zoomIn', 'zoomCustom', null, { keywords: 'percentage scale magnification' }),
+    c('Custom views…', 'View', 'customViews', 'customViews', null, { keywords: 'saved view show add named layout zoom hidden print' }),
+    !flags.chartSheet && c('New sheet view', 'View', 'sheetView', 'sheetView', 'new', { keywords: 'personal temporary filter my own view collaborate' }),
+    flags.sheetView && c('Exit sheet view', 'View', 'exitView', 'sheetView', 'exit', { keywords: 'default view leave' }),
+    !flags.chartSheet && c('Sheet view options…', 'View', 'sliders', 'sheetView', 'options', { keywords: 'rename duplicate delete switch personal view' }),
+    !flags.chartSheet && (!flags.viewMode || flags.viewMode === 'normal') && c('Page breaks', 'View', 'pageBreak', 'showPageBreaks', null, { keywords: 'dashed lines pages print toggle' }),
+    c('Insert page break', 'File', 'breaks', 'pageBreak', 'insert', { keywords: 'print new page manual' }),
+    c('Remove page break', 'File', 'eraser', 'pageBreak', 'remove', { keywords: 'print manual' }),
+    c('Reset all page breaks', 'File', 'reset', 'pageBreak', 'reset', { keywords: 'print manual clear' }),
+    !flags.chartSheet && c('Sheet background…', 'File', 'background', 'sheetBackground', 'pick', { keywords: 'picture image wallpaper tile' }),
+    flags.background && c('Delete sheet background', 'File', 'deleteItem', 'sheetBackground', 'delete', { keywords: 'picture image wallpaper remove' }),
     c('Reset zoom to 100%', 'View', 'reset', 'zoom', 'reset'),
     c('Freeze first row', 'View', 'pin', 'freeze', { rows: 1 }, { keywords: 'lock header' }),
     c('Freeze first column', 'View', 'pin', 'freeze', { cols: 1 }, { keywords: 'lock' }),
@@ -124,7 +147,13 @@ export function paletteCommands(flags = {}) {
     c('Image…', 'Insert', 'image', 'insertImage', null, { keywords: 'picture upload' }),
     flags.pick && c('Image from Puter…', 'Insert', 'folderOpen', 'insertImagePuter', null, { keywords: 'picture cloud storage drive logo' }),
     c('Image from URL…', 'Insert', 'external', 'insertImageUrl', null, { keywords: 'picture web address link logo' }),
+    c('Place picture in cell…', 'Insert', 'placeInCell', 'insertImage', 'cell', { keywords: 'image in cell value photo logo' }),
+    flags.cellPicture && c('Place the cell picture over cells', 'Insert', 'placeOverCells', 'placeOverCells', null, { keywords: 'image float picture' }),
+    flags.cellPicture && c('Alt text for the cell picture…', 'Insert', 'altText', 'cellAltText', null, { keywords: 'image description accessibility' }),
+    flags.copiedCells && c('Paste copied cells as a picture', 'Edit', 'pastePicture', 'pasteWith', { picture: true }, { keywords: 'image snapshot' }),
+    flags.copiedCells && c('Paste copied cells as a linked picture', 'Edit', 'linkedPicture', 'pasteWith', { picture: 'linked' }, { keywords: 'camera live image snapshot' }),
     c('Text box…', 'Insert', 'text', 'insertTextBox', null, { keywords: 'label note caption title floating shape drawing' }),
+    c('SmartArt graphic…', 'Insert', 'smartArt', 'smartArt', { action: 'insertDialog' }, { keywords: 'diagram org chart organization process cycle hierarchy venn pyramid matrix list timeline' }),
     flags.sparklines && c('Sparkline settings…', 'Format', 'chartLine', 'editSparkline', null, { keywords: 'mini chart axis markers colors data' }),
     c('Sparklines…', 'Insert', 'chartLine', 'insertSparklines', null, { keywords: 'mini chart line column win loss data' }),
     flags.sparklines && c('Group using active sparkline', 'Format', 'chartLine', 'groupSparklines', null, { keywords: 'mini chart shared settings' }),
@@ -133,6 +162,7 @@ export function paletteCommands(flags = {}) {
     flags.sparklines && c('Clear entire selected sparkline groups', 'Format', 'eraser', 'clearSparklines', 'groups', { keywords: 'remove delete mini charts' }),
     c('Sparkline function', 'Insert', 'chartLine', 'insertFunction', 'SPARKLINE', { keywords: 'mini chart in cell' }),
     c('New sheet', 'Insert', 'plus', 'newSheet', null, { shortcut: 'Shift+F11', keywords: 'tab' }),
+    flags.grouped && c('Fill across worksheets…', 'Edit', 'layers', 'fillAcrossSheets', null, { keywords: 'group copy same cells other sheets contents formats' }),
     c('Duplicate sheet', 'Insert', 'duplicate', 'duplicateSheet', null, { keywords: 'tab copy' }),
     c('Move or Copy sheet…', 'Insert', 'layers', 'moveOrCopySheet', null, { keywords: 'tab order reorder duplicate destination' }),
     c('Copy sheet to another spreadsheet…', 'Insert', 'copy', 'copySheetTo', null, { keywords: 'tab move export file workbook' }),
@@ -144,6 +174,8 @@ export function paletteCommands(flags = {}) {
     c(flags.sheet?.protected ? 'Unprotect sheet' : 'Protect sheet', 'Insert', 'lock', 'protectSheet', null, { keywords: 'lock unlock tab' }),
     !flags.sheet?.only && c('Hide sheet', 'Insert', 'eyeOff', 'hideSheet', null, { keywords: 'tab' }),
     !flags.sheet?.only && c(flags.sheet?.holdsWork ? 'Delete sheet…' : 'Delete sheet', 'Insert', 'trash', 'deleteSheet', null, { keywords: 'tab remove' }),
+    flags.grouped ? c('Ungroup sheets', 'Insert', 'layers', 'ungroupSheets', null, { keywords: 'tabs group selected sheets single' })
+      : !flags.sheet?.only && c('Select all sheets', 'Insert', 'layers', 'selectAllSheets', null, { keywords: 'tabs group several sheets at once edit together' }),
     c('Insert function…', 'Insert', 'sigma', 'functionMenu', null, { shortcut: 'Shift+F3', keywords: 'formula wizard' }),
     c('AutoSum', 'Insert', 'sigma', 'autosum', null, { shortcut: 'Alt+=', keywords: 'sum total' }),
 
@@ -154,14 +186,21 @@ export function paletteCommands(flags = {}) {
     flags.hasTable ? c('Edit table…', 'Data', 'table', 'editTable', null, { keywords: 'name style totals' }) : c('Create table…', 'Data', 'table', 'insertTable', null, { keywords: 'structured banded' }),
     flags.hasTable && c('Toggle the table’s totals row', 'Data', 'sigma', 'tableTotals'),
     c('Subtotals…', 'Data', 'sigma', 'subtotal', null, { keywords: 'group by outline' }),
+    c('Auto Outline', 'Data', 'group', 'autoOutline', null, { keywords: 'group rows columns summary totals outline automatic' }),
+    c('Clear Outline', 'Data', 'eraser', 'clearOutline', null, { keywords: 'remove groups ungroup all outline' }),
+    c('Outline settings…', 'Data', 'sliders', 'outlineSettings', null, { keywords: 'summary rows below columns right automatic styles outline' }),
     c('Pivot table…', 'Data', 'pivot', 'pivot', null, { keywords: 'summarize' }),
     c('Column stats…', 'Data', 'chartColumn', 'columnStats', null, { keywords: 'summary distribution' }),
+    c('Data form…', 'Data', 'dataForm', 'dataForm', null, { keywords: 'record entry fields list database criteria find' }),
     c('Goal seek…', 'Data', 'sliders', 'goalSeek', null, { keywords: 'what if solve' }),
     c('Data table…', 'Data', 'table', 'dataTable', null, { keywords: 'what if analysis sensitivity' }),
+    c('Solver…', 'Data', 'solver', 'solver', null, { keywords: 'optimize optimization maximize minimize linear programming constraints simplex nonlinear evolutionary' }),
+    c('Data analysis…', 'Data', 'dataAnalysis', 'dataAnalysis', null, { keywords: 'statistics anova regression histogram correlation covariance descriptive t-test z-test f-test fourier sampling random moving average smoothing rank percentile' }),
     c('Remove duplicate rows…', 'Data', 'dedupe', 'dedupe', null, { keywords: 'unique' }),
     c('Remove empty rows', 'Data', 'rows', 'removeEmptyRows', null, { keywords: 'blank' }),
     c('Randomize range', 'Data', 'sortAsc', 'shuffle', null, { keywords: 'shuffle random order' }),
     c('Split text to columns', 'Data', 'cols', 'splitText', null, { keywords: 'delimiter comma' }),
+    c('Text to Columns…', 'Data', 'cols', 'splitTextDialog', null, { keywords: 'split delimiter separator fixed width' }),
     c('Trim whitespace', 'Data', 'text', 'textCase', 'trim'),
     c('UPPERCASE text', 'Data', 'text', 'textCase', 'upper', { keywords: 'case' }),
     c('lowercase text', 'Data', 'text', 'textCase', 'lower', { keywords: 'case' }),
@@ -170,6 +209,7 @@ export function paletteCommands(flags = {}) {
     c('Data validation…', 'Data', 'validation', 'validation', null, { keywords: 'rules dropdown checkbox' }),
     c('Named ranges…', 'Data', 'tag', 'names', null, { keywords: 'define name' }),
     c('Protected ranges…', 'Data', 'lock', 'protectRanges', null, { keywords: 'lock sheet protect' }),
+    c('Edit links…', 'Data', 'editLinks', 'editLinks', null, { keywords: 'external workbook references other file update values change source break startup prompt' }),
 
     c('Bold', 'Format', 'bold', 'bold', null, { shortcut: `${M}+B` }),
     c('Italic', 'Format', 'italic', 'italic', null, { shortcut: `${M}+I` }),
@@ -179,6 +219,8 @@ export function paletteCommands(flags = {}) {
     c('Conditional formatting…', 'Format', 'highlighter', 'condFormat', null, { keywords: 'rules color scale data bars' }),
     c('Alternating colors', 'Format', 'rows', 'bands', null, { keywords: 'banding stripes zebra' }),
     c('Cell styles…', 'Format', 'paint', 'cellStylesMenu', null, { keywords: 'title heading total good bad' }),
+    !flags.editing && c('New cell style…', 'Format', 'plus', 'newCellStyle', null, { keywords: 'named style create define by example' }),
+    !flags.editing && c('Merge cell styles…', 'Format', 'paint', 'mergeCellStyles', null, { keywords: 'copy styles from another workbook spreadsheet import' }),
     c('Paint format', 'Format', 'paint', 'paintFormat', null, { keywords: 'copy formatting brush' }),
     // A single unmerged cell has nothing to merge; one row nothing to merge vertically, one column nothing horizontally.
     flags.merged ? c('Unmerge cells', 'Format', 'unmerge', 'merge', null, { keywords: 'merge split' }) : !flags.singleCell && c('Merge cells', 'Format', 'merge', 'merge', null, { keywords: 'unmerge' }),
@@ -229,11 +271,21 @@ export function paletteCommands(flags = {}) {
     c('Replace formulas with values', 'Formula', 'number', 'toValues', null, { keywords: 'convert static results constants' }),
     flags.ai && c(flags.aiPanel ? 'Close the AI assistant' : 'Open the AI assistant', 'View', 'sparkle', 'aiPanel', null, { shortcut: `${M}+J`, keywords: 'chat copilot gemini ask analyze agent sidebar panel help' }),
     flags.ai && c('Write a formula with AI…', 'Formula', 'sparkle', 'aiFormula', null, { keywords: 'generate assistant' }),
+    c(flags.scriptsPane ? 'Close the Code Editor' : 'Open the Code Editor', 'Automate', 'codeEditor', 'scriptsPane', null, { keywords: 'script macro code automate javascript editor' }),
+    c('New script', 'Automate', 'newScript', 'newScript', null, { keywords: 'macro code automate javascript' }),
+    c(flags.recording ? 'Stop recording actions' : 'Record actions', 'Automate', 'recordActions', 'recordActions', null, { keywords: 'macro recorder automate script' }),
+    c('All scripts…', 'Automate', 'allScripts', 'scriptGallery', null, { keywords: 'gallery samples macros my scripts library' }),
+    c('Script reference', 'Automate', 'scriptReference', 'scriptReference', null, { keywords: 'api documentation help javascript' }),
+    ...SAMPLE_SCRIPTS.map((sample) => c(`Run sample script: ${sample.name}`, 'Automate', 'runScript', 'runScript', { sample: sample.id }, { keywords: `macro ${sample.description}` })),
     flags.ai && flags.hasFormula && c('Explain this formula (AI)…', 'Formula', 'sparkle', 'aiExplain', null, { keywords: 'assistant' }),
     flags.ai && c('Ask AI about this data…', 'Data', 'sparkle', 'aiAsk', null, { keywords: 'question summarize insights assistant analyze' }),
 
     flags.chart && !flags.chartIsImage && c('Edit the selected chart…', 'Chart', 'chartColumn', 'editChart', flags.chart, { shortcut: 'Enter', keywords: 'type range title colors' }),
     flags.chart && flags.chartIsImage && c('Replace the selected image…', 'Chart', 'image', 'replaceImage', flags.chart),
+    flags.chart && flags.chartIsImage && c('Place the selected picture in a cell', 'Chart', 'placeInCell', 'placeObjectInCell', flags.chart, { keywords: 'image cell value' }),
+    flags.chart && flags.chartIsImage && c('Crop the selected picture…', 'Chart', 'crop', 'pictureFormat', { action: 'crop' }, { keywords: 'image trim aspect' }),
+    flags.chart && flags.chartIsImage && c('Picture corrections…', 'Chart', 'corrections', 'pictureFormat', { action: 'correctionsDialog' }, { keywords: 'image brightness contrast transparency' }),
+    flags.chart && flags.chartIsImage && c('Reset the selected picture', 'Chart', 'resetPicture', 'pictureFormat', { action: 'reset' }, { keywords: 'image corrections style' }),
     flags.chart && c(flags.chartIsImage ? 'Duplicate the selected image' : 'Duplicate the selected chart', 'Chart', 'duplicate', 'duplicateChart', { id: flags.chart }),
     flags.chart && c(flags.chartIsImage ? 'Copy the selected image' : 'Copy the selected chart as a picture', 'Chart', 'copy', 'copyChart', { id: flags.chart }, { keywords: 'clipboard png' }),
     flags.chart && c(flags.chartIsImage ? 'Download the selected image' : 'Download the selected chart as PNG', 'Chart', 'download', 'downloadChart', { id: flags.chart, format: 'png' }),
@@ -242,7 +294,8 @@ export function paletteCommands(flags = {}) {
     flags.fns?.shortcuts && { label: 'Keyboard shortcuts…', section: 'Help', icon: 'keyboard', fn: flags.fns.shortcuts, keywords: 'keys help' },
     flags.fns?.locale && { label: 'Regional format…', section: 'Help', icon: 'monitor', fn: flags.fns.locale, keywords: 'locale decimal comma date order language' },
   ];
-  return list.filter(Boolean);
+  // Grouped sheets: the commands for one sheet's objects are greyed in the menus, so they are left out here.
+  return list.filter((item) => item && !(flags.grouped && item.cmd && GROUP_BLOCKED_COMMANDS.has(item.cmd)));
 }
 
 const RECENT_KEY = 'spreadsheet:palette:recent';

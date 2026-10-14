@@ -1,7 +1,9 @@
 /**
  * Sheet tabs along the bottom: click to switch, double-click (or the menu)
  * to rename, drag a tab to reorder it (Ctrl or Option copies it),
- * the menu's move actions, and an add button.
+ * the menu's move actions, and an add button. Shift-click groups the sheets
+ * from the active one to the one clicked, Ctrl-click (⌘-click on a Mac) adds
+ * or removes one sheet: grouped sheets take the same edits (see core/sheet-group.js).
  */
 
 import { el } from './dom.js';
@@ -160,7 +162,11 @@ export function createSheetTabs(ctx, { excelLayout = false } = {}) {
         ctx.run && { label: 'Copy to another spreadsheet…', icon: 'copy', onSelect: () => ctx.run('copySheetTo', sheet.id) },
         { label: 'Move left', icon: 'chevL', disabled: !before, onSelect: () => ctx.wb.moveSheet(sheet.id, ctx.wb.sheets.indexOf(before)) },
         { label: 'Move right', icon: 'chevR', disabled: !after, onSelect: () => ctx.wb.moveSheet(sheet.id, ctx.wb.sheets.indexOf(after)) },
-      ],
+        { separator: true },
+        // Grouping: every sheet on show at once, or back to the one in view.
+        { label: 'Select All Sheets', icon: 'layers', disabled: visible.length <= 1, onSelect: () => act('selectAllSheets', null, () => ctx.wb.groupSheets(visible.map((v) => v.id))) },
+        ctx.wb.sheetGroup && { label: 'Ungroup Sheets', icon: 'layers', onSelect: () => act('ungroupSheets', null, () => ctx.wb.ungroupSheets()) },
+      ].filter(Boolean),
     });
   }
 
@@ -190,6 +196,22 @@ export function createSheetTabs(ctx, { excelLayout = false } = {}) {
   observer?.observe(list);
   observer?.observe(strip);
 
+  // In a shared workbook, a dot in each person's colour on the tab of the sheet they are on.
+  let peers = new Map(); // sheetId → [{ name, color }]
+  function peerMarks(sheetId) {
+    const here = peers.get(sheetId);
+    if (!here?.length) return null;
+    const names = here.map((p) => p.name).join(', ');
+    return el('span.tab-peers', { role: 'img', 'aria-label': `Here: ${names}`, title: `Here: ${names}` },
+      ...here.slice(0, 3).map((p) => el('span.tab-peer', { style: { '--peer': p.color } })),
+      here.length > 3 && el('span.tab-peer-more', {}, `+${here.length - 3}`));
+  }
+  function setPeers(next) {
+    const before = JSON.stringify([...peers]);
+    peers = next instanceof Map ? next : new Map();
+    if (JSON.stringify([...peers]) !== before) refresh();
+  }
+
   function refresh() {
     const active = ctx.wb.activeSheetId;
     allBtn.setAttribute('aria-haspopup', ctx.wb.sheets.length >= 8 ? 'dialog' : 'menu');
@@ -198,13 +220,18 @@ export function createSheetTabs(ctx, { excelLayout = false } = {}) {
     if (panel) { panel.setAttribute('role', 'tabpanel'); if (!panel.id) panel.id = 'sheet-panel'; }
     // Rebuilding the tabs removes the focused one; the keyboard must not fall through to the page.
     const hadFocus = list.contains(document.activeElement);
+    const group = ctx.wb.sheetGroup;
+    // Grouped sheets are all selected tabs at once.
+    strip.setAttribute('aria-multiselectable', String(!!group));
+    root.classList.toggle('grouped', !!group);
     strip.replaceChildren(...ctx.wb.visibleSheets.map((s) => {
       const isActive = s.id === active;
+      const grouped = !!group?.includes(s.id);
       const tab = el('div.tab', {
-        id: `sheet-tab-${s.id}`, role: 'tab', tabindex: isActive ? 0 : -1, 'aria-selected': String(isActive), 'aria-controls': panel?.id || null,
-        className: `tab${isActive ? ' active' : ''}${s.color ? ' colored' : ''}`,
+        id: `sheet-tab-${s.id}`, role: 'tab', tabindex: isActive ? 0 : -1, 'aria-selected': String(isActive || grouped), 'aria-controls': panel?.id || null,
+        className: `tab${isActive ? ' active' : ''}${grouped ? ' grouped' : ''}${s.color ? ' colored' : ''}`,
         style: s.color ? { '--tab-color': s.color } : null,
-        onclick: () => { if (!isActive && Date.now() - draggedAt > 300) ctx.wb.setActiveSheet(s.id); },
+        onclick: (e) => { if (Date.now() - draggedAt > 300) clickTab(s, e); },
         ondblclick: () => renameVia(s),
         oncontextmenu: (e) => {
           e.preventDefault();
@@ -228,8 +255,14 @@ export function createSheetTabs(ctx, { excelLayout = false } = {}) {
         },
       },
         s.protected && el('span.tab-lock', { role: 'img', html: icon('lock', 12, 2.2), 'aria-label': 'Protected', title: 'Protected sheet' }),
+        // In a sheet view of one's own (View ▸ Sheet View), the tab says which.
+        s.personalView && (() => {
+          const name = s.sheetViews?.find((v) => v.id === s.personalView.id)?.name || 'Sheet view';
+          return el('span.tab-view', { role: 'img', html: icon('eye', 12, 2), 'aria-label': `In sheet view ${name}`, title: `Sheet view: ${name}` });
+        })(),
         // A name in a right-to-left script is laid out that way, its number and full stop at its own end, as a cell is.
-        el('span.tab-name', { dir: 'auto' }, s.name));
+        el('span.tab-name', { dir: 'auto' }, s.name),
+        peerMarks(s.id));
       if (!isActive) return tab;
       // The active tab's chip: the surface fill and accent line, with room at its end for the options button.
       return el('div.tab-item', {
@@ -250,6 +283,35 @@ export function createSheetTabs(ctx, { excelLayout = false } = {}) {
 
   function focusActive() {
     strip.querySelector('.tab.active')?.focus();
+  }
+
+  /**
+   * A click on a tab. Plain: go to that sheet (a sheet outside the group ends it; with every sheet grouped, any
+   * click ends it). Shift: group the sheets from the active one to this one. Ctrl or ⌘: add this sheet to the
+   * group, or take it out (the active one hands over to its neighbour in the group first).
+   */
+  function clickTab(s, e) {
+    const wb = ctx.wb;
+    const visible = wb.visibleSheets;
+    const group = wb.sheetGroup;
+    if (e?.shiftKey) {
+      const from = visible.findIndex((v) => v.id === wb.activeSheetId);
+      const to = visible.indexOf(s);
+      if (from < 0 || to < 0) return;
+      wb.groupSheets(visible.slice(Math.min(from, to), Math.max(from, to) + 1).map((v) => v.id));
+      return;
+    }
+    if (e?.ctrlKey || e?.metaKey) {
+      const ids = group || [wb.activeSheetId];
+      if (!ids.includes(s.id)) { wb.groupSheets([...ids, s.id]); return; }
+      if (!group) return;
+      const rest = ids.filter((id) => id !== s.id);
+      if (s.id === wb.activeSheetId) wb.setActiveSheet(rest[0]);
+      wb.groupSheets(rest);
+      return;
+    }
+    if (group && group.length >= visible.length) { wb.ungroupSheets(); if (s.id !== wb.activeSheetId) wb.setActiveSheet(s.id); return; }
+    if (s.id !== wb.activeSheetId) wb.setActiveSheet(s.id);
   }
 
   // Dragging a tab moves the sheet to where it is dropped; with Ctrl (Option on a Mac) held at the drop it is copied there.
@@ -311,10 +373,10 @@ export function createSheetTabs(ctx, { excelLayout = false } = {}) {
     const t = e.detail?.type;
     // Not on 'history': every edit records an undo step, and whatever changes a tab (a rename or colour, a
     // sheet added, moved, hidden or restored by undo) already arrives as a structure or active-sheet change.
-    if (t === 'structure' || t === 'active-sheet' || t === 'load') refresh();
+    if (t === 'structure' || t === 'active-sheet' || t === 'load' || t === 'sheet-group') refresh();
   };
   ctx.wb.addEventListener('change', onChange);
   refresh();
   // The editor's Sheet commands (menu bar, palette) ask and pick through the same dialogs and swatches as the tab menu.
-  return { el: root, refresh, rename, confirmDelete, colorMenu, destroy: () => { observer?.disconnect(); ctx.wb.removeEventListener('change', onChange); } };
+  return { el: root, refresh, rename, confirmDelete, colorMenu, setPeers, destroy: () => { observer?.disconnect(); ctx.wb.removeEventListener('change', onChange); } };
 }

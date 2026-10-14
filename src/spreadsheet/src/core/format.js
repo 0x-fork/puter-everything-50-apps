@@ -589,10 +589,27 @@ function typedDate(y, m, d, style = null) {
   return serial < 0 ? null : { serial, style };
 }
 
-/** Short years: 00–29 → 2000s, 30–99 → 1900s, and a single digit like the 03 it stands for. */
+/**
+ * The last year a two-digit year can mean: 2029 reads 00–29 as 2000–2029 and 30–99 as 1930–1999. The app's
+ * options set it (Edit ▸ two-digit years); it is the person's, not the workbook's.
+ */
+let yearCutoff = 2029;
+export function setTwoDigitYearCutoff(year) {
+  const n = Math.round(Number(year));
+  yearCutoff = Number.isFinite(n) && n >= 2000 && n <= 2099 ? n : 2029;
+}
+export const twoDigitYearCutoff = () => yearCutoff;
+
+/** A year typed with two digits, as a full year inside the hundred years that end at the cutoff. */
+export function expandTwoDigitYear(n, cutoff = yearCutoff) {
+  const tail = cutoff % 100;
+  return n <= tail ? cutoff - tail + n : cutoff - tail - 100 + n;
+}
+
+/** Short years: inside the hundred years up to the cutoff (00–29 → 2000s, 30–99 → 1900s by default), and a single digit like the 03 it stands for. */
 function fullYear(text, now) {
   if (text == null) return now.getFullYear();
-  if (text.length <= 2) { const n = Number(text); return n < 30 ? 2000 + n : 1900 + n; }
+  if (text.length <= 2) return expandTwoDigitYear(Number(text));
   return text.length === 4 ? Number(text) : NaN;
 }
 
@@ -1121,6 +1138,8 @@ export function editText(cell) {
   // An error constant edits as its code, which a commit reads back as the error, as the formula bar shows
   // it; one a typed cell cannot spell (#SPILL!, #CYCLE!) needs a formula literal to stay an error, not text.
   if (typeof v === 'object' && v.error) return TYPED_ERRORS.has(v.error) ? v.error : `=${v.error}`;
+  // A picture placed in the cell has no text to edit; an entry left as it is keeps the picture.
+  if (typeof v === 'object' && typeof v.image === 'string') return '';
   if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
   if (typeof v === 'string') {
     // A Plain text cell shows its text as it is; elsewhere an apostrophe marks

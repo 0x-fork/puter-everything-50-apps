@@ -1,4 +1,5 @@
 import { normalizeThemeInfo, themedTableLook } from './workbook-theme.js';
+import { normalizeCellStyles } from './custom-cell-styles.js';
 import { normalizeFillColor, fillColorCss, sameFillColor } from './fill-color.js';
 import { normalizeNativeFill, nativeFillPatch, packNativeFillState, unpackNativeFillState } from './native-fill.js';
 import { tableConversionStyle } from './table-conversion-style.js';
@@ -73,10 +74,13 @@ import { transferNativePivots } from './native-pivot-transfer.js';
 import { prepareDataModelImport } from './data-model-import.js';
 import { nativePivotSheetCopy } from './native-pivot-sheet-copy.js';
 import { normalizePrintSettings, mapPrintAreas } from './print-settings.js';
+import { normalizeBackground } from './sheet-background.js';
+import { normalizeCustomViews, captureCustomView, MAX_CUSTOM_VIEWS, CUSTOM_VIEW_NAME_MAX } from './custom-views.js';
 import { parseFormula } from './formula/parser.js';
 import { ARRAY_BUDGET, evaluate, evaluateFormula, isVolatile, paramSpec, resetArrayBudget, withArrayBudget } from './formula/evaluator.js';
 import { FUNCTIONS, err, isError, isRange, scalar, compareStoredValues, toText } from './formula/functions.js';
 import { parseDelimited } from './tsv.js';
+import { splitPieces, detectDelimiter, DEFAULT_SPLIT } from './text-split.js';
 import { adjustFormula, adjustRefForInsert, adjustRefForDelete, adjustRefForDeletedLines, deleteMap, renameSheetInFormula, shiftFormula, resolveRelativeName, mapFormulaRefs, parseRefText, refToText, MAX_ROW, MAX_COL, quoteSheet, sheetKey, sameSheetName } from './refs.js';
 import { headerlessTableColumns, normalizeTableHeaderState, headerlessInsertColumns, headerlessDeleteColumns, headerlessJoinColumns, headerlessResizeNames } from './table-header-row.js';
 import { tableStyle, tableRows, normalizeCustomTableStyle, customTableStyleAt, validateTableName, MAX_TABLE_NAME_LENGTH, parseTableSpec, resolveTableSpec, renderTableSpec, renameTableInFormula, tableColumnRenames, renameColumnsInFormula, tableRefsToA1, hasTableRefs } from './tables.js';
@@ -87,17 +91,21 @@ import { filterValueIdentity, sheetFilters, sameFilterRange, filterRangeKey, fil
 import { freeNameTokens } from './formula/names.js';
 import { matchesRule, scaleColor, scaleMidpoint, valueIdentity, bandColor, dataBar, iconFor, barColorOf, DEFAULT_BAR_COLOR } from './condformat.js';
 import { checkValue, listOptions, listOptionIndex, chipFor, isRangeSource, ruleFormulaBody } from './validation.js';
-import { normalizeChart, placeAlong, mapChartReferences, snapshotChartData, preserveCopiedChartFormats } from './charts.js';
+import { normalizeChart, placeAlong, mapChartReferences, snapshotChartData, preserveCopiedChartFormats, OBJECT_NAME_MAX } from './charts.js';
+import { orderObjects, moveObjectTo, groupObjects, ungroupObjects, alignRects, distributeRects, boundsOf, withGroups, canRotate, rotatePatch } from './arrange.js';
 import { explainError } from './errhelp.js';
 import { impliedFormulaStyle } from './implied-format.js';
 import { formulaReachesOut } from './reaches-out.js';
 import { STYLE_KEYS, BORDER_STYLE_KEYS, GRID_RANGE, intersection, rowRuns, readStyleResets, styleResetAt, assignStyleExceptionRegions, compactStyleResets, removeStyleResets, mapStyleResets, shiftStyleResets, permuteStyleResets, moveLineStyleResets, moveStyleResets } from './style-resets.js';
 import { normalizeScenarios, copyScenarios, mapScenarioCells } from './scenarios.js';
 import { normalizeQueries, serializeQueries } from './queries.js';
+import { normalizeScripts, serializeScripts } from './scripts.js';
+import { installSheetGroups } from './sheet-group.js';
+import { normalizeChangeHistory, recordCellWrites, recordStep } from './change-history.js';
 
 /** What a floating object is called in undo labels: chart, image, or text box. */
 function objectNoun(obj) {
-  return obj?.type === 'slicer' ? 'slicer' : obj?.type === 'scroll' ? 'scroll bar' : obj?.type === 'image' ? 'image' : obj?.type === 'text' ? obj.equation ? 'equation' : 'text box' : 'chart';
+  return obj?.type === 'slicer' ? 'slicer' : obj?.type === 'scroll' ? 'scroll bar' : obj?.type === 'image' ? 'image' : obj?.type === 'smartart' ? 'SmartArt' : obj?.type === 'text' ? obj.equation ? 'equation' : 'text box' : 'chart';
 }
 
 export const DEFAULT_ROWS = 100;
@@ -129,6 +137,8 @@ const SNAPSHOT_CELLS = 1_000_000;
 const CHANGE_LOG = 256;
 // Formulas that read other files or the web; a file from elsewhere may not run them until the user allows it.
 // Formulas that reach outside the file: the web and other files, and the AI service, which spends the account's quota on a foreign file's prompts.
+/** Edit Links ▸ Startup Prompt choices (see setLinkStartup). */
+export const LINK_STARTUP_MODES = ['ask', 'update', 'none'];
 const EXTERNAL_PROVIDERS = new Set(['IMPORTDATA', 'IMPORTHTML', 'IMPORTXML', 'IMPORTRANGE', 'WEBSERVICE', 'AI', 'TRANSLATE', 'DETECTLANGUAGE']);
 const DEEP_FRAMES = 16; // nested evaluations above this depth hand a stack overflow to a shallower frame
 // A bounded reference is read this far past the data (A1:A5000 on a sheet with
@@ -311,6 +321,25 @@ function shiftCalc(calc, c1, at, n, remove) {
   return out;
 }
 
+/**
+ * A sheet's outline settings, kept only where they differ from the defaults: summary rows below their detail and
+ * summary columns to its right (the outline buttons sit on the summary line), and automatic styles off.
+ */
+export function normalizeOutlineSettings(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  if (raw.summaryBelow === false) out.summaryBelow = false;
+  if (raw.summaryRight === false) out.summaryRight = false;
+  if (raw.autoStyles === true) out.autoStyles = true;
+  return Object.keys(out).length ? out : null;
+}
+
+/** The outline settings in force on a sheet, every field spelt out. */
+export function outlineSettingsOf(sheet) {
+  const s = sheet?.outlineSettings || {};
+  return { summaryBelow: s.summaryBelow !== false, summaryRight: s.summaryRight !== false, autoStyles: s.autoStyles === true };
+}
+
 /** Outline groups: { rows: [{ from, to, collapsed }], cols: [...] }, sorted, sane. */
 function normalizeGroups(raw) {
   // Collapsing and expanding iterate every line. File metadata must never
@@ -346,6 +375,9 @@ function sortComparator(caseSensitive) {
     if (isError(a) && isError(b)) return 0;
     if (isError(a)) return 1;
     if (isError(b)) return -1;
+    // Pictures in cells have no order of their own: they follow the values, before errors and blanks, in either direction.
+    const picture = (v) => !!v && typeof v === 'object' && typeof v.image === 'string';
+    if (picture(a) || picture(b)) return picture(a) === picture(b) ? 0 : picture(a) ? 1 : -1;
     const cmp = typeof a === 'string' && typeof b === 'string' ? collator.compare(a, b) : compareStoredValues(a, b);
     return ascending ? cmp : -cmp;
   };
@@ -584,13 +616,38 @@ function absoluteDrawingAnchor(sheet, chart) {
   return { ...chart, anchor: { r: 0, c: 0 },
     dx: chart.dx + offset(chart.anchor.c, sheet.colWidths, sheet.defaultColWidth, sheet.hiddenCols),
     dy: chart.dy + offset(chart.anchor.r, sheet.rowHeights, sheet.defaultRowHeight, sheet.hiddenRows, sheet.filterHidden),
-    ...(['image', 'text'].includes(chart.type) ? { range: { r1: 0, c1: 0, r2: 0, c2: 0 } } : {}) };
+    ...(['image', 'text', 'smartart'].includes(chart.type) ? { range: { r1: 0, c1: 0, r2: 0, c2: 0 } } : {}) };
+}
+
+/**
+ * A sheet's sheet views (View ▸ Sheet View) as saved: the one this person is in takes the filters on show,
+ * and a temporary view nobody kept stays out of a file.
+ */
+function sheetViewsJSON(s, live) {
+  return s.sheetViews.filter((v) => live || !v.temporary).map((v) => {
+    const active = s.personalView?.id === v.id;
+    return { id: v.id, name: v.name, ...(v.temporary ? { temporary: true } : {}),
+      filter: copyFilter(active ? s.filter : v.filter) || null, otherFilters: ((active ? s.otherFilters : v.otherFilters) || []).map(copyFilter) };
+  });
+}
+
+/** Sheet views as stored: a name each (unique on the sheet), and filters that pass the sheet's own checks. */
+function normalizeSheetViews(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  return raw.slice(0, 256).filter((v) => v && typeof v.name === 'string' && v.name.trim() && typeof v.id === 'string' && v.id).flatMap((v) => {
+    const name = v.name.trim().slice(0, 255);
+    if (seen.has(name.toLowerCase()) || seen.has(`#${v.id}`)) return [];
+    seen.add(name.toLowerCase()); seen.add(`#${v.id}`);
+    return [{ id: v.id.slice(0, 64), name, ...(v.temporary === true ? { temporary: true } : {}),
+      filter: normalizeFilter(v.filter), otherFilters: (Array.isArray(v.otherFilters) ? v.otherFilters : []).map(normalizeFilter).filter(Boolean) }];
+  });
 }
 
 /** The views a worksheet can be shown in (CT_SheetView's view: normal, pageLayout, pageBreakPreview). */
 export const SHEET_VIEW_MODES = ['normal', 'pageLayout', 'pageBreak'];
 
-function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, rowHeightModes, defaultColWidth, defaultRowHeight, nativeWidths, nativeDefaultHeight, colStyles, rowStyles, styleResets, ignoredErrors, cells, frozenRows, frozenCols, hiddenRows, hiddenCols, merges, notes, rules, validations, color, filter, otherFilters, filterHidden, hidden, veryHidden, charts, sparklineGroups, protected: locked, groups, gridlines, headers, rightToLeft, defaultVAlign, zeros, viewZoom, viewSelection, viewOrigin, frozenOrigin, split, viewMode, zoomToFit, printSettings, protectedRanges, tables, scenarios, freshIds = false }) {
+export function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, rowHeightModes, defaultColWidth, defaultRowHeight, nativeWidths, nativeDefaultHeight, colStyles, rowStyles, styleResets, ignoredErrors, cells, frozenRows, frozenCols, hiddenRows, hiddenCols, merges, notes, rules, validations, color, filter, otherFilters, filterHidden, hidden, veryHidden, charts, sparklineGroups, protected: locked, groups, gridlines, headers, rightToLeft, defaultVAlign, zeros, viewZoom, viewSelection, viewOrigin, frozenOrigin, split, viewMode, zoomToFit, printSettings, protectedRanges, tables, scenarios, outlineSettings, showPageBreaks, background, sheetViews, personalView, freshIds = false }) {
   // Optional metadata from a file may be malformed. An invalid collection
   // must not prevent the workbook's actual cell data from opening.
   const arrayOrEmpty = (value) => Array.isArray(value) ? value : [];
@@ -628,6 +685,7 @@ function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, rowHeigh
     veryHidden: !!veryHidden,
     protected: !!locked,
     groups: normalizeGroups(groups),
+    ...(normalizeOutlineSettings(outlineSettings) ? { outlineSettings: normalizeOutlineSettings(outlineSettings) } : {}),
     gridlines: gridlines !== false,
     headers: headers !== false,
     rightToLeft: rightToLeft === true,
@@ -635,6 +693,10 @@ function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, rowHeigh
     zeros: zeros !== false,
     ...(Number.isFinite(viewZoom) && viewZoom >= .1 && viewZoom <= 4 ? { viewZoom } : {}),
     ...(kind !== 'chart' && SHEET_VIEW_MODES.includes(viewMode) && viewMode !== 'normal' ? { viewMode } : {}),
+    ...(kind !== 'chart' && showPageBreaks === true ? { showPageBreaks: true } : {}),
+    ...(kind !== 'chart' && normalizeBackground(background) ? { background: normalizeBackground(background) } : {}),
+    // View ▸ Sheet View: the sheet's named filter views; personalView is the one this person is in (undo snapshots only).
+    ...(kind !== 'chart' && normalizeSheetViews(sheetViews).length ? { sheetViews: normalizeSheetViews(sheetViews) } : {}),
     printSettings: normalizePrintSettings(printSettings),
     filter: normalizeFilter(filter),
     otherFilters: arrayOrEmpty(otherFilters).map(normalizeFilter).filter(Boolean),
@@ -687,6 +749,10 @@ function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, rowHeigh
     })).filter((t) => t.range.r2 >= t.range.r1 && t.range.c2 >= t.range.c1),
     cells: new Map(),
   };
+  if (personalView && sheet.sheetViews?.some((v) => v.id === personalView.id)) {
+    sheet.personalView = { id: personalView.id, saved: { filter: normalizeFilter(personalView.saved?.filter),
+      otherFilters: (Array.isArray(personalView.saved?.otherFilters) ? personalView.saved.otherFilters : []).map(normalizeFilter).filter(Boolean) } };
+  }
   const filterRanges = new Set([filterRangeKey(sheet.filter)]);
   sheet.otherFilters = sheet.otherFilters.filter(f => {
     const key = filterRangeKey(f);
@@ -784,8 +850,16 @@ export function safeLinkUrl(url) {
   return /^(?:https?:\/\/|ftp:\/\/|mailto:)/i.test(normalized) ? normalized : null;
 }
 
-/** A sheet as toJSON writes it, apart from its cells; makeSheet reads the same shape back. */
-function sheetShapeJSON(s) {
+/**
+ * A sheet as toJSON writes it, apart from its cells; makeSheet reads the same shape back. A file gets the
+ * sheet as everyone sees it: while this person is in a sheet view (View ▸ Sheet View), the default view's
+ * filters, with the view's own kept among the sheet's views, and `defaultHidden` gives the rows those
+ * filters hide. `live` is the state as it stands, the person's view included (undo snapshots, copies).
+ */
+export function sheetShapeJSON(s, { live = false, defaultHidden = null } = {}) {
+  const personal = !live && s.personalView ? s.personalView : null;
+  const shown = personal ? { filter: personal.saved.filter || null, otherFilters: personal.saved.otherFilters || [] } : s;
+  const hiddenByFilter = personal ? defaultHidden?.(s) || null : s.filterHidden;
   return {
     id: s.id,
     name: s.name,
@@ -805,15 +879,20 @@ function sheetShapeJSON(s) {
     zeros: s.zeros === false ? false : undefined,
     ...(s.viewZoom != null ? { viewZoom: s.viewZoom } : {}),
     ...(s.viewMode ? { viewMode: s.viewMode } : {}),
+    ...(s.showPageBreaks ? { showPageBreaks: true } : {}),
+    ...(s.background ? { background: { ...s.background } } : {}),
     ...(s.viewSelection ? { viewSelection: normalizeSheetSelection(s.viewSelection) } : {}),
     ...(s.viewOrigin ? { viewOrigin: normalizeSheetOrigin(s.viewOrigin) } : {}),
     ...(s.frozenOrigin ? { frozenOrigin: normalizeSheetOrigin(s.frozenOrigin) } : {}),
     ...(s.split ? { split: normalizeSplit(s.split) } : {}),
     printSettings: s.printSettings ? normalizePrintSettings(s.printSettings) : undefined,
     groups: s.groups.rows.length || s.groups.cols.length ? { rows: s.groups.rows.map((g) => ({ ...g })), cols: s.groups.cols.map((g) => ({ ...g })) } : undefined,
-    filter: s.filter ? { ...s.filter, range: { ...s.filter.range }, criteria: { ...s.filter.criteria }, ...(s.filter.hiddenButtons ? { hiddenButtons: [...s.filter.hiddenButtons] } : {}) } : null,
-    ...(s.otherFilters?.length ? { otherFilters: s.otherFilters.map(copyFilter) } : {}),
-    ...(sheetFilters(s).length ? { filterHidden: [...s.filterHidden] } : {}),
+    ...(s.outlineSettings ? { outlineSettings: { ...s.outlineSettings } } : {}),
+    filter: shown.filter ? copyFilter(shown.filter) : null,
+    ...(shown.otherFilters?.length ? { otherFilters: shown.otherFilters.map(copyFilter) } : {}),
+    ...(sheetFilters(shown).length && hiddenByFilter ? { filterHidden: [...hiddenByFilter] } : {}),
+    ...(s.sheetViews?.length ? { sheetViews: sheetViewsJSON(s, live) } : {}),
+    ...(live && s.personalView ? { personalView: { id: s.personalView.id, saved: { filter: copyFilter(s.personalView.saved.filter) || null, otherFilters: (s.personalView.saved.otherFilters || []).map(copyFilter) } } } : {}),
     hiddenRows: [...s.hiddenRows].sort((a, b) => a - b),
     hiddenCols: [...s.hiddenCols].sort((a, b) => a - b),
     merges: s.merges.map((m) => ({ ...m })),
@@ -844,7 +923,7 @@ function sheetShapeJSON(s) {
 const sheetListEntry = (s) => ({ id: s.id, name: s.name, hidden: s.hidden, veryHidden: s.veryHidden });
 
 /** Whether two values as toJSON writes them are alike: the same keys and, key by key, the same values. */
-function sameJSON(a, b) {
+export function sameJSON(a, b) {
   if (a === b) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || !a || !b || Array.isArray(a) !== Array.isArray(b)) return false;
   if (Array.isArray(a)) return a.length === b.length && a.every((x, i) => sameJSON(x, b[i]));
@@ -887,12 +966,19 @@ const SUBSTITUTE_STATE = ['_iterationReady', '_cache', '_rangeCache', '_rangeCac
   '_volatile', '_spills', '_spillBuilds', '_hasDeferredSpills', '_spillComputed', '_evaluating', '_cyclic', '_provisional', '_blankProvisional',
   '_blankKeys', '_unsettled', '_tentative', '_grown'];
 
+/** The workbook's settings beside its sheets and their active one (see bookState): what a file holds of the book itself. */
+export const BOOK_STATE_KEYS = ['dataModel', 'nativePivots', 'externalWorkbooks', 'iteration', 'calcMode', 'structureProtected', 'queries', 'watches',
+  'calculationCompatibility', 'colorPalette', 'fontTheme', 'themeInfo', 'normalFont', 'nativeNormalStyle', 'nativeNormalFill', 'nativeDefaultCellFormat', 'names',
+  'scripts', 'cellStyles', 'linkStartup', 'customViews'];
+
 export class Workbook extends EventTarget {
   /** Async sources for functions like AI(): name → (text) => Promise<string>. Answers are cached per prompt. */
   _asyncProviders = new Map();
   _asyncCache = new Map();
   _snapshotBudget = SNAPSHOT_CELLS;
   _fixedArrayIndexes = new WeakMap();
+  /** Sheet settings a sheet added in this session starts with (see addSheet); never saved. */
+  newSheetDefaults = null;
 
   constructor(json = null) {
     super();
@@ -940,40 +1026,16 @@ export class Workbook extends EventTarget {
 
   _load(json) {
     json = unpackNativeFillState(json);
-    this.dataModel = normalizeDataModel(json.dataModel);
-    this.nativePivots = normalizeNativePivots(json.nativePivots);
-    this.externalWorkbooks = normalizeExternalWorkbooks(json.externalWorkbooks);
-    this.iteration = normalizeIteration(json.iteration);
-    // Calculation Options: 'automatic' recalculates after every change; 'manual' keeps results until F9 (see _changed).
-    this.calcMode = json.calcMode === 'manual' ? 'manual' : 'automatic';
-    // Protect Workbook (structure): sheets cannot be added, deleted, renamed, moved, copied, hidden, shown or recoloured.
-    this.structureProtected = json.structureProtected === true;
-    // Watch Window: cells whose values are kept in view, by sheet id and position.
-    // Get & Transform: the workbook's queries (see queries.js); their loaded tables are ordinary tables.
-    this.queries = normalizeQueries(json.queries);
-    this.watches = Array.isArray(json.watches) ? json.watches.filter((w) => w && Number.isInteger(w.r) && Number.isInteger(w.c) && w.sheetId != null).slice(0, 500).map(({ sheetId, r, c }) => ({ sheetId, r, c })) : [];
-    this.calcPending = false;
-    this.calculationCompatibility = normalizeCalculationCompatibility(json.calculationCompatibility);
-    this.colorPalette = normalizeColorPalette(json.colorPalette);
-    this.fontTheme = normalizeFontTheme(json.fontTheme);
-    this.themeInfo = normalizeThemeInfo(json.themeInfo);
-    this.normalFont = normalizeNormalFont(json.normalFont);
-    this.nativeNormalStyle = normalizeNativeNormalStyle(json.nativeNormalStyle);
-    this.nativeNormalFill = normalizeNativeFill(json.nativeNormalFill);
-    this.normalStyle = normalFontStyle(this.normalFont);
-    this.nativeDefaultCellFormat = normalizeNativeDefaultCellFormat(json.nativeDefaultCellFormat);
-    this.cellDefaultStyle = this.nativeDefaultCellFormat ? { ...this.normalStyle, ...this.nativeDefaultCellFormat.style } : this.normalStyle;
-    this._sheetDefaultStyles = new WeakMap();
+    this._loadSettings(json);
+    // Show Changes: the record of recent edits (see change-history.js). It is no part of undo, nor of toJSON, which
+    // undo restores exactly: the draft and the file's sidecar carry it beside the book (drafts.js, io.js).
+    this.changeHistory = normalizeChangeHistory(json.changeHistory);
+    this._changeJoin = null;
     this.sheets = (json.sheets?.length ? json.sheets : [{ name: 'Sheet1' }]).map(makeSheet);
     this.workbookView = normalizeWorkbookView(json.workbookView);
-    this.names = [];
-    for (const n of json.names || []) {
-      // Preserve legacy name/table collisions on load; reject new collisions
-      // through editing APIs without silently discarding stored definitions.
-      const scope = n?.sheet == null ? null : this.sheetByName(n.sheet)?.name;
-      if (n?.sheet != null && !scope) continue;
-      if (n?.name && n?.ref && !this.validateName(n.name, null, { allowTableName: true, sheet: scope })) this.names.push({ name: n.name, ref: String(n.ref), ...(n.hidden === true ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(n.relative === true ? { relative: true } : {}) });
-    }
+    // View ▸ Custom Views (see custom-views.js).
+    this.customViews = normalizeCustomViews(json.customViews, this.sheets.map((s) => s.id), normalizeFilter);
+    this._loadNames(json);
     // Never every sheet hidden, and never a hidden sheet in front.
     if (this.sheets.every((s) => s.hidden)) this.sheets[0].hidden = false;
     this.activeSheetId = this.sheets.some((s) => s.id === json.activeSheetId && !s.hidden)
@@ -993,6 +1055,84 @@ export class Workbook extends EventTarget {
       this._invalidate();
       for (const { sheet, r, c, cell } of bind) cell.externalResult.context = this._externalCallerContext(sheet, r, c, cell.f);
     }
+  }
+
+  /** The workbook's own settings (everything but its sheets and defined names), read from serialized contents. */
+  _loadSettings(json) {
+    this.dataModel = normalizeDataModel(json.dataModel);
+    this.nativePivots = normalizeNativePivots(json.nativePivots);
+    this.externalWorkbooks = normalizeExternalWorkbooks(json.externalWorkbooks);
+    this.iteration = normalizeIteration(json.iteration);
+    // Calculation Options: 'automatic' recalculates after every change; 'manual' keeps results until F9 (see _changed).
+    this.calcMode = json.calcMode === 'manual' ? 'manual' : 'automatic';
+    // Protect Workbook (structure): sheets cannot be added, deleted, renamed, moved, copied, hidden, shown or recoloured.
+    this.structureProtected = json.structureProtected === true;
+    // Watch Window: cells whose values are kept in view, by sheet id and position.
+    // Get & Transform: the workbook's queries (see queries.js); their loaded tables are ordinary tables.
+    this.queries = normalizeQueries(json.queries);
+    // Automate: the scripts the workbook carries (see scripts.js).
+    this.scripts = normalizeScripts(json.scripts);
+    // Edit Links ▸ Startup Prompt: what opening the book does about its links to other workbooks.
+    this.linkStartup = LINK_STARTUP_MODES.includes(json.linkStartup) ? json.linkStartup : 'ask';
+    // Named cell styles this workbook defines, and built-in ones it modified (see custom-cell-styles.js).
+    this.cellStyles = normalizeCellStyles(json.cellStyles);
+    this.watches = Array.isArray(json.watches) ? json.watches.filter((w) => w && Number.isInteger(w.r) && Number.isInteger(w.c) && w.sheetId != null).slice(0, 500).map(({ sheetId, r, c }) => ({ sheetId, r, c })) : [];
+    this.calcPending = false;
+    this.calculationCompatibility = normalizeCalculationCompatibility(json.calculationCompatibility);
+    this.colorPalette = normalizeColorPalette(json.colorPalette);
+    this.fontTheme = normalizeFontTheme(json.fontTheme);
+    this.themeInfo = normalizeThemeInfo(json.themeInfo);
+    this.normalFont = normalizeNormalFont(json.normalFont);
+    this.nativeNormalStyle = normalizeNativeNormalStyle(json.nativeNormalStyle);
+    this.nativeNormalFill = normalizeNativeFill(json.nativeNormalFill);
+    this.normalStyle = normalFontStyle(this.normalFont);
+    this.nativeDefaultCellFormat = normalizeNativeDefaultCellFormat(json.nativeDefaultCellFormat);
+    this.cellDefaultStyle = this.nativeDefaultCellFormat ? { ...this.normalStyle, ...this.nativeDefaultCellFormat.style } : this.normalStyle;
+    this._sheetDefaultStyles = new WeakMap();
+  }
+
+  /** The defined names, read from serialized contents against the sheets already loaded (a scope must name one). */
+  _loadNames(json) {
+    this.names = [];
+    for (const n of json.names || []) {
+      // Preserve legacy name/table collisions on load; reject new collisions
+      // through editing APIs without silently discarding stored definitions.
+      const scope = n?.sheet == null ? null : this.sheetByName(n.sheet)?.name;
+      if (n?.sheet != null && !scope) continue;
+      if (n?.name && n?.ref && !this.validateName(n.name, null, { allowTableName: true, sheet: scope })) this.names.push({ name: n.name, ref: String(n.ref), ...(n.hidden === true ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(n.relative === true ? { relative: true } : {}) });
+    }
+  }
+
+  /**
+   * The workbook's settings beside its sheets, each as the live value it is held as (shared editing compares these
+   * by identity first, as an edit replaces a setting rather than changing it in place). See bookState.
+   */
+  bookFields() {
+    const out = {};
+    for (const key of BOOK_STATE_KEYS) out[key] = this[key];
+    return out;
+  }
+
+  /** The workbook's settings beside its sheets, serialized as a file holds them (natively filled colors unpacked); `keys` limits them. */
+  bookState(keys = BOOK_STATE_KEYS) {
+    const out = {};
+    for (const key of keys) {
+      const value = key === 'queries' ? serializeQueries(this) : key === 'scripts' ? serializeScripts(this) : key === 'names' ? this.names.map((n) => ({ ...n })) : this[key];
+      out[key] = JSON.parse(JSON.stringify(value ?? null));
+    }
+    return out;
+  }
+
+  /**
+   * Put serialized settings (some keys of bookState) in place, read as a file's are; the sheets stay. Not an undo step:
+   * shared editing applies the settings someone else changed with this, and keeps its own record around it.
+   */
+  applyBookState(partial) {
+    const json = { ...this.bookState(), ...partial };
+    this._loadSettings(json);
+    if ('names' in partial) this._loadNames(json);
+    if ('customViews' in partial) this.customViews = normalizeCustomViews(json.customViews, this.sheets.map((s) => s.id), normalizeFilter);
+    this._changed('structure');
   }
 
   /**
@@ -1016,11 +1156,15 @@ export class Workbook extends EventTarget {
       ...(this.externalWorkbooks ? { externalWorkbooks: normalizeExternalWorkbooks(this.externalWorkbooks) } : {}),
       activeSheetId: this.activeSheetId,
       ...(this.workbookView ? { workbookView: normalizeWorkbookView(this.workbookView) } : {}),
+      ...(this.customViews?.length ? { customViews: normalizeCustomViews(this.customViews, this.sheets.map((s) => s.id), normalizeFilter) } : {}),
       names: this.names.map((n) => ({ ...n })),
       ...(this.iteration ? { iteration: { ...this.iteration } } : {}),
       ...(this.calcMode === 'manual' ? { calcMode: 'manual' } : {}),
       ...(this.structureProtected ? { structureProtected: true } : {}),
+      ...(this.linkStartup !== 'ask' ? { linkStartup: this.linkStartup } : {}),
       ...(this.queries.length ? { queries: serializeQueries(this) } : {}),
+      ...(this.scripts.length ? { scripts: serializeScripts(this) } : {}),
+      ...(this.cellStyles.length ? { cellStyles: normalizeCellStyles(this.cellStyles) } : {}),
       ...(this.watches.length ? { watches: this.watches.filter((w) => this.sheet(w.sheetId)).map((w) => ({ ...w })) } : {}),
       calculationCompatibility: { ...this.calculationCompatibility },
       ...(this.colorPalette ? { colorPalette: normalizeColorPalette(this.colorPalette) } : {}),
@@ -1030,7 +1174,7 @@ export class Workbook extends EventTarget {
       ...(this.nativeNormalStyle ? { nativeNormalStyle: normalizeNativeNormalStyle(this.nativeNormalStyle) } : {}),
       ...(this.nativeNormalFill ? { nativeNormalFill: this.nativeNormalFill } : {}),
       ...(this.nativeDefaultCellFormat ? { nativeDefaultCellFormat: normalizeNativeDefaultCellFormat(this.nativeDefaultCellFormat) } : {}),
-      sheets: this.sheets.map((s) => ({ ...sheetShapeJSON(s), cells: Object.fromEntries([...s.cells].map(([k, c]) => [k, cloneCell(c)])) })),
+      sheets: this.sheets.map((s) => ({ ...sheetShapeJSON(s, { defaultHidden: (sheet) => this._defaultFilterHidden(sheet) }), cells: Object.fromEntries([...s.cells].map(([k, c]) => [k, cloneCell(c)])) })),
     });
   }
 
@@ -1046,7 +1190,7 @@ export class Workbook extends EventTarget {
     let cells = 0;
     for (const s of this.sheets) {
       if (!touched.has(s.id)) continue;
-      const json = { ...sheetShapeJSON(s), cells: Object.fromEntries([...s.cells].map(([k, c]) => [k, cloneCell(c)])) };
+      const json = { ...sheetShapeJSON(s, { live: true }), cells: Object.fromEntries([...s.cells].map(([k, c]) => [k, cloneCell(c)])) };
       sheets.set(s.id, json);
       cells += s.cells.size + s.styleResets.length + s.ignoredErrors.length + nativeSparklineSize(s.sparklineGroups);
     }
@@ -1069,7 +1213,7 @@ export class Workbook extends EventTarget {
       const fAt = [];
       const fText = [];
       for (let i = 0; i < cells.length; i++) { const f = cells[i].f; if (f != null) { fAt.push(i); fText.push(f); } }
-      capture.sheets.set(s.id, { sheet: s, map: s.cells, keys: Array.from(s.cells.keys()), cells, fAt, fText, shape: sheetShapeJSON(s) });
+      capture.sheets.set(s.id, { sheet: s, map: s.cells, keys: Array.from(s.cells.keys()), cells, fAt, fText, shape: sheetShapeJSON(s, { live: true }) });
     }
     this._captures.push(capture);
     return capture;
@@ -1088,7 +1232,7 @@ export class Workbook extends EventTarget {
       i++;
     }
     const listed = { name: null, hidden: null, veryHidden: null };
-    return p !== cap.fAt.length || !sameJSON({ ...sheetShapeJSON(live), ...listed }, { ...cap.shape, ...listed });
+    return p !== cap.fAt.length || !sameJSON({ ...sheetShapeJSON(live, { live: true }), ...listed }, { ...cap.shape, ...listed });
   }
 
   /**
@@ -1245,7 +1389,9 @@ export class Workbook extends EventTarget {
     const beside = this.sheet(this.activeSheetId);
     const excel = beside && beside.defaultColWidth === EXCEL_SHEET_DEFAULTS.defaultColWidth && beside.defaultRowHeight === EXCEL_SHEET_DEFAULTS.defaultRowHeight;
     return this._structural('Add sheet', () => {
-      const sheet = makeSheet({ name: sheetName, ...(excel ? EXCEL_SHEET_DEFAULTS : {}), ...(excel && beside.defaultVAlign ? { defaultVAlign: beside.defaultVAlign } : {}) });
+      // `newSheetDefaults` is the person's choice for new sheets (the editor sets it from the app's options: the
+      // view they open in, whether headers show); it belongs to this session, not to the file.
+      const sheet = makeSheet({ name: sheetName, ...(excel ? EXCEL_SHEET_DEFAULTS : {}), ...(excel && beside.defaultVAlign ? { defaultVAlign: beside.defaultVAlign } : {}), ...this.newSheetDefaults });
       this.sheets.splice(index, 0, sheet);
       this.activeSheetId = sheet.id;
       return sheet;
@@ -1399,7 +1545,8 @@ export class Workbook extends EventTarget {
     return this._structural('Duplicate sheet', () => {
       // Only this sheet is written out. Serializing the whole book for one of its sheets made a tab-menu
       // click take a second on a book of a sheet per month, for a copy that reads nothing from the others.
-      const json = { ...sheetShapeJSON(src), cells: Object.fromEntries([...src.cells].map(([k, c]) => [k, cloneCell(c)])) };
+      // The copy shows what this person sees, and becomes everyone's: it is in no sheet view of its own.
+      const { personalView: _personal, ...json } = { ...sheetShapeJSON(src, { live: true }), cells: Object.fromEntries([...src.cells].map(([k, c]) => [k, cloneCell(c)])) };
       let name = suffixedSheetName(src.name, ' (copy)');
       let n = 2;
       while (this.sheetByName(name)) name = suffixedSheetName(src.name, ` (copy ${n++})`);
@@ -1433,7 +1580,7 @@ export class Workbook extends EventTarget {
     const src = this.sheet(id);
     if (!src || src.externalCache) return null;
     // Serialize this sheet; supporting dependencies are collected separately.
-    const sheet = { ...sheetShapeJSON(src), cells: Object.fromEntries([...src.cells].map(([k, c]) => [k, cloneCell(c)])) };
+    const { personalView: _personal, ...sheet } = { ...sheetShapeJSON(src, { live: true }), cells: Object.fromEntries([...src.cells].map(([k, c]) => [k, cloneCell(c)])) };
     const native = nativePivotSheetCopy(this, sheet, options);
     sheet.charts = native.charts;
     const names = this._namesForSheetCopy(sheet, [...this.names.map((n) => ({ ...n })), ...native.entries], native.names);
@@ -2239,7 +2386,10 @@ export class Workbook extends EventTarget {
       this._changed('cells', live.id, { box, formula });
       if (bounds) this._cellBoundsCache.set(live.id, bounds);
     };
+    // Grouped sheets: the cells written on the active sheet are noted, to be written again on the rest of the group.
+    if (this._groupRecorder?.sheetId === sheetId) for (let i = 0; i < before.length; i++) this._groupRecorder.writes.push({ key: before[i].key, prev: before[i].cell, next: after[i].cell });
     apply(after, afterIgnored);
+    recordCellWrites(this, sheet, before, after, label, box);
     // The before-and-after pair the step closes over is the memory it costs, and a sort, fill, paste or
     // replace-all holds a clone of every cell it touched twice over. Weighed against the same budget as a
     // structural step's snapshots, so that a history of them cannot grow without end (see _evictSnapshots).
@@ -4916,47 +5066,18 @@ export class Workbook extends EventTarget {
    * both 0 when nothing was split, with `reason` 'protected' when a protected
    * cell among the targets refused the split, 'room' when the pieces would
    * run past the last column, or 'merged' when one would land under a merge.
+   *
+   * `delimiter` may instead be the Text to Columns options (see text-split.js): separators or fixed
+   * widths, plus `formats` (per piece: 'general', 'text' to keep it as typed, 'skip' to leave it out) and
+   * `dest` ({ r, c }, where the first row's pieces start; by default over the text itself).
    */
   splitTextToColumns(sheetId, range, delimiter = null) {
     const sheet = this.sheet(sheetId);
     if (!sheet) return { rows: 0, cols: 0 };
     if (this._gridLocked(sheet)) return { rows: 0, cols: 0 };
-    const n = normalizeRange(range);
-    const c = n.c1;
-    const texts = [];
-    for (let r = n.r1; r <= n.r2; r++) {
-      const cell = sheet.cells.get(cellKey(r, c));
-      if (cell && cell.f == null && typeof cell.v === 'string') texts.push({ r, cell });
-    }
-    if (!texts.length) return { rows: 0, cols: 0 };
-    let delim = delimiter;
-    if (!delim) {
-      // The delimiter most rows contain wins; space is the last resort.
-      const candidates = ['\t', ',', ';', '|', ' '];
-      let best = null;
-      let bestCount = 0;
-      for (const d of candidates) {
-        const count = texts.filter((t) => t.cell.v.includes(d)).length;
-        if (count > bestCount) { best = d; bestCount = count; }
-      }
-      if (!best) return { rows: 0, cols: 0 };
-      delim = best;
-    }
-    // Quoted fields keep their delimiter: "Smith, John",42 splits into two. A line
-    // break inside a cell (Alt+Enter) is part of its piece, not the row break it is
-    // in pasted text: the breaks are hidden from the parser and put back in the pieces.
-    const pieces = (text) => (parseDelimited(text.replace(/\r/g, '').replace(/\n/g, ''), delim)[0] || [])
-      .map((piece) => piece.replace(//g, '\r').replace(//g, '\n'));
-    const split = texts.map(({ r, cell }) => ({ r, cell, parts: delim === ' ' ? cell.v.trim().split(/\s+/) : pieces(cell.v) }));
-    const cols = split.reduce((n, { parts }) => Math.max(n, parts.length), 1);
-    // Pieces past the last column would be dropped while the split was reported as written, so the split is refused.
-    if (c + cols > Math.max(sheet.cols, MAX_COLS)) return { rows: 0, cols: 0, reason: 'room' };
-    const entries = [];
-    for (const { r, parts } of split) {
-      parts.forEach((part, i) => {
-        entries.push({ r, c: c + i, cell: cellFromInput(part.trim(), this.styleAt(sheetId, r, c + i)) });
-      });
-    }
+    const plan = this.splitTextPlan(sheetId, range, delimiter);
+    if (!plan.entries) return { rows: 0, cols: 0, ...(plan.reason ? { reason: plan.reason } : {}) };
+    const { entries } = plan;
     // A piece under a merged block would be stored out of sight: the split is refused rather than the merge undone unasked.
     for (const { r, c: cc } of entries) if (this._coveredByMerge(sheetId, r, cc)) return { rows: 0, cols: 0, reason: 'merged' };
     // The pieces land right of the selection, where a protected cell refuses the whole split; the
@@ -4967,7 +5088,59 @@ export class Workbook extends EventTarget {
     // Pieces written over a table's header row rename its columns: the names stay distinct and the
     // formulas that used the old names follow, as when a header is typed or pasted over.
     if (!this.setCellsWithTableHeaders(sheetId, entries, 'Split text')) return { rows: 0, cols: 0 };
-    return { rows: texts.length, cols };
+    return { rows: plan.rows, cols: plan.cols };
+  }
+
+  /**
+   * The cells a split would write, without writing them: { entries, rows, cols }, or { reason } (or {}) when
+   * there is nothing to split. The editor asks it before a split whether cells holding data would be written over.
+   */
+  splitTextPlan(sheetId, range, delimiter = null) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return {};
+    const n = normalizeRange(range);
+    const c = n.c1;
+    const texts = [];
+    for (let r = n.r1; r <= n.r2; r++) {
+      const cell = sheet.cells.get(cellKey(r, c));
+      if (cell && cell.f == null && typeof cell.v === 'string') texts.push({ r, cell });
+    }
+    if (!texts.length) return {};
+    let split;
+    const options = delimiter && typeof delimiter === 'object' ? delimiter : null;
+    if (options) {
+      split = texts.map(({ r, cell }) => ({ r, cell, parts: splitPieces(cell.v, { ...DEFAULT_SPLIT, ...options }) }));
+    } else {
+      // The delimiter most rows contain wins; space is the last resort.
+      const delim = delimiter || detectDelimiter(texts.map((t) => t.cell.v));
+      if (!delim) return {};
+      // Quoted fields keep their delimiter: "Smith, John",42 splits into two. A line
+      // break inside a cell (Alt+Enter) is part of its piece, not the row break it is
+      // in pasted text: the breaks are hidden from the parser and put back in the pieces.
+      const pieces = (text) => (parseDelimited(text.replace(/\r/g, '\u0001').replace(/\n/g, '\u0002'), delim)[0] || [])
+        .map((piece) => piece.replace(/\u0001/g, '\r').replace(/\u0002/g, '\n'));
+      split = texts.map(({ r, cell }) => ({ r, cell, parts: delim === ' ' ? cell.v.trim().split(/\s+/) : pieces(cell.v) }));
+    }
+    const formats = options?.formats || [];
+    const dest = options?.dest || { r: n.r1, c };
+    const entries = [];
+    let cols = 1;
+    for (const { r, parts } of split) {
+      const row = dest.r + (r - n.r1);
+      let k = 0;
+      parts.forEach((part, i) => {
+        const fmt = formats[i] || 'general';
+        if (fmt === 'skip') return;
+        const at = dest.c + k++;
+        const style = this.styleAt(sheetId, row, at);
+        entries.push({ r: row, c: at, cell: cellFromInput(part.trim(), fmt === 'text' ? { ...(style || {}), fmt: 'text' } : style) });
+      });
+      cols = Math.max(cols, k);
+    }
+    // Pieces past the last column (or row) would be dropped while the split was reported as written, so the split is refused.
+    if (dest.c + cols > Math.max(sheet.cols, MAX_COLS) || dest.r + (n.r2 - n.r1) >= Math.max(sheet.rows, MAX_ROWS)) return { reason: 'room' };
+    if (!entries.length) return {};
+    return { entries, rows: texts.length, cols };
   }
 
   /**
@@ -6844,6 +7017,44 @@ export class Workbook extends EventTarget {
     });
   }
 
+  /** Change a sheet's outline settings (see normalizeOutlineSettings); an undo step of its own. */
+  setOutlineSettings(sheetId, patch) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || sheet.kind === 'chart') return false;
+    const prev = sheet.outlineSettings ? { ...sheet.outlineSettings } : null;
+    const next = normalizeOutlineSettings({ ...outlineSettingsOf(sheet), ...patch });
+    if (JSON.stringify(prev) === JSON.stringify(next)) return false;
+    const apply = (v) => {
+      const live = this.sheet(sheetId);
+      if (!live) return;
+      if (v) live.outlineSettings = { ...v }; else delete live.outlineSettings;
+      this._changed('layout', live.id);
+    };
+    apply(next);
+    this._push({ label: 'Outline settings', undo: () => apply(prev), redo: () => apply(next) });
+    return true;
+  }
+
+  /**
+   * Replace every outline group on an axis (or both, when axis is null) with `groups`, as one step: Auto Outline
+   * and Clear Outline. Lines a removed group had hidden come back; a new group starts expanded.
+   */
+  replaceGroups(sheetId, next, label = 'Outline') {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._gridLocked(sheet)) return false;
+    const wanted = normalizeGroups({ rows: next.rows ?? sheet.groups.rows, cols: next.cols ?? sheet.groups.cols });
+    if (JSON.stringify(wanted) === JSON.stringify(normalizeGroups(sheet.groups))) return false;
+    this._structural(label, () => {
+      for (const [key, hidden] of [['rows', sheet.hiddenRows], ['cols', sheet.hiddenCols]]) {
+        if (!next[key]) continue;
+        for (const g of sheet.groups[key]) if (g.collapsed) for (let i = g.from; i <= g.to; i++) hidden.delete(i);
+      }
+      sheet.groups = wanted;
+      if (sheetFilters(sheet).length) this._applyFilter(sheet);
+    });
+    return true;
+  }
+
   /** Is line i inside some group that is (still) collapsed? */
   _insideCollapsed(sheet, key, i) {
     return sheet.groups[key].some((g) => g.collapsed && g.from <= i && g.to >= i);
@@ -6882,11 +7093,11 @@ export class Workbook extends EventTarget {
     this._setSheetSwitch(sheetId, 'zeros', on, 'Show zeros');
   }
 
-  setPrintSettings(sheetId, settings) {
+  setPrintSettings(sheetId, settings, label = 'Page setup') {
     const sheet = this.sheet(sheetId);
-    if (!sheet) return;
+    if (!sheet) return false;
     const prev = sheet.printSettings, next = normalizePrintSettings(settings);
-    if (JSON.stringify(prev) === JSON.stringify(next)) return;
+    if (JSON.stringify(prev) === JSON.stringify(next)) return false;
     const apply = value => {
       const live = this.sheet(sheetId);
       if (!live) return;
@@ -6894,7 +7105,19 @@ export class Workbook extends EventTarget {
       this._changed('layout', sheetId);
     };
     apply(next);
-    this._push({ label: 'Page setup', undo: () => apply(prev), redo: () => apply(next) });
+    this._push({ label, undo: () => apply(prev), redo: () => apply(next) });
+    return true;
+  }
+
+  /**
+   * Replace the sheet's manual page breaks (see page-breaks.js): `rows` and `cols` list the first line of
+   * each new page. One undo step; a sheet without page setup of its own gets the default one.
+   */
+  setPageBreaks(sheetId, { rows, cols }, label = 'Page breaks') {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || sheet.kind === 'chart') return false;
+    const current = sheet.printSettings || normalizePrintSettings({});
+    return this.setPrintSettings(sheetId, { ...current, rowBreaks: rows ?? current.rowBreaks, colBreaks: cols ?? current.colBreaks }, label);
   }
 
   /** Navigation is included in the next save, but is not a document edit. */
@@ -6931,6 +7154,277 @@ export class Workbook extends EventTarget {
     if (!sheet || sheet.kind === 'chart' || !SHEET_VIEW_MODES.includes(mode)) return;
     if ((sheet.viewMode || 'normal') === mode) return;
     if (mode === 'normal') delete sheet.viewMode; else sheet.viewMode = mode;
+    this._changed('view', sheetId);
+  }
+
+  /**
+   * Page Layout ▸ Background: a picture tiled behind the sheet's cells on screen (never printed), or null to
+   * delete it. One undo step.
+   */
+  setSheetBackground(sheetId, src) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || sheet.kind === 'chart' || this._locked(sheet)) return false;
+    const next = src == null ? null : normalizeBackground(src);
+    if (src != null && !next) return false;
+    const prev = sheet.background || null;
+    if ((prev?.src || null) === (next?.src || null)) return false;
+    const apply = (value) => {
+      const live = this.sheet(sheetId);
+      if (!live) return;
+      if (value) live.background = { ...value }; else delete live.background;
+      this._changed('layout', sheetId);
+    };
+    apply(next);
+    this._push({ label: next ? 'Background' : 'Delete background', undo: () => apply(prev), redo: () => apply(next) });
+    return true;
+  }
+
+  /* ---------- Custom Views ---------- */
+
+  /** Views read from a file, made safe as stored ones are; not an undo step. */
+  adoptCustomViews(views) {
+    this.customViews = normalizeCustomViews(views, this.sheets.map((s) => s.id), normalizeFilter);
+  }
+
+  _setCustomViews(next, label) {
+    const prev = this.customViews;
+    const apply = (list) => { this.customViews = list; this._changed('view', null); this.dirty = true; };
+    apply(next);
+    this._push({ label, undo: () => apply(prev), redo: () => apply(next) });
+  }
+
+  /**
+   * Add a view of the workbook as it is now, under `name` (replacing a view of that name). `print` keeps the
+   * page setup with it, `hidden` the hidden rows and columns and the filters. Returns the view's id, or null.
+   */
+  addCustomView(name, { print = true, hidden = true } = {}) {
+    const text = String(name ?? '').trim();
+    if (!text || text.length > CUSTOM_VIEW_NAME_MAX) return null;
+    const view = captureCustomView(this, text, { print, hidden, copyFilter });
+    const at = this.customViews.findIndex((v) => v.name.toLowerCase() === text.toLowerCase());
+    if (at < 0 && this.customViews.length >= MAX_CUSTOM_VIEWS) return null;
+    const next = this.customViews.slice();
+    if (at >= 0) next[at] = { ...view, id: this.customViews[at].id }; else next.push(view);
+    this._setCustomViews(next, 'Add view');
+    return next[at >= 0 ? at : next.length - 1].id;
+  }
+
+  deleteCustomView(id) {
+    if (!this.customViews.some((v) => v.id === id)) return false;
+    this._setCustomViews(this.customViews.filter((v) => v.id !== id), 'Delete view');
+    return true;
+  }
+
+  /**
+   * Show a view: each sheet it holds goes back to how it was shown (zoom, selection, scroll, view mode,
+   * frozen panes or split, display switches, and with the view's options its hidden lines, filters and page
+   * setup), and its active sheet comes to the front. The edits among those are one undo step; zoom,
+   * selection and scroll are navigation, as elsewhere. Returns false for an unknown view.
+   */
+  showCustomView(id) {
+    const view = this.customViews.find((v) => v.id === id);
+    if (!view) return false;
+    const entries = Object.entries(view.sheets).map(([sheetId, state]) => [this.sheet(sheetId), state]).filter(([sheet]) => sheet && !sheet.externalCache);
+    const frame = (sheet) => ({
+      frozenRows: sheet.frozenRows, frozenCols: sheet.frozenCols, frozenOrigin: sheet.frozenOrigin ? { ...sheet.frozenOrigin } : null,
+      split: sheet.split ? { ...sheet.split } : null, gridlines: sheet.gridlines, headers: sheet.headers, zeros: sheet.zeros,
+      hiddenRows: [...sheet.hiddenRows], hiddenCols: [...sheet.hiddenCols],
+      filter: copyFilter(sheet.filter), otherFilters: (sheet.otherFilters || []).map(copyFilter), filterHidden: [...sheet.filterHidden],
+      printSettings: sheet.printSettings ? normalizePrintSettings(sheet.printSettings) : null,
+      hidden: !!sheet.hidden,
+    });
+    const before = new Map(entries.map(([sheet]) => [sheet.id, frame(sheet)]));
+    const target = (sheet, state) => {
+      const was = before.get(sheet.id);
+      const t = { ...was, frozenRows: state.frozenRows, frozenCols: state.frozenCols, frozenOrigin: state.frozenOrigin || null,
+        split: state.split || null, gridlines: state.gridlines, headers: state.headers, zeros: state.zeros, hidden: state.sheetHidden };
+      if (view.hidden && state.hiddenRows) Object.assign(t, { hiddenRows: state.hiddenRows, hiddenCols: state.hiddenCols, filter: state.filter, otherFilters: state.otherFilters, filterHidden: null });
+      if (view.print && 'printSettings' in state && sheet.kind !== 'chart') t.printSettings = state.printSettings;
+      return t;
+    };
+    const after = new Map(entries.map(([sheet, state]) => [sheet.id, target(sheet, state)]));
+    // Never every sheet hidden: the view's active sheet stays in view whatever the view says of it.
+    const front = this.sheet(view.activeSheetId) && !this.sheet(view.activeSheetId).externalCache ? view.activeSheetId : null;
+    if (front && after.has(front)) after.get(front).hidden = false;
+    if (this.sheets.every((s) => (after.get(s.id)?.hidden ?? s.hidden))) for (const v of after.values()) { v.hidden = false; break; }
+    const apply = (states) => {
+      for (const [sheetId, v] of states) {
+        const live = this.sheet(sheetId);
+        if (!live) continue;
+        live.frozenRows = v.frozenRows; live.frozenCols = v.frozenCols;
+        if (v.frozenOrigin) live.frozenOrigin = { ...v.frozenOrigin }; else delete live.frozenOrigin;
+        if (v.split && !v.frozenRows && !v.frozenCols) live.split = { ...v.split }; else delete live.split;
+        live.gridlines = v.gridlines; live.headers = v.headers; live.zeros = v.zeros;
+        live.hiddenRows = new Set(v.hiddenRows); live.hiddenCols = new Set(v.hiddenCols);
+        live.filter = copyFilter(v.filter); live.otherFilters = (v.otherFilters || []).map(copyFilter);
+        if (v.filterHidden) live.filterHidden = new Set(v.filterHidden);
+        else { this._applyFilter(live); v.filterHidden = [...live.filterHidden]; }
+        if (live.kind !== 'chart') live.printSettings = normalizePrintSettings(v.printSettings);
+        live.hidden = v.hidden;
+        this._changed('layout', live.id);
+      }
+      if (this.sheet(this.activeSheetId)?.hidden) this.activeSheetId = this.sheets.find((s) => !s.hidden).id;
+      this._changed('structure', null);
+    };
+    apply(after);
+    this._push({ label: `Show view ${view.name}`, undo: () => apply(before), redo: () => apply(after) });
+    // Navigation: where each sheet was, as it was zoomed and in which view.
+    for (const [sheet, state] of entries) {
+      if (sheet.kind !== 'chart') {
+        if (state.selection) sheet.viewSelection = normalizeSheetSelection(state.selection);
+        if (state.origin) sheet.viewOrigin = { ...state.origin }; else delete sheet.viewOrigin;
+        if (state.mode === 'normal') delete sheet.viewMode; else sheet.viewMode = state.mode;
+      }
+      sheet.viewZoom = state.zoom;
+      this._changed('view', sheet.id);
+    }
+    if (front && !this.sheet(front).hidden && front !== this.activeSheetId) { this.activeSheetId = front; this._emit('active-sheet'); }
+    return true;
+  }
+
+  /* ---------- Sheet View: named filter views of a sheet, each person in their own ---------- */
+
+  /**
+   * The rows the default view's filters hide while this person is in a sheet view: worked out on a stand-in
+   * for the sheet, so the sheet shown is left as it is.
+   */
+  _defaultFilterHidden(sheet) {
+    const saved = sheet.personalView?.saved;
+    if (!saved) return sheet.filterHidden;
+    const stand = { ...sheet, filter: saved.filter, otherFilters: saved.otherFilters || [], filterHidden: new Set() };
+    if (sheetFilters(stand).length) this._applyFilter(stand);
+    return stand.filterHidden;
+  }
+
+  /** One sheet-view step: the views, the view this person is in, and the filters on show, before and after. */
+  _sheetViewStep(sheet, label, change, { undoable = true, shared = false } = {}) {
+    if (!sheet || sheet.kind === 'chart') return false;
+    const state = (s) => JSON.parse(JSON.stringify({ views: s.sheetViews || [], personal: s.personalView || null, filter: s.filter, otherFilters: s.otherFilters || [] }));
+    const before = { ...state(sheet), hidden: [...sheet.filterHidden] };
+    if (change(sheet) === false) return false;
+    const after = state(sheet);
+    const apply = (v, hidden) => {
+      const live = this.sheet(sheet.id);
+      if (!live) return;
+      if (v.views.length) live.sheetViews = v.views; else delete live.sheetViews;
+      if (v.personal) live.personalView = v.personal; else delete live.personalView;
+      live.filter = v.filter; live.otherFilters = v.otherFilters;
+      if (hidden) live.filterHidden = new Set(hidden); else this._applyFilter(live);
+      // Going into a view or out of one changes what this person sees, not the document everyone shares;
+      // naming, copying or deleting a view changes the document.
+      const dirty = this.dirty;
+      this._changed('layout', live.id);
+      if (!shared) this.dirty = dirty;
+    };
+    apply(after);
+    after.hidden = [...this.sheet(sheet.id).filterHidden];
+    if (undoable) this._push({ label, undo: () => apply(before, before.hidden), redo: () => apply(after, after.hidden), snapshotCells: before.hidden.length + after.hidden.length });
+    return true;
+  }
+
+  /** The view's filters kept up to date with the ones on show while this person is in it. */
+  _captureSheetView(sheet) {
+    const id = sheet.personalView?.id;
+    if (!id || !sheet.sheetViews) return;
+    sheet.sheetViews = sheet.sheetViews.map((v) => (v.id === id ? { ...v, filter: copyFilter(sheet.filter), otherFilters: (sheet.otherFilters || []).map(copyFilter) } : v));
+  }
+
+  /** Go into a sheet view: its filters show for this person, the default view's kept aside for everyone else. */
+  enterSheetView(sheetId, viewId, options) {
+    const sheet = this.sheet(sheetId), view = sheet?.sheetViews?.find((v) => v.id === viewId);
+    if (!view || sheet.personalView?.id === viewId) return false;
+    return this._sheetViewStep(sheet, `Switch to ${view.name}`, (s) => {
+      this._captureSheetView(s);
+      const saved = s.personalView?.saved || { filter: copyFilter(s.filter), otherFilters: (s.otherFilters || []).map(copyFilter) };
+      // A temporary view left for another one goes, as it does on Exit.
+      if (s.personalView && s.sheetViews.find((v) => v.id === s.personalView.id)?.temporary) s.sheetViews = s.sheetViews.filter((v) => v.id !== s.personalView.id);
+      const target = s.sheetViews.find((v) => v.id === viewId);
+      s.personalView = { id: viewId, saved };
+      s.filter = copyFilter(target.filter); s.otherFilters = (target.otherFilters || []).map(copyFilter);
+    }, options);
+  }
+
+  /** New: a temporary view starting from the filters on show, which this person goes into; Keep names it. */
+  newSheetView(sheetId) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || sheet.kind === 'chart') return null;
+    const id = newId();
+    const ok = this._sheetViewStep(sheet, 'New sheet view', (s) => {
+      this._captureSheetView(s);
+      const saved = s.personalView?.saved || { filter: copyFilter(s.filter), otherFilters: (s.otherFilters || []).map(copyFilter) };
+      const views = (s.sheetViews || []).filter((v) => !(v.temporary && v.id === s.personalView?.id));
+      s.sheetViews = [...views, { id, name: 'Temporary View', temporary: true, filter: copyFilter(s.filter), otherFilters: (s.otherFilters || []).map(copyFilter) }];
+      s.personalView = { id, saved };
+    });
+    return ok ? id : null;
+  }
+
+  /** Keep: the temporary view this person is in gets a name and stays with the workbook. */
+  keepSheetView(sheetId, name) {
+    const sheet = this.sheet(sheetId), id = sheet?.personalView?.id, text = String(name ?? '').trim().slice(0, 255);
+    if (!id || !text || sheet.sheetViews.some((v) => v.id !== id && v.name.toLowerCase() === text.toLowerCase())) return false;
+    return this._sheetViewStep(sheet, 'Keep sheet view', (s) => {
+      this._captureSheetView(s);
+      s.sheetViews = s.sheetViews.map((v) => (v.id === id ? (({ temporary, ...rest }) => ({ ...rest, name: text }))(v) : v));
+    }, { shared: true });
+  }
+
+  /** Exit: back to the default view; the view keeps its filters (a temporary one is let go). */
+  exitSheetView(sheetId, options) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet?.personalView) return false;
+    return this._sheetViewStep(sheet, 'Exit sheet view', (s) => {
+      this._captureSheetView(s);
+      const { id, saved } = s.personalView;
+      if (s.sheetViews.find((v) => v.id === id)?.temporary) s.sheetViews = s.sheetViews.filter((v) => v.id !== id);
+      delete s.personalView;
+      s.filter = copyFilter(saved.filter); s.otherFilters = (saved.otherFilters || []).map(copyFilter);
+    }, options);
+  }
+
+  /** Options: rename, duplicate or delete a view (deleting the one this person is in goes back to the default). */
+  renameSheetView(sheetId, viewId, name) {
+    const sheet = this.sheet(sheetId), text = String(name ?? '').trim().slice(0, 255);
+    if (!sheet?.sheetViews?.some((v) => v.id === viewId) || !text || sheet.sheetViews.some((v) => v.id !== viewId && v.name.toLowerCase() === text.toLowerCase())) return false;
+    return this._sheetViewStep(sheet, 'Rename sheet view', (s) => {
+      s.sheetViews = s.sheetViews.map((v) => (v.id === viewId ? (({ temporary, ...rest }) => ({ ...rest, name: text }))(v) : v));
+    }, { shared: true });
+  }
+
+  duplicateSheetView(sheetId, viewId) {
+    const sheet = this.sheet(sheetId), view = sheet?.sheetViews?.find((v) => v.id === viewId);
+    if (!view) return null;
+    this._captureSheetView(sheet);
+    const source = sheet.sheetViews.find((v) => v.id === viewId);
+    let name = `${source.name} (2)`;
+    for (let n = 3; sheet.sheetViews.some((v) => v.name.toLowerCase() === name.toLowerCase()); n++) name = `${source.name} (${n})`;
+    const id = newId();
+    const ok = this._sheetViewStep(sheet, 'Duplicate sheet view', (s) => {
+      const at = s.sheetViews.findIndex((v) => v.id === viewId);
+      s.sheetViews = [...s.sheetViews.slice(0, at + 1), { ...JSON.parse(JSON.stringify(source)), id, name, temporary: undefined }, ...s.sheetViews.slice(at + 1)]
+        .map((v) => (v.temporary === undefined ? (({ temporary, ...rest }) => rest)(v) : v));
+    }, { shared: true });
+    return ok ? id : null;
+  }
+
+  deleteSheetView(sheetId, viewId) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet?.sheetViews?.some((v) => v.id === viewId)) return false;
+    return this._sheetViewStep(sheet, 'Delete sheet view', (s) => {
+      if (s.personalView?.id === viewId) {
+        const { saved } = s.personalView;
+        delete s.personalView;
+        s.filter = copyFilter(saved.filter); s.otherFilters = (saved.otherFilters || []).map(copyFilter);
+      }
+      s.sheetViews = s.sheetViews.filter((v) => v.id !== viewId);
+    }, { shared: true });
+  }
+
+  /** Normal view's page-break lines (View ▸ Page Breaks): a view setting saved with the sheet, not an undo step. */
+  setShowPageBreaks(sheetId, on) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || sheet.kind === 'chart' || !!sheet.showPageBreaks === !!on) return;
+    if (on) sheet.showPageBreaks = true; else delete sheet.showPageBreaks;
     this._changed('view', sheetId);
   }
 
@@ -7476,7 +7970,7 @@ export class Workbook extends EventTarget {
     copy.anchor = { r: row.index, c: col.index };
     copy.dx = col.offset;
     copy.dy = row.offset;
-    if (copy.title && copy.type !== 'image' && copy.type !== 'text' && copy.type !== 'slicer') copy.title = `${copy.title} (copy)`;
+    if (copy.title && !['image', 'text', 'slicer', 'smartart'].includes(copy.type)) copy.title = `${copy.title} (copy)`;
     const full = reanchorCellDrawing(sheet, absoluteDrawingAnchor(sheet, normalizeChart({ ...copy, id: newId() })));
     if (!full) return null;
     this._setCharts(sheet, [...sheet.charts, full], `Duplicate ${objectNoun(full)}`);
@@ -7502,6 +7996,32 @@ export class Workbook extends EventTarget {
     this._setCharts(sheet, next, label);
   }
 
+  /**
+   * Change a SmartArt diagram (see smartart.js): its outline, layout, colours, style or shapes' formatting.
+   * With `merge`, a change following one with the same key within a few seconds joins its undo step, so the
+   * words typed into one item of the Text Pane undo together rather than letter by letter.
+   */
+  updateSmartArt(sheetId, id, patch, label = 'Edit SmartArt', { merge = null } = {}) {
+    const before = this._history.at(-1);
+    const ch = this.chartById(sheetId, id);
+    if (ch?.type !== 'smartart') return false;
+    // A diagram another program drew is shown as it left it until it is changed here.
+    this.updateChart(sheetId, id, { ...patch, ...(ch.fallback && !Object.hasOwn(patch, 'fallback') ? { fallback: null } : {}) }, label);
+    if (this._group) return true;
+    const after = this._history.at(-1);
+    if (after === before || !after) return false;
+    const now = Date.now();
+    if (merge && before?.smartArtMerge === `${sheetId}|${id}|${merge}` && now - before.smartArtAt < 4000) {
+      this._history.pop();
+      before.redo = after.redo;
+      before.smartArtAt = now;
+    } else if (merge) {
+      after.smartArtMerge = `${sheetId}|${id}|${merge}`;
+      after.smartArtAt = now;
+    }
+    return true;
+  }
+
   /** Ignore Error: the error-checking rule `key` is acknowledged for these cells (saved as <ignoredErrors>). One undo step. */
   ignoreErrors(sheetId, ranges, key) {
     const sheet = this.sheet(sheetId);
@@ -7525,6 +8045,168 @@ export class Workbook extends EventTarget {
     if (to == null || to === i) return false;
     next.splice(to, 0, obj);
     this._setCharts(sheet, next, where === 'front' || where === 'forward' ? 'Bring to front' : 'Send to back');
+    return true;
+  }
+
+  /* ---------- Arrange: drawing objects' order, place, groups, visibility and names (see arrange.js) ---------- */
+
+  /** Pixels before line `count` along an axis at 100% zoom, hidden lines counting nothing. */
+  _lineOffset(sheet, axis, count) {
+    const row = axis === 'row';
+    const sizes = row ? sheet.rowHeights : sheet.colWidths, fallback = row ? sheet.defaultRowHeight : sheet.defaultColWidth;
+    let pixels = count * fallback;
+    for (const [i, size] of sizes) if (i < count) pixels += size - fallback;
+    const hidden = row ? new Set([...sheet.hiddenRows, ...sheet.filterHidden]) : sheet.hiddenCols;
+    for (const i of hidden) if (i < count) pixels -= sizes.get(i) ?? fallback;
+    return pixels;
+  }
+
+  /** Where an object sits on its sheet, { id, x, y, w, h } in pixels at 100% zoom from the sheet's corner. */
+  objectRect(sheetId, id) {
+    const sheet = this.sheet(sheetId), ch = sheet?.charts.find((o) => o.id === id);
+    if (!ch) return null;
+    if (sheet.kind === 'chart') return { id, x: ch.dx, y: ch.dy, w: ch.w, h: ch.h };
+    return { id, x: this._lineOffset(sheet, 'col', ch.anchor.c) + ch.dx, y: this._lineOffset(sheet, 'row', ch.anchor.r) + ch.dy, w: ch.w, h: ch.h };
+  }
+
+  /** Apply several objects' patches (place, size, state) as one undo step, as updateChart applies one. */
+  _patchObjects(sheet, patches, label) {
+    if (this._locked(sheet) || !patches.size) return false;
+    let changed = false;
+    const next = sheet.charts.map((ch) => {
+      const patch = patches.get(ch.id);
+      if (!patch) return ch;
+      const merged = absoluteDrawingAnchor(sheet, normalizeChart({ ...ch, ...patch, id: ch.id, range: ch.range, anchor: patch.anchor || ch.anchor }));
+      if (!merged || JSON.stringify(merged) === JSON.stringify(ch)) return ch;
+      changed = true;
+      return ['anchor', 'dx', 'dy', 'w', 'h'].some((k) => Object.hasOwn(patch, k)) ? reanchorCellDrawing(sheet, merged) : merged;
+    });
+    if (!changed) return false;
+    this._setCharts(sheet, next, label);
+    return true;
+  }
+
+  /** Move objects so their top-left corners land at { id, x, y } (pixels at 100% zoom), re-anchored to the cells there. One undo step. */
+  placeObjects(sheetId, places, label = 'Move objects') {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return false;
+    const patches = new Map();
+    for (const { id, x, y } of places) {
+      const ch = sheet.charts.find((o) => o.id === id), at = this.objectRect(sheetId, id);
+      if (!ch || !at || (Math.abs(x - at.x) < 1e-6 && Math.abs(y - at.y) < 1e-6)) continue;
+      if (sheet.kind === 'chart') { patches.set(id, { dx: Math.max(0, x), dy: Math.max(0, y) }); continue; }
+      const col = placeAlong((c) => this.colWidth(sheet.id, c), sheet.cols, ch.anchor.c, ch.dx + (x - at.x), ch.w || 1);
+      const row = placeAlong((r) => this.rowHeight(sheet.id, r), sheet.rows, ch.anchor.r, ch.dy + (y - at.y), ch.h || 1);
+      patches.set(id, { anchor: { r: row.index, c: col.index }, dx: col.offset, dy: row.offset });
+    }
+    return this._patchObjects(sheet, patches, label);
+  }
+
+  /** Align the objects named (left, center, right, top, middle, bottom) or distribute them ('horizontal', 'vertical'). One undo step. */
+  alignObjects(sheetId, ids, how) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return false;
+    // A group aligns as one unit, the box around its members, which keep their places within it.
+    const units = new Map();
+    for (const id of withGroups(sheet.charts, ids)) {
+      const ch = sheet.charts.find((o) => o.id === id), rect = this.objectRect(sheetId, id);
+      if (!rect) continue;
+      const key = ch.group || id;
+      if (!units.has(key)) units.set(key, []);
+      units.get(key).push(rect);
+    }
+    const boxes = [...units].map(([id, rects]) => ({ id, ...boundsOf(rects) }));
+    const moved = new Map((['horizontal', 'vertical'].includes(how) ? distributeRects(boxes, how) : alignRects(boxes, how)).map((p) => [p.id, p]));
+    const places = boxes.flatMap((box) => units.get(box.id).map((r) => ({ id: r.id, x: r.x + moved.get(box.id).x - box.x, y: r.y + moved.get(box.id).y - box.y })));
+    const labels = { left: 'Align left', center: 'Align center', right: 'Align right', top: 'Align top', middle: 'Align middle', bottom: 'Align bottom', horizontal: 'Distribute horizontally', vertical: 'Distribute vertically' };
+    return this.placeObjects(sheetId, places, labels[how] || 'Align');
+  }
+
+  /** Bring to Front ('front'), Bring Forward ('forward'), Send Backward ('backward') or Send to Back ('back') several objects at once (whole groups). */
+  orderObjects(sheetId, ids, where) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._locked(sheet)) return false;
+    const next = orderObjects(sheet.charts, ids, where);
+    if (next.every((ch, i) => ch === sheet.charts[i])) return false;
+    this._setCharts(sheet, next, { front: 'Bring to front', forward: 'Bring forward', backward: 'Send backward', back: 'Send to back' }[where]);
+    return true;
+  }
+
+  /** The Selection Pane's drag: put an object (its whole group) at place `to` in the stacking order, counted from the back. */
+  moveObjectInOrder(sheetId, id, to) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._locked(sheet) || !sheet.charts.some((ch) => ch.id === id)) return false;
+    const next = moveObjectTo(sheet.charts, id, to);
+    if (next.every((ch, i) => ch === sheet.charts[i])) return false;
+    this._setCharts(sheet, next, 'Reorder objects');
+    return true;
+  }
+
+  /** Group the objects named into one; returns the group's id. One undo step. */
+  groupObjects(sheetId, ids) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._locked(sheet)) return null;
+    const group = `g${newId().replace(/[^\w]/g, '').slice(0, 24)}`;
+    const next = groupObjects(sheet.charts, ids, group);
+    if (!next) return null;
+    this._setCharts(sheet, next, 'Group');
+    return group;
+  }
+
+  /** Ungroup the groups of the objects named, remembering the last one for Regroup. One undo step. */
+  ungroupObjects(sheetId, ids) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._locked(sheet)) return false;
+    const groups = new Set(sheet.charts.filter((ch) => ids.includes(ch.id) && ch.group).map((ch) => ch.group));
+    const next = ungroupObjects(sheet.charts, ids);
+    if (!next) return false;
+    const last = [...groups].at(-1);
+    (this._ungrouped ||= new Map()).set(sheetId, { group: last, ids: sheet.charts.filter((ch) => ch.group === last).map((ch) => ch.id) });
+    this._setCharts(sheet, next, 'Ungroup');
+    return true;
+  }
+
+  /** Regroup: the group last ungrouped on this sheet, if its objects are all still there and ungrouped. */
+  canRegroup(sheetId) {
+    const last = this._ungrouped?.get(sheetId), sheet = this.sheet(sheetId);
+    return !!last && last.ids.length > 1 && last.ids.every((id) => sheet?.charts.some((ch) => ch.id === id && !ch.group));
+  }
+
+  regroupObjects(sheetId) {
+    if (!this.canRegroup(sheetId)) return null;
+    const { ids } = this._ungrouped.get(sheetId);
+    this._ungrouped.delete(sheetId);
+    return this.groupObjects(sheetId, ids);
+  }
+
+  /** Rotate Right or Left 90°, Flip Vertical or Horizontal the objects named that can turn (pictures, shapes, text boxes). */
+  rotateObjects(sheetId, ids, op) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return false;
+    const patches = new Map(sheet.charts.filter((ch) => ids.includes(ch.id) && canRotate(ch)).map((ch) => [ch.id, rotatePatch(ch, op)]));
+    return this._patchObjects(sheet, patches, { right: 'Rotate right', left: 'Rotate left', flipH: 'Flip horizontal', flipV: 'Flip vertical' }[op] || 'Rotate');
+  }
+
+  /** Show or hide objects (the Selection Pane's eye; Show All and Hide All). One undo step. */
+  setObjectsHidden(sheetId, ids, hidden) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return false;
+    const patches = new Map(sheet.charts.filter((ch) => ids.includes(ch.id) && !!ch.hidden !== !!hidden).map((ch) => [ch.id, { hidden: !!hidden }]));
+    return this._patchObjects(sheet, patches, hidden ? 'Hide objects' : 'Show objects');
+  }
+
+  /** The Selection Pane's rename: an object's own name (empty gives it back its default one). */
+  renameObject(sheetId, id, name) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return false;
+    return this._patchObjects(sheet, new Map([[id, { name: String(name ?? '').trim().slice(0, OBJECT_NAME_MAX) }]]), 'Rename object');
+  }
+
+  /** Delete several objects at once, as one undo step. */
+  deleteObjects(sheetId, ids) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._locked(sheet) || !sheet.charts.some((ch) => ids.includes(ch.id))) return false;
+    this._setCharts(sheet, sheet.charts.filter((ch) => !ids.includes(ch.id)), ids.length === 1 ? `Delete ${objectNoun(sheet.charts.find((ch) => ch.id === ids[0]))}` : 'Delete objects');
     return true;
   }
 
@@ -8636,7 +9318,8 @@ export class Workbook extends EventTarget {
       this._setRules(sheet, rules, label);
     }
     if (sheet.validations.some((v) => inside(v.range))) this._setValidations(sheet, sheet.validations.map((v) => (inside(v.range) ? { ...v, range: grown(v.range) } : v)), label);
-    if (sheet.charts.some((ch) => ch.type !== 'image' && inside(ch.range))) this._setCharts(sheet, sheet.charts.map((ch) => (ch.type !== 'image' && inside(ch.range) ? { ...ch, range: grown(ch.range) } : ch)), label);
+    const reads = (ch) => ch.type !== 'image' && ch.type !== 'smartart' && inside(ch.range);
+    if (sheet.charts.some(reads)) this._setCharts(sheet, sheet.charts.map((ch) => (reads(ch) ? { ...ch, range: grown(ch.range) } : ch)), label);
   }
 
   /**
@@ -11598,6 +12281,28 @@ export class Workbook extends EventTarget {
     this._announce('structure', null);
   }
 
+  /**
+   * Edit Links: put a new set of supporting-workbook links in place (fresh values, another source, a link
+   * dropped). One undo step; every formula is worked out again from the links' cached cells.
+   */
+  setExternalWorkbooks(next, label = 'Edit links') {
+    const prev = this.externalWorkbooks;
+    const value = next?.books?.length ? normalizeExternalWorkbooks(next) : null;
+    const apply = (v) => { this.externalWorkbooks = v; this._changed('structure'); };
+    apply(value);
+    this._push({ label, undo: () => apply(prev), redo: () => apply(value) });
+  }
+
+  /** Edit Links ▸ Startup Prompt: 'ask' on opening whether to update the links, 'update' them without asking, or 'none'. Not an undoable edit. */
+  setLinkStartup(mode) {
+    const next = LINK_STARTUP_MODES.includes(mode) ? mode : 'ask';
+    if (next === this.linkStartup) return;
+    this.linkStartup = next;
+    this.dirty = true;
+    this.version++;
+    this._announce('settings', null);
+  }
+
   /** Watch Window: add cells to watch (once each), or remove watches; the list is saved with the workbook. */
   addWatches(sheetId, cells) {
     const before = this.watches.length;
@@ -11618,6 +12323,21 @@ export class Workbook extends EventTarget {
   }
 
   /** Switch between automatic and manual calculation; switching back to automatic works everything out again. */
+  /**
+   * Iterative calculation for circular references: { iterate, iterateCount, iterateDelta }, or null to turn it
+   * off. A setting of the workbook (saved in it, shared with co-authors), like the calculation mode.
+   */
+  setIteration(value) {
+    const next = normalizeIteration(value);
+    if (JSON.stringify(next) === JSON.stringify(this.iteration)) return;
+    this.iteration = next;
+    this._iterationReady = false;
+    this.dirty = true;
+    this.version++;
+    this._invalidate();
+    this._announce('calc', null);
+  }
+
   setCalcMode(mode) {
     const next = mode === 'manual' ? 'manual' : 'automatic';
     if (next === this.calcMode) return;
@@ -11711,6 +12431,22 @@ export class Workbook extends EventTarget {
     this._tentative = []; // cells calculated while a circle was unsettled, dropped if it proves a cycle
   }
 
+  /* ---------- Named cell styles ---------- */
+
+  /**
+   * Replace the workbook's named cell styles (see custom-cell-styles.js) as an undo step. Inside a transaction the
+   * cells a modified style reformats join the same step.
+   */
+  setCellStyles(next, label = 'Cell styles') {
+    const prev = this.cellStyles;
+    const value = normalizeCellStyles(next);
+    if (JSON.stringify(prev) === JSON.stringify(value)) return false;
+    const apply = (v) => { this.cellStyles = v; this._changed('view'); };
+    apply(value);
+    this._push({ label, undo: () => apply(prev), redo: () => apply(value) });
+    return true;
+  }
+
   /* ---------- History ---------- */
 
   canUndo() { return this._history.length > 0; }
@@ -11730,6 +12466,26 @@ export class Workbook extends EventTarget {
     const i = this._history.lastIndexOf(mark);
     return i < 0 ? null : this._history.slice(i + 1);
   }
+  /**
+   * Fold the steps recorded since `mark` (a historyTop read earlier) into one step called `label`, so a run of edits
+   * made as one action (a script's) is undone and redone as one. A mark evicted meanwhile means every step left is
+   * newer than it. False when there was nothing to fold.
+   */
+  squashHistory(mark, label) {
+    const at = mark == null ? 0 : this._history.lastIndexOf(mark) + 1;
+    const entries = this._history.slice(at);
+    if (!entries.length) return false;
+    this._history.splice(at);
+    const step = {
+      label,
+      undo: () => { for (let i = entries.length - 1; i >= 0; i--) entries[i].undo(); },
+      redo: () => { for (const e of entries) e.redo(); },
+      snapshotCells: entries.reduce((cells, e) => cells + (e.snapshotCells || 0), 0),
+    };
+    this._history.push(step);
+    this._emit('history');
+    return true;
+  }
   redoLabels(n = 10) { return this._future.slice(-n).reverse().map((e) => e.label); }
   /** Undo (or redo) several steps at once. Returns how many were taken. */
   undoSteps(n) { let k = 0; while (k < n && this.undo()) k++; return k; }
@@ -11741,6 +12497,7 @@ export class Workbook extends EventTarget {
     this._snapshotCells -= entry.snapshotCells || 0;
     this._coalesce(() => entry.undo()); // a transaction's step is announced once, as the transaction was
     this._future.push(entry);
+    recordStep(this, 'undo', entry.label);
     this._emit('history');
     return true;
   }
@@ -11750,6 +12507,7 @@ export class Workbook extends EventTarget {
     if (!entry) return false;
     this._coalesce(() => entry.redo());
     this._history.push(entry);
+    recordStep(this, 'redo', entry.label);
     this._snapshotCells += entry.snapshotCells || 0;
     // A redone structural step holds its after snapshot as well as its before: the oldest steps make way for it.
     this._evictSnapshots();
@@ -11831,6 +12589,7 @@ export class Workbook extends EventTarget {
 
   /** Run a structural edit with snapshots, for undo, of the sheets it changes (see _capture). */
   _structural(label, fn) {
+    recordStep(this, 'structure', label);
     if (this._group) {
       // Inside a transaction one pair of snapshots serves every structural step: the state
       // before the first step, and the state at the end of the transaction (captured when
@@ -12018,3 +12777,5 @@ export class Workbook extends EventTarget {
     this.dispatchEvent(new CustomEvent('change', { detail: { type, sheetId, ...(extra || {}) } }));
   }
 }
+
+installSheetGroups(Workbook);

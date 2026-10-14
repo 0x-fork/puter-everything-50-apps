@@ -80,7 +80,13 @@ import { normalizeNativeFill, packNativeFillState, unpackNativeFillState } from 
 import { readFontTheme, normalizeFontTheme } from './font-theme.js';
 import { isRangeSource, ruleFormulaBody } from './validation.js';
 import { parseScenariosXml } from './scenarios.js';
+import { readXlsxOutlineSettings } from './xlsx-outline.js';
+import { readXlsxBackground } from './xlsx-background.js';
+import { remapCustomViews } from './custom-views.js';
 import { serializeQueries } from './queries.js';
+import { serializeScripts } from './scripts.js';
+import { readXlsxScripts } from './xlsx-scripts.js';
+import { serializeChangeHistory } from './change-history.js';
 
 export const META_SHEET = '_puter_meta';
 const META_CHUNK = 30000;
@@ -526,7 +532,7 @@ function tableFileFormulas(table, externalWorkbooks = null) {
 }
 
 /** The app's own state for the sidecar; `ods` adds what that format's writer and reader lose. */
-function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null } = {}) {
+function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null, history = true } = {}) {
   // Sheet names are user data; names such as __proto__ must be ordinary keys.
   const meta = { v: 1, format: 'puter-spreadsheet', ...(!ods ? { themeFonts: true } : {}), active: wb.activeSheet?.name || null, sheets: Object.create(null) };
   let any = structuredNames.length > 0;
@@ -540,11 +546,22 @@ function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null 
   if (wb.fontTheme) { meta.fontTheme = wb.fontTheme; any = true; }
   if (wb.themeInfo) { meta.themeInfo = wb.themeInfo; any = true; }
   if (wb.queries?.length) { meta.queries = serializeQueries(wb); any = true; }
+  // An .xlsx carries the scripts in a part of their own (xlsx-scripts.js); an .ods in these settings.
+  if (ods && wb.scripts?.length) { meta.scripts = serializeScripts(wb); any = true; }
+  if (wb.cellStyles?.length) { meta.cellStyles = wb.cellStyles; any = true; }
+  // Show Changes: the record of recent edits, which no file format has a place for. A copy downloaded to hand to
+  // someone leaves it out, as it holds what cells used to say (a value deleted on purpose among them).
+  if (history && wb.changeHistory?.length) { meta.changeHistory = serializeChangeHistory(wb); any = true; }
   const pivotSlicers = !ods && pivotSlicerSidecar(wb);
   if (pivotSlicers?.length) { meta.pivotSlicers = pivotSlicers; any = true; }
   if (structuredNames.length) meta.structuredNames = structuredNames;
   const relativeNames = wb.names.filter(n => n.relative).map(n => ({ name: n.name, ref: n.ref, ...(n.sheet ? { sheet: n.sheet } : {}) }));
   if (relativeNames.length) { meta.relativeNames = relativeNames; any = true; }
+  // Custom Views: whole, by sheet name (the native parts have no place for hidden-line lists).
+  if (wb.customViews?.length) {
+    meta.customViews = remapCustomViews(wb.customViews, (id) => wb.sheet(id)?.name ?? null);
+    any = true;
+  }
   const tableNames = wb.tableNames();
   const nativeDefaultVAlign = wb.sheets.find(s => s.kind !== 'chart')?.defaultVAlign || 'middle';
   for (const sheet of wb.sheets) {
@@ -713,6 +730,9 @@ function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null 
     if (sheet.split) { meta.sheets[sheet.name].split = sheet.split; any = true; }
     if (sheet.viewZoom != null) { meta.sheets[sheet.name].viewZoom = sheet.viewZoom; any = true; }
     if (sheet.viewMode) { meta.sheets[sheet.name].viewMode = sheet.viewMode; any = true; }
+    if (sheet.showPageBreaks) { meta.sheets[sheet.name].showPageBreaks = true; any = true; }
+    // View ▸ Sheet View: the sheet's named filter views (a file has no one in them).
+    if (sheet.sheetViews?.length) { meta.sheets[sheet.name].sheetViews = sheet.sheetViews.filter((v) => !v.temporary); any = true; }
     if (sheet.printSettings) { meta.sheets[sheet.name].printSettings = sheet.printSettings; any = true; }
     if (sheet.tables.length) {
       meta.sheets[sheet.name].tables = sheet.tables;
@@ -751,7 +771,7 @@ function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null 
 }
 
 /** The SheetJS workbook for this document; `meta` adds the very-hidden styling sheet this app reads back. */
-function buildBook(X, wb, { meta = true, odsSettings = false, ods = false } = {}) {
+function buildBook(X, wb, { meta = true, odsSettings = false, ods = false, history = true } = {}) {
   const book = { SheetNames: [], Sheets: Object.create(null), Workbook: { Sheets: [] } };
   for (const sheet of wb.sheets) {
     book.SheetNames.push(sheet.name);
@@ -797,7 +817,7 @@ function buildBook(X, wb, { meta = true, odsSettings = false, ods = false } = {}
     if (sheet.kind !== 'chart' && p.titleCols) titles.push(prefix + p.titleCols.map(c => `$${X.utils.encode_col(c)}`).join(':'));
     if (titles.length) (book.Workbook.Names ||= []).push({ Name: '_xlnm.Print_Titles', Ref: titles.join(','), Sheet: i });
   }
-  const extra = meta || odsSettings ? collectMeta(wb, structuredNames, { ods: odsSettings, fileSheets: book.Sheets }) : null;
+  const extra = meta || odsSettings ? collectMeta(wb, structuredNames, { ods: odsSettings, fileSheets: book.Sheets, history }) : null;
   if (extra && odsSettings) book.PuterSettings = extra;
   if (extra && meta) {
     // A user worksheet may have the usual sidecar name. Keep its name and
@@ -829,11 +849,23 @@ function buildBook(X, wb, { meta = true, odsSettings = false, ods = false } = {}
   return book;
 }
 
+/**
+ * The workbook as everyone sees it. While this person is in a sheet view (View ▸ Sheet View) a file must
+ * still hold the default view's filters: the copy toJSON makes has them, with the view kept among the views.
+ */
+function sharedBook(wb) {
+  if (!wb.sheets.some((s) => s.personalView)) return wb;
+  const copy = new Workbook(wb.toJSON());
+  if (wb.externalFormulas) copy.externalFormulas = wb.externalFormulas;
+  return copy;
+}
+
 /** Serialize the workbook to an .xlsx Blob. */
-export async function workbookToXlsx(wb, { sourceWorkbook = null } = {}) {
+export async function workbookToXlsx(wb, { sourceWorkbook = null, history = true } = {}) {
+  wb = sharedBook(wb);
   const { completeXlsx } = await import('./xlsx-export.js');
   const X = await XLSX();
-  const book = buildBook(X, wb);
+  const book = buildBook(X, wb, { history });
   const data = await completeXlsx(X, wb, book, X.write(book, { bookType: 'xlsx', type: 'array' }), { sourceWorkbook });
   return new Blob([data], { type: XLSX_MIME });
 }
@@ -844,13 +876,14 @@ export async function workbookToXlsx(wb, { sourceWorkbook = null } = {}) {
  * travel. Active filters also retain their app-specific criteria and dependent
  * styles, rules, and tables in standard ODF application settings.
  */
-export async function workbookToOds(wb, { settings = true } = {}) {
+export async function workbookToOds(wb, { settings = true, history = true } = {}) {
+  wb = sharedBook(wb);
   const X = await XLSX();
   // The app's own settings (styles, frozen panes, tab colours, protection, rules, charts,
   // tables and filter criteria) ride along in a standard ODF settings block other readers
   // ignore. Without them the file is exactly what those readers see. The entries are
   // deflated as an .xlsx's are; the writer keeps the mimetype entry first and stored, as ODF asks.
-  const data = X.write(buildBook(X, wb, { meta: false, odsSettings: settings, ods: true }), { bookType: 'ods', type: 'array', compression: true });
+  const data = X.write(buildBook(X, wb, { meta: false, odsSettings: settings, ods: true, history }), { bookType: 'ods', type: 'array', compression: true });
   return new Blob([data], { type: ODS_MIME });
 }
 
@@ -1444,7 +1477,9 @@ function fileCellStyles(styles, native, includeDefaults = true) {
     // bottom even when the entire alignment element is absent (MS-OI29500
     // 2.1.693). Private sidecars own their app defaults, just as for fonts.
     const s = { ...byFont[Number.isInteger(xf?.fontId) ? xf.fontId : 0], ...native?.fills?.[xf?.fillId], ...xlsxAlignment(xf?.alignment || (includeDefaults ? {} : null)), ...native?.borders?.[xf?.borderId], ...(native?.shrink?.[i] ? { shrink: true } : null), ...(native?.protection?.[i]?.unlocked ? { locked: false } : null), ...(native?.protection?.[i]?.hidden ? { formulaHidden: true } : null),
-      ...(completeDefault ? numFmtToStyle(native?.formatCodes?.[xf?.numFmtId]) : null) };
+      ...(completeDefault ? numFmtToStyle(native?.formatCodes?.[xf?.numFmtId]) : null),
+      // The named cell style the format is linked to, so the cell follows the style when it is modified.
+      ...(native?.cellXfStyleNames?.[i] ? { cellStyle: native.cellXfStyleNames[i] } : null) };
     return Object.keys(s).length ? s : null;
   });
   if (completeDefault && byXf[0]) {
@@ -1946,12 +1981,15 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     color: own?.color || part?.color || (!own && partXml ? xlsxColor(partXml.match(/<tabColor\b[^>]*>/)?.[0], nativeStyles?.colors || themes) : null),
     protected: own ? !!own.protected : !!part?.protected,
     groups: own ? own.groups || null : fileGroups(ws, filtered),
+    outlineSettings: readXlsxOutlineSettings(partXml),
     gridlines: own ? own.gridlines !== false : part?.gridlines !== false,
     headers: nativePart?.headers ?? own?.headers ?? true,
     rightToLeft: nativePart?.rightToLeft ?? own?.rightToLeft ?? false,
     defaultVAlign,
     viewZoom: own?.viewZoom ?? part?.viewZoom,
     viewMode: partXml ? nativePart?.viewMode : own?.viewMode,
+    showPageBreaks: own?.showPageBreaks === true,
+    sheetViews: own?.sheetViews,
     viewSelection: partXml ? nativePart?.viewSelection : own?.viewSelection,
     viewOrigin: partXml ? nativePart?.viewOrigin : own?.viewOrigin,
     frozenOrigin: partXml ? nativePart?.frozenOrigin : own?.frozenOrigin,
@@ -2319,10 +2357,13 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
       // A native editor can delete the built-in title name. Absence in the
       // native package must override the app's older private metadata too.
       if (sheet.printSettings && partOf(n)) sheet.printSettings = { ...sheet.printSettings,
-        titleRows: printSettings?.titleRows, titleCols: printSettings?.titleCols };
+        titleRows: printSettings?.titleRows, titleCols: printSettings?.titleCols,
+        // Page breaks, likewise: the native part's list is the one in force.
+        rowBreaks: printSettings?.rowBreaks, colBreaks: printSettings?.colBreaks };
       if (!meta?.sheets?.[n]) {
         if (chartSheet) sheet.gridlines = false;
       }
+      if (!chartSheet && partOf(n)) sheet.background = readXlsxBackground(book, n, partOf(n));
       return { ...sheet, hidden: hidden.has(n) || isVeryHidden || visibility === 'hidden', veryHidden: isVeryHidden };
     });
   const pivotRulePriorities = new Map();
@@ -2361,7 +2402,9 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
   }
   // Two-cell drawing anchors need the imported row heights and column widths.
   const drawingInventory = new Map();
-  const nativeCharts = await readXlsxCharts(book, sheets, drawingInventory);
+  const nativeCharts = await readXlsxCharts(book, sheets, drawingInventory, {
+    // The groups this app wrote of its own objects, which come apart into those objects again.
+    splitGroups: (name) => { const keys = meta?.sheets?.[name]?.nativeGroups; return Array.isArray(keys) ? new Set(keys.filter((k) => typeof k === 'string')) : null; } });
   for (const sheet of sheets) if (book.files?.['xl/workbook.xml']) sheet.charts = await reconcileDrawings(meta?.sheets?.[sheet.name], nativeCharts.get(sheet.name) || [], drawingInventory.get(sheet.name));
   // A timeline has no Excel drawing of ours: it comes back from the app's own data (see timeline.js).
   for (const sheet of sheets) {
@@ -2416,11 +2459,16 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
   const calcMode = String(book.Workbook?.CalcPr?.calcMode || '').toLowerCase() === 'manual' ? 'manual' : undefined;
   const workbookXml = (() => { const path = book.Directory?.workbooks?.[0]?.replace(/^\//, '') || 'xl/workbook.xml'; const part = book.files?.[path]?.content; return part ? new TextDecoder().decode(part) : ''; })();
   const structureProtected = ['1', 'true'].includes(xmlAttr(workbookXml.match(/<(?:\w+:)?workbookProtection\b[^>]*>/)?.[0], 'lockStructure') || '') || undefined;
-  const wb = new Workbook({ sheets, names, iteration, calcMode, structureProtected, calculationCompatibility, normalFont,
+  // Edit Links ▸ Startup Prompt, from workbookPr's updateLinks (userSet, the default, is to ask).
+  const linkStartup = { always: 'update', never: 'none' }[xmlAttr(workbookXml.match(/<(?:\w+:)?workbookPr\b[^>]*>/)?.[0], 'updateLinks') || ''];
+  const wb = new Workbook({ sheets, names, iteration, calcMode, structureProtected, linkStartup, calculationCompatibility, normalFont,
     nativeNormalStyle: book.bookType === 'xlsx' ? nativeStyles.nativeNormalStyle : normalizeNativeNormalStyle(meta?.nativeNormalStyle),
     nativeNormalFill: book.bookType === 'xlsx' ? nativeStyles.nativeNormalFill : meta?.nativeNormalFill,
     nativeDefaultCellFormat: book.bookType === 'xlsx' ? nativeStyles.nativeDefaultCellFormat : meta?.nativeDefaultCellFormat,
-    dataModel, externalWorkbooks, colorPalette: nativeStyles.colorPalette, queries: meta?.queries,
+    dataModel, externalWorkbooks, colorPalette: nativeStyles.colorPalette, queries: meta?.queries, changeHistory: meta?.changeHistory,
+    scripts: book.bookType === 'xlsx' ? readXlsxScripts(book.files) : meta?.scripts,
+    // The app's own record of its named styles, else the file's (another program's custom styles).
+    cellStyles: Array.isArray(meta?.cellStyles) ? meta.cellStyles : nativeStyles?.namedStyles,
     fontTheme: themePart ? readFontTheme(new TextDecoder().decode(themePart)) : normalizeFontTheme(meta?.fontTheme),
     themeInfo: importedThemeInfo(themePart ? readThemeInfo(new TextDecoder().decode(themePart)) : null, meta?.themeInfo, normalFont) });
   if (modelRels && /\/pivotCacheDefinition["']/.test(new TextDecoder().decode(modelRels)))
@@ -2481,6 +2529,15 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
   // SheetJS CE does not carry the workbook's active tab through a write, so
   // the sidecar remembers which sheet was open. Treat this optional hint as
   // a name only; coercing malformed objects can abort an otherwise valid import.
+  // Custom Views: the native ones, made whole from the app's record of them where it has one.
+  const workbookText = book.bookType === 'xlsx' && workbookPart ? new TextDecoder().decode(workbookPart) : null;
+  const views = workbookText != null
+    ? /customWorkbookView\b/.test(workbookText) ? (await import('./xlsx-custom-views.js')).readXlsxCustomViews(workbookText, book.SheetNames.filter((n) => n !== sidecar?.name), partOf, meta?.customViews) : []
+    : Array.isArray(meta?.customViews) ? meta.customViews.map((v) => ({ ...v, activeSheet: v.activeSheetId })) : [];
+  if (views.length) {
+    const idOf = (name) => wb.sheetByName(renamed.get(name) || name)?.id ?? null;
+    wb.adoptCustomViews(remapCustomViews(views.map((v) => ({ ...v, activeSheetId: v.activeSheet })), idOf));
+  }
   const view = workbookPart && new TextDecoder().decode(workbookPart).replace(/<!--[\s\S]*?-->/g, '').match(/<(?:\w+:)?workbookView\b[^>]*>/)?.[0];
   if (view) {
     const rawFirstSheet = xlsxAttr(view, 'firstSheet');

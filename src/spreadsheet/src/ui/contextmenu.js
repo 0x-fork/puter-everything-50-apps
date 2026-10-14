@@ -19,17 +19,86 @@ function linkItems(ctx) {
   ];
 }
 
+/**
+ * In Page Break Preview the menus offer the page breaks at the selection and the print area, as the
+ * Page Layout tab does; elsewhere they are left out.
+ */
+function pageBreakItems(ctx, kind) {
+  const sheet = ctx.wb.sheet(ctx.sheetId());
+  if (sheet?.viewMode !== 'pageBreak') return [];
+  const p = sheet.printSettings || {}, at = ctx.active();
+  const there = kind === 'row' ? p.rowBreaks?.includes(at.r) : kind === 'col' ? p.colBreaks?.includes(at.c) : p.rowBreaks?.includes(at.r) || p.colBreaks?.includes(at.c);
+  return [
+    { separator: true },
+    { label: 'Insert Page Break', icon: 'breaks', onSelect: () => ctx.run('pageBreak', 'insert') },
+    there && { label: 'Remove Page Break', onSelect: () => ctx.run('pageBreak', 'remove') },
+    (p.rowBreaks?.length || p.colBreaks?.length) && { label: 'Reset All Page Breaks', onSelect: () => ctx.run('pageBreak', 'reset') },
+    kind === 'cell' && { label: 'Set Print Area', icon: 'printArea', onSelect: () => ctx.run('printArea', 'set') },
+    kind === 'cell' && p.areas?.length && { label: 'Reset Print Area', onSelect: () => ctx.run('printArea', 'clear') },
+  ];
+}
+
+/** Group, Regroup and Ungroup for the objects selected, each offered when it can act. */
+function groupItems(ctx) {
+  const sheet = ctx.wb.sheet(ctx.sheetId()), ids = ctx.grid?.selectedCharts || [];
+  const objects = ids.map((id) => sheet?.charts.find((o) => o.id === id)).filter(Boolean);
+  const units = new Set(objects.map((o) => o.group || o.id)).size;
+  return [
+    { label: 'Group', icon: 'groupObjects', disabled: units < 2, onSelect: () => ctx.run('groupObjects', 'group') },
+    { label: 'Regroup', icon: 'groupObjects', disabled: !ctx.wb.canRegroup?.(ctx.sheetId()), onSelect: () => ctx.run('groupObjects', 'regroup') },
+    { label: 'Ungroup', icon: 'ungroup', disabled: !objects.some((o) => o.group), onSelect: () => ctx.run('groupObjects', 'ungroup') },
+  ];
+}
+
 export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
+  if (kind === 'chart' && ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'smartart') {
+    // A SmartArt graphic: its text, its layout, and the actions every drawing object has.
+    const smartArt = (action, extra = {}) => () => ctx.run('smartArt', { action, id: chartId, ...extra });
+    openMenu({
+      x, y, label: 'SmartArt actions', restoreFocus: false, onClose: () => ctx.grid.focus(),
+      items: [
+        { label: 'Show Text Pane', icon: 'textPane', shortcut: 'Enter', onSelect: () => ctx.run('editChart', chartId) },
+        { label: 'Change Layout…', icon: 'smartArt', onSelect: smartArt('layoutDialog') },
+        { label: 'Add Shape', icon: 'addShape', submenu: [
+          { label: 'Add Shape After', onSelect: smartArt('add', { where: 'after' }) }, { label: 'Add Shape Before', onSelect: smartArt('add', { where: 'before' }) },
+          { label: 'Add Shape Above', onSelect: smartArt('add', { where: 'above' }) }, { label: 'Add Shape Below', onSelect: smartArt('add', { where: 'below' }) }] },
+        { label: 'Reset Graphic', icon: 'resetStyle', onSelect: smartArt('reset') },
+        { label: 'Convert to Shapes', icon: 'convertShapes', onSelect: smartArt('convert') },
+        { separator: true },
+        { label: 'Duplicate', icon: 'duplicate', onSelect: () => ctx.run('duplicateChart', { id: chartId }) },
+        { label: 'Copy as picture', icon: 'copy', onSelect: () => ctx.run('copyChart', { id: chartId }) },
+        { label: 'Download as PNG', icon: 'download', onSelect: () => ctx.run('downloadChart', { id: chartId, format: 'png' }) },
+        { label: 'Download as SVG', icon: 'download', onSelect: () => ctx.run('downloadChart', { id: chartId, format: 'svg' }) },
+        { separator: true },
+        { label: 'Bring to Front', icon: 'bringForward', onSelect: () => ctx.run('orderObject', { where: 'front' }) },
+        { label: 'Send to Back', icon: 'sendBackward', onSelect: () => ctx.run('orderObject', { where: 'back' }) },
+        { label: 'Group', icon: 'groupObjects', submenu: groupItems(ctx) },
+        { label: 'Selection Pane…', icon: 'selectionPane', onSelect: () => ctx.run('selectionPane') },
+        { label: 'Edit Alt Text…', icon: 'altText', onSelect: () => ctx.run('altText', chartId) },
+        { separator: true },
+        { label: 'Delete SmartArt', icon: 'trash', shortcut: 'Delete', danger: true, onSelect: () => ctx.run('deleteChart', chartId) },
+      ],
+    });
+    return;
+  }
   if (kind === 'chart') {
     const slicer = ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'slicer';
     const image = ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'image';
+    const linked = image && !!ctx.wb.chartById(ctx.sheetId(), chartId)?.pictureRef;
     const scroll = ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'scroll';
     const textBox = ctx.wb.chartById(ctx.sheetId(), chartId)?.type === 'text';
     openMenu({
       x, y, label: slicer ? 'Slicer actions' : scroll ? 'Scroll bar actions' : image ? 'Image actions' : textBox ? 'Text box actions' : 'Chart actions', restoreFocus: false, onClose: () => ctx.grid.focus(),
       items: [
         !image && { label: slicer ? 'Edit slicer…' : scroll ? 'Edit scroll bar…' : textBox ? 'Edit text…' : 'Edit chart…', icon: textBox ? 'text' : 'chartColumn', shortcut: 'Enter', onSelect: () => ctx.run('editChart', chartId) },
-        image && { label: 'Replace image…', icon: 'image', onSelect: () => ctx.run('replaceImage', chartId) },
+        image && !linked && { label: 'Replace image…', icon: 'image', onSelect: () => ctx.run('replaceImage', chartId) },
+        image && linked && { label: 'Go to Linked Cells', icon: 'linkedPicture', onSelect: () => ctx.run('replaceImage', chartId) },
+        image && { label: 'Place in Cell', icon: 'placeInCell', onSelect: () => ctx.run('placeObjectInCell', chartId) },
+        image && { label: 'Format Picture', icon: 'pictureStyles', submenu: [
+          { label: 'Crop…', icon: 'crop', disabled: linked, onSelect: () => ctx.run('pictureFormat', { action: 'crop' }) },
+          { label: 'Picture Corrections…', icon: 'corrections', onSelect: () => ctx.run('pictureFormat', { action: 'correctionsDialog' }) },
+          { label: 'Reset Picture', icon: 'resetPicture', onSelect: () => ctx.run('pictureFormat', { action: 'reset' }) },
+        ] },
         { separator: true },
         { label: 'Duplicate', icon: 'duplicate', onSelect: () => ctx.run('duplicateChart', { id: chartId }) },
         { label: slicer ? 'Copy slicer' : scroll ? 'Copy scroll bar' : image ? 'Copy image' : textBox ? 'Copy text' : 'Copy as picture', icon: 'copy', onSelect: () => ctx.run('copyChart', { id: chartId }) },
@@ -37,8 +106,19 @@ export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
         !image && !textBox && !scroll && !slicer && { label: 'Download as SVG', icon: 'download', onSelect: () => ctx.run('downloadChart', { id: chartId, format: 'svg' }) },
         image && { label: 'Download image', icon: 'download', onSelect: () => ctx.run('downloadChart', { id: chartId }) },
         { separator: true },
-        { label: 'Bring to Front', icon: 'bringForward', onSelect: () => ctx.run('orderObject', { id: chartId, where: 'front' }) },
-        { label: 'Send to Back', icon: 'sendBackward', onSelect: () => ctx.run('orderObject', { id: chartId, where: 'back' }) },
+        { label: 'Bring to Front', icon: 'bringForward', submenu: [
+          { label: 'Bring to Front', icon: 'bringForward', onSelect: () => ctx.run('orderObject', { where: 'front' }) },
+          { label: 'Bring Forward', icon: 'bringForward', onSelect: () => ctx.run('orderObject', { where: 'forward' }) }] },
+        { label: 'Send to Back', icon: 'sendBackward', submenu: [
+          { label: 'Send to Back', icon: 'sendBackward', onSelect: () => ctx.run('orderObject', { where: 'back' }) },
+          { label: 'Send Backward', icon: 'sendBackward', onSelect: () => ctx.run('orderObject', { where: 'backward' }) }] },
+        { label: 'Group', icon: 'groupObjects', submenu: groupItems(ctx) },
+        (image || textBox) && { label: 'Rotate', icon: 'rotateObjects', submenu: [
+          { label: 'Rotate Right 90°', icon: 'rotateObjects', onSelect: () => ctx.run('rotateObjects', 'right') },
+          { label: 'Rotate Left 90°', icon: 'rotateLeft', onSelect: () => ctx.run('rotateObjects', 'left') },
+          { label: 'Flip Vertical', icon: 'flipV', onSelect: () => ctx.run('rotateObjects', 'flipV') },
+          { label: 'Flip Horizontal', icon: 'flipH', onSelect: () => ctx.run('rotateObjects', 'flipH') }] },
+        { label: 'Selection Pane…', icon: 'selectionPane', onSelect: () => ctx.run('selectionPane') },
         !scroll && !slicer && { label: 'Edit Alt Text…', icon: 'altText', onSelect: () => ctx.run('altText', chartId) },
         { separator: true },
         { label: scroll ? 'Delete scroll bar' : image ? 'Delete image' : textBox ? 'Delete text box' : 'Delete chart', icon: 'trash', shortcut: 'Delete', danger: true, onSelect: () => ctx.run('deleteChart', chartId) },
@@ -84,7 +164,8 @@ export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
       ctx.wb.outlineGroups(ctx.sheetId(), 'row').some((g) => g.collapsed) && { label: 'Expand all row groups', icon: 'chevD', onSelect: () => ctx.run('expandAll', 'row') },
       sheet.frozenRows === r2 + 1
         ? { label: 'Unfreeze rows', icon: 'freeze', onSelect: () => ctx.run('freeze', 'rows-none') }
-        : { label: `Freeze rows up to ${r2 + 1}`, icon: 'freeze', onSelect: () => ctx.run('freeze', 'rows') }];
+        : { label: `Freeze rows up to ${r2 + 1}`, icon: 'freeze', onSelect: () => ctx.run('freeze', 'rows') },
+      ...pageBreakItems(ctx, 'row')];
   } else if (kind === 'col') {
     const { c1, c2 } = ctx.range();
     const hiddenCols = ctx.wb.hiddenWithin(ctx.sheetId(), 'col', c1, c2);
@@ -111,7 +192,8 @@ export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
       ctx.wb.outlineGroups(ctx.sheetId(), 'col').some((g) => g.collapsed) && { label: 'Expand all column groups', icon: 'chevR', onSelect: () => ctx.run('expandAll', 'col') },
       sheet.frozenCols === c2 + 1
         ? { label: 'Unfreeze columns', icon: 'freeze', onSelect: () => ctx.run('freeze', 'cols-none') }
-        : { label: `Freeze columns up to ${colName(c2)}`, icon: 'freeze', onSelect: () => ctx.run('freeze', 'cols') }];
+        : { label: `Freeze columns up to ${colName(c2)}`, icon: 'freeze', onSelect: () => ctx.run('freeze', 'cols') },
+      ...pageBreakItems(ctx, 'col')];
   } else {
     const range = ctx.range();
     const nr = range.r2 - range.r1 + 1;
@@ -165,6 +247,11 @@ export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
         { label: 'Remove empty rows', icon: 'rows', onSelect: () => ctx.run('removeEmptyRows') },
       ] },
       { label: 'Clear Contents', icon: 'eraser', shortcut: 'Delete', onSelect: () => ctx.run('clear') },
+      ...pageBreakItems(ctx, 'cell'),
+      // A picture placed in the cell: lift it out to float over the cells, or describe it.
+      ...(flags?.cellPicture ? [{ separator: true },
+        { label: 'Place over Cells', icon: 'placeOverCells', onSelect: () => ctx.run('placeOverCells') },
+        { label: 'Edit Alt Text…', icon: 'altText', onSelect: () => ctx.run('cellAltText') }] : []),
       { separator: true },
       { label: 'Filter', icon: 'filter', submenu: [
         { label: filtered ? 'Remove Filter' : 'Filter', icon: filtered ? 'filterClear' : 'filter', shortcut: `${MOD_KEY}+Shift+L`, onSelect: () => ctx.run('filter') },
@@ -189,6 +276,7 @@ export function openCellContextMenu(ctx, { x, y, kind, chartId }) {
         : [!note && { label: 'New Comment', icon: 'comment', shortcut: `${MOD_KEY}+Shift+F2`, onSelect: () => ctx.run('newComment') },
           note ? { label: 'Edit Note', icon: 'note', shortcut: 'Shift+F2', onSelect: () => ctx.run('note') } : { label: 'New Note', icon: 'note', shortcut: 'Shift+F2', onSelect: () => ctx.run('note') },
           note && { label: 'Delete Note', icon: 'deleteNote', onSelect: () => ctx.run('deleteNote') }]),
+      { label: 'Show Changes', icon: 'showChanges', onSelect: () => ctx.run('showChanges', 'selection') },
       { separator: true },
       { label: 'Format Cells…', icon: 'formatCells', shortcut: `${MOD_KEY}+1`, onSelect: () => ctx.run('formatCells') },
       nr * nc === 1 && { label: 'Pick From Drop-down List…', icon: 'dropdown', shortcut: 'Alt+↓', onSelect: () => ctx.run('pickFromList') },

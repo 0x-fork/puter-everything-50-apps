@@ -57,7 +57,7 @@ const minimumRatio = (style) => {
 };
 
 const objectName = (obj, index) => obj.title || {
-  image: `Picture ${index + 1}`, text: `TextBox ${index + 1}`, slicer: `Slicer ${index + 1}`, scroll: `Scroll Bar ${index + 1}`,
+  image: `Picture ${index + 1}`, text: `TextBox ${index + 1}`, smartart: `SmartArt ${index + 1}`, slicer: `Slicer ${index + 1}`, scroll: `Scroll Bar ${index + 1}`,
 }[obj.type] || `Chart ${index + 1}`;
 
 /**
@@ -76,9 +76,17 @@ export function checkAccessibility(wb) {
     // Objects without a description and not marked decorative. Scroll bars and slicers carry their own names.
     sheet.charts.forEach((obj, i) => {
       if (obj.type === 'scroll' || obj.type === 'slicer' || obj.decorative) return;
-      const alt = obj.description || (obj.type === 'image' ? obj.title : '');
+      // A SmartArt graphic reads out its own text when it has no description.
+      const alt = obj.description || (obj.type === 'image' ? obj.title : obj.type === 'smartart' ? (obj.items || []).map((it) => it.text).join(' ') : '');
       if (!String(alt || '').trim()) add('altText', sheet, `${objectName(obj, i)} (${sheet.name})`, { chartId: obj.id });
     });
+    // Pictures placed in cells with no alt text of their own (an IMAGE formula gives its alt text as an argument).
+    for (const [key, cell] of sheet.cells) {
+      const v = cell?.v;
+      if (!v || typeof v !== 'object' || typeof v.image !== 'string' || String(v.alt || '').trim()) continue;
+      const [r, c] = key.split(',').map(Number);
+      add('altText', sheet, `Picture in ${rangeName({ r1: r, c1: c, r2: r, c2: c })} (${sheet.name})`, { range: { r1: r, c1: c, r2: r, c2: c } });
+    }
     for (const table of sheet.tables || []) {
       if (table.headerRow === false || table.headerRowCount === 0) add('tableHeader', sheet, `${table.name} (${sheet.name})`, { range: table.range });
     }

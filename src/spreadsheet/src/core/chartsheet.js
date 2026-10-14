@@ -20,9 +20,10 @@ export function chartSheetLayout(sheet, width, height, zoom = 1) {
 const CHART_SHEET_COMMANDS = new Set([
   'new', 'newFromTemplate', 'open', 'openFile', 'home', 'import', 'importUrl', 'importSheets',
   'save', 'saveAs', 'rename', 'share', 'versions', 'docInfo', 'downloadXlsx', 'downloadOds', 'exportPdf', 'print',
-  'undo', 'redo', 'undoSteps', 'redoSteps', 'escape', 'palette', 'recalc', 'names',
+  'undo', 'redo', 'undoSteps', 'redoSteps', 'escape', 'palette', 'recalc', 'names', 'options',
   'newSheet', 'duplicateSheet', 'showSheet', 'hideSheet', 'deleteSheet', 'renameSheet', 'moveSheet',
   'protectSheet', 'sheetColor', 'copySheetTo', 'moveOrCopySheet', 'placeSheet', 'sheet', 'focusMode', 'fullscreen', 'zoom', 'zoomTo', 'zoomCustom', 'zoomFit',
+  'customViews', 'addCustomView', 'deleteCustomView', 'showCustomView',
   'editChart', 'deleteChart', 'duplicateChart', 'copyChart', 'downloadChart', 'chart',
   'insertImage', 'insertImagePuter', 'insertImageUrl', 'replaceImage', 'insertTextBox', 'copy', 'paste', 'find', 'goTo', 'goToName',
 ]);

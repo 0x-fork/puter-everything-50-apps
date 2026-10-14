@@ -18,7 +18,7 @@ import { normalIndentUnit, normalFontCss } from '../core/normal-font.js';
 import { numberFormatParts, layoutFormatParts, rotatedFormatWidth } from '../core/format-layout.js';
 import { formatLayoutNode } from './format-layout.js';
 import { richTextMeasure, largestRichTextSize } from '../core/rich-text-font.js';
-import { paginatePrintColumns, fitPrintTableScale, setPrintTitleAxes, quantizePrintScale } from './print-pagination.js';
+import { paginatePrintColumns, fitPrintTableScale, setPrintTitleAxes, setPrintBreakAxes, quantizePrintScale } from './print-pagination.js';
 import { fontColorCss } from '../core/font-color.js';
 import { normalizePrintSettings } from '../core/print-settings.js';
 import { paintPrintBorders, setMergedPrintBorders } from './print-borders.js';
@@ -32,6 +32,9 @@ import { codeColor } from '../core/numfmt.js';
  */
 import { measureRows } from '../core/row-height.js';
 import { pictureNode } from './picture.js';
+import { pictureFrameCss, pictureStyled } from '../core/picture-format.js';
+import { linkedPictureTarget, rangePicture, svgDataUrl } from '../core/range-picture.js';
+import { cellPictureObjectPosition } from '../core/cell-picture.js';
 import { chartSheetBounds } from '../core/chartsheet.js';
 
 import { shrinkCellText } from '../core/shrink-text.js';
@@ -42,6 +45,8 @@ import { formatValue, defaultAlign, fontStack, borderCss, getLocale } from '../c
 import { readsRightToLeft } from '../core/bidi.js';
 import { isError } from '../core/formula/functions.js';
 import { chartData, isImage, isTextBox, textBoxStyle, textBoxText } from '../core/charts.js';
+import { smartArtSvg, smartArtAltText } from '../core/smartart.js';
+import { smartArtLook, fallbackPicture } from './smartart.js';
 import { equationBody } from './equation-view.js';
 import { textBoxEffectCss } from '../core/theme-effects.js';
 import { renderChartSvg, renderSparklineSvg, chartCornerRadius } from './chartsvg.js';
@@ -74,7 +79,8 @@ export function sheetPrintPrefs(sheet) {
   // A chart sheet is one page, with no cell scale, titles or headings.
   const chart = sheet?.kind === 'chart' ? { area: 'sheet', fit: 'pages', fitWidth: 1, fitHeight: 1,
     title: false, gridlines: false, headers: false, repeatFrozen: false, horizontalCentered: false, verticalCentered: false, titleRows: null, titleCols: null, native: true } : {};
-  if (!p) return { alignWithMargins: true, firstPageNumber: 1, useFirstPageNumber: false, differentFirst: false, differentOddEven: false, firstHeader: '', firstFooter: '', evenHeader: '', evenFooter: '',
+  // Breaks belong to a sheet: preferences saved from another one never bring theirs along.
+  if (!p) return { rowBreaks: [], colBreaks: [], alignWithMargins: true, firstPageNumber: 1, useFirstPageNumber: false, differentFirst: false, differentOddEven: false, firstHeader: '', firstFooter: '', evenHeader: '', evenFooter: '',
     ...(sheet?.kind === 'chart' ? { orientation: 'landscape', ...chart } : { titleRows: null, titleCols: null }) };
   return { area: p.areas.length ? 'printArea' : 'sheet', orientation: p.orientation,
     paper: ({ 1: 'letter', 2: 'letter', 3: 'tabloid', 5: 'legal', 8: 'a3', 9: 'a4', 10: 'a4' })[p.paperSize] || 'letter',
@@ -83,6 +89,7 @@ export function sheetPrintPrefs(sheet) {
     titleRows: p.titleRows || null, titleCols: p.titleCols || null,
     firstPageNumber: p.firstPageNumber, useFirstPageNumber: p.useFirstPageNumber, alignWithMargins: p.alignWithMargins !== false,
     gridlines: p.gridlines, headers: p.headings, title: p.title ?? false, repeatFrozen: p.repeatFrozen ?? false, header: p.header || '', footer: p.footer || '',
+    rowBreaks: p.rowBreaks || [], colBreaks: p.colBreaks || [],
     ...Object.fromEntries(HEADER_VARIANTS.map(key => [key, p[key]])), native: true, ...chart };
 }
 
@@ -118,6 +125,13 @@ function pageMargins(opts) {
     const v = opts.customMargins?.[k];
     return [k, opts.margins === 'custom' && typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v * IN : fallback];
   }));
+}
+
+/** The paper as oriented and its margins, in CSS pixels: { width, height, margins: { top, right, bottom, left } }. */
+export function printPaperBox(opts = {}) {
+  const paper = PAPER_PX[opts.paper] || PAPER_PX[PRINT_DEFAULTS.paper];
+  const [width, height] = opts.orientation === 'landscape' ? [paper[1], paper[0]] : paper;
+  return { width, height, margins: pageMargins(opts) };
 }
 
 export function printableHeight(opts = {}) {
@@ -548,7 +562,7 @@ function printRange(wb, sheetId, opts) {
   else {
     range = printBounds(wb, sheetId, sheet);
     for (const obj of sheet.charts || []) {
-      if (!obj.anchor || obj.print === false) continue;
+      if (!obj.anchor || obj.print === false || obj.hidden) continue;
       const box = objectExtent(wb, sheetId, sheet, obj);
       range = range ? { r1: Math.min(range.r1, box.r1), c1: Math.min(range.c1, box.c1), r2: Math.max(range.r2, box.r2), c2: Math.max(range.c2, box.c2) } : box;
     }
@@ -651,6 +665,36 @@ function printLayout(wb, sheetId, sheet, used, opts) {
   return { cols, totalW, pixel: true, zoom: quantizePrintScale(page / totalW) };
 }
 
+/**
+ * Which manual page breaks a print honours on each axis: all of them, except on an axis the page setup
+ * fits to a number of pages, where the fit decides the pages (and Fit to page width fits the columns).
+ */
+export function manualBreaksApply(opts) {
+  const fitted = opts.fit === 'pages';
+  return { rows: !(fitted && Number(opts.fitHeight) > 0), cols: opts.fit !== 'width' && !(fitted && Number(opts.fitWidth) > 0) };
+}
+
+/**
+ * The manual breaks as the print table's own line indices: a break before a hidden line starts its page
+ * at the next line printed, one before the printed block (or at its first line) starts nothing, and
+ * `heading` counts the row-number column or column-letter row the table puts first.
+ */
+export function printBreakAxes(rows, cols, used, opts, heading) {
+  const apply = manualBreaksApply(opts);
+  const axis = (lines, breaks, first) => {
+    const set = new Set();
+    if (!breaks?.length) return set;
+    const body = lines.findIndex(n => n >= first);
+    for (const at of breaks) {
+      const i = lines.findIndex(n => n >= at);
+      if (i > body && body >= 0) set.add(i + heading);
+    }
+    return set;
+  };
+  const r = apply.rows ? axis(rows, opts.rowBreaks, used.r1) : new Set(), c = apply.cols ? axis(cols, opts.colBreaks, used.c1 ?? 0) : new Set();
+  return r.size || c.size ? { rows: r, cols: c } : null;
+}
+
 function constrainPrintCell(cell) {
   cell.classList.add('constrained');
   if (!cell.firstChild) return cell;
@@ -737,6 +781,8 @@ export function buildPrintTable(wb, sheetId, opts = {}) {
     rows: opts.titleRows ? titleAxis(rows, used.r1, opts.titleRows, headers ? 1 : 0) : null,
     cols: opts.titleCols ? titleAxis(cols, used.c1, opts.titleCols, headers ? 1 : 0) : null,
   });
+  const breakAxes = printBreakAxes(rows, cols, used, opts, headers ? 1 : 0);
+  if (breakAxes) setPrintBreakAxes(table, breakAxes);
   const inHead = (r) => r < repeat;
   // Disjoint titles and the print area are separate printed blocks. A merge
   // must not acquire an anchor from the omitted gap or collapse across it.
@@ -945,7 +991,8 @@ export function buildPrintTable(wb, sheetId, opts = {}) {
           const fit = value.fit || 'contain';
           const room = Math.max(4, wb.rowHeight(sheetId, r) - 2);
           td.classList.add('image', `fit-${fit}`);
-          td.append(el('img', { src: value.image, alt: '', style: fit === 'stretch' ? { width: '100%', height: `${room}px` } : fit === 'original' ? null : { maxWidth: '100%', maxHeight: `${room}px` } }));
+          td.append(el('img', { src: value.image, alt: value.alt || '', style: fit === 'stretch' ? { width: '100%', height: `${room}px` } : fit === 'original' ? null
+            : { width: '100%', height: `${room}px`, objectFit: 'contain', objectPosition: cellPictureObjectPosition(st) } }));
         } else if (st.rot) {
           const rotated = el('span', {}, formatted || shown);
           rotated.style.display = 'inline-block';
@@ -1044,7 +1091,8 @@ export function buildPrintTable(wb, sheetId, opts = {}) {
  * positions are the row heights in pixels.
  */
 function printObjectContent(node, wb, sheetId, obj, w, h) {
-  if (obj.print === false || obj.type === 'slicer' && obj.hidden) return false;
+  // A hidden object (the Selection Pane's eye) prints no more than it shows.
+  if (obj.print === false || obj.hidden) return false;
   if (obj.type === 'slicer') {
     const control = createSlicerControl(document);
     control.update(obj, slicerItems(wb, obj), obj.paint);
@@ -1066,16 +1114,36 @@ function printObjectContent(node, wb, sheetId, obj, w, h) {
     return true;
   }
   if (obj.decorative) node.setAttribute('aria-hidden', 'true');
+  if (obj.type === 'smartart') {
+    // A SmartArt graphic prints as it shows, its empty items left blank.
+    node.style.backgroundColor = 'transparent';
+    node.classList.add('borderless');
+    if (obj.fallback) { node.style.overflow = 'visible'; node.innerHTML = fallbackPicture(obj.fallback); } else node.innerHTML = smartArtSvg(obj, obj.w, obj.h, { ...smartArtLook(wb), idPrefix: `psa-${String(obj.id).replace(/[^\w-]/g, '')}`,
+      label: obj.decorative ? '' : obj.description || smartArtAltText(obj) }).replace('<svg ', '<svg style="width:100%;height:100%" ');
+    return true;
+  }
   if (isImage(obj) || obj.appearance?.background === 'none') node.style.backgroundColor = 'transparent';
   if (isImage(obj)) {
     node.style.overflow = 'visible';
-    if (obj.src) node.append(pictureNode(obj));
+    // A linked picture prints the cells it shows now; a styled picture prints its frame and shadow.
+    const target = obj.pictureRef && linkedPictureTarget(wb, sheetId, obj.pictureRef);
+    const live = target && rangePicture(wb, target.sheetId, target.range);
+    const shown = live ? { ...obj, src: svgDataUrl(live.svg), srcRect: null, fillRect: null } : obj;
+    if (pictureStyled(obj)) {
+      const frame = el('div', { style: { position: 'absolute', inset: '0', boxSizing: 'border-box', ...pictureFrameCss(obj) } });
+      if (obj.shape) frame.style.overflow = 'hidden';
+      if (shown.src) frame.append(pictureNode(shown));
+      node.style.border = 'none';
+      node.append(frame);
+    } else if (shown.src) node.append(pictureNode(shown));
   } else if (isTextBox(obj)) {
     node.classList.add('print-text');
     if (obj.style?.border === false) node.classList.add('borderless');
     const effect = textBoxEffectCss(wb, obj);
     if (effect.filter) node.style.overflow = 'visible';
     node.append(obj.equation ? equationBody(obj, 1, effect) : el('div.text-body', { style: { ...textBoxStyle(obj), ...effect } }, el('span', {}, textBoxText(wb, sheetId, obj))));
+    // A turned or flipped text box (Arrange ▸ Rotate) prints as it shows.
+    if (obj.rotation || obj.flipH || obj.flipV) node.style.transform = `rotate(${obj.rotation || 0}deg) scale(${obj.flipH ? -1 : 1}, ${obj.flipV ? -1 : 1})`;
   } else {
     if (chartCornerRadius(obj)) node.style.backgroundColor = 'transparent';
     try { node.innerHTML = renderChartSvg(chartData(wb, sheetId, obj), obj, w, h); } catch { return false; }

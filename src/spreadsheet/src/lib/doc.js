@@ -24,6 +24,7 @@ import { sheetFilters } from '../core/sheet-filters.js';
 
 import { Workbook, EXCEL_SHEET_DEFAULTS } from '../core/workbook.js';
 import { formulaReachesOut } from '../core/reaches-out.js';
+import { recordStep } from '../core/change-history.js';
 import { isRangeSource } from '../core/validation.js';
 import { workbookToXlsx, workbookToOds, workbookFromFile, sheetToCsv, sheetToTsv, sheetToHtml, stripExtension, XLSX_MIME, CSV_MIME, TSV_MIME, HTML_MIME } from '../core/io.js';
 import * as P from './puter.js';
@@ -32,12 +33,17 @@ import { session } from './session.js';
 import { draftKey, liveDraftKey, draftRevision, saveDraft, loadDraft, clearDraft, moveDraft, parkDraft, isUnsavedDraftKey, sameBook, draftKeyForFile, readableDraft, uniqueId } from './drafts.js';
 import { adoptVersionsByUid, listVersions, saveVersion, readVersion, dueForVersion, moveVersions, parkVersions, RESTORE_LABEL } from './versions.js';
 import { storageScope, accountStorageKey, isAccountScope, isProvisionalScope } from './account-storage.js';
+import { optionState } from './option-state.js';
 
 const AUTOSAVE_MS = 1500;
 // The title row's AutoSave switch: off, edits wait for Save (the local draft still keeps them). Per device.
 const AUTOSAVE_KEY = 'spreadsheet:autosave';
+// A device that never flipped the switch saves as it goes unless the app's options say not to (Save ▸ AutoSave by default).
 export function autoSaveEnabled() {
-  try { return globalThis.localStorage?.getItem(AUTOSAVE_KEY) !== 'off'; } catch { return true; }
+  try {
+    const kept = globalThis.localStorage?.getItem(AUTOSAVE_KEY);
+    return kept == null ? optionState.autoSave !== false : kept !== 'off';
+  } catch { return optionState.autoSave !== false; }
 }
 export function setAutoSaveEnabled(on) {
   try { globalThis.localStorage?.setItem(AUTOSAVE_KEY, on ? 'on' : 'off'); } catch { /* optional storage */ }
@@ -156,8 +162,14 @@ export async function copyExternalDecision(source, copy, scope = storageScope())
 export function forgetExternalDecision(file, scope = storageScope()) {
   recordExternal(file, scope, null);
 }
-const DRAFT_MS = 600; // unsaved edits are copied to this browser's storage after this pause
+// Unsaved edits are copied to this browser's storage after this pause; the app's options can lengthen it (Save).
+const draftMs = () => {
+  const s = Number(optionState.draftDelay);
+  return Number.isFinite(s) && s > 1 ? Math.min(s, 3600) * 1000 : 600;
+};
 export const UNTITLED = 'Untitled spreadsheet';
+/** How long a shared workbook waits after its last change before its owner's browser writes the .xlsx file. */
+const SHARED_FILE_MS = 15_000;
 export const SIGN_IN_TO_SAVE = 'Sign in to Puter to save this spreadsheet';
 /** Why a spreadsheet shared with the user only to view is not saved. */
 export const VIEW_ONLY = 'You can view this spreadsheet, but not change it. Use File > Save a copy to keep your changes';
@@ -313,6 +325,7 @@ export class Doc extends EventTarget {
   }
 
   destroy() {
+    if (this.collab) { this._leaveRoom(); return; }
     clearTimeout(this._timer);
     clearTimeout(this._draftTimer);
     if (!this.wb.dirty) clearDraft(this._ownDraftKey, this._draftRevision);
@@ -348,6 +361,8 @@ export class Doc extends EventTarget {
 
   /** Copy the unsaved book to local storage (no-op once it is clean). */
   writeDraft() {
+    // A shared workbook keeps unsent changes in its own outbox (see collab/outbox.js), not in a draft.
+    if (this.collab) return false;
     clearTimeout(this._draftTimer);
     if (!this.wb.dirty) { clearDraft(this._ownDraftKey, this._draftRevision); return false; }
     // Timestamps and workbook versions can coincide across tabs. Each write
@@ -430,6 +445,7 @@ export class Doc extends EventTarget {
 
   _changed(type) {
     if (type === 'active-sheet') return;
+    if (this.collab) { this._sharedChanged(type); return; }
     if (type === 'clean') {
       // The book was declared clean without a save (columns fitted on open, say): nothing is pending.
       if (!this.wb.dirty && this.status === 'unsaved') {
@@ -448,7 +464,7 @@ export class Doc extends EventTarget {
       this._timerIsRetry = false;
     }
     clearTimeout(this._draftTimer);
-    this._draftTimer = setTimeout(() => this.writeDraft(), DRAFT_MS);
+    this._draftTimer = setTimeout(() => this.writeDraft(), draftMs());
   }
 
   /** Turn AutoSave on or off; turning it on saves what is waiting. */
@@ -462,6 +478,7 @@ export class Doc extends EventTarget {
 
   /** Save now. Returns true when the file was written. */
   save({ auto = false, retry = false } = {}) {
+    if (this.collab) return this._enqueueWrite(() => this._saveShared({ auto }));
     clearTimeout(this._timer);
     if (!retry) this._retryDelay = 0; // an edit, a save asked for, or coming back online starts the retries over
     return this._enqueueWrite(() => {
@@ -684,7 +701,11 @@ export class Doc extends EventTarget {
     // it uploads. Those edits must remain available in the current workbook.
     if (this.wb.version !== version) throw new Error('The spreadsheet changed while preparing to restore. Your edits are intact; try restoring again.');
     if (distrust) this.distrustExternal();
+    // The record of edits (Show Changes) goes on through a restore, which is one more change to it.
+    const changeHistory = this.wb.changeHistory;
     this.wb.replaceWith(other.toJSON());
+    this.wb.changeHistory = changeHistory;
+    recordStep(this.wb, 'structure', 'Restore version');
     this._changed('cells');
     return true;
   }
@@ -843,12 +864,13 @@ export class Doc extends EventTarget {
     return null;
   }
 
+  /** A downloaded copy, to keep or hand on: without Show Changes' record of what cells used to hold. */
   async toXlsxBlob() {
-    return workbookToXlsx(this.wb);
+    return workbookToXlsx(this.wb, { history: false });
   }
 
   async toOdsBlob() {
-    return workbookToOds(this.wb);
+    return workbookToOds(this.wb, { history: false });
   }
 
   toCsvBlob(sheetId = this.wb.activeSheetId) {
@@ -869,6 +891,75 @@ export class Doc extends EventTarget {
   /* ---------- Constructors ---------- */
 
   /** Recover a spreadsheet that closed before its first cloud save. */
+  /* ---------- Shared workbooks (see collab/client.js) ---------- */
+
+  /**
+   * The document of a shared workbook: its changes go to everyone through the room as they are made, and
+   * saving writes a checkpoint and the .xlsx file (over the owner's file, so it still opens anywhere).
+   */
+  static forRoom(client, { path = null, uid = null } = {}) {
+    const doc = new Doc({ wb: client.wb, name: client.name || UNTITLED, path: client.file?.path ?? path, uid: client.file?.uid ?? uid });
+    doc.collab = client;
+    doc._onRoomStatus = () => doc._sharedChanged('room');
+    client.addEventListener('status', doc._onRoomStatus);
+    doc._setStatus(client.status.pending ? 'saving' : 'saved');
+    return doc;
+  }
+
+  get isOwner() {
+    return !!this.collab && this.collab.user?.uuid === this.collab.owner;
+  }
+
+  /** A change reached a shared workbook (here or from someone else): the status follows the room's, and the file is written once things settle. */
+  _sharedChanged(type) {
+    const { state, pending } = this.collab.status;
+    if (state === 'offline') this._setStatus('offline', this.collab.status.message);
+    else if (state === 'error') this._setStatus('error', this.collab.status.message);
+    else this._setStatus(pending ? 'saving' : 'saved');
+    if (type === 'room' || type === 'clean' || !this.wb.dirty) return;
+    // The owner's browser keeps the .xlsx current while it is open: a while after the last change, everyone's.
+    if (this.isOwner && autoSaveEnabled() && !session.signedOut) {
+      clearTimeout(this._timer);
+      this._timer = setTimeout(() => this.save({ auto: true }).catch(() => {}), SHARED_FILE_MS);
+    }
+  }
+
+  /** Deliver what is pending, then write a checkpoint and the .xlsx. */
+  async _saveShared({ auto = false } = {}) {
+    const client = this.collab;
+    clearTimeout(this._timer);
+    await client.flush();
+    await client.settled();
+    if (client.replica.pending.length) {
+      this._sharedChanged('room');
+      if (auto) return false;
+      throw new Error(client.status.message || 'Your changes are waiting to be sent. They are kept on this device until the connection returns.');
+    }
+    if (!client.canEdit) { this.wb.markClean(); return true; }
+    this._setStatus('saving');
+    try {
+      const res = await client.checkpoint({ file: true });
+      // The worker writes the owner's file when Puter lets it; the owner's own browser can always.
+      if (this.isOwner && this.path && this.isXlsxPath && !res?.wrote) await P.writeFile(this.path, await workbookToXlsx(this.wb), { overwrite: true });
+      this.lastSaved = Date.now();
+      this.wb.markClean();
+      this._setStatus('saved');
+      return true;
+    } catch (e) {
+      this._setStatus(client.status.state === 'offline' ? 'offline' : 'error', e?.message || 'Could not save');
+      if (auto) return false;
+      throw e;
+    }
+  }
+
+  _leaveRoom() {
+    clearTimeout(this._timer);
+    this.collab.removeEventListener('status', this._onRoomStatus);
+    this.wb.removeEventListener('change', this._onChange);
+    session.removeEventListener('change', this._onSession);
+    this.collab.leave().catch(() => {});
+  }
+
   static fromDraft(key) {
     // Only this account's drafts of spreadsheets that have no file are recovered this way.
     const draft = isUnsavedDraftKey(key) ? loadDraft(key) : null;
@@ -1035,8 +1126,19 @@ export class Doc extends EventTarget {
 
   /** A new, empty spreadsheet; `excel` starts it with the usual .xlsx defaults: Calibri 11 (the theme's body font) as the
    * Normal font, cells aligned to the bottom, and the format's default column width and row height. */
-  static blank({ excel = false } = {}) {
-    const wb = new Workbook(excel ? { normalFont: { name: 'Calibri', sz: 11, scheme: 'minor' }, sheets: [{ name: 'Sheet1', ...EXCEL_SHEET_DEFAULTS, defaultVAlign: 'bottom' }] } : null);
+  /**
+   * A new, empty workbook. `start` carries the app's options for new workbooks (lib/app-options.js): the font
+   * and size, how many sheets, the view and headers they open with, and how the workbook calculates.
+   */
+  static blank({ excel = false, start = null } = {}) {
+    if (!excel) return new Doc({ wb: new Workbook(null), name: UNTITLED });
+    const font = start?.fontName && start.fontName !== 'Calibri' ? { name: start.fontName, sz: start.fontSize || 11 }
+      : { name: 'Calibri', sz: start?.fontSize || 11, scheme: 'minor' };
+    const count = Math.max(1, Math.min(255, Math.round(start?.newSheets || 1)));
+    const view = start?.newView && start.newView !== 'normal' ? { viewMode: start.newView } : {};
+    const headers = start && start.showHeaders === false ? { headers: false } : {};
+    const sheets = Array.from({ length: count }, (_, i) => ({ name: `Sheet${i + 1}`, ...EXCEL_SHEET_DEFAULTS, defaultVAlign: 'bottom', ...view, ...headers }));
+    const wb = new Workbook({ normalFont: font, sheets, ...(start?.newCalcMode === 'manual' ? { calcMode: 'manual' } : {}) });
     return new Doc({ wb, name: UNTITLED });
   }
 }

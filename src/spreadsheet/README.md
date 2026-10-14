@@ -2,7 +2,8 @@
 
 # Spreadsheet
 
-A fast, private spreadsheet app built with vanilla JavaScript (no frameworks),
+An open-source alternative to Microsoft Excel: a fast, private spreadsheet app
+built with vanilla JavaScript (no frameworks),
 Vite, and [Puter.js](https://developer.puter.com) as the only backend. Files
 are real `.xlsx` documents saved to your own Puter cloud, so they open in
 Excel, Numbers, or LibreOffice and never live on anyone else's server.
@@ -165,6 +166,22 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   way for titles, notes, and captions, with a font size, bold and italic,
   text and fill colors, alignment, and an optional border; double-click to
   edit, and they print where they sit.
+- **Hierarchy, statistical, stock and surface charts**: Insert ▸ Charts also offers
+  treemaps and sunbursts (each leading label column is a level of the hierarchy, blank
+  parent cells repeat the label above; parents are named overlapping their boxes, in a
+  banner, or not at all, and each top-level branch keeps one colour), box and whisker
+  charts (exclusive or inclusive median quartiles, whiskers to 1.5 interquartile ranges,
+  outlier and inner points, mean markers and a mean line, rows pooled by category),
+  funnels, stock charts (High-Low-Close, Open-High-Low-Close with up/down bars, and both
+  with volume columns on their own axis), 3-D surface, wireframe, contour and wireframe
+  contour charts coloured in value bands set by the value axis's major unit, and exploded
+  pie and doughnut, pie of pie and bar of pie charts. Each has its gallery tile and
+  Change Chart Type page, Recommended Charts suggests them for data of their shape
+  (price columns, nested labels, long columns of numbers, stage counts), and the Format
+  pane sets their options. They round-trip through `.xlsx`: treemaps, sunbursts, box and
+  whisker and funnel charts as extended chart parts (with a fallback note for older
+  readers, and named sources read as other apps write them), stock and surface charts as
+  classic chart parts.
 - **Hyperlinks**: `HYPERLINK(url, label)` cells and typed web or email
   addresses are clickable (Ctrl/Cmd+click opens them, a popover shows where
   they go). Ctrl/Cmd+K inserts or edits a link to a web address, to a sheet
@@ -191,6 +208,29 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   contents are treated as data, never as instructions, a formula it writes
   that fetches from the web waits for the file's Allow, and pictures in
   replies are never loaded. On a phone the panel is a sheet over the grid.
+- **Automate (scripts)**: an Automate ribbon tab for JavaScript scripts with
+  an `async function main(workbook)` that work on the workbook through a
+  documented object model (worksheets, ranges, values and formulas, fills,
+  fonts, alignment, borders, sizes, insert and delete, sort, fill, merge,
+  hide, notes, links, tables and charts; Script Reference lists it all).
+  The Code Editor pane beside the sheet has syntax colouring, line numbers,
+  indentation that follows the code, closing brackets and quotes, bracket
+  matching, Find and Replace, line comments, completions for the API, Run
+  (Ctrl/Cmd+Enter) and Stop, and output whose errors link to their lines.
+  Record Actions writes what you do (typing, formatting, borders, inserting
+  and deleting, sorting, fill, sizes, sheets, tables) as a new script. All
+  Scripts gathers the workbook's scripts, My Scripts (`.js` files kept on
+  your drive, for any workbook) and samples, which also run straight from the
+  ribbon: highlight duplicates, unhide everything, sum each column, a table of
+  contents sheet, style the header row, remove blank rows. Script Button puts
+  a button on the sheet that runs a script when clicked (Shift+click selects
+  it). Everything a run changes is one undo step. Scripts run in a worker inside a sandboxed frame
+  with an origin of its own and no network, so they reach the workbook and
+  nothing else (not the page, your account or your files), and they are
+  stopped after two minutes or when you press Stop; a script that came inside
+  someone else's file runs only once you agree. Scripts are saved with the
+  workbook, in `.xlsx` as a package part of their own that other programs
+  leave alone.
 - **AI help with formulas**: describe what a cell should calculate and Puter's
   AI writes the formula (the sheet's headers, a few sample rows, tables, and
   named ranges are explained to it, and the dialog says which cells were
@@ -296,7 +336,12 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   `[h]:mm`, `0.0%;[Red](0.0%)`) with a live preview. A Format cells dialog
   (Ctrl/Cmd+Shift+F, or Ctrl+1 where the browser leaves it free) gathers
   number format, alignment, font, borders, and fill in one place and applies
-  only what changed. Keyboard shortcuts
+  only what changed. It keeps one size on every tab; the Number tab says in a
+  line what the chosen category does; the Border tab draws its line styles as
+  the lines they make, with None, Outline and Inside presets and a diagram of
+  the selection whose edges (and the buttons beside them) draw or remove a
+  line; the Fill tab offers the theme's colours with their tints and the
+  standard fills as palettes beside a large sample. Keyboard shortcuts
   (Ctrl/Cmd+Shift+1/2/3/4/5/6/~ for formats, Ctrl/Cmd+Shift+7 and _ for an
   outline border and no borders, Ctrl/Cmd+\ to clear formatting). Formatting
   more than 50,000 cells at once (Select all on a sheet of many rows) formats
@@ -310,6 +355,19 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   has not reached yet: a value typed, pasted or filled into a formatted column
   takes its format wherever it lands, and the column keeps it through inserted,
   deleted and moved lines until Clear formats takes it away.
+- **Cell styles**: a gallery of built-in styles (Title, Heading, Total,
+  Input, Good, Bad, Note and the rest), themed accent styles, and the
+  workbook's own named styles. New Cell Style… makes one by example from the
+  active cell; the Style dialog names it and chooses which parts of a format
+  it holds (number, alignment, font, border, fill, protection), each shown
+  with a summary, and Format… edits it in the Format Cells dialog. Applying a
+  style changes only the parts it holds. Right-click a style (or press the menu
+  key on it) to modify, duplicate or delete it; modifying a style reformats
+  every cell that uses it, in one undo step, and a built-in style can be
+  modified for one workbook and reset later. Merge Styles… copies the styles of
+  another spreadsheet (from the Spreadsheets folder, Puter, or this device) and
+  asks before replacing same-named ones. Named styles travel in .xlsx files as
+  the file's own cell styles, with cells linked to them.
 - **Conditional formatting**: highlight cells that are greater or less than,
   between, equal, contain, begin or end with text, are empty, are duplicates
   or unique, are in the top or bottom N, hold a date that is today, yesterday,
@@ -360,7 +418,11 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   rows grouped to collapse, removable again in one click); randomize the order of the
   selected rows; remove duplicate rows (choosing which columns must match)
   or empty rows;
-  split text to columns on a detected or chosen separator; trim whitespace,
+  split text to columns on a detected or chosen separator, or with Text to
+  Columns (Data menu and ribbon): any mix of separators with repeated ones
+  counted once and a choice of text qualifier, or fixed widths picked on a
+  clickable ruler, a live preview where each column is read as values, kept
+  as typed text or skipped, and a destination cell; trim whitespace,
   change case, and convert text to numbers; and pivot tables that summarize
   a range by rows, columns, and Sum, Count, Average, Max, or Min onto a new
   sheet as live `SUMIFS`/`COUNTIFS` formulas (over a table, they name its
@@ -370,16 +432,147 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   input value that makes a formula reach a wanted result; and Column stats,
   a profile of a column (counts, sum, average, median, spread, the most
   frequent values, and a distribution).
+- **Solver** (Data ▸ Analyze, the Data menu, or the palette): make a formula
+  cell as large or as small as it can be, or equal to a value, by changing
+  variable cells (several ranges) subject to constraints (`<=`, `=`, `>=`,
+  whole numbers, 0/1 and all different), with three methods: Simplex LP
+  for linear models (a bounded two-phase simplex that cannot cycle, with a
+  check that the model really is linear), GRG Nonlinear for smooth models
+  (gradients measured through the sheet's own recalculation, optionally from
+  many starting points) and Evolutionary for models built on IF, lookups or
+  rounding; integer constraints go through branch and bound. Options cover
+  precision, scaling, time and iteration limits, integer optimality,
+  convergence, derivatives, population, mutation rate and a random seed. The
+  solve runs in the background with a Stop button; the result can be kept
+  or the original values restored, saved as a scenario, and reported on new
+  sheets (Answer; Sensitivity with reduced costs, shadow prices and allowable
+  ranges, or reduced gradients and Lagrange multipliers; Limits). Keeping a
+  solution is one undo step. The model is saved with the sheet in hidden
+  defined names, so it travels in .xlsx files, follows inserted rows and
+  columns, and can also be saved to and loaded from a range of cells.
+- **Data Analysis** (Data ▸ Analyze): a list of statistical tools, each
+  with its own dialog — Anova (single factor, two-factor with and without
+  replication), Correlation, Covariance, Descriptive Statistics (with a
+  confidence level and kth largest and smallest), Exponential Smoothing,
+  F-Test for variances, Fourier Analysis, Histogram (with Pareto order,
+  cumulative percentage and a chart), Moving Average, Random Number
+  Generation (uniform, normal, Bernoulli, binomial, Poisson, patterned and
+  discrete, with a seed), Rank and Percentile, Regression (multiple X
+  columns, residuals, standardized residuals, residual, line fit and normal
+  probability plots, a chosen confidence level, constant zero), Sampling,
+  t-Tests (paired, equal and unequal variances) and a two-sample z-Test.
+  Inputs grouped by columns or rows with optional labels are checked with
+  clear messages; results (and their charts) go to a range, a new sheet or a
+  new spreadsheet as one undo step, computed with the same statistics as the
+  sheet functions (`LINEST`, `T.DIST`, `F.DIST`…).
+- **Data form** (Data → Form, or Data → Data Tools → Form): a list or table
+  one record at a time, its header row naming the fields and calculated
+  columns shown read-only. Step through records with the slider, the arrow
+  keys or Page Up/Down; edits are written when you move on (one undo step per
+  record) and Restore puts the record back; New adds a record under the list
+  (growing a table, carrying a plain list's formulas down), Delete removes one
+  after asking, and Criteria finds records by field (`>100`, `<>0`, `=Smith`,
+  text that begins with what you type, `*` and `?` wildcards) with Find Prev
+  and Find Next.
+- **Edit links** (Data → Edit links, or Data → Queries & Connections → Edit
+  Links): every link to another workbook with its source file, kind, update
+  mode and status. Update Values reads the source again from your Puter drive
+  and refreshes the cached cells the formulas read; Change Source points a
+  link at another file (picked on the drive), Open Source opens it, Check
+  Status looks for every source (and its sheets), and Break Link turns every
+  formula that reads a link into its current value, dropping the link and
+  renumbering the rest, in one undo step. Startup Prompt chooses whether
+  opening the book offers to update its links, updates them, or leaves them
+  (kept in the `.xlsx` as the workbook's update-links setting).
 - **Layout**: frozen rows and columns (from the menus, or by dragging the
   bars at the corner of the headers), hidden rows and columns, row and
   column groups with an outline gutter (collapse and expand one or all,
-  nested, Alt+Shift+Right/Left), column and row resizing (drag, double-click to fit,
-  or an exact size), zoom from 50% to 200% (presets from the status bar),
+  nested, Alt+Shift+Right/Left); Auto Outline builds nested row and column
+  groups from the summary formulas (`SUM`, `SUBTOTAL`, `AVERAGE` and the like
+  beside the cells they total), Clear Outline removes them, and Outline
+  Settings puts summary rows above or below their detail and summary columns
+  left or right of it (saved in .xlsx files) and can set summary lines in bold
+  automatically (Data → Outline), column and row resizing (drag, double-click to fit,
+  or an exact size), zoom from 10% to 400% (presets from the status bar, or
+  View ▸ Zoom with 200%, 100%, 75%, 50%, 25%, Fit selection or a percentage of your own),
   optional gridlines, zero values
   that can be hidden per sheet, notes on cells, and colored sheet tabs. The
   row and column headers can be hidden, a focus mode hides the toolbar and
   formula bar, the app can go full screen (all in the View menu), and spelling
   is checked while typing text (never inside formulas; Tools menu).
+- **Page breaks**: Page Layout ▸ Breaks inserts a manual page break above and
+  left of the selected cell (whole rows or columns break on their own axis),
+  removes the one beside it, or resets them all, each an undo step; the cell
+  menu offers the same in Page Break Preview, where manual breaks are solid
+  lines and automatic ones dashed, a break drags to another row or column (an
+  automatic one dragged becomes manual, one dragged off the print area goes),
+  and the print area's edges drag to resize it. Printing and PDF start a new
+  page at every manual break (fit-to-pages settings decide the axis they
+  fit), breaks follow rows and columns as they are inserted, deleted or moved,
+  and they are saved as the worksheet's native row and column breaks. View ▸
+  Page Breaks (or a print preview) shows them in Normal view as dashed lines.
+- **Sheet background**: Page Layout ▸ Background tiles a picture behind the
+  cells on screen (a cell's fill covers it, and it never prints); Delete
+  Background takes it away. It is kept as the worksheet's native background
+  picture.
+- **Custom Views**: View ▸ Custom Views keeps the workbook's present view
+  under a name, with or without its page setup and its hidden rows, columns
+  and filters, and Show brings it back: each sheet's zoom, selection, scroll
+  position, frozen panes or split, Normal, Page Layout or Page Break Preview,
+  gridlines, headings and zeros, which sheets are hidden, and the sheet in
+  front, with the edits among those one undo step. Views are saved in the
+  file as native custom workbook and sheet views.
+- **Sheet views**: View ▸ Sheet View ▸ New starts a temporary view of the
+  sheet in which you filter for yourself while everyone else keeps the
+  default view (the headings take a tint and the sheet tab an eye); Keep
+  names it so it stays with the workbook, Exit goes back to the default
+  view, the Sheet View menu switches between the sheet's views, and Options
+  renames, duplicates or deletes them. Files and drafts always hold the
+  default view's filters with the named views beside them, the view you are
+  in is remembered on this device for that file, and sorting (which moves
+  the rows themselves) still applies to everyone.
+- **SmartArt graphics**: Insert ▸ Illustrations ▸ SmartArt opens a gallery of
+  37 diagram layouts in seven categories (list, process, cycle, hierarchy,
+  relationship, matrix and pyramid: block and bullet lists, steps, chevrons,
+  a timeline, cycles, hub and spokes, organization charts and trees,
+  overlapping circles, a target, a balance, an equation, quadrants and
+  pyramids), each shown drawn by the same engine that draws the diagram. A
+  diagram is an outline: the Text Pane beside the sheet edits it as a
+  bulleted list (Enter adds an item, Tab and Shift+Tab demote and promote it,
+  Alt+Shift+Up/Down moves it, Backspace joins lines, several pasted lines
+  become several items), and the layout works out every shape, connector and
+  text size again from it, fitting like shapes to one size and following the
+  diagram's resizing; with a range of cells selected, a new diagram takes its
+  outline from them. The SmartArt Design tab adds shapes after, before, above
+  or below the one picked, promotes, demotes and moves it, turns the diagram
+  Right to Left, switches to another layout keeping the text, and offers 31
+  colour schemes and six styles drawn from the workbook's theme (so a new
+  theme recolours every diagram), Reset Graphic and Convert to Shapes (a group
+  of ordinary shapes and text boxes). The Format tab gives a shape picked in
+  the diagram its own fill, outline and text colour, makes it larger or
+  smaller, or changes it to another shape. Every change is one undo step
+  (typing in one item undoes together); diagrams arrange, group, print and
+  export to PDF like other objects, read their text out as alt text unless
+  given their own, sync between people editing together, and are saved in an
+  `.xlsx` as a group of ordinary shapes any spreadsheet program shows, with
+  the diagram kept for this app to edit again. A diagram another program
+  saved opens with the shapes that program drew, its outline in the Text Pane,
+  and is redrawn with the nearest layout once changed.
+- **Arranging objects**: charts, pictures, shapes, text boxes, WordArt,
+  slicers, timelines and controls stack in an order of their own. Page
+  Layout ▸ Arrange (and a chart's Format tab, and the object menu) brings
+  them forward or to the front, sends them backward or to the back, aligns
+  them left, centre, right, top, middle or bottom, distributes three or more
+  evenly, groups, ungroups and regroups them (a group moves, orders and
+  aligns as one, and is saved as a native group), and rotates or flips
+  pictures, shapes and text boxes by quarter turns; Snap to Grid and Snap to
+  Shape line up objects as they are dragged (Alt places one freely).
+  Shift- or Cmd/Ctrl-click selects several objects, which then drag, nudge
+  with the arrow keys and delete together. The Selection Pane lists every
+  object on the sheet, front first and groups with their members, with an
+  eye to hide or show each (Show All, Hide All), a double-click or F2 to
+  rename one, and rows that drag to restack; hidden objects do not print,
+  and names, hidden state and order travel in the `.xlsx`.
 - **Multiple sheets**: add, rename, duplicate, reorder, color, hide, protect,
   and delete sheets from the tab bar, the Insert menu's Sheet submenu, or the
   palette, or copy one to another spreadsheet (a
@@ -402,6 +595,43 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   Protecting a sheet is an undo step of its own, as the
   gridlines and zero-value switches are, so Ctrl/Cmd+Z after one takes back
   that setting and not the edit before it.
+- **Grouped sheets**: Shift-click a sheet tab to group every sheet from the
+  one in view to it, Ctrl-click (⌘-click on a Mac) to add or drop one sheet,
+  or right-click a tab → Select All Sheets. The title shows **[Group]**, and
+  what you type, format, clear, fill or paste, the rows and columns you insert
+  or delete, and the column widths and row heights you set land on the same
+  cells of every grouped sheet, as one undo step (each sheet keeps its own
+  formatting when only values are typed). Edit → Fill → Across Worksheets
+  copies the selection to the other grouped sheets (all, contents only, or
+  formats only); Hide and Delete act on the whole group. Commands that belong
+  to one sheet (tables, charts, sorting, filters, conditional formatting,
+  validation, notes, freezing) are greyed out and say why until the sheets are
+  ungrouped, by clicking a tab outside the group or with Ungroup Sheets.
+- **AutoCorrect** (Tools → AutoCorrect Options, or Review → Proofing): as a
+  word ends in a cell or the formula bar (never in a formula), listed text is
+  replaced — (c) → ©, (tm) → ™, -- → –, -> → →, and common typos such as
+  teh → the, keeping the case it was typed in — TWo INitial CApitals and
+  words typed with caps lock on are fixed, days get a capital, and so does
+  the first word after a full stop (abbreviations such as e.g. and etc. are
+  exceptions you can edit, and the first word of a cell is left as typed).
+  Ctrl/Cmd+Z straight after a correction puts the word back; a last word
+  corrected as the entry is committed is an undo step of its own. The list,
+  the exceptions and an optional `\alpha` → α math-symbols rule are kept for
+  your account.
+- **Spelling, thesaurus and translation** (Review → Proofing and Language, or
+  the Tools menu): F7 checks the text cells of the selection, or of the whole
+  sheet from the active cell round to it, against English word lists from
+  SCOWL (American or British, loaded the first time they are needed). Each
+  word not in the dictionary is shown in its sentence with the nearest
+  suggestions, to Change or Change All (one undo step), Ignore Once or Ignore
+  All, Add to Dictionary (your own dictionary, kept for your account and
+  editable), or add to AutoCorrect; words in capitals, words with digits and
+  web, email and file addresses are skipped unless you say otherwise.
+  Shift+F7 opens the Thesaurus pane on the active cell's word: its meanings
+  with synonyms and antonyms from Puter's AI, a click to look any of them up,
+  and Insert to put one in place of the word. The Translator pane translates
+  typed text or the selected cells (as `TRANSLATE()` does) and puts the result
+  in the active cell or back into the cells it came from, in one step.
 - **Templates**: start from a monthly budget, an expense tracker with a
   donut chart, an invoice, a to-do list with checkboxes and priorities (the
   last three built on tables), a
@@ -434,7 +664,10 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   or fit to a chosen number of pages wide and tall. Imported XLSX print
   areas, paper orientation, scale, fit settings, exact margins, centering,
   gridlines, and header/footer text are retained in native XLSX records.
-  The print dialog starts with the sheet's saved page setup and offers
+  The print dialog shows the pages as they will print beside its choices
+  (paper, orientation, scale, margins, centring, breaks, gridlines, headings,
+  title, header and footer), page by page, and follows every change.
+  It starts with the sheet's saved page setup and offers
   custom margins and separate pages for nonadjacent print areas,
   with your own header and footer text on every page (`&[Page]`, `&[Pages]`,
   `&[Date]`, `&[Time]`, `&[Tab]`, and `&[File]` fill in the page number and
@@ -471,8 +704,8 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   opens in Excel the way it reads here.
   Formulas whose results are written in the regional format (`TEXT`, `DOLLAR`,
   `FIXED`) are recalculated when it changes, as F9 recalculates them.
-- **Design**: grouped Home, Insert, Page Layout, Formulas, Data, Review and View
-  ribbon tabs reuse the existing commands and formatting controls. Arrow keys
+- **Design**: grouped Home, Insert, Page Layout, Formulas, Data, Review, View and
+  Automate ribbon tabs reuse the existing commands and formatting controls. Arrow keys
   navigate tabs; Down enters a group, and double-clicking a tab collapses the
   ribbon. Overflow controls keep commands reachable in narrow windows.
   Unsupported ribbon features are disabled. The original menus remain available.
@@ -480,7 +713,8 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   changes worksheet zoom. The formula bar
   expands to several lines for long formulas (Alt+Enter adds a line), sheet
   tabs, and a status bar that sums the selection (with min and max) and
-  explains an error in the active cell. Works on desktop, tablet, and phone
+  explains an error in the active cell; right-click it to choose what it shows,
+  each choice listed with its current value, the menu staying open while you switch several. Works on desktop, tablet, and phone
   (tap to select, tap again to edit, long-press for the menu). Light, dark,
   and system themes, applied before first paint. Dark mode changes the app
   controls while the spreadsheet keeps its white paper background and colors.
@@ -501,6 +735,36 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   code's section colors ([Red], [Blue], …) color the cell text.
 - **Image from URL**: Insert → Image from URL fetches a PNG, JPEG, GIF, WebP,
   or SVG through Puter and places it on the sheet like an uploaded picture.
+- **Pictures in cells**: Insert ▸ Image ▸ Place in Cell (from your device,
+  Puter or a URL) makes a picture the cell's value, fitted inside the cell in
+  proportion and aligned by the cell's alignment. It moves, sorts (after the
+  values), filters, copies and undoes with its cell; `=A1` shows it, `TYPE`
+  answers 128 and `ISNUMBER`/`ISTEXT` say no. Right-click ▸ Edit Alt Text… gives
+  it a description (`IMAGE(url, "alt text", sizing)` does the same for a
+  formula's picture), and Place over Cells lifts it out to float; a floating
+  picture's menu or Picture Format ▸ Place in Cell puts it back into the cell
+  under its corner. A pasted picture offers both in its Paste Options. In
+  .xlsx they are the standard in-cell rich values (local images with their alt
+  text, and `IMAGE()` results from the web as web images), so other programs
+  show them too. The accessibility check lists cell pictures with no alt text.
+- **Pictures of cells**: Paste Special ▸ Picture pastes a picture of the copied
+  range; Paste Special ▸ Linked Picture pastes one that keeps showing those
+  cells (values, number formats, fills, fonts, borders, merged cells and cell
+  pictures, without gridlines) as they change, follows inserted rows and
+  renamed sheets, and shows its reference (`=Sheet1!$A$1:$C$5`) in the formula
+  bar, where typing another range retargets it; double-click goes to the
+  cells. Saved to .xlsx as a picture of the cells naming its range, so it stays
+  linked elsewhere.
+- **Picture Format**: a selected picture brings its own tab. Corrections
+  (brightness and contrast presets previewed on the picture, or exact values
+  in Picture Corrections), Color (grayscale), Transparency, Reset Picture and
+  Reset Picture & Size; Picture Styles (white or black frames, a thin border,
+  drop shadow, rounded corners, oval); Alt Text; Arrange; and Size: Crop with
+  eight handles (drag or arrow keys) and aspect-ratio presets, the picture
+  staying where it is on the sheet, plus exact height and width with Lock
+  aspect ratio. All of it prints, copies, undoes and round trips through
+  .xlsx as DrawingML (brightness/contrast, grayscale, alpha, outline, preset
+  shape and shadow).
 - **CSV encodings**: imported text files are read as UTF-8 (with or without a
   BOM), as UTF-16 when a byte-order mark says so, and as Windows-1252 when the
   bytes are not valid UTF-8, so accented names survive files from older
@@ -508,6 +772,59 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
 - **Import from URL**: File → Import from URL fetches a .csv, .tsv, .xlsx, or
   .ods from a web address through Puter and adds its sheets to the open
   spreadsheet (the format is read from the address or sniffed from the bytes).
+- **Editing together**: Share → Start editing together lets several people
+  work in one spreadsheet at once. Everyone sees the others' edits within a
+  second or two (cell values and formulas, formatting, inserted, deleted and
+  moved rows and columns, added, renamed, moved and deleted sheets, settings)
+  without overwriting each other: changes go through one ordered log, and a
+  formula typed while someone inserted rows above it is rewritten as the
+  workbook rewrites its own. Each person's initials sit beside Share (a click
+  goes to where they are), their selection is outlined on the grid in their
+  colour with their name, and the sheet tabs show who is on which sheet. The
+  owner hands out invitation links that let people edit or only view (enforced
+  by the owner's own collaboration server, a Puter Worker, not only by the
+  interface), invites people by username, changes or removes access, and can
+  stop at any time. Undo takes back only your own changes, and leaves alone
+  what others changed since. Edits made offline wait on the device (through
+  a reload too) and merge when the connection returns; the status says Live,
+  Syncing or Offline with what is waiting. The .xlsx file stays the copy the
+  owner keeps: it is written back as people work, so it opens anywhere. See
+  [docs/collaboration.md](docs/collaboration.md).
+- **Send by email**: File → Share → Send a copy emails the workbook as it is
+  now to up to 20 addresses, with a subject and a message, from the signed-in
+  user (replies go to them): as an .xlsx, as a PDF of the whole workbook, the
+  sheet or the selection (built in the app, laid out on each sheet's paper and
+  orientation, scaled to the page width or split across pages), or the sheet
+  or selection as .csv. The copy leaves out Show Changes' record of earlier
+  cell values, as every download does. Send a link shares the file with each
+  address (Can view or Can edit; someone without a Puter account is invited)
+  and emails them a link that opens it; the owner of a live workbook sends an
+  invitation into it. The Share dialog offers Email a link too. Addresses are
+  checked as they are typed, attachments are capped at 7 MB, the dialog shows
+  what is attached and how large it is, and after a partial failure it keeps
+  just the addresses that were not reached. Mail goes through the app's own
+  email worker (`src/workers/email-worker.js`, adapted from the Calendar
+  app's), called with the user's Puter session and billed to them; it
+  composes every message itself, accepts only workbook attachments it
+  recognizes and links to the app, sends each person a message of their own,
+  and caps how much one user can send a day. No credential is ever put in a
+  request.
+- **Threaded comments with @mentions**: typing @ in a comment or reply lists
+  the people who can be mentioned (the members of a live workbook, the people
+  the file is shared with, the workbook's other commenters), narrowed as you
+  type; a Puter username or an email address can be typed in full. A posted
+  comment keeps whom it mentions, shows them highlighted, and carries them in
+  .xlsx threaded comments (each comment's mentions list against the
+  workbook's people). Anyone mentioned who cannot open the workbook is offered
+  a share first (Can view or Can edit), then each is emailed the comment, its
+  cell and a link that opens the workbook at that cell (a Puter user known by
+  username at their Puter mailbox). Whoever has the workbook open sees a
+  mention of them as it arrives, and on opening it the mentions they have not
+  seen yet, with a button that goes to the comment. A comment that mentions
+  someone can also assign its thread to them: the card says who it is
+  assigned to, resolving the thread marks it done, and the person is told it
+  is theirs (the assignment travels in the app's own file and live
+  workbooks, not in .xlsx).
 - **Version history**: File → Version history lists snapshots of the file
   kept under `Spreadsheets/.versions/<name> ~<file id>/` — one is written on
   its own about every 10 minutes of saving, and any can be saved by hand with a
@@ -519,6 +836,20 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   a file deleted or renamed outside the app before it was kept that way is set
   aside, its snapshots kept, when another file takes that name, so no file
   lists or restores a stranger's snapshots.
+- **Show Changes**: Review → Show Changes (also File → Show changes, and
+  Show Changes on the cell menu for the selected cells) opens a pane listing
+  the recent edits newest first: who made each one (the signed-in Puter
+  user), when, where, and what the cell held before and after, formulas shown
+  as formulas. A paste or fill is one card that opens onto the cells it
+  changed; rows and sheets inserted or deleted, and undo and redo, are listed
+  by name. A click selects the cells. The list narrows to the sheet shown and
+  to the selection or a typed range, and older edits load on demand. The
+  record keeps the last 1,000 edits (up to 100 cells listed each) and travels
+  with the file in the app's own sidecar part and in drafts, but not in a
+  downloaded or exported copy, so what cells used to say stays with the file
+  on your drive; it is not part of undo, and Clear empties it after asking.
+  In a shared workbook each person's edits are listed under their own name.
+  The pane links on to Version history.
 - **Nothing lost**: unsaved edits are also copied to the browser's local
   storage moments after they are made. If a tab closes while offline or a
   save fails, opening the file again offers to restore those changes (or
@@ -563,6 +894,42 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   shortcut: type a few letters ("freeze", "pivot", "currency"), arrow to the
   one you mean, Enter runs it. Opened with nothing typed, the actions you used
   last come first.
+- **Options** (File → Options, Tools → Options, the account menu, or
+  Ctrl/Cmd+,): one dialog with a search box over its sections that finds any
+  option by a word of its name. General: theme, regional format, whether the
+  app opens on the start screen, and the font, size, sheet count and view a new
+  workbook starts with, and the name written on your comments and changes
+  (your Puter account's unless you choose another). Formulas: this workbook's
+  calculation mode and iterative calculation (saved with the workbook, and
+  labelled as such), how new workbooks calculate, and the error checking rules.
+  Editing: where Enter moves (down, right, up, left, or nowhere), a fixed
+  decimal point, editing in the cell or the formula bar, AutoComplete, Flash
+  Fill offered as you type, carrying a list's formats and formulas onto a new
+  row, how two-digit years are read, the fill handle and dragging cells, a
+  warning before a drag replaces data, the Paste and Auto Fill Options buttons,
+  and a warning before a command changes very many cells. View: formula bar,
+  status bar, sheet tabs, scroll bars, headers on new sheets, comment and note
+  indicators (with hover, without, or none) and showing or hiding all objects.
+  Proofing (AutoCorrect, spelling), Save (AutoSave by default, how soon unsaved
+  edits are copied into the browser), Accessibility (a stronger selection,
+  reduced motion) and Privacy (AI features on or off). Changes apply at once and
+  follow your Puter account to other devices.
+- **Quick Access Toolbar**: the row beside the title holds AutoSave, Save, Undo
+  and Redo, and any other command: right-click a ribbon button → Add to Quick
+  Access Toolbar, tick common commands in the toolbar's own arrow menu, or pick
+  from every command in File → Options → Quick Access Toolbar, where they can
+  be reordered. It can sit below the ribbon and show command names, and is kept
+  for your account.
+- **Customize the ribbon** (File → Options → Customize Ribbon, or right-click
+  the ribbon): show or hide tabs, rename and reorder them, and build tabs and
+  groups of your own holding any commands, on your own tabs or the built-in
+  ones; Restore Defaults puts the ribbon back.
+- **Keyboard shortcuts of your own** (File → Options → Keyboard Shortcuts):
+  every command with the keys that run it, searchable by name or keys. Press a
+  new combination to give a command a shortcut; the dialog says which command
+  it would be taken from and refuses chords the browser or typing needs. Built-in
+  shortcuts can be turned off or moved, and the menus, the palette and the
+  ribbon's tooltips show the keys in force.
 - **Accessibility**: the grid is a real `role="grid"` with the active cell
   exposed through `aria-activedescendant`, every selection change is
   announced through a live region, menus and dialogs trap focus and close on
@@ -598,11 +965,15 @@ src/
                       validations, charts and images, links, groups, protection,
                       moving and reordering
     charts.js         chart model and the data read from a range
+    chart-special.js  hierarchies, box statistics, stock columns and surface bands for charts
     tables.js         tables and structured references (Table1[Column])
     subtotal.js       subtotal rows and their outline groups
+    auto-outline.js   Auto Outline, Clear Outline and outline styles from summary formulas
+    custom-cell-styles.js  the workbook's named cell styles: parts, applying, merging
     importrange.js    IMPORTRANGE, IMPORTDATA, IMPORTHTML, IMPORTXML helpers
     formula/query.js  the QUERY language: parser and executor
     aiformula.js      prompts for the AI formula helper and reading formulas from replies
+    change-history.js the record of recent edits behind Show Changes
     pivot.js          pivot tables as live formulas
     clipboard.js      HTML tables for and from the system clipboard
     selection.js      selection and keyboard navigation rules
@@ -627,6 +998,8 @@ src/
                       fill-series, sort, pivot, validation, and version-history dialogs
   views/              home (file list), editor, gate (SDK error, sign-in for a cloud file)
   vendor/xlsx.mjs     SheetJS Community Edition 0.20.3 (Apache-2.0), vendored
+  vendor/words-en.js  English word lists for the spelling checker, from SCOWL
+                      (MIT AND BSD; generated by dev/generate-word-lists.py)
 ```
 
 The grid is virtualized: only the cells in view exist in the DOM, headers
@@ -648,6 +1021,9 @@ covers them.
 | FS `Spreadsheets/<name>.xlsx` | each document, whole | a real file the user owns; opens anywhere |
 | `Spreadsheets/.versions/<name> ~<file id>/*.xlsx` | version history snapshots | one per ~10 minutes of saving, 30 unlabeled kept; the id keeps the history with the file through any rename |
 | KV `spreadsheet:settings:v1` | theme and regional format (this browser's storage without a session) | tiny, hot, one read at boot |
+| FS `Spreadsheets/Scripts/<name>.js` | My Scripts, the user's own scripts | plain files the user can see; usable in any workbook |
+| KV `spreadsheet:script-trust:v1:<sha256>` | scripts from files the user has agreed to run | asked once per script, on every device |
+| KV `spreadsheet:pref:<name>` | AutoCorrect settings, the custom dictionary, spelling and translation choices (also kept in this browser, per account) | follow the account to another device |
 
 Files are never stored in KV. The XLSX exporter supplements SheetJS Community
 Edition with native cell styles (fonts, colors, borders and alignment), blank
@@ -761,6 +1137,18 @@ Two dev harnesses (not part of the production build):
   (`dev/puter-mock.js`), so no Puter account is needed. Add `?env=app` to
   simulate the Puter desktop or `?signedout` to start without a session.
 - `/dev/phone.html` shows the mock app in phone- and tablet-sized frames.
+
+In `/mock.html`, editing together runs against a room worker inside the page
+(`dev/collab-mock.js`); `window.__collabDemo.addPerson('maria')` adds a
+simulated collaborator to the shared workbook that is open, whose `RoomClient`
+can then edit and move about. `npm run build:worker` bundles the room worker
+into `public/worker/spreadsheet-worker.js` (part of `npm run build`).
+
+Email in `/mock.html` runs the real email worker inside the page
+(`dev/email-mock.js`): nothing is sent, and each message it would send is
+kept in `window.__mailbox` and logged. Addresses at `bounce.test` fail and
+addresses at `optout.test` have opted out. `npm run deploy:email-worker`
+deploys the worker as `spreadsheet-email` (done once, by the app owner).
 
 ### Tests
 

@@ -10,8 +10,13 @@ import { identifyDrawing, drawingBaseline } from './xlsx-drawing-reconcile.js';
 import { readXlsxCharts } from './xlsx-charts.js';
 import { xlsxAttr } from './xlsx-styles.js';
 import { decorativeXml, drawingDescription } from './drawingml-accessibility.js';
+import { linkedPictureTarget, rangePicture, svgDataUrl } from './range-picture.js';
+import { roundedRadius } from './picture-format.js';
 import { equationAnchorXml, equationParagraphs } from './xlsx-equation.js';
 import { effectRefStyleXml } from './theme-effects.js';
+import { smartArtGroupXml } from './xlsx-smartart.js';
+import { workbookTheme } from './workbook-theme.js';
+import { CHARTEX_CONTENT_TYPE, CHARTEX_REL, CHARTEX_TYPES, CHART_COLORS_REL, CHART_STYLE_REL, chartExColorsXml, chartExFrame, chartExStyleXml, chartExXml } from './xlsx-chartex.js';
 
 const A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
@@ -190,17 +195,23 @@ function chartXml(X, wb, sheet, ch) {
   const ap = ch.appearance || (ch.type === 'bar'
     ? { reverseCategories: true, axisCrossings: { y: 'max' } } : {});
   const groups = new Map(), circular = ['pie', 'donut'].includes(ch.type);
+  // A stock chart with volume draws it as columns on the primary axis and its prices on a secondary one.
+  const stockVolume = ch.type === 'stock' && ['vhlc', 'vohlc'].includes(ch.stock);
+  const stockFields = ch.type === 'stock' ? { hlc: 3, ohlc: 4, vhlc: 4, vohlc: 5 }[ch.stock] || 3 : Infinity;
   data.series.forEach((series, i) => {
     if (circular && i) return;
-    const type = ch.type === 'combo' ? ap.seriesTypes?.[i] || (i === data.series.length - 1 ? 'line' : 'column') : ch.type;
-    const secondary = ch.secondaryAxis && ch.type === 'combo' && type === 'line';
+    if (i >= stockFields) return;
+    const type = ch.type === 'combo' ? ap.seriesTypes?.[i] || (i === data.series.length - 1 ? 'line' : 'column') : stockVolume && i === 0 ? 'column' : ch.type;
+    const secondary = ch.secondaryAxis && ch.type === 'combo' && type === 'line' || stockVolume && type === 'stock';
     const sourceGroup = ap.seriesGroups?.[i];
     const key = `${type}:${secondary}:${sourceGroup?.id ?? ''}`, group = groups.get(key) || { type, secondary, grouping: sourceGroup?.grouping, series: '', count: 0 };
     const color = seriesColor(ch, i), line = ap.lines?.[i] || ap.lineDefault, pie = circular ? ap.pie : null;
     const isBar = ['column', 'bar'].includes(type), bar = isBar ? ap.bars?.[i] : null;
     const bubble = type === 'bubble' ? ap.bubble?.series?.[i] : null;
     const radar = type === 'radar' ? ap.radar?.series?.[i] : null;
-    const props = circular ? tag('c:spPr', {}, (pie?.color ? paint(pie.color) : '')
+    // Stock prices are drawn by the group's high-low lines and up/down bars, their own lines hidden; a surface by its bands.
+    const props = type === 'surface' ? '' : type === 'stock' ? tag('c:spPr', {}, tag('a:ln', { w: 19050 }, tag('a:noFill')))
+      : circular ? tag('c:spPr', {}, (pie?.color ? paint(pie.color) : '')
       + tag('a:ln', { w: emu(pie?.strokeWidth ?? 1.5) }, pie ? pie.stroke == null ? '' : paint(pie.stroke) : paint('#ffffff')))
       : radar ? lineShape({ color: line?.visible === false ? 'none' : (ap.radar.style === 'filled' ? radar.stroke : ch.colors?.[i] || radar.stroke) || line?.color || color, width: line?.width, dash: radar.dash },
         !ch.colors?.[i] && gradientPaint(radar.gradient) || paint(ch.colors?.[i] || radar.fill || color))
@@ -217,6 +228,12 @@ function chartXml(X, wb, sheet, ch) {
     // App-authored bars keep their ordinary fill for negative values. Native
     // series retain both explicit booleans and the omitted (true) default.
     if (isBar && (!bar || typeof bar.invertIfNegative === 'boolean')) body += val('invertIfNegative', Number(bar?.invertIfNegative ?? false));
+    if (circular && ch.explosion) body += val('explosion', Math.round(ch.explosion));
+    if (type === 'stock') {
+      // A high-low-close chart marks each close with a dash; prices with up/down bars need no markers.
+      const close = !['ohlc', 'vohlc'].includes(ch.stock) && i === stockFields - 1;
+      body += tag('c:marker', {}, val('symbol', close ? 'dash' : 'none') + (close ? val('size', 5) + tag('c:spPr', {}, paint('#404040') + tag('a:ln', {}, paint('#404040'))) : ''));
+    }
     if (['line', 'scatter', 'radar'].includes(type)) body += tag('c:marker', {}, val('symbol', line?.marker === false ? 'none' : radar?.markerSymbol || line?.markerSymbol || 'circle')
       + val('size', Math.min(72, Math.max(2, Math.round(line?.markerSize ?? 5))))
       + tag('c:spPr', {}, paint(line?.markerFill || color) + tag('a:ln', {}, paint(line?.markerStroke || color))));
@@ -231,7 +248,7 @@ function chartXml(X, wb, sheet, ch) {
         body += tag('c:dPt', {}, val('idx', index) + tag('c:spPr', {}, paint(fill)
           + (border ? tag('a:ln', border.strokeWidth == null ? {} : { w: emu(border.strokeWidth) }, border.stroke == null ? '' : paint(border.stroke)) : '')));
       }
-    } else {
+    } else if (type !== 'surface') {
       const colors = new Map((ap.pointColors?.[i] || []).map(p => [p.index, p.color]));
       const points = new Map((bar?.points || []).map(p => [p.index, p]));
       for (const index of new Set([...colors.keys(), ...points.keys()])) {
@@ -246,7 +263,7 @@ function chartXml(X, wb, sheet, ch) {
     const labels = ap.valueLabels?.[i], rangeLabels = refs[i]?.labels ? ap.dataLabels?.[i] : null;
     const showRange = refs[i]?.labels ? rangeLabelVisibility(rangeLabels?.showRange !== false) : '';
     if (type === 'bubble') body += bubbleLabelsXml(bubble?.labels, ch.labels);
-    else if ((ch.labels || showRange) && !pie) {
+    else if ((ch.labels || showRange) && !pie && type !== 'surface') {
       const overrides = new Map((labels?.points || []).map(p => [p.index, p]));
       const rangePoints = new Map((rangeLabels?.points || []).map(p => [p.index, p]));
       const points = [...new Set([...(labels?.hidden || []), ...overrides.keys(), ...rangePoints.keys()])].sort((a, b) => a - b).map(index => {
@@ -300,9 +317,24 @@ function chartXml(X, wb, sheet, ch) {
     group.series += tag('c:ser', {}, body); group.count++; groups.set(key, group);
   });
   let plots = '';
+  const surfaceView = ch.type === 'surface' ? ch.surfaceView || 'surface3d' : null;
   for (const { type, series, secondary, grouping, count } of groups.values()) {
-    const kind = { column: 'bar', bar: 'bar', donut: 'doughnut' }[type] || type;
+    const kind = { column: 'bar', bar: 'bar', donut: 'doughnut' }[type] || (type === 'pie' && ch.ofPie ? 'ofPie' : type);
+    if (kind === 'stock') {
+      const ink = paint('#404040');
+      plots += tag('c:stockChart', {}, series + tag('c:hiLowLines', {}, tag('c:spPr', {}, tag('a:ln', { w: 9525 }, ink)))
+        + (['ohlc', 'vohlc'].includes(ch.stock) ? tag('c:upDownBars', {}, val('gapWidth', 150)
+          + tag('c:upBars', {}, tag('c:spPr', {}, paint('#ffffff') + tag('a:ln', { w: 9525 }, ink))) + tag('c:downBars', {}, tag('c:spPr', {}, ink + tag('a:ln', { w: 9525 }, ink)))) : '')
+        + val('axId', 1) + val('axId', secondary ? 3 : 2));
+      continue;
+    }
+    if (kind === 'surface') {
+      plots += tag(surfaceView.endsWith('ontour') ? 'c:surfaceChart' : 'c:surface3DChart', {}, val('wireframe', Number(surfaceView.startsWith('wireframe')))
+        + series + val('axId', 1) + val('axId', 2) + val('axId', 4));
+      continue;
+    }
     let body = '';
+    if (kind === 'ofPie') body += val('ofPieType', ch.ofPie.kind === 'bar' ? 'bar' : 'pie');
     if (kind === 'bar') body += val('barDir', type === 'bar' ? 'bar' : 'col');
     // The combo's stack controls apply to its columns. Its ordinary line keeps
     // raw values, including alongside percentage columns. Explicit per-group
@@ -316,7 +348,9 @@ function chartXml(X, wb, sheet, ch) {
     if (kind === 'bubble') body += val('bubbleScale', Math.round(ap.bubble?.scale ?? 100))
       + val('showNegBubbles', Number(!!ap.bubble?.showNegative)) + val('sizeRepresents', ap.bubble?.sizeRepresents || 'area');
     if (kind === 'bar') body += val('gapWidth', ap.gapWidth ?? authoredBarGapWidth(ch.stacked || ch.stack100 ? 1 : count)) + val('overlap', ch.stacked || ch.stack100 ? 100 : ap.overlap || 0);
-    if (circular) body += val('firstSliceAng', Math.round(ap.pie?.firstSliceAngle || 0));
+    if (kind === 'ofPie') body += val('gapWidth', Math.round(ch.ofPie.gap)) + val('splitType', 'pos') + val('splitPos', ch.ofPie.split)
+      + val('secondPieSize', Math.round(ch.ofPie.secondSize)) + tag('c:serLines', {}, tag('c:spPr', {}, tag('a:ln', { w: 9525 }, paint('#7f7f7f'))));
+    else if (circular) body += val('firstSliceAng', Math.round(ap.pie?.firstSliceAngle || 0));
     if (kind === 'doughnut') body += val('holeSize', Math.round(ap.pie?.holeSize ?? 58));
     if (!circular) body += val('axId', 1) + val('axId', secondary ? 3 : 2);
     plots += tag(`c:${kind}Chart`, {}, body);
@@ -355,7 +389,7 @@ function chartXml(X, wb, sheet, ch) {
     body += val('crossAx', horizontal ? 2 : 1) + val(Number.isFinite(crossing) ? 'crossesAt' : 'crosses', crossing);
     if (kind === 'catAx' && ap.xLabelSkip) body += val('tickLblSkip', ap.xLabelSkip);
     if (kind === 'catAx' && axisStyle?.tickSkip) body += val('tickMarkSkip', axisStyle.tickSkip);
-    if (numeric) body += val('crossBetween', ap.categoryBetween === false ? 'midCat' : 'between');
+    if (numeric) body += val('crossBetween', ap.categoryBetween === false || ch.type === 'surface' ? 'midCat' : 'between');
     if (date) body += val('baseTimeUnit', ap.xBaseTimeUnit || 'days');
     const step = horizontal ? ap.xStep : secondary ? ap.y2Step : ap.yStep;
     if ((numeric || date) && step > 0) body += val('majorUnit', step);
@@ -370,7 +404,12 @@ function chartXml(X, wb, sheet, ch) {
         + textProps(units.style, units.rotation)) : ''));
     return tag(`c:${kind}`, {}, body);
   };
-  const axes = circular ? '' : axis(1, true) + axis(2, false) + ([...groups.values()].some(g => g.secondary) ? axis(3, false, true) : '');
+  // A surface also has a series axis, running back from the categories (hidden on a contour, seen from above).
+  const seriesAxis = surfaceView ? tag('c:serAx', {}, val('axId', 4) + tag('c:scaling', {}, val('orientation', 'minMax')) + val('delete', Number(surfaceView.endsWith('ontour')))
+    + val('axPos', 'b') + val('majorTickMark', 'out') + val('minorTickMark', 'none') + val('tickLblPos', 'nextTo') + textProps(ap.xStyle || {}) + val('crossAx', 2) + val('crosses', 'autoZero')) : '';
+  const axes = circular ? '' : axis(1, true) + axis(2, false) + ([...groups.values()].some(g => g.secondary) ? axis(3, false, true) : '') + seriesAxis;
+  const view3D = surfaceView ? tag('c:view3D', {}, surfaceView.endsWith('ontour') ? val('rotX', 90) + val('rotY', 0) + val('rAngAx', 0) + val('perspective', 0)
+    : val('rotX', 15) + val('rotY', 20) + val('rAngAx', 0) + val('perspective', 30)) : '';
   const table = ap.dataTable;
   const tableXml = table ? tag('c:dTable', {}, val('showHorzBorder', Number(table.horizontal)) + val('showVertBorder', Number(table.vertical))
     + val('showOutline', Number(table.outline)) + val('showKeys', Number(table.keys))
@@ -389,13 +428,32 @@ function chartXml(X, wb, sheet, ch) {
   return HEADER + tag('c:chartSpace', { 'xmlns:c': C, 'xmlns:a': A, 'xmlns:r': R.slice(0, -1) },
     (typeof ap.roundedCorners === 'boolean' ? val('roundedCorners', Number(ap.roundedCorners)) : '')
     + (pivot && !pivot.standalone ? pivotSource('c') : '')
-    + tag('c:chart', {}, (ch.title || ch.titleRef ? title(data.titles?.title ?? ch.title, ap.titleStyle, ap.title, ch.titleRef, 0, boxShape(ap.titleBox, ap.effects?.title)) : val('autoTitleDeleted', 1)) + plot + legend + val('plotVisOnly', Number(!ch.includeHidden)) + val('dispBlanksAs', ap.radar?.blanks || ap.blanks || 'gap'))
+    + tag('c:chart', {}, (ch.title || ch.titleRef ? title(data.titles?.title ?? ch.title, ap.titleStyle, ap.title, ch.titleRef, 0, boxShape(ap.titleBox, ap.effects?.title)) : val('autoTitleDeleted', 1)) + view3D + plot + legend + val('plotVisOnly', Number(!ch.includeHidden)) + val('dispBlanksAs', ap.radar?.blanks || ap.blanks || 'gap'))
     + withEffects(tag('c:spPr', {}, paint(ap.background || '#ffffff') + tag('a:ln', ap.borderWidth != null ? { w: emu(ap.borderWidth) } : {},
       paint(ap.border === false || ap.borderColor === 'none' ? null : ap.borderColor || '#cccccc'))), ap.effects?.chartArea)
     + (ap.textStyle ? textProps(ap.textStyle) : '') + (ap.annotations?.length ? tag('c:userShapes', { 'r:id': 'chartAnnotations' }) : '') + pivotExtension);
 }
 
 /** SVG shapes can contain HTML text; rasterize that text in the browser before giving it to Excel. */
+const CAMERA_URI = '{84589F7E-364E-4C9E-8A38-B11213B215E9}';
+const A14 = 'http://schemas.microsoft.com/office/drawing/2010/main';
+/**
+ * A picture's Picture Format in DrawingML: corrections as a:lum, grayscale as a:grayscl and
+ * transparency as a:alphaModFix inside the blip; a rounded or oval outline as the preset geometry,
+ * the frame as a:ln and the shadow as an outer shadow on the shape.
+ */
+export function pictureFormatXml(obj) {
+  const pct = n => Math.round(n * 100000);
+  const blip = (obj.transparency ? tag('a:alphaModFix', { amt: pct(1 - obj.transparency) }) : '')
+    + (obj.recolor === 'grayscale' ? tag('a:grayscl') : '')
+    + (obj.adjust ? tag('a:lum', { bright: obj.adjust.brightness ? pct(obj.adjust.brightness) : null, contrast: obj.adjust.contrast ? pct(obj.adjust.contrast) : null }) : '');
+  const radius = obj.shape === 'roundRect' ? Math.min(50000, Math.round(roundedRadius(obj.w, obj.h) / Math.max(1, Math.min(obj.w, obj.h)) * 100000)) : null;
+  const geometry = tag('a:prstGeom', { prst: obj.shape || 'rect' }, radius != null ? tag('a:avLst', {}, tag('a:gd', { name: 'adj', fmla: `val ${radius}` })) : tag('a:avLst'));
+  const line = obj.outline ? tag('a:ln', { w: Math.round(obj.outline.width * 9525) }, tag('a:solidFill', {}, tag('a:srgbClr', { val: obj.outline.color.slice(1).toUpperCase() }))) : '';
+  const shadow = obj.shadow ? tag('a:effectLst', {}, tag('a:outerShdw', { blurRad: 95250, dist: 38100, dir: 2700000, algn: 'tl', rotWithShape: 0 }, tag('a:srgbClr', { val: '000000' }, tag('a:alpha', { val: 38000 })))) : '';
+  return { blip, shape: geometry + line + shadow };
+}
+
 async function pictureBytes(src, width, height) {
   const match = /^data:image\/([a-z0-9.+-]+);base64,(.*)$/is.exec(src);
   if (!match) throw new Error('The workbook contains an unreadable picture');
@@ -411,7 +469,7 @@ async function pictureBytes(src, width, height) {
   return { type, extension: type === 'svg+xml' ? 'svg' : type === 'jpeg' ? 'jpg' : type === 'x-emf' ? 'emf' : type, bytes: Uint8Array.from(atob(data), c => c.charCodeAt(0)) };
 }
 
-export async function exportDrawings(X, wb, sheet, index, { set, binary, contentType, recordDrawing, slicers }) {
+export async function exportDrawings(X, wb, sheet, index, { set, binary, contentType, recordDrawing, recordGroup, slicers }) {
   // A chartsheet requires a drawing relationship even after its last object
   // has been removed. An empty drawing is still a valid drawing part.
   // Form controls and timelines are written elsewhere (a timeline travels in the app's own data).
@@ -436,6 +494,13 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
     objectIds.set(obj.id, ids);
     if (obj.drawingKey && !drawingIds.has(obj.drawingKey)) drawingIds.set(obj.drawingKey, i + 1);
   }
+  // Arrange ▸ Group: a group of objects written whole becomes one grpSp in one anchor. Only groups of plain
+  // one-cell objects qualify; any other group's members are written one by one (the app's record keeps the group).
+  const members = new Map();
+  for (const obj of sheet.charts) if (obj.group) members.set(obj.group, [...(members.get(obj.group) || []), obj]);
+  const nativeGroups = new Set([...members].filter(([, list]) => list.length > 1 && sheet.kind !== 'chart' && list.every(o => !appOnly(o)
+    && o.type !== 'slicer' && o.type !== 'smartart' && !o.cellAnchor && o.anchorMode !== 'absolute' && !o.equation && !(o.type === 'image' && o.nativeDrawing))).map(([group]) => group));
+  const pending = new Map();
   for (const [i, obj] of sheet.charts.entries()) {
     if (appOnly(obj)) continue;
     const id = i + 1, key = `${index}_${id}`, relId = `rId${id}`;
@@ -449,7 +514,14 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
       if (!view) throw new Error('Missing native slicer export plan');
       shape = slicerFrameXml(obj, id, view.name);
     } else if (native) shape = native;
-    else if (obj.type === 'text') {
+    else if (obj.type === 'smartart') {
+      // A SmartArt graphic: a group of ordinary shapes as the app draws it (the app's record keeps the diagram), or,
+      // for one another program drew and nobody has changed here, the shapes that program drew.
+      const theme = workbookTheme(wb);
+      shape = (obj.fallback?.nativeDrawing && nativeDrawingXml({ ...obj, nativeDrawing: obj.fallback.nativeDrawing, title: obj.name || 'Diagram', rotation: 0, flipH: false, flipV: false },
+        id, () => nextDrawingId++, null, objectIds.get(obj.id), drawingIds))
+        || smartArtGroupXml(obj, id, () => nextDrawingId++, { colors: theme.colors, font: theme.minor });
+    } else if (obj.type === 'text') {
       const s = obj.style || {};
       const text = textBoxText(wb, sheet.id, obj);
       // WordArt carries its effects on each run as well, where every reader applies them.
@@ -461,11 +533,24 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
           + tag('a:t', {}, xmlText(text.slice((obj.textPrefix || '').length, obj.textSuffix ? -obj.textSuffix.length : undefined)))) + run(obj.textSuffix || ''))
         : text.split('\n').map(line => tag('a:p', {}, tag('a:pPr', { algn: { left: 'l', center: 'ctr', right: 'r' }[s.align] || 'l' }, textStyle(s)) + run(line))).join('');
       shape = tag('xdr:sp', { textlink: obj.textRef || null }, tag('xdr:nvSpPr', {}, tag('xdr:cNvPr', { id, name: `Text ${id}`, descr: obj.decorative ? null : obj.description || null }, decorativeXml(obj.decorative) || undefined) + tag('xdr:cNvSpPr', { txBox: 1 }))
-        + tag('xdr:spPr', {}, tag('a:xfrm', {}, tag('a:off', { x: 0, y: 0 }) + tag('a:ext', { cx: emu(obj.w), cy: emu(obj.h) }))
+        + tag('xdr:spPr', {}, tag('a:xfrm', { rot: obj.rotation ? Math.round(obj.rotation * 60000) : null, flipH: obj.flipH ? 1 : null, flipV: obj.flipV ? 1 : null }, tag('a:off', { x: 0, y: 0 }) + tag('a:ext', { cx: emu(obj.w), cy: emu(obj.h) }))
           + tag('a:prstGeom', { prst: 'rect' }, tag('a:avLst')) + paint(s.bg) + tag('a:ln', {}, paint(s.border ? '#cccccc' : null)))
         + effectRefStyleXml(s.effectRef)
         + tag('xdr:txBody', {}, tag('a:bodyPr', { anchor: { top: 't', middle: 'ctr', bottom: 'b' }[s.valign] || 'ctr', ...(equation ? { wrap: 'none' } : {}),
           ...(s.padding ? Object.fromEntries(['tIns', 'rIns', 'bIns', 'lIns'].map((k, i) => [k, emu(s.padding[i])])) : {}) }) + tag('a:lstStyle') + content));
+    } else if (CHARTEX_TYPES.has(obj.type)) {
+      // Treemaps, sunbursts, box and whisker and funnel charts are extended chart parts with their own style parts.
+      const path = `/xl/charts/chartEx${key}.xml`;
+      set(path, chartExXml(X, wb, sheet, obj));
+      set(`/xl/charts/style${key}.xml`, chartExStyleXml());
+      set(`/xl/charts/colors${key}.xml`, chartExColorsXml());
+      set(`/xl/charts/_rels/chartEx${key}.xml.rels`, HEADER + tag('Relationships', { xmlns: 'http://schemas.openxmlformats.org/package/2006/relationships' },
+        tag('Relationship', { Id: 'rId1', Type: CHART_STYLE_REL, Target: `style${key}.xml` }) + tag('Relationship', { Id: 'rId2', Type: CHART_COLORS_REL, Target: `colors${key}.xml` })));
+      contentType(path, CHARTEX_CONTENT_TYPE);
+      contentType(`/xl/charts/style${key}.xml`, 'application/vnd.ms-office.chartstyle+xml');
+      contentType(`/xl/charts/colors${key}.xml`, 'application/vnd.ms-office.chartcolorstyle+xml');
+      relationships.push(tag('Relationship', { Id: relId, Type: CHARTEX_REL, Target: `../charts/chartEx${key}.xml` }));
+      shape = chartExFrame(obj, id, relId, tag('xdr:cNvPr', { id, name: obj.title || `Chart ${id}`, descr: obj.decorative ? null : obj.description }, decorativeXml(obj.decorative) || undefined));
     } else if (!['image', 'histogram', 'waterfall'].includes(obj.type) && !obj.pareto) {
       const path = `/xl/charts/chart${key}.xml`;
       set(path, chartXml(X, wb, sheet, obj));
@@ -483,6 +568,10 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
         + tag('a:graphic', {}, tag('a:graphicData', { uri: C }, tag('c:chart', { 'xmlns:c': C, 'r:id': relId }))));
     } else {
       let src = obj.nativeSrc || obj.src;
+      // A linked picture is saved as the picture of its cells as they are now.
+      const linked = obj.type === 'image' && obj.pictureRef ? linkedPictureTarget(wb, sheet.id, obj.pictureRef) : null;
+      const live = linked && rangePicture(wb, linked.sheetId, linked.range);
+      if (live) src = svgDataUrl(live.svg);
       if (obj.type !== 'image') {
         // Complex chart artwork uses the same renderer as the sheet. Keep the
         // editable chart in metadata, and its visible result in a native picture.
@@ -511,12 +600,19 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
             tag('asvg:svgBlip', { 'xmlns:asvg': 'http://schemas.microsoft.com/office/drawing/2016/SVG/main', 'r:embed': `${relId}Svg` })));
         }
       }
+      // Picture Format: corrections, grayscale and transparency go on the blip; style on the shape (pictureFormatXml).
+      const format = pictureFormatXml(obj);
+      // A linked picture names the cells it shows (MS-ODRAWXML cameraTool), so other programs keep it live.
+      const camera = obj.type === 'image' && obj.pictureRef ? tag('a:extLst', {}, tag('a:ext', { uri: CAMERA_URI }, tag('a14:cameraTool', { 'xmlns:a14': A14, cellRange: obj.pictureRef }))) : '';
       shape = tag('xdr:pic', {}, tag('xdr:nvPicPr', {}, tag('xdr:cNvPr', { id, name: obj.title || `Picture ${id}`, descr: drawingDescription(obj) },
-        decorativeXml(obj.decorative)) + tag('xdr:cNvPicPr'))
-        + tag('xdr:blipFill', {}, tag('a:blip', { 'r:embed': relId }, svgExtension || undefined) + (obj.srcRect ? tag('a:srcRect', pictureRectAttrs(obj.srcRect)) : '') + tag('a:stretch', {}, tag('a:fillRect', pictureRectAttrs(obj.fillRect))))
+        decorativeXml(obj.decorative)) + tag('xdr:cNvPicPr', {}, (obj.type === 'image' && obj.lockAspect !== false ? tag('a:picLocks', { noChangeAspect: 1 }) : '') + camera || undefined))
+        + tag('xdr:blipFill', {}, tag('a:blip', { 'r:embed': relId }, (format.blip + (svgExtension || '')) || undefined) + (obj.srcRect && !live ? tag('a:srcRect', pictureRectAttrs(obj.srcRect)) : '') + tag('a:stretch', {}, tag('a:fillRect', pictureRectAttrs(live ? null : obj.fillRect))))
         + tag('xdr:spPr', {}, tag('a:xfrm', { rot: Math.round((obj.rotation || 0) * 60000), flipH: Number(!!obj.flipH), flipV: Number(!!obj.flipV) }, tag('a:off', { x: 0, y: 0 }) + tag('a:ext', { cx: emu(placement.w), cy: emu(placement.h) }))
-          + tag('a:prstGeom', { prst: 'rect' }, tag('a:avLst'))));
+          + format.shape));
     }
+    // The Selection Pane's name and eye: cNvPr@name and cNvPr@hidden of the object's own drawing.
+    if (obj.name || obj.hidden) shape = shape.replace(/<xdr:cNvPr\b([^>]*?)(\/?)>/, (_, attrs, closed) =>
+      `<xdr:cNvPr${obj.name ? attrs.replace(/\sname="[^"]*"/, ` name="${xmlText(obj.name)}"`) : attrs}${obj.hidden && !/\shidden=/.test(attrs) ? ' hidden="1"' : ''}${closed}>`);
     if (link) shape = shape.replace(/<xdr:cNvPr\b([^>]*?)(\/?)>/, (_, attrs, closed) =>
       `<xdr:cNvPr${attrs}>${tag('a:hlinkClick', { 'r:id': `${relId}Link`, tooltip: obj.hyperlinkTooltip || null })}${closed ? '</xdr:cNvPr>' : ''}`);
     let identified;
@@ -535,7 +631,7 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
         const childSize = whole.match(/<a:chExt\b[^>]*\/>/)?.[0] || '';
         return `<${prefix}:xfrm${attrs}>${transform}${childFrame}${childSize}</${prefix}:xfrm>`;
       });
-      const split = /<c:chart\b|<a:fld\b[^>]*type="TxLink"/.test(shape);
+      const split = /<cx?:chart\b|<a:fld\b[^>]*type="TxLink"/.test(shape);
       if (split) { identified = identifyDrawing(shape); shape = identified.xml; }
       shape = tag('xdr:grpSp', {}, tag('xdr:nvGrpSpPr', {}, tag('xdr:cNvPr', { id: nextDrawingId++, name: obj.title || `Drawing frame ${id}`, descr: drawingDescription(obj) },
         decorativeXml(obj.decorative) + (link ? tag('a:hlinkClick', { 'r:id': `${relId}Link`, tooltip: obj.hyperlinkTooltip || null }) : '')) + tag('xdr:cNvGrpSpPr'))
@@ -544,6 +640,12 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
     }
     if (!identified) { identified = identifyDrawing(shape); shape = identified.xml; }
     if (obj.type !== 'slicer') recordDrawing?.(sheet.name, obj.id, identified.key);
+    if (obj.group && nativeGroups.has(obj.group)) {
+      pending.set(obj.group, [...(pending.get(obj.group) || []), { obj, shape, placement }]);
+      // The group's last member writes the group: one anchor at the box around them, each member placed in it.
+      if (pending.get(obj.group).length === members.get(obj.group).length) anchors.push(groupAnchorXml(sheet, obj.group, pending.get(obj.group), nextDrawingId++, recordGroup));
+      continue;
+    }
     const from = tag('xdr:from', {}, tag('xdr:col', {}, obj.anchor.c) + tag('xdr:colOff', {}, emu(placement.dx)) + tag('xdr:row', {}, obj.anchor.r) + tag('xdr:rowOff', {}, emu(placement.dy)));
     const absolute = sheet.kind === 'chart' || obj.anchorMode === 'absolute';
     if (cellAnchor && sheet.kind !== 'chart') {
@@ -562,14 +664,46 @@ export async function exportDrawings(X, wb, sheet, index, { set, binary, content
   return `../drawings/drawing${index}.xml`;
 }
 
+/** Pixels before line `count` along an axis, hidden lines counting nothing. */
+function lineOffset(sheet, axis, count) {
+  const row = axis === 'row', sizes = row ? sheet.rowHeights : sheet.colWidths, fallback = row ? sheet.defaultRowHeight : sheet.defaultColWidth;
+  let pixels = count * fallback;
+  for (const [i, size] of sizes) if (i < count) pixels += size - fallback;
+  for (const i of row ? new Set([...sheet.hiddenRows, ...sheet.filterHidden]) : sheet.hiddenCols) if (i < count) pixels -= sizes.get(i) ?? fallback;
+  return pixels;
+}
+
+/**
+ * One grpSp holding a group's members, in a one-cell anchor at the box around them: the group's frame and its
+ * child coordinate space are both that box in EMUs, and each member's own transform places it inside.
+ */
+function groupAnchorXml(sheet, group, items, id, recordGroup) {
+  const at = items.map(({ obj, placement }) => ({ x: lineOffset(sheet, 'col', obj.anchor.c) + placement.dx, y: lineOffset(sheet, 'row', obj.anchor.r) + placement.dy, w: placement.w, h: placement.h }));
+  const gx = Math.min(...at.map(r => r.x)), gy = Math.min(...at.map(r => r.y));
+  const gw = Math.max(...at.map(r => r.x + r.w)) - gx, gh = Math.max(...at.map(r => r.y + r.h)) - gy;
+  const left = items[at.findIndex(r => r.x === gx)], top = items[at.findIndex(r => r.y === gy)];
+  const body = items.map(({ shape }, i) => shape.replace(/<(a|xdr):xfrm([^>]*)>[\s\S]*?<\/\1:xfrm>/, (whole, prefix, attrs) =>
+    `<${prefix}:xfrm${attrs}>${tag('a:off', { x: emu(at[i].x - gx), y: emu(at[i].y - gy) })}${tag('a:ext', { cx: emu(at[i].w), cy: emu(at[i].h) })}</${prefix}:xfrm>`)).join('');
+  const hidden = items.every(({ obj }) => obj.hidden);
+  const identified = identifyDrawing(tag('xdr:grpSp', {}, tag('xdr:nvGrpSpPr', {}, tag('xdr:cNvPr', { id, name: `Group ${id}`, hidden: hidden ? 1 : null }) + tag('xdr:cNvGrpSpPr'))
+    + tag('xdr:grpSpPr', {}, tag('a:xfrm', {}, tag('a:off', { x: 0, y: 0 }) + tag('a:ext', { cx: emu(gw), cy: emu(gh) })
+      + tag('a:chOff', { x: 0, y: 0 }) + tag('a:chExt', { cx: emu(gw), cy: emu(gh) }))) + body));
+  recordGroup?.(sheet.name, identified.key);
+  const from = tag('xdr:from', {}, tag('xdr:col', {}, left.obj.anchor.c) + tag('xdr:colOff', {}, emu(left.placement.dx)) + tag('xdr:row', {}, top.obj.anchor.r) + tag('xdr:rowOff', {}, emu(top.placement.dy)));
+  return tag('xdr:oneCellAnchor', {}, from + tag('xdr:ext', { cx: emu(gw), cy: emu(gh) }) + identified.xml + tag('xdr:clientData'));
+}
+
 /** Save projections of the emitted drawings, without another ZIP/cell parse. */
-export async function updateDrawingMetadata(X, zip, book, wb, records, { get, set }) {
+export async function updateDrawingMetadata(X, zip, book, wb, records, { get, set, groups = new Map() }) {
   const meta = book.PuterExportMeta;
   if (!meta) return;
   const files = Object.create(null), root = zip.FullPaths[0];
   zip.FullPaths.forEach((path, i) => { files[path.slice(root.length)] = zip.FileIndex[i]; });
   const sheets = [...get('/xl/workbook.xml').matchAll(/<sheet\b[^>]*\/>/g)].map(m => ({ name: xlsxAttr(m[0], 'name'), id: xlsxAttr(m[0], 'r:id') }));
-  const native = await readXlsxCharts({ files, Workbook: { Sheets: sheets }, Styles: { Fonts: [wb.normalFont || { sz: 12 }] } });
+  const native = await readXlsxCharts({ files, Workbook: { Sheets: sheets }, Styles: { Fonts: [wb.normalFont || { sz: 12 }] } }, [], new Map(),
+    { splitGroups: (name) => (groups.has(name) ? new Set(groups.get(name)) : null) });
+  // The groups written whole are named in the record, so reading the file again takes them apart into their objects.
+  for (const [name, keys] of groups) if (meta.data.sheets[name]) meta.data.sheets[name].nativeGroups = keys;
   for (const [name, entries] of records) {
     const byKey = new Map((native.get(name) || []).map(c => [c.xlsxDrawingIdentity?.key, c]));
     const baseline = [];

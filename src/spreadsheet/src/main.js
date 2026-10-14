@@ -14,7 +14,10 @@ import { rememberRecent, forgetRecent } from './lib/recent.js';
 import { errorView, signInView } from './views/gate.js';
 import { homeView } from './views/home.js';
 import { editorView } from './views/editor.js';
-import { parseAppHash } from './lib/links.js';
+import { parseAppHash, editHash } from './lib/links.js';
+import { roomForFile, openRoom } from './collab/session.js';
+import { appOptions, appOption, syncAppOptions } from './lib/app-options.js';
+import { installAppOptions } from './lib/apply-options.js';
 
 const appRoot = document.getElementById('app');
 let current = null; // { kind: 'home' | 'editor' | 'gate', view }
@@ -125,7 +128,16 @@ const nav = {
   templateDoc: (id) => go(`#/template/${encodeURIComponent(id)}`),
   importFile: (file) => route({ file }),
   recoverDraft: (draftKey) => route({ draftKey }),
+  // A shared workbook (editing together): its room, and the owner's file when known.
+  openLive: ({ server, room, path = null, uid = null }) => {
+    liveFile = path ? { path, uid } : null;
+    const hash = `#/live/${encodeURIComponent(room)}?${new URLSearchParams({ server })}`;
+    history.replaceState(null, '', hash);
+    route({ reload: true });
+  },
 };
+/** The owner's file a shared workbook was opened from, while its room is being opened. */
+let liveFile = null;
 
 function openEditor(doc, initialRange = null) {
   const view = editorView({ doc, ...nav, initialRange, leaveDialog: () => leaveWithoutSessionDialog({ kept: doc.draftKept !== false }) });
@@ -190,11 +202,12 @@ async function route({ reload = false, file = null, draftKey = null } = {}) {
       P.setWindowTitle('Spreadsheet');
       return;
     }
-    if (r === 'new') { openEditor(Doc.blank({ excel: true })); return; }
+    // A new workbook starts as the options say: its font, how many sheets, its view and calculation.
+    if (r === 'new') { openEditor(Doc.blank({ excel: true, start: appOptions() })); return; }
     if (r === 'template') {
       const template = templateById(id);
       if (!template) { go(HOME); return; }
-      if (template.id === 'blank') { openEditor(Doc.blank({ excel: true })); return; }
+      if (template.id === 'blank') { openEditor(Doc.blank({ excel: true, start: appOptions() })); return; }
       const wb = template.build();
       const doc = new Doc({ wb, name: template.name });
       wb.dirty = true;
@@ -212,6 +225,24 @@ async function route({ reload = false, file = null, draftKey = null } = {}) {
     }
     // Reading a file without a session would pop the SDK's dialog by itself; ask first, in place.
     if (session.signedOut) { mountSignInGate(location.hash); return; }
+    if (r === 'live') {
+      showLoading('Joining the shared workbook…');
+      const { room, server, token } = parseHash();
+      try {
+        const doc = await openRoom({ server, room, token, ...(liveFile || {}) });
+        liveFile = null;
+        // The invitation was used: the address left behind opens the workbook for members, without it.
+        if (token) history.replaceState(null, '', `#/live/${encodeURIComponent(room)}?${new URLSearchParams({ server })}`);
+        openEditor(doc);
+        if (token) toast(`You joined "${doc.name}". Everyone here sees changes as they happen`, { icon: 'people', duration: 4000 });
+      } catch (e) {
+        console.error(e);
+        liveFile = null;
+        toast(e?.message || 'Could not open the shared workbook', { icon: 'alert', duration: 6000 });
+        go(HOME);
+      }
+      return;
+    }
     if (r === 'file') {
       // A shared spreadsheet's link names the file by its id: whoever follows it finds it at the
       // address their own drive shows for it (a shared one's masked path), and opens it there.
@@ -236,7 +267,7 @@ async function route({ reload = false, file = null, draftKey = null } = {}) {
         return;
       }
       // Through the route queue, so that a navigation made while the id was looked up wins.
-      pendingRoute ??= { hash: `#/edit/${encodeURIComponent(found.path)}` };
+      pendingRoute ??= { hash: editHash(found.path, range) };
       return;
     }
     showLoading();
@@ -248,6 +279,19 @@ async function route({ reload = false, file = null, draftKey = null } = {}) {
         history.replaceState(null, '', '#/new');
         toast('That file no longer exists. Unsaved changes kept on this device were opened as a new spreadsheet', { icon: 'info', duration: 6000 });
       } else if (!P.samePath(doc.path, path)) forgetRecent(path); // the file was found where the drive keeps it now
+      // A file its owner shares for editing together opens as the shared workbook, which may be ahead of the file.
+      const shared = doc.path ? await roomForFile(doc.file) : null;
+      if (shared) {
+        try {
+          const live = await openRoom({ ...shared, path: doc.path, uid: doc.uid });
+          doc.destroy();
+          openEditor(live, range);
+          return;
+        } catch (e) {
+          console.warn('The shared workbook could not be opened; opening the file instead', e);
+          toast('This spreadsheet is shared for editing together, but the shared copy could not be reached. Opening the file', { icon: 'info', duration: 5000 });
+        }
+      }
       openEditor(doc, range);
     } catch (e) {
       console.error(e);
@@ -364,6 +408,11 @@ async function boot() {
   await session.init();
   // The SDK signs the user in on its own before an AI request; the views follow.
   P.onAuth((user) => session.signedInAs(user));
+  // The person's options (File ▸ Options), with the account's copy when it arrives quickly enough to matter.
+  installAppOptions();
+  if (session.signedIn) await Promise.race([syncAppOptions().catch(() => {}), new Promise((resolve) => setTimeout(resolve, 800))]);
+  // Opened with no address, the app lands on a new workbook, or on the start screen when the options ask for it.
+  if (!launchedPath && appOption('startScreen') && /^#?\/?$/.test(location.hash)) history.replaceState(null, '', HOME);
   booted = true;
   window.addEventListener('hashchange', route);
   if (launchedPath) {

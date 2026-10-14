@@ -19,6 +19,9 @@ import { tableStyleParts, parseTableSpec } from './tables.js';
 import { writeThemeInfo } from './workbook-theme.js';
 import { parseFormula } from './formula/parser.js';
 import { writeXlsxPrint } from './xlsx-export-print.js';
+import { writeXlsxOutlineSettings } from './xlsx-outline.js';
+import { writeXlsxBackground } from './xlsx-background.js';
+import { writeXlsxSheetCustomViews, writeXlsxWorkbookCustomViews } from './xlsx-custom-views.js';
 import { richValueWriter } from './xlsx-rich-values.js';
 import { scenariosXml } from './scenarios.js';
 import { parseKey } from './cell.js';
@@ -30,6 +33,7 @@ import { writeExportMetadata } from './xlsx-export-meta.js';
 import { normalizeSplit, splitPaneXml, paneName } from './split-panes.js';
 import { conditionalFormatSignature } from './xlsx-condformat-reconcile.js';
 import { createPersonList, writeXlsxThreadedComments, writeXlsxPersons } from './xlsx-threaded-comments.js';
+import { writeXlsxScripts } from './xlsx-scripts.js';
 
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
@@ -152,7 +156,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
   }
   const defaultVAlign = wb.sheets.find(s => s.kind !== 'chart')?.defaultVAlign || 'middle';
   const slicers = prepareXlsxSlicers(wb);
-  const styles = exportStyles(sourceStyles, wb.normalFont, wb.colorPalette, defaultVAlign, wb.fontTheme, wb.nativeNormalStyle, wb.nativeNormalFill, wb.nativeDefaultCellFormat);
+  const styles = exportStyles(sourceStyles, wb.normalFont, wb.colorPalette, defaultVAlign, wb.fontTheme, wb.nativeNormalStyle, wb.nativeNormalFill, wb.nativeDefaultCellFormat, wb.cellStyles);
   // Reuse identical hidden helpers after import; never shadow a user name or
   // table, including local names which would intercept a global helper call.
   const usedNames = new Set([...wb.names.map(n => n.name), ...wb.tableNames()].map(n => n.toUpperCase()));
@@ -175,6 +179,8 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
     if (!drawingRecords.has(name)) drawingRecords.set(name, []);
     drawingRecords.get(name).push({ id, key });
   };
+  const groupRecords = new Map();
+  const recordGroup = (name, key) => { if (!groupRecords.has(name)) groupRecords.set(name, []); groupRecords.get(name).push(key); };
   let types = get('/[Content_Types].xml'), tableId = 0;
   const contentType = (path, type) => { types = types.replace('</Types>', xmlTag('Override', { PartName: path, ContentType: type }) + '</Types>'); };
   const richValues = richValueWriter({ get, set, binary: (path, data) => X.CFB.utils.cfb_add(zip, path, data), contentType });
@@ -183,7 +189,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
     const ws = book.Sheets[sheet.name], path = `/xl/worksheets/sheet${i + 1}.xml`;
     if (sheet.kind === 'chart') {
       const chartPath = `/xl/chartsheets/sheet${i + 1}.xml`;
-      const drawing = await exportDrawings(X, wb, sheet, i + 1, { set, binary: (path, data) => X.CFB.utils.cfb_add(zip, path, data), contentType, recordDrawing, slicers });
+      const drawing = await exportDrawings(X, wb, sheet, i + 1, { set, binary: (path, data) => X.CFB.utils.cfb_add(zip, path, data), contentType, recordDrawing, recordGroup, slicers });
       const views = xmlTag('sheetViews', {}, xmlTag('sheetView', {
         workbookViewId: 0, tabSelected: Number(wb.activeSheetId === sheet.id), zoomToFit: Number(!!sheet.zoomToFit),
         zoomScale: sheet.viewZoom != null ? Math.round(sheet.viewZoom * 100) : null,
@@ -282,7 +288,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
       const relPath = `/xl/worksheets/_rels/sheet${i + 1}.xml.rels`;
       let rels = get(relPath) || HEADER + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
       const parts = [];
-      const drawing = await exportDrawings(X, wb, sheet, i + 1, { set, binary: (path, data) => X.CFB.utils.cfb_add(zip, path, data), contentType, recordDrawing, slicers });
+      const drawing = await exportDrawings(X, wb, sheet, i + 1, { set, binary: (path, data) => X.CFB.utils.cfb_add(zip, path, data), contentType, recordDrawing, recordGroup, slicers });
       if (drawing) {
         rels = rels.replace('</Relationships>', xmlTag('Relationship', { Id: 'puterDrawing', Type: `${REL}drawing`, Target: drawing }) + '</Relationships>');
         // A DrawingML drawing precedes the VML drawing used by cell comments.
@@ -316,11 +322,19 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
       set(relPath, rels);
       if (parts.length) xml = xml.replace('</worksheet>', xmlTag('tableParts', { count: parts.length }, parts.join('')) + '</worksheet>');
     }
+    if (sheet.background) {
+      // Page Layout ▸ Background: the tiled picture, kept as the worksheet's <picture>.
+      const relPath = `/xl/worksheets/_rels/sheet${i + 1}.xml.rels`;
+      let rels = get(relPath) || HEADER + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+      ({ xml, rels } = writeXlsxBackground(xml, rels, sheet.background, i + 1, { binary: (path, data) => X.CFB.utils.cfb_add(zip, path, data), contentType }));
+      set(relPath, rels);
+    }
     const imageValues = new Map();
     for (const [key, cell] of sheet.cells) {
       if (!cell.f && !cell.v?.image) continue;
       const { r, c } = parseKey(key), value = wb.getValue(sheet.id, r, c);
-      if (value?.image) imageValues.set(X.utils.encode_cell({ r, c }), { ...value, computed: !!cell.f });
+      // A computed picture came from an IMAGE formula (origin 1) or from a reference to another cell's picture (4).
+      if (value?.image) imageValues.set(X.utils.encode_cell({ r, c }), { ...value, computed: !!cell.f, ...(cell.f ? { origin: /^\s*(?:_xlfn\.)?IMAGE\s*\(/i.test(cell.f) ? 1 : 4 } : {}) });
     }
     const ruleRecords = [];
     const pivotPriorities = new Map();
@@ -342,7 +356,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
     xml = writeXlsxIgnoredErrors(xml, sheet.ignoredErrors);
     xml = writeXlsxRichText(xml, ws, wb.colorPalette, normalFont, wb.fontTheme);
     writeXlsxThreadedComments(sheet, i + 1, persons, { get, set, contentType });
-    set(path, richValues.sheet(writeXlsxPrint(xml, sheet.printSettings), imageValues));
+    set(path, richValues.sheet(writeXlsxSheetCustomViews(writeXlsxOutlineSettings(writeXlsxPrint(xml, sheet.printSettings), sheet.outlineSettings), wb.customViews || [], sheet), imageValues));
   }
   writeXlsxPersons(persons, { get, set, contentType });
   let workbook = get('/xl/workbook.xml');
@@ -359,6 +373,15 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
   // Protect Workbook: the structure lock sits just before the views, where the schema has it; no password is set.
   workbook = workbook.replace(/<workbookProtection\b[^>]*\/>/g, '');
   if (wb.structureProtected) workbook = workbook.replace(/<bookViews\b/, `${xmlTag('workbookProtection', { lockStructure: 1 })}<bookViews`);
+  // Edit Links ▸ Startup Prompt: workbookPr's updateLinks says whether opening the book asks about its links (the
+  // default, written as nothing), updates them, or leaves them; the element comes before the protection and the views.
+  workbook = workbook.replace(/(<workbookPr\b[^>]*?)\s+updateLinks="[^"]*"/, '$1');
+  const updateLinks = wb.linkStartup === 'update' ? 'always' : wb.linkStartup === 'none' ? 'never' : null;
+  if (updateLinks) {
+    workbook = /<workbookPr\b/.test(workbook)
+      ? workbook.replace(/<workbookPr\b/, `<workbookPr updateLinks="${updateLinks}"`)
+      : workbook.replace(/<(workbookProtection|bookViews)\b/, (m) => `${xmlTag('workbookPr', { updateLinks })}${m}`);
+  }
   if (wb.iteration || wb.calcMode === 'manual') {
     const calc = xmlTag('calcPr', { calcMode: wb.calcMode === 'manual' ? 'manual' : null, ...(wb.iteration ? { iterate: 1, iterateCount: wb.iteration.iterateCount, iterateDelta: wb.iteration.iterateDelta } : {}) });
     workbook = /<calcPr\b/.test(workbook) ? workbook.replace(/<calcPr\b[^>]*\/>/, calc) : workbook.replace('</workbook>', `${calc}</workbook>`);
@@ -372,6 +395,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
     { get, set, binary: (path, data) => X.CFB.utils.cfb_add(zip, path, data), contentType });
   if (wb.nativePivots) workbook = (await import('./xlsx-pivots.js')).writeXlsxPivots(wb, workbook, { get, set, contentType, styles, pivotRulePriorities });
   if (wb.externalWorkbooks) workbook = writeXlsxExternalWorkbooks(rebaseExternalWorkbooks(wb.externalWorkbooks, sourceWorkbook), workbook, { get, set, contentType });
+  workbook = writeXlsxWorkbookCustomViews(workbook, wb.customViews || [], wb);
   set('/xl/workbook.xml', workbook);
   set('/xl/styles.xml', styles.xml());
   if (book.PuterExportMeta && conditionalRecords.size) {
@@ -394,9 +418,10 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
     }
   }
   writeXlsxSlicers(wb, slicers, { get, set, contentType });
+  writeXlsxScripts(wb, { get, set, contentType });
   richValues.finish();
   set('/[Content_Types].xml', types);
-  if (drawingRecords.size) await updateDrawingMetadata(X, zip, book, wb, drawingRecords, { get, set });
+  if (drawingRecords.size) await updateDrawingMetadata(X, zip, book, wb, drawingRecords, { get, set, groups: groupRecords });
   if (book.PuterExportMeta) {
     book.PuterExportMeta.data.nativeFillBaseline = styles.fillBaseline();
     writeExportMetadata(X, book, { get, set });

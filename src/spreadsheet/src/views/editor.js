@@ -36,6 +36,7 @@ import { shapeSvg, iconSvg, svgDataUrl, openShapesMenu, openIconsDialog } from '
 import { flashFill } from '../core/flashfill.js';
 import { createWatchWindow } from '../ui/watchwindow.js';
 import { createAccessibilityPane } from '../ui/accessibility-pane.js';
+import { createChangesPane } from '../ui/changes-pane.js';
 import { openAltTextDialog } from '../ui/alttext.js';
 import { invalidCells } from '../core/validation-circles.js';
 import { openRecommendedPivots } from '../ui/recommended-pivots.js';
@@ -44,7 +45,7 @@ import { createQuickAnalysis } from '../ui/quick-analysis.js';
 import { quickTotalEntries } from '../core/quick-totals.js';
 import { createComments, COMMENT_COMMANDS } from '../ui/comments.js';
 import { copyThreads, pasteThreads } from '../core/comments.js';
-import { pageBreaks, pagesOf } from '../ui/pagebreaks.js';
+import { pageBreaks, pagesOf, insertBreaks, removeBreaks, hasBreakAt, moveBreak, moveAreaEdge } from '../ui/pagebreaks.js';
 import { createPageLayout } from '../ui/page-layout.js';
 import { consolidate } from '../core/consolidate.js';
 import { openConsolidateDialog } from '../ui/consolidatedialog.js';
@@ -77,6 +78,8 @@ import { runChartAction, insertChart as insertExcelChart, insertChartSheet } fro
 import { createChartUi } from '../ui/chart-format-pane.js';
 import { openTemplatePicker } from '../ui/templates.js';
 import { openSubtotalDialog } from '../ui/subtotaldialog.js';
+import { openDataForm } from '../ui/dataform.js';
+import { openEditLinks, updateAllLinks } from '../ui/editlinks.js';
 import { openFormatCellsDialog } from '../ui/formatcells.js';
 import { openTableDialog } from '../ui/tabledialog.js';
 import { openAiDialog } from '../ui/aidialog.js';
@@ -91,23 +94,43 @@ import { openGoalSeek } from '../ui/goalseek.js';
 import { openDataTable } from '../ui/datatable.js';
 import { openForecastSheet } from '../ui/forecast-sheet.js';
 import { openScenarioManager } from '../ui/scenario-manager.js';
+import { openSolver } from '../ui/solver.js';
+import { openDataAnalysis } from '../ui/analysis-tools.js';
+import { openCustomViews } from '../ui/customviews.js';
+import { openZoomDialog } from '../ui/zoomdialog.js';
+import { openSheetViewOptions, askViewName, nextViewName } from '../ui/sheetviews.js';
+import { createSelectionPane } from '../ui/selection-pane.js';
+import { createSmartArtUi, runSmartArtAction, smartArtLook } from '../ui/smartart.js';
+import { createSmartArtPane } from '../ui/smartart-pane.js';
+import { smartArtSvg, smartArtAltText } from '../core/smartart.js';
+import { arrangeTargets } from '../ui/arrange-ribbon.js';
 import { openAdvancedFilter } from '../ui/advanced-filter.js';
 import { fromText as getDataText, fromWorkbook as getDataWorkbook, fromWeb as getDataWeb, fromTable as getDataTable, blankQuery, queryIo, fitQueryTables } from '../ui/get-data.js';
 import { openQueryEditor } from '../ui/query-editor.js';
 import { createQueriesPane } from '../ui/queries-pane.js';
+import { createAutomate, AUTOMATE_COMMANDS, scriptOfLink } from '../ui/automate.js';
+import { createPictures, PICTURE_COMMANDS } from '../ui/pictures.js';
+import { isCellPicture } from '../core/cell-picture.js';
+import { pictureIsPlain } from '../core/picture-format.js';
+import { linkedPictureTarget, rangePicture } from '../core/range-picture.js';
 import { refreshAll as refreshAllQueries, refreshQuery as refreshOneQuery, queryById, queryForTable } from '../core/queries.js';
 import { clearSheetFilters, reapplySheetFilters } from '../core/advanced-filter.js';
 import { toggleDetail } from '../core/outline-detail.js';
 import { openDatePicker } from '../ui/datepicker.js';
 import { openDedupeDialog } from '../ui/dedupedialog.js';
+import { openTextToColumnsDialog } from '../ui/textcolumnsdialog.js';
 import { openProtectedRanges } from '../ui/protect.js';
 import { openColumnStats } from '../ui/colstats.js';
-import { CELL_STYLES, cellStyle } from '../core/cellstyles.js';
+import { cellStyle } from '../core/cellstyles.js';
+import { definitionFor, stylePatch, customStyleNamed, builtinOverride } from '../core/custom-cell-styles.js';
+import { openCellStylesGallery, openStyleDialog, openMergeStylesDialog, saveCellStyle, deleteCellStyle } from '../ui/cellstyles-ui.js';
+import { autoOutline, clearOutline, applyOutlineStyles } from '../core/auto-outline.js';
+import { openOutlineSettings } from '../ui/outline-settings.js';
 import { renderChartSvg, standaloneSvg, setThemeSeriesColors } from '../ui/chartsvg.js';
 import { openWordArtMenu } from '../ui/wordart.js';
 import { openEquationDialog, runInsertEquation } from '../ui/equation.js';
 import { openThemeEffectsMenu } from '../ui/theme-effects.js';
-import { openThemesMenu, openThemeColorsMenu, openThemeFontsMenu, themedCellStyleItems } from '../ui/themes.js';
+import { openThemesMenu, openThemeColorsMenu, openThemeFontsMenu } from '../ui/themes.js';
 import { themedPreset, themedCellStylePatch, themedSeriesColors } from '../core/workbook-theme.js';
 import { chartData } from '../core/charts.js';
 import { chartSheetCommand } from '../core/chartsheet.js';
@@ -122,6 +145,11 @@ import { createMenubar, SPECIAL_KINDS } from '../ui/menubar.js';
 import { paletteCommands, openCommandPalette } from '../ui/palette.js';
 import { openVersionHistory } from '../ui/versions.js';
 import { openShareDialog } from '../ui/share.js';
+import { openSendCopyDialog, openSendLinkDialog } from '../ui/send-mail.js';
+import { createMentionNotifier, createMentionAlerts } from '../ui/mention-notify.js';
+import { createMailer } from '../lib/mail.js';
+import { createPeopleBar, peopleHere, roomStatus } from '../ui/coauthor.js';
+import { mapLine, mapGap } from '../collab/ops.js';
 import { openShortcuts } from '../ui/shortcuts.js';
 import { session } from '../lib/session.js';
 import * as P from '../lib/puter.js';
@@ -129,7 +157,7 @@ import { trackEvent } from '../lib/analytics.js';
 import { VIEW_ONLY, autoSaveEnabled } from '../lib/doc.js';
 import { cellName, colName, normalizeRange, rangeName, parseRange, parseCellRef, parseKey } from '../core/cell.js';
 import { parseRefText, MAX_ROW, MAX_COL } from '../core/refs.js';
-import { formatValue, todaySerial, formatDate, fontStack, indentWidth, parseInput, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, cellCurrency, currencyDecimals, localeInfo } from '../core/format.js';
+import { formatValue, todaySerial, formatDate, fontStack, indentWidth, parseInput, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, cellCurrency, currencyDecimals, localeInfo, editText } from '../core/format.js';
 import { maxLineWidth, cellLayoutText } from '../core/textfit.js';
 import { toDelimited, parseClipboard, parseDelimited } from '../core/tsv.js';
 import { detectDelimiter, workbookFromFile, rangeToCsv, CSV_MIME } from '../core/io.js';
@@ -149,12 +177,28 @@ import { pasteOptions, legacyMode, pasteLabel, composePaste, cellsFromText } fro
 import { refill, autoFillChoices, defaultAutoFill, justifyLines } from '../core/autofill-options.js';
 import { openPasteSpecialDialog, openInsertPasteDialog, pasteGallery } from '../ui/pastespecialdialog.js';
 import { createOptionButton } from '../ui/option-button.js';
+import { GROUP_BLOCKED_COMMANDS, GROUP_BLOCKED_REASON } from '../core/sheet-group.js';
+import { openFillAcrossDialog } from '../ui/fillacross.js';
+import { createAutoCorrector, openAutoCorrectDialog, syncAutoCorrectSettings } from '../ui/autocorrect.js';
+import { appOptions, appOption, setAppOptions, onAppOptions, syncAppOptions, displayUserName } from '../lib/app-options.js';
+import { installAppOptions } from '../lib/apply-options.js';
+import { syncCustomizations, keymapStore, parseCommandId } from '../lib/customize.js';
+import { chordFromEvent } from '../core/keymap.js';
+import { listExtension } from '../core/entry-options.js';
+import { openOptionsDialog } from '../ui/options-dialog.js';
+import { createQuickAccess } from '../ui/quick-access.js';
+import { withCustomShortcuts } from '../ui/custom-shortcuts.js';
+import { syncErrorChecking } from '../ui/error-smarttag.js';
+import { isFormulaText } from '../core/autocorrect.js';
+import { openSpellingDialog } from '../ui/spelling.js';
+import { createLanguagePane } from '../ui/language-pane.js';
+import { translatePrompt } from '../core/formula/functions.js';
 
 const MAX_FORMAT_CELLS = 20000;
 // Clipboard height can exceed JavaScript's argument limit, even when the
 // cells ultimately pasted are clipped to the sheet's supported dimensions.
 const clipboardWidth = (rows) => rows.reduce((width, row) => Math.max(width, row.length), 0);
-export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importFile, initialRange = null, leaveDialog = null }) {
+export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importFile, openLive = null, initialRange = null, leaveDialog = null }) {
   let destroyed = false;
   let palette = null; // the open command palette, closed with the view
   const { wb } = doc;
@@ -163,11 +207,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   const syncChartTheme = () => setThemeSeriesColors(themedSeriesColors(wb));
   syncChartTheme();
   wb.addEventListener('change', syncChartTheme);
-  // AI() formulas ask Puter's AI; without the SDK they show #N/A.
-  wb.setAsyncProvider('AI', P.canAI() ? (text) => P.aiChat(text) : null);
-  // TRANSLATE and DETECTLANGUAGE: the same AI, with the reply tidied to just the answer.
-  wb.setAsyncProvider('TRANSLATE', P.canAI() ? async (text) => String(await P.aiChat(text, { feature: 'translate' })).trim().replace(/^["'\u201c\u2018]+|["'\u201d\u2019]+$/g, '') : null);
-  wb.setAsyncProvider('DETECTLANGUAGE', P.canAI() ? async (text) => { const m = /\b([a-z]{2,3})(?:-[A-Za-z]{2,4})?\b/i.exec(String(await P.aiChat(text, { feature: 'detect-language' })).trim()); return m ? m[1].toLowerCase() : { error: '#N/A' }; } : null);
+  // The app's options (File ▸ Options): applied before anything reads them, AI features among them.
+  installAppOptions();
+  // AI() formulas ask Puter's AI; without the SDK, or with AI features turned off in the options, they show #N/A.
+  // TRANSLATE and DETECTLANGUAGE: the same AI, with the reply tidied to just the answer. Review ▸ Translate asks the same way.
+  const aiTranslate = async (prompt) => String(await P.aiChat(prompt, { feature: 'translate' })).trim().replace(/^["'\u201c\u2018]+|["'\u201d\u2019]+$/g, '');
+  const setAiProviders = () => {
+    wb.setAsyncProvider('AI', P.canAI() ? (text) => P.aiChat(text) : null);
+    wb.setAsyncProvider('TRANSLATE', P.canAI() ? aiTranslate : null);
+    wb.setAsyncProvider('DETECTLANGUAGE', P.canAI() ? async (text) => { const m = /\b([a-z]{2,3})(?:-[A-Za-z]{2,4})?\b/i.exec(String(await P.aiChat(text, { feature: 'detect-language' })).trim()); return m ? m[1].toLowerCase() : { error: '#N/A' }; } : null);
+  };
+  setAiProviders();
   // A fetch that failed: too much data, or an address off the public internet (this computer, a
   // private network), is a #VALUE! that says so (the status bar shows the reason); anything else
   // (offline, a missing page) stays #N/A, with the reason as well. The fetch helpers mark both
@@ -247,6 +297,9 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     });
   };
 
+  // Email from this workbook: Send a copy, Send a link, and @mention notes (lib/mail.js).
+  const mailer = createMailer();
+
   /* ---------- Context shared by the components ---------- */
 
   // Text was pasted into the entry under way (the in-cell editor or the formula bar). Pasted text is outside
@@ -283,15 +336,43 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (!dialog) toast(v.message || 'That value is not allowed here', { icon: 'alert', duration: 3500 });
   };
 
+  // AutoCorrect: words fixed as they are typed into a cell or the formula bar (Tools ▸ AutoCorrect Options).
+  const autoCorrector = createAutoCorrector({ announce: (text) => statusBar?.announce(text) });
+  ctx.autocorrect = autoCorrector;
+  if (!session.signedOut) syncAutoCorrectSettings().catch(() => {});
+
   const grid = createGrid({
     wb,
     sheetId: wb.activeSheetId,
+    autocorrect: autoCorrector,
+    // The entry is written: its last word, corrected, is a step of its own, so Ctrl/Cmd+Z brings back what was typed.
+    afterCommit: ({ sheetId: sid, r, c, text }) => {
+      if (isFormulaText(text)) return;
+      queueMicrotask(() => offerFlashFill(sid, r, c)); // after AutoCorrect's own step, if it takes one
+      const fixed = autoCorrector.tail(text);
+      if (fixed === text || editText(wb.getCell(sid, r, c)) !== text) return;
+      if (wb.validateInput(sid, r, c, fixed).ok === false) return;
+      wb.setInput(sid, r, c, fixed, { label: 'AutoCorrect' });
+      statusBar?.announce(`AutoCorrect changed the entry to ${fixed}. ${MOD_KEY}+Z puts back what was typed`);
+    },
+    // Editing in cells turned off (the options): F2 and a double-click put the caret in the formula bar.
+    // (Not while the formula bar is hidden: there the cell is the only place to edit.)
+    onEditInBar: () => { if (!appOption('showFormulaBar') || view.focus) return false; formulaBar.focusInput(); return true; },
+    // A row typed at the foot of a list takes on the list's formats and formulas (the options), in the entry's step.
+    extendEntry: ({ sheetId: sid, r, c }) => {
+      if (!appOption('extendLists')) return;
+      const { style, formulas } = listExtension(wb, sid, r, c);
+      if (style) wb.applyStyle(sid, { r1: r, c1: c, r2: r, c2: c }, style);
+      for (const f of formulas) wb.setInput(sid, r, f.c, f.input);
+    },
     onSelection: notify,
     onEdit: (e) => { if (e.editing) { endCut(); optionButton?.hide(); } else entryPasted = false; notify(); }, // typing into a cell ends a cut
     onCommand: (cmd, arg) => run(cmd, arg),
     onFilled: (info) => offerAutoFill(info),
     // A chart's own elements (Chart Design, Format and the Format pane) follow the chart selected on the grid.
-    onChartSelection: (id) => { chartUi?.chartSelected(id); notify(); },
+    onChartSelection: (id) => { chartUi?.chartSelected(id); ctx.smartArt?.chartSelected(id); notify(); },
+    // A SmartArt diagram draws the shapes picked in it (a click on one, or the Text Pane's cursor) framed.
+    smartArtSelection: (id) => ctx.smartArt?.selected(id),
     onChartKey: (e, id) => !!chartUi?.onChartKey(e, id),
     canOpen: P.canPickFiles(), // Ctrl+O only where a file picker exists
     onContextMenu: (info) => openCellContextMenu(ctx, info),
@@ -309,6 +390,11 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     onListOpen: ({ r, c, rule }) => openListPicker(r, c, rule),
     onDateOpen: ({ r, c }) => openDatePicker(ctx, r, c),
     onFilterOpen: ({ r, c }) => openFilterMenu(c, r),
+    // Page Break Preview: a page break or the print area's edge dragged to another line.
+    onPageBreakMove: (info) => run('movePageBreak', info),
+    onPrintAreaEdge: (info) => run('printAreaEdge', info),
+    // Arrange ▸ Align ▸ Snap to Grid and Snap to Shape, for objects dragged on the sheet.
+    snap: () => ({ grid: !!view.snapGrid, shape: !!view.snapShape }),
     // A header drag reordered rows or columns: the selection the user had before it joins the step, so
     // undoing the move puts it back, as undoing Insert or Delete rows does.
     rememberSelection: ({ sel, extras }) => rememberStepSelection({
@@ -316,6 +402,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     }),
   });
   ctx.grid = grid;
+  // SmartArt: the shapes picked in a diagram, and its Text Pane (made below with the other task panes).
+  ctx.notify = notify;
+  ctx.refused = (what) => refusedByProtection(what);
+  ctx.smartArt = createSmartArtUi(ctx);
   // The Paste Options and Auto Fill Options button, at the corner of what was just pasted or filled.
   const optionButton = createOptionButton({ grid, host: grid.el });
   let lastPaste = null; // { text, html, paste, from, mark, external }: what the Paste Options button pastes again
@@ -332,13 +422,52 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
 
   /* ---------- View options (remembered on this device) ---------- */
 
+  // Sheets shown in print preview this session draw their page breaks in Normal view afterwards, until
+  // View ▸ Page Breaks turns them off; the sheet's own setting (showPageBreaks) is the one saved.
+  const previewedSheets = new Set();
+  const pageBreakLinesOn = (id) => !!wb.sheet(id)?.showPageBreaks || previewedSheets.has(id);
+  let selectionPane = null; // made once the editor's commands exist (see below)
+  /*
+   * The sheet view each person is in is their own: remembered on this device for this file, never saved in
+   * it, and taken up again when the file opens here.
+   */
+  const sheetViewKey = () => (doc.path ? `spreadsheet:sheet-views:${doc.path}` : null);
+  function rememberSheetViews() {
+    const key = sheetViewKey();
+    if (!key) return;
+    const mine = Object.fromEntries(wb.sheets.filter((s) => s.personalView && !s.sheetViews?.find((v) => v.id === s.personalView.id)?.temporary).map((s) => [s.id, s.personalView.id]));
+    try { if (Object.keys(mine).length) localStorage.setItem(key, JSON.stringify(mine)); else localStorage.removeItem(key); } catch { /* no storage */ }
+  }
+  try {
+    const key = sheetViewKey(), mine = key ? JSON.parse(localStorage.getItem(key) || '{}') || {} : {};
+    for (const [sheetId, viewId] of Object.entries(mine)) wb.enterSheetView(sheetId, viewId, { undoable: false });
+  } catch { /* no storage, or nothing remembered */ }
+
   const view = { focus: false, spell: true };
   try { Object.assign(view, JSON.parse(localStorage.getItem('spreadsheet:view') || '{}') || {}); } catch { /* no storage */ }
   // Header visibility now follows the saved worksheet view, not a device-wide override.
   delete view.headers;
+  // The formula bar's switch moved into the person's options (View ▸ Formula bar is the same switch); a device
+  // that had it off keeps it off.
+  if (view.formulaBar === false && appOption('showFormulaBar')) setAppOptions({ showFormulaBar: false });
+  delete view.formulaBar;
+  // A sheet added here starts the way the options say: in the chosen view, with or without headers.
+  const syncNewSheetDefaults = () => {
+    const o = appOptions();
+    wb.newSheetDefaults = { ...(o.newView !== 'normal' ? { viewMode: o.newView } : {}), ...(o.showHeaders ? {} : { headers: false }) };
+  };
+  syncNewSheetDefaults();
   function applyView() {
+    const o = appOptions();
     root.classList.toggle('focus-mode', !!view.focus);
-    root.classList.toggle('no-formula-bar', view.formulaBar === false); // View ▸ Show ▸ Formula Bar
+    // What the window shows around the sheet: View ▸ Formula bar and the options' View page.
+    root.classList.toggle('no-formula-bar', !o.showFormulaBar);
+    root.classList.toggle('no-status-bar', !o.showStatusBar);
+    root.classList.toggle('no-sheet-tabs', !o.showSheetTabs);
+    root.classList.toggle('no-hscroll', !o.showHScroll);
+    root.classList.toggle('no-vscroll', !o.showVScroll);
+    root.classList.toggle('no-objects', !o.showObjects);
+    root.classList.toggle('no-comment-marks', o.commentIndicators === 'none');
     grid.setSpellcheck(view.spell !== false);
     try { localStorage.setItem('spreadsheet:view', JSON.stringify(view)); } catch { /* no storage */ }
   }
@@ -1030,6 +1159,15 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
    */
   function splitWouldOverwrite(delimiter) {
     const sheetId = grid.sheetId;
+    if (delimiter && typeof delimiter === 'object') {
+      // The Text to Columns choices: whatever the split writes, other than over the text itself.
+      const ranges = delimiter.dest ? [grid.range] : grid.ranges.flatMap((rg) => shownRuns(rg, sheetId));
+      return ranges.some((rg) => (wb.splitTextPlan(sheetId, { ...rg, c2: rg.c1 }, delimiter).entries || []).some(({ r, c }) => {
+        if (c === rg.c1 && r >= rg.r1 && r <= rg.r2) return false;
+        const cell = wb.getCell(sheetId, r, c);
+        return !!cell && (cell.v != null || cell.f != null);
+      }));
+    }
     for (const rg of grid.ranges) for (const run of shownRuns(rg, sheetId)) {
       const texts = [];
       for (let r = run.r1; r <= run.r2; r++) {
@@ -1106,18 +1244,28 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const cell = wb.getCell(sheetId, r, c);
     const sheet = wb.sheet(sheetId);
     return {
-      templates: !!templateDoc, pick: P.canPickFiles(), share: P.canShare(), ai: P.canAI(), aiPanel: !!aiPanel?.isOpen, saving: P.isApp() && P.canSaveFiles(),
+      templates: !!templateDoc, pick: P.canPickFiles(), share: P.canShare(), mail: mailer.available(), ai: P.canAI(), aiPanel: !!aiPanel?.isOpen, saving: P.isApp() && P.canSaveFiles(),
       fullscreen: !!document.fullscreenEnabled, isFullscreen: isFullscreen(), filter: !!wb.filterAt(sheetId, grid.active.r, grid.active.c),
       hasFormula: cell?.f != null, hasTable: !!wb.tableAt(sheetId, r, c), table: wb.tableAt(sheetId, r, c),
       tableFilterButton: tableFilterButtonOn(wb, sheetId, wb.tableAt(sheetId, r, c)), pivotReport: !!nativePivotAt(wb, sheetId, r, c), hasNote: !!wb.getNote(sheetId, r, c), hasLink: !!wb.linkAt(sheetId, r, c),
-      hasComment: !!sheet?.comments?.has(`${r},${c}`), hasComments: !!sheet?.comments?.size, commentsPane: !!ctx.comments?.paneOpen, queriesPane: !!queriesPane?.open, hasQueries: !!wb.queries?.length,
+      languagePane: languagePane?.open ? languagePane.mode : null,
+      hasComment: !!sheet?.comments?.has(`${r},${c}`), hasComments: !!sheet?.comments?.size, commentsPane: !!ctx.comments?.paneOpen, queriesPane: !!queriesPane?.open, changesPane: !!changesPane?.open, hasQueries: !!wb.queries?.length,
+      // Automate: the Code Editor is open, actions are being recorded, a script is running.
+      scriptsPane: !!automate?.paneOpen, recording: !!automate?.recording, scriptRunning: !!automate?.running,
       chartSheet: sheet?.kind === 'chart',
       // The sheet holds native sparklines, so the commands that edit, regroup or clear them have something to act on.
       sparklines: !!sheet?.sparklineGroups?.length,
       chart: grid.selectedChart || (sheet?.kind === 'chart' ? sheet.charts[0]?.id : null), chartIsImage: wb.chartById(sheetId, grid.selectedChart)?.type === 'image',
+      // A picture placed in the active cell (not an IMAGE result): Place over Cells and Alt Text act on it.
+      cellPicture: isCellPicture(cell?.v) && cell?.f == null,
       showFormulas: !!grid.showFormulas, gridlines: sheet?.gridlines !== false, zeros: sheet?.zeros !== false, viewMode: sheet?.viewMode || 'normal',
+      showPageBreaks: pageBreakLinesOn(sheetId), background: !!sheet?.background,
+      // Arrange: the Selection Pane, and snapping for objects dragged on the sheet.
+      selectionPane: !!selectionPane?.open, snapGrid: !!view.snapGrid, snapShape: !!view.snapShape,
+      // View ▸ Sheet View: the view this person is in, if any, and whether it is the temporary one.
+      sheetView: sheet?.personalView ? (sheet.sheetViews || []).find((v) => v.id === sheet.personalView.id) || null : null,
       headers: sheet?.headers !== false, focus: !!view.focus, spell: view.spell !== false,
-      split: !!sheet?.split && !sheet.frozenRows && !sheet.frozenCols, formulaBar: view.formulaBar !== false,
+      split: !!sheet?.split && !sheet.frozenRows && !sheet.frozenCols, formulaBar: appOption('showFormulaBar'),
       // While a cell is being edited the sheet behind it is off limits: undo, paste, fill and the like wait.
       editing: !!grid.editing,
       // Cells copied here wait on the clipboard: Insert Copied Cells has something to insert.
@@ -1132,6 +1280,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       // active sheet" or "the active cell" have two candidates, and wait until the entry is home again.
       away: !!grid.editing && grid.editState.sheetId !== sheetId,
       canUndo: wb.canUndo(), canRedo: wb.canRedo(), style: styleTarget().style,
+      // Several sheets are grouped: edits reach each of them, and the commands for one sheet's objects wait.
+      grouped: !!wb.sheetGroup,
+      // The workbook's own cell styles, for the Format menu's Cell styles list.
+      customCellStyles: wb.cellStyles.filter((d) => !d.builtin).map((d) => d.name),
       // The active sheet among those on show, for the Sheet commands: the last one showing cannot be hidden or
       // deleted, an end one not moved past the end, and one holding work is asked about before it goes.
       sheet: sheetFlags(sheetId),
@@ -1229,14 +1381,70 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (ok) doc.allowExternal();
     return ok;
   }
+  /** What Edit Links needs from the editor: this book's path, and reading, picking and opening other files on the drive. */
+  function linkHost() {
+    return {
+      docPath: () => doc.path || null,
+      read: async (path) => workbookFromFile(await P.readFile(path), P.displayName(path)),
+      open: (path) => run('openFile', path),
+      pick: P.canPickFiles() ? () => P.pickFile() : null,
+      // A book from elsewhere reads no other file until allowed, as its IMPORTRANGE formulas wait.
+      allow: async () => {
+        if (wb.externalAllowed !== false) return true;
+        const ok = await confirmDialog({ title: 'Read linked workbooks', message: 'This workbook came from elsewhere, so it has not been allowed to read other files. Allow it to read the workbooks it links to?', confirmLabel: 'Allow', danger: false });
+        if (ok) doc.allowExternal();
+        return ok;
+      },
+    };
+  }
+  /** Commands that may touch every selected cell, which the long-operation alert counts first. */
+  const LONG_COMMANDS = new Set(['clear', 'clearAll', 'clearFormat', 'fillDown', 'fillRight', 'toValues', 'textCase', 'sort']);
+  /**
+   * How many cells `cmd` would change: the selected cells that hold something (the used range), or every
+   * selected cell for a fill, which writes them all.
+   */
+  function affectedCells(cmd) {
+    const used = wb.usedRange(grid.sheetId);
+    let n = 0;
+    for (const rg of grid.ranges) {
+      const box = cmd === 'fillDown' || cmd === 'fillRight' || !used ? rg
+        : { r1: Math.max(rg.r1, used.r1), c1: Math.max(rg.c1, used.c1), r2: Math.min(rg.r2, used.r2), c2: Math.min(rg.c2, used.c2) };
+      if (box.r2 >= box.r1 && box.c2 >= box.c1) n += (box.r2 - box.r1 + 1) * (box.c2 - box.c1 + 1);
+    }
+    return n;
+  }
+
+  /** File ▸ Options…, on `section`. */
+  function openOptions(section) {
+    return openOptionsDialog({
+      wb, run, flags: commandFlags, ribbon: toolbar, docName: () => doc.name,
+      accountName: () => session.user?.username || '',
+      openLocale: openLocaleDialog,
+      setAutoSave: (on) => { doc.setAutoSave?.(on); autoSaveSwitch.setAttribute('aria-checked', String(on)); },
+      afterCalcChange: () => { grid.refresh(); notify(); },
+      afterErrorChecking: () => { grid.redraw(); errorTag.sync(); },
+      onOptionsClosed: () => keepFocus(),
+    }, { section });
+  }
+
   async function run(cmd, arg) {
+    // While a script runs the workbook is its alone; one Undo takes back everything it did once it ends.
+    if (automate?.running && !AUTOMATE_COMMANDS.has(cmd)) { toast('A script is running. Wait for it to finish, or stop it in the Code Editor', { icon: 'info' }); return; }
     // F4 (and Ctrl+Y with nothing to redo) repeats the last formatting or structural command on the selection now.
     if (cmd === 'repeat') { if (lastRepeatable && !grid.editing) return run(lastRepeatable.cmd, lastRepeatable.arg); return; }
     if (cmd === 'redo' && !grid.editing && !wb.canRedo() && lastRepeatable) return run('repeat');
     if (REPEATABLE.has(cmd) && !(arg instanceof Event) && !(arg instanceof HTMLElement)) lastRepeatable = { cmd, arg };
     const chartSheet = wb.sheet(grid.sheetId)?.kind === 'chart';
-    if (chartSheet && !chartSheetCommand(cmd)) return;
+    if (chartSheet && !chartSheetCommand(cmd) && !AUTOMATE_COMMANDS.has(cmd)) return;
+    // A command for one sheet's objects (a table, a chart, a rule, a sort) has no meaning across a group of sheets.
+    if (wb.sheetGroup && GROUP_BLOCKED_COMMANDS.has(cmd)) {
+      toast(GROUP_BLOCKED_REASON, { icon: 'layers', duration: 4000 });
+      statusBar?.announce(GROUP_BLOCKED_REASON);
+      return;
+    }
     if (COMMENT_COMMANDS.has(cmd)) { comments.run(cmd, arg); return; }
+    // Pictures in cells, Picture Format and pictures of cells (ui/pictures.js).
+    if (PICTURE_COMMANDS.has(cmd)) { if (grid.editing && !grid.commitEdit()) return; return pictures.run(cmd, arg); }
     if (cmd === 'copy' && (chartSheet || grid.selectedChart)) { return run('copyChart', { id: grid.selectedChart || wb.sheet(grid.sheetId).charts[0]?.id }); }
     if (cmd === 'cut' && grid.selectedChart) return; // Drawing cut is unsupported; never cut the cells behind it.
     if (chartSheet && ['editChart', 'deleteChart', 'duplicateChart'].includes(cmd) && !arg) arg = grid.selectedChart || wb.sheet(grid.sheetId).charts[0]?.id;
@@ -1251,7 +1459,23 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       sheetId = grid.sheetId;
       return true;
     };
+    // A command that would change a great many cells asks first, when the options say to (Editing ▸ Long operations).
+    if (LONG_COMMANDS.has(cmd) && !grid.editing && appOption('longOperationAlert')) {
+      const cells = affectedCells(cmd);
+      if (cells > appOption('longOperationCells') * 1000) {
+        const ok = await confirmDialog({
+          title: 'This may take a while',
+          message: `This changes about ${cells.toLocaleString()} cells, which can take some time. Go ahead?`,
+          confirmLabel: 'Continue', danger: false,
+        });
+        if (!ok || destroyed) { keepFocus(); return; }
+      }
+    }
     switch (cmd) {
+      case 'options':
+        if (grid.editing && !grid.commitEdit()) return;
+        openOptions(typeof arg === 'string' ? arg : 'general');
+        return;
       case 'bold': case 'italic': case 'underline': case 'strike': {
         // Decide once from the active cell, so every range (and every run of shown rows) gets the same state.
         const on = !ctx.style()[cmd];
@@ -1557,23 +1781,16 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         keepFocus();
         return;
       }
-      case 'cellStylesMenu': {
-        const anchor = arg instanceof HTMLElement ? arg : null;
-        // The samples are custom items, which the menu does not close on its own as it does its plain items: a picked style closes it here.
-        const menu = openMenu({
-          anchor, x: anchor ? null : (arg?.x ?? null), y: anchor ? null : (arg?.y ?? null), label: 'Cell styles', minWidth: 200,
-          items: CELL_STYLES.map((s) => ({
-            custom: el('button.menu-item.cell-style-item', { type: 'button', role: 'menuitem', tabindex: -1, onclick: () => { menu.close(); run('cellStyle', s.key); } },
-              // A preset that names no ink or fill of its own shows the sheet's, the paper's in every theme,
-              // as the cell it makes will; the menu's dark tokens made some samples unreadable in dark mode.
-              el('span.cell-style-sample.sheet-paper', { style: { color: s.patch.color || 'var(--ink)', background: s.patch.bg || 'var(--surface)', border: '1px solid var(--hairline)', fontWeight: s.patch.bold ? '700' : '400', fontSize: s.patch.size ? `${Math.min(s.patch.size, 16)}px` : '13px', borderBottom: (s.borders || []).some((b) => b.kind === 'bottom') ? `2px solid ${s.borders.find((b) => b.kind === 'bottom').color}` : 'none' } }, s.label)),
-          })).concat(themedCellStyleItems(wb, (key) => { menu.close(); run('cellStyle', key); })),
-          onClose: () => keepFocus(),
-        });
+      case 'cellStylesMenu':
+        // The gallery: built-in, custom and themed styles, with New Cell Style… and Merge Styles… (ui/cellstyles-ui.js).
+        openCellStylesGallery(ctx, arg);
         return;
-      }
       case 'cellStyle': {
-        const preset = themedPreset(cellStyle(arg), wb) || themedCellStylePatch(arg, wb);
+        // A custom style, or a built-in this workbook modified, applies its own definition's parts; a built-in as
+        // it comes applies its preset. Either way the cells keep the style's name, to follow it when it changes.
+        const own = definitionFor(wb, arg);
+        const builtIn = own ? null : themedPreset(cellStyle(arg), wb) || themedCellStylePatch(arg, wb);
+        const preset = own ? { label: own.name, ...stylePatch(own) } : builtIn && { ...builtIn, patch: { ...builtIn.patch, cellStyle: arg === 'normal' ? null : builtIn.label } };
         if (!preset) return;
         const borders = (preset.borders || []).map(b => ({ ...b, color: b.color ?? null, style: b.style ?? 'thin' }));
         if (!nativeFormatRanges((sid, ranges) => formatNativePivotStyleAndBorders(wb, new Map([[sid, ranges]]), preset.patch, borders,
@@ -1783,6 +2000,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!committed()) return;
         if (refusedByProtection('sort')) return;
         if (!oneRange('sort')) return;
+        // In a sheet view the filters are one's own, but sorting moves the rows themselves, for everyone.
+        if (wb.sheet(sheetId)?.personalView) toast('Sorting reorders the rows for everyone; in a sheet view only the filters are your own', { icon: 'info', duration: 3500 });
         let range = grid.range;
         const single = S.isSingle(grid.selection);
         const sheet = wb.sheet(sheetId);
@@ -1934,7 +2153,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       case 'aiExplain': if (!committed()) return; openAiDialog(ctx, { mode: 'explain' }); return;
       case 'aiAsk': if (!committed()) return; openAiDialog(ctx, { mode: 'ask' }); return;
       case 'aiPanel':
-        if (!aiPanel) { toast('AI is not available here', { icon: 'info' }); return; }
+        if (!aiPanel || !P.canAI()) { toast(appOption('aiFeatures') ? 'AI is not available here' : 'AI features are turned off in Options ▸ Privacy', { icon: 'info' }); return; }
         // Opened from the keyboard mid-entry, the panel leaves the focus on the cell being typed into.
         if (arg === false || (arg == null && aiPanel.isOpen)) aiPanel.close();
         else aiPanel.open({ focus: !grid.editing, prompt: typeof arg === 'string' ? arg : null });
@@ -2047,12 +2266,100 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         keepFocus();
         return;
       }
+      // Data ▸ Form: a record at a time over the list at the selection (see ui/dataform.js, core/data-form.js).
+      case 'dataForm': {
+        if (!committed()) return;
+        openDataForm(ctx);
+        return;
+      }
+      // Data ▸ Queries & Connections ▸ Edit Links: the book's links to other workbooks (see ui/editlinks.js, core/edit-links.js).
+      case 'editLinks': {
+        if (!committed()) return;
+        openEditLinks(ctx, linkHost());
+        return;
+      }
       case 'subtotal': {
         if (!committed()) return;
         if (!oneRange('add subtotals')) return;
         const range = dataRange();
         if (!range) { toast('Nothing to subtotal', { icon: 'info' }); return; }
         openSubtotalDialog(ctx, range);
+        return;
+      }
+      /* ---------- Cell styles management and outline tools ---------- */
+      case 'newCellStyle': if (!committed()) return; openStyleDialog(ctx, { mode: 'new' }); return;
+      case 'modifyCellStyle': case 'duplicateCellStyle': {
+        if (!committed()) return;
+        // From the menus a style comes by its name or preset key; from the gallery as { builtin } or { custom }.
+        const ref = typeof arg === 'string' ? (cellStyle(arg) ? { builtin: arg } : { custom: arg }) : arg;
+        openStyleDialog(ctx, { mode: cmd === 'modifyCellStyle' ? 'modify' : 'duplicate', ref });
+        return;
+      }
+      case 'saveCellStyle': {
+        if (!arg?.def) return;
+        const n = saveCellStyle(wb, arg);
+        toast(arg.oldName ? `Style ${arg.def.name} saved${n ? `; ${n} cell${n === 1 ? '' : 's'} updated` : ''}` : `Style ${arg.def.name} added to Cell Styles`, { icon: 'paint', duration: 2600 });
+        keepFocus();
+        return;
+      }
+      case 'deleteCellStyle': {
+        if (!committed()) return;
+        const ref = typeof arg === 'string' ? (cellStyle(arg) ? { builtin: arg } : { custom: arg }) : arg;
+        if (ref?.builtin) {
+          if (!builtinOverride(wb, ref.builtin)) { toast('Built-in styles stay in the gallery. Modify one to change it for this spreadsheet', { icon: 'info', duration: 3200 }); return; }
+          deleteCellStyle(wb, ref);
+          toast(`${cellStyle(ref.builtin).label} is as built in again`, { icon: 'check' });
+          keepFocus();
+          return;
+        }
+        if (!customStyleNamed(wb, ref?.custom)) return;
+        const ok = await confirmDialog({ title: `Delete style "${ref.custom}"?`, message: 'Cells formatted with it keep their formatting. You can undo this.', confirmLabel: 'Delete style' });
+        if (ok) deleteCellStyle(wb, ref);
+        keepFocus();
+        return;
+      }
+      case 'mergeCellStyles':
+        if (!committed()) return;
+        openMergeStylesDialog(ctx, {
+          listFiles: () => P.listFiles(), pickFile: P.canPickFiles() ? () => P.pickFile({ accept: ['.xlsx', '.xlsm', '.ods'] }) : null,
+          readFile: (path) => P.readFile(path), open: (bytes, name) => workbookFromFile(bytes, name), currentPath: doc.path,
+        });
+        return;
+      case 'autoOutline': {
+        if (!committed()) return;
+        if (refusedByProtection('outline rows and columns')) return;
+        // A single cell outlines the whole sheet; a selected block only what lies in it.
+        const rg = grid.range;
+        const n = autoOutline(wb, sheetId, rg.r1 === rg.r2 && rg.c1 === rg.c2 ? null : rg);
+        toast(n ? `Outline built: ${n} group${n === 1 ? '' : 's'} from the summary formulas` : 'No summary formulas (such as SUM or SUBTOTAL next to the cells they total) to build an outline from', { icon: n ? 'check' : 'info', duration: 3600 });
+        keepFocus();
+        return;
+      }
+      case 'clearOutline': {
+        if (!committed()) return;
+        if (refusedByProtection('clear the outline')) return;
+        const rg = grid.range;
+        const sheet = wb.sheet(sheetId);
+        const whole = (rg.r1 === rg.r2 && rg.c1 === rg.c2) || (rg.r1 === 0 && rg.c1 === 0 && rg.r2 >= sheet.rows - 1 && rg.c2 >= sheet.cols - 1);
+        toast(clearOutline(wb, sheetId, whole ? null : rg) ? 'Outline cleared' : 'No outline here to clear', { icon: 'info' });
+        keepFocus();
+        return;
+      }
+      case 'outlineSettings': {
+        if (!committed()) return;
+        if (!arg?.settings) { openOutlineSettings(ctx); return; }
+        // From the dialog: keep its settings, then Create or Apply Styles with them, as one step.
+        let made = 0;
+        let styled = true;
+        wb.transaction(arg.then === 'create' ? 'Auto Outline' : arg.then === 'styles' ? 'Apply outline styles' : 'Outline settings', () => {
+          wb.setOutlineSettings(sheetId, arg.settings);
+          if (arg.then === 'create') made = autoOutline(wb, sheetId);
+          if (arg.then === 'styles') styled = applyOutlineStyles(wb, sheetId);
+        });
+        if (arg.then === 'create') toast(made ? `Outline built: ${made} group${made === 1 ? '' : 's'}` : 'No summary formulas to build an outline from', { icon: made ? 'check' : 'info', duration: 3200 });
+        if (arg.then === 'styles' && !styled) toast('There is no outline to style yet', { icon: 'info' });
+        grid.refresh();
+        keepFocus();
         return;
       }
       case 'textCase': {
@@ -2102,9 +2409,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
               const d = await promptDialog({ title: 'Split text', label: 'Separator', value: '', confirmLabel: 'Split', validate: (v) => (v.length ? null : 'Enter a separator') });
               if (d != null) run('splitText', d);
             } },
+            { label: 'Text to Columns…', icon: 'textToColumns', onSelect: () => run('splitTextDialog') },
           ],
           onClose: () => keepFocus(),
         });
+        return;
+      }
+      case 'splitTextDialog': {
+        // Text to Columns: separators or fixed widths, a preview, a format per column and a destination.
+        if (!committed()) return;
+        if (refusedByProtection('split the text')) return;
+        openTextToColumnsDialog(ctx, { range: grid.range, allowDest: grid.ranges.length === 1, resolve: resolveRangeText, onSplit: (options) => run('splitText', options) });
         return;
       }
       case 'splitText': {
@@ -2121,17 +2436,20 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         let rows = 0;
         let cols = 0;
         let reason = null;
-        const done = eachRange('Split text', (rg) => {
+        const dest = arg && typeof arg === 'object' ? arg.dest : null;
+        const splitOne = (rg) => {
           const out = wb.splitTextToColumns(sheetId, { ...rg, c2: rg.c1 }, arg || null);
           rows += out.rows;
           cols = Math.max(cols, out.cols);
           reason ??= out.reason;
-        }, { cap: false });
+        };
+        // Pieces sent elsewhere keep the rows of the text they came from, so the selection is read whole, once.
+        const done = dest ? (wb.lockedIn(sheetId, { ...grid.range, c2: grid.range.c1 }) ? null : splitOne(grid.range)) : eachRange('Split text', splitOne, { cap: false });
         if (done === null) { keepFocus(); return; } // a protected cell among the selected ranges; the workbook's notice has named it
         const problem = { room: "Can't split: the pieces would run past the last column", merged: "Can't split: the pieces would land under merged cells" }[reason];
         if (!rows) {
           // A protected cell right of the text refused the split; the workbook's notice has named it.
-          if (reason !== 'protected') toast(problem || (arg ? `No text containing "${arg === '\t' ? 'a tab' : arg}" to split` : 'No text with a separator to split'), { icon: 'info' });
+          if (reason !== 'protected') toast(problem || (typeof arg === 'string' && arg ? `No text containing "${arg === '\t' ? 'a tab' : arg}" to split` : 'No text with a separator to split'), { icon: 'info' });
           keepFocus();
           return;
         }
@@ -2139,7 +2457,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // A range the split had to refuse is not passed over in silence.
         if (problem) toast(problem, { icon: 'info' });
         const range = grid.range;
-        if (grid.ranges.length === 1) grid.setSelection(S.fromRange({ ...range, c2: Math.min(range.c1 + cols - 1, wb.sheet(sheetId).cols - 1) }, grid.active), { scroll: false });
+        if (dest) grid.setSelection(S.fromRange({ r1: dest.r, c1: dest.c, r2: dest.r + range.r2 - range.r1, c2: Math.min(dest.c + cols - 1, wb.sheet(sheetId).cols - 1) }, { r: dest.r, c: dest.c }), { scroll: false });
+        else if (grid.ranges.length === 1) grid.setSelection(S.fromRange({ ...range, c2: Math.min(range.c1 + cols - 1, wb.sheet(sheetId).cols - 1) }, grid.active), { scroll: false });
         keepFocus();
         return;
       }
@@ -2190,6 +2509,13 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         openDedupeDialog(ctx, range);
         return;
       }
+      /* ---------- Show Changes (Review ▸ Show Changes, the cell menu) ---------- */
+      // With 'selection' (the cell menu) the pane opens on the changes to the selected cells; alone it opens or closes.
+      case 'showChanges':
+        if (arg === 'selection') changesPane.show({ selection: true });
+        else changesPane.toggle();
+        notify();
+        return;
       case 'resizeCols': case 'resizeRows': {
         if (!committed()) return;
         const isCol = cmd === 'resizeCols';
@@ -2371,19 +2697,30 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         openVersionHistory(doc, { onRestored: () => { grid.refresh(); keepFocus(); } });
         return;
       }
-      case 'share': {
-        // Sharing hands out a file: an unsaved spreadsheet is saved first, as for a link to a range.
+      case 'sendCopy': {
+        // Email the workbook as it is now, from the signed-in user (ui/send-mail.js).
         if (!committed()) return;
         if (session.signedOut && (!await session.signIn() || destroyed)) return;
-        // Saved by hand, not flushed: a flush has nothing to write for a blank book that was never changed. A
-        // file that is not an .xlsx (a .csv opened from the drive) is saved as one first, where its edits go
-        // from now on: shared as it was, it would never see them.
-        if (!doc.path || !doc.isXlsxPath) {
-          try { await doc.save(); } catch (e) { toast(e?.message || 'Could not save the spreadsheet', { icon: 'alert', duration: 4000 }); return; }
-          if (destroyed) return;
-        }
-        if (!doc.path) { toast('Save the spreadsheet first, then share it', { icon: 'info' }); return; }
-        openShareDialog({ path: doc.path, name: doc.name, uid: doc.uid });
+        openSendCopyDialog({ doc, sheetId: grid.sheetId, range: S.isSingle(grid.selection) ? null : { ...grid.range }, mailer, user: session.user, onClose: () => keepFocus() });
+        return;
+      }
+      case 'sendLink': {
+        if (!await savedForSharing()) return;
+        openSendLinkDialog({ doc, mailer, user: session.user, onClose: () => keepFocus() });
+        return;
+      }
+      case 'share': {
+        if (!await savedForSharing()) return;
+        openShareDialog({
+          path: doc.path, name: doc.name, uid: doc.uid, doc: openLive ? doc : null,
+          onEmailLink: mailer.available() ? () => run('sendLink') : null,
+          // Editing together started (or stopped): the workbook opens again as the room's (or as the file).
+          onLive: async (room) => {
+            if (destroyed) return;
+            if (room) openLive?.({ ...room, path: doc.path, uid: doc.uid });
+            else openPath(doc.path, { reload: true });
+          },
+        });
         return;
       }
       case 'importUrl': {
@@ -2429,7 +2766,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // Every menu action by name: Ctrl/Cmd+Shift+P, Alt+/, or the Search button.
         if (!committed()) return;
         palette?.close();
-        palette = openCommandPalette({ commands: paletteCommands(commandFlags()), run, onClose: () => { palette = null; keepFocus(); } });
+        palette = openCommandPalette({ commands: withCustomShortcuts(paletteCommands(commandFlags())), run, onClose: () => { palette = null; keepFocus(); } });
         return;
       }
       case 'insertFunction': insertFunction(arg); return;
@@ -2500,14 +2837,43 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       case 'placeSheet':
         if (!committed() || !arg?.id) return false;
         return !!placeSheet(wb, arg.id, arg);
-      case 'showSheet': case 'hideSheet':
+      case 'showSheet': case 'hideSheet': {
         if (!committed()) return;
+        // Hiding a grouped sheet hides the whole group, as long as a sheet outside it stays on show.
+        const group = cmd === 'hideSheet' && wb.sheetGroup;
+        if (group && (!arg || group.includes(arg))) {
+          if (group.length >= wb.visibleSheets.length) { toast('At least one sheet must stay visible. Ungroup the sheets first', { icon: 'eyeOff', duration: 3500 }); return; }
+          wb.transaction('Hide sheets', () => { for (const id of group) wb.setSheetHidden(id, true); });
+          return;
+        }
         wb.setSheetHidden(arg || sheetId, cmd === 'hideSheet');
+        return;
+      }
+      case 'selectAllSheets':
+        if (!committed()) return;
+        wb.groupSheets(wb.visibleSheets.filter((s) => s.kind !== 'chart' || s.id === wb.activeSheetId).map((s) => s.id));
+        return;
+      case 'ungroupSheets':
+        wb.ungroupSheets();
+        keepFocus();
+        return;
+      case 'fillAcrossSheets':
+        if (!committed() || !wb.sheetGroup) return;
+        openFillAcrossDialog(ctx);
         return;
       case 'deleteSheet': {
         // From the tab menu, the Insert menu or the palette alike: the last sheet showing stays, and one
         // holding work is asked about first, through the tab strip's own question.
         if (!committed()) return;
+        const group = wb.sheetGroup;
+        if (group && (!arg || group.includes(arg))) {
+          // A grouped sheet goes with the rest of its group, in one step that one undo brings back.
+          if (group.length >= wb.visibleSheets.length) { toast('A spreadsheet needs at least one sheet. Ungroup the sheets first', { icon: 'trash', duration: 3500 }); return; }
+          const ok = await confirmDialog({ title: `Delete ${group.length} sheets?`, message: `${group.map((id) => wb.sheet(id)?.name).join(', ')} and everything on them will be removed. You can undo this.`, confirmLabel: 'Delete sheets' });
+          if (!ok || destroyed) return;
+          wb.transaction('Delete sheets', () => { for (const id of group) wb.deleteSheet(id); });
+          return;
+        }
         const sheet = wb.sheet(arg || sheetId);
         if (!sheet || wb.visibleSheets.length <= 1) return;
         if (sheetHoldsWork(sheet) && !await sheetTabs.confirmDelete(sheet)) return;
@@ -2620,14 +2986,28 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       case 'formulaBar':
         // View ▸ Show ▸ Formula Bar, remembered on this device.
-        view.formulaBar = view.formulaBar === false;
-        applyView();
+        setAppOptions({ showFormulaBar: !appOption('showFormulaBar') }); // the options' listener applies it
         notify();
         keepFocus();
         return;
       case 'toggleHeaders':
         grid.setShowHeaders(!grid.showHeaders);
         keepFocus();
+        return;
+      case 'spelling':
+        if (!committed()) return;
+        await openSpellingDialog(ctx);
+        return;
+      case 'thesaurus': case 'translatePane': {
+        const tool = cmd === 'thesaurus' ? 'thesaurus' : 'translate';
+        if (!languagePane) return;
+        if (languagePane.open && languagePane.mode === tool) { languagePane.hide(); return; }
+        languagePane.show(tool, { fromCell: true });
+        return;
+      }
+      case 'autoCorrectOptions':
+        if (!committed()) return;
+        openAutoCorrectDialog({ onClose: () => keepFocus() });
         return;
       case 'toggleSpellcheck':
         view.spell = view.spell === false;
@@ -2648,13 +3028,9 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       }
       case 'zoomCustom': {
-        const text = await promptDialog({
-          title: 'Custom zoom', label: 'Zoom percentage', value: String(Math.round(grid.zoom * 100)), confirmLabel: 'Apply', inputMode: 'numeric',
-          hint: 'Enter a whole percentage from 10% to 400%.',
-          validate: (value) => /^\d+\s*%?$/.test(value) && parseInt(value, 10) >= 10 && parseInt(value, 10) <= 400 ? null : 'Enter a whole percentage from 10% to 400%.',
-        });
-        if (text != null) return run('zoomTo', parseInt(text, 10) / 100);
-        keepFocus();
+        // View ▸ Zoom: the presets, Fit selection (a chart sheet fits its window), or a percentage of one's own.
+        const chartSheet = wb.sheet(sheetId)?.kind === 'chart';
+        openZoomDialog({ zoom: grid.zoom, apply: (z) => run('zoomTo', z), fit: () => run(chartSheet ? 'zoomFit' : 'zoomSelection'), onClose: () => keepFocus() });
         return;
       }
       case 'zoomTo':
@@ -2750,11 +3126,65 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       }
       case 'orderObject': {
-        // Bring to Front / Send to Back: the object's place in the sheet's drawing order.
-        wb.orderChart(sheetId, arg?.id || grid.selectedChart, arg?.where);
-        keepFocus();
+        // Bring to Front, Bring Forward, Send Backward, Send to Back: the place in the sheet's drawing order of the
+        // object named, or of every object selected (whole groups).
+        const ids = arrangeTargets(ctx, arg?.id ? [arg.id] : null);
+        if (!ids.length) { toast('Select a chart, picture, shape or text box first', { icon: 'info', duration: 2500 }); return; }
+        if (wb.orderObjects(sheetId, ids, arg?.where)) statusBar?.announce({ front: 'Brought to front', forward: 'Brought forward', backward: 'Sent backward', back: 'Sent to back' }[arg?.where] || 'Order changed');
+        notify(); keepFocus();
         return;
       }
+      case 'alignObjects': {
+        const ids = arrangeTargets(ctx);
+        if (wb.alignObjects(sheetId, ids, arg)) statusBar?.announce(['horizontal', 'vertical'].includes(arg) ? `Distributed ${arg}ly` : `Aligned ${arg}`);
+        else if (ids.length < 2) toast('Select two or more objects to align (three to distribute)', { icon: 'info', duration: 2800 });
+        notify(); keepFocus();
+        return;
+      }
+      case 'groupObjects': {
+        // Arrange ▸ Group: Group, Regroup (the group last ungrouped) and Ungroup.
+        if (arg === 'regroup') {
+          const group = wb.regroupObjects(sheetId);
+          if (group) grid.selectCharts(wb.sheet(sheetId).charts.filter((o) => o.group === group).map((o) => o.id));
+        } else if (arg === 'ungroup') {
+          if (wb.ungroupObjects(sheetId, arrangeTargets(ctx))) statusBar?.announce('Ungrouped');
+        } else {
+          const group = wb.groupObjects(sheetId, arrangeTargets(ctx));
+          if (group) { grid.selectCharts(wb.sheet(sheetId).charts.filter((o) => o.group === group).map((o) => o.id)); statusBar?.announce('Grouped'); }
+          else toast('Select two or more objects to group', { icon: 'info', duration: 2500 });
+        }
+        notify(); keepFocus();
+        return;
+      }
+      case 'rotateObjects':
+        if (!wb.rotateObjects(sheetId, arrangeTargets(ctx), arg)) toast('Pictures, shapes and text boxes can be rotated; charts and controls cannot', { icon: 'info', duration: 3000 });
+        notify(); keepFocus();
+        return;
+      case 'snapObjects': {
+        const key = arg === 'shape' ? 'snapShape' : 'snapGrid';
+        view[key] = !view[key];
+        applyView();
+        statusBar?.announce(`${arg === 'shape' ? 'Snap to shape' : 'Snap to grid'} ${view[key] ? 'on' : 'off'}`);
+        notify(); keepFocus();
+        return;
+      }
+      case 'selectionPane': selectionPane?.toggle(); notify(); return;
+      case 'objectsVisible':
+        if (arg?.ids?.length) wb.setObjectsHidden(sheetId, arg.ids, !!arg.hidden);
+        notify();
+        return;
+      case 'renameObject':
+        if (arg?.id) wb.renameObject(sheetId, arg.id, arg.name);
+        notify();
+        return;
+      case 'moveObjectInOrder':
+        if (arg?.id) wb.moveObjectInOrder(sheetId, arg.id, arg.to);
+        notify();
+        return;
+      case 'deleteObjects':
+        if (Array.isArray(arg) && wb.deleteObjects(sheetId, arg)) statusBar?.announce(`${arg.length} objects deleted`);
+        keepFocus();
+        return;
       case 'addWatch': {
         // Add Watch: the selected cells, as many as the Watch Window lists for a selection (the first 100).
         const cells = [];
@@ -2769,21 +3199,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // column within the data around them are filled the same way, as one undo step.
         if (!committed()) return;
         const { r, c } = grid.active;
-        const region = wb.dataRegion(sheetId, r, c) || { r1: r, c1: c, r2: r, c2: c };
-        const area = { r1: region.r1, r2: region.r2, c1: Math.min(region.c1, c - 1 >= 0 ? c - 1 : c), c2: Math.max(region.c2, c) };
-        const cols = [];
-        for (let cc = area.c1; cc <= area.c2; cc++) if (cc !== c) cols.push(cc);
-        const shown = (rr, cc) => { const v = wb.getValue(sheetId, rr, cc); return v == null || (typeof v === 'object') ? null : wb.getDisplay(sheetId, rr, cc); };
-        const rows = [];
-        for (let rr = area.r1; rr <= area.r2; rr++) {
-          const target = wb.getCell(sheetId, rr, c);
-          rows.push({ r: rr, sources: cols.map((cc) => shown(rr, cc)), target: target?.v != null || target?.f != null ? shown(rr, c) : null });
-        }
-        // A header above the examples fits no pattern: try again without the first row before giving up.
-        let filled = flashFill(rows), from = 0;
-        if (!filled && rows.length > 1) { filled = flashFill(rows.slice(1)); from = 1; }
-        const entries = [];
-        if (filled) filled.forEach((text, i) => { const row = rows[i + from]; if (text != null && text !== '' && row.sources.some((v) => v != null)) entries.push({ r: row.r, c, cell: { v: text, f: null, s: wb.getCell(sheetId, row.r, c)?.s } }); });
+        const { entries } = flashFillPlan(sheetId, r, c);
         if (!entries.length) { toast('Flash Fill found no pattern to fill. Type an example or two, then try again', { icon: 'info', duration: 3200 }); keepFocus(); return; }
         if (wb.setCells(sheetId, entries, 'Flash Fill')) toast(`Flash Fill changed ${entries.length} cell${entries.length === 1 ? '' : 's'}`, { icon: 'flashFill', duration: 2200 });
         keepFocus();
@@ -2891,6 +3307,64 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         keepFocus();
         return;
       }
+      case 'pageBreak': {
+        // Page Layout ▸ Breaks: insert or remove a manual page break at the selection, or reset them all.
+        if (!committed()) return;
+        const sheet = wb.sheet(sheetId);
+        if (sheet.kind === 'chart') return;
+        const settings = sheet.printSettings || {};
+        const at = { active: grid.active, wholeRows: grid.range.c1 === 0 && grid.range.c2 >= MAX_COL, wholeCols: grid.range.r1 === 0 && grid.range.r2 >= MAX_ROW };
+        if (arg === 'reset') {
+          if (!settings.rowBreaks?.length && !settings.colBreaks?.length) { toast('This sheet has no manual page breaks', { icon: 'info' }); keepFocus(); return; }
+          wb.setPageBreaks(sheetId, { rows: [], cols: [] }, 'Reset all page breaks');
+          statusBar?.announce('All manual page breaks removed');
+        } else if (arg === 'remove') {
+          if (!hasBreakAt(settings, at)) { toast('There is no manual page break beside the selected cell', { icon: 'info' }); keepFocus(); return; }
+          wb.setPageBreaks(sheetId, removeBreaks(settings, at), 'Remove page break');
+          statusBar?.announce('Page break removed');
+        } else {
+          const next = insertBreaks(settings, at);
+          if (!wb.setPageBreaks(sheetId, next, 'Insert page break')) { toast('A page already starts at the selected cell', { icon: 'info' }); keepFocus(); return; }
+          statusBar?.announce('Page break inserted');
+        }
+        refreshPageView(true);
+        notify(); keepFocus();
+        return;
+      }
+      case 'movePageBreak': {
+        if (!arg) return;
+        const sheet = wb.sheet(grid.sheetId), area = pageBreaks(wb, grid.sheetId)?.area;
+        if (!sheet || !area) return;
+        const list = moveBreak(sheet.printSettings, area, arg);
+        wb.setPageBreaks(grid.sheetId, arg.axis === 'row' ? { rows: list } : { cols: list }, 'Move page break');
+        refreshPageView(true);
+        notify(); keepFocus();
+        return;
+      }
+      case 'printAreaEdge': {
+        // The print area's edge dragged in Page Break Preview: the area grows or shrinks to that line.
+        if (!arg) return;
+        const sheet = wb.sheet(grid.sheetId), area = pageBreaks(wb, grid.sheetId)?.area;
+        if (!sheet || !area) return;
+        const current = sheet.printSettings || normalizePrintSettings({});
+        const next = moveAreaEdge(area, arg.edge, arg.to);
+        wb.setPrintSettings(grid.sheetId, { ...current, areas: [next, ...current.areas.slice(1)] }, 'Print area');
+        statusBar?.announce(`Print area set to ${rangeName(next)}`);
+        refreshPageView(true);
+        notify(); keepFocus();
+        return;
+      }
+      case 'showPageBreaks': {
+        // View ▸ Page Breaks: Normal view's dashed lines where the pages break, kept with the sheet.
+        const sheet = wb.sheet(grid.sheetId);
+        if (!sheet || sheet.kind === 'chart') return;
+        const on = arg == null ? !pageBreakLinesOn(grid.sheetId) : !!arg;
+        if (!on) previewedSheets.delete(grid.sheetId);
+        wb.setShowPageBreaks(grid.sheetId, on);
+        refreshPageView(true);
+        notify(); keepFocus();
+        return;
+      }
       case 'printArea': {
         if (!committed()) return;
         const sheet = wb.sheet(sheetId);
@@ -2981,6 +3455,64 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       case 'dataTable': if (!committed()) return; openDataTable(ctx); return;
       case 'forecastSheet': if (!committed()) return; openForecastSheet(ctx); return;
       case 'scenarioManager': if (!committed()) return; openScenarioManager(ctx); return;
+      case 'solver': if (!committed()) return; openSolver(ctx); return;
+      case 'dataAnalysis': if (!committed()) return; openDataAnalysis(ctx); return;
+      case 'customViews': if (!committed()) return; openCustomViews(ctx); return;
+      case 'sheetView': {
+        // View ▸ Sheet View: New, Keep, Exit, switching views, and Options (rename, duplicate, delete).
+        if (!committed()) return;
+        const sheet = wb.sheet(sheetId);
+        if (!sheet || sheet.kind === 'chart') return;
+        const action = typeof arg === 'string' ? arg : arg?.action;
+        const views = sheet.sheetViews || [];
+        if (action === 'new') {
+          if (wb.newSheetView(sheetId)) toast('You are in a temporary sheet view: the filters you set stay yours. Keep it to give it a name', { icon: 'sheetView', duration: 4000 });
+        } else if (action === 'keep') {
+          const at = views.find((v) => v.id === sheet.personalView?.id);
+          if (!at) { toast('Choose New first: Keep names the temporary view you are in', { icon: 'info', duration: 3000 }); return; }
+          const name = await askViewName(views, { title: 'Keep View', value: at.temporary ? nextViewName(views) : at.name, except: at.id, confirmLabel: 'Keep' });
+          if (name != null && wb.keepSheetView(sheetId, name)) statusBar?.announce(`Sheet view ${name.trim()} kept`);
+        } else if (action === 'exit') {
+          if (wb.exitSheetView(sheetId)) statusBar?.announce('Back to the default view');
+        } else if (action === 'switch') {
+          if (arg?.id) wb.enterSheetView(sheetId, arg.id); else wb.exitSheetView(sheetId);
+        } else if (action === 'rename') wb.renameSheetView(sheetId, arg.id, arg.name);
+        else if (action === 'duplicate') wb.duplicateSheetView(sheetId, arg.id);
+        else if (action === 'delete') wb.deleteSheetView(sheetId, arg.id);
+        else if (action === 'options') { openSheetViewOptions(ctx); return; }
+        rememberSheetViews();
+        notify(); keepFocus();
+        return;
+      }
+      case 'addCustomView': {
+        // The zoom in force may be this device's, not yet the sheet's own: the view keeps what is on screen.
+        if (!committed() || !arg?.name) return;
+        if (wb.sheet(grid.sheetId)?.viewZoom == null && grid.zoom !== 1) wb.setSheetView(grid.sheetId, { viewZoom: grid.zoom });
+        if (wb.addCustomView(arg.name, { print: arg.print !== false, hidden: arg.hidden !== false })) {
+          statusBar?.announce(`View ${arg.name} added`);
+          toast(`View “${arg.name}” added`, { icon: 'customViews', duration: 1800 });
+        }
+        notify();
+        return;
+      }
+      case 'deleteCustomView':
+        if (wb.deleteCustomView(arg)) statusBar?.announce('View deleted');
+        notify();
+        return;
+      case 'showCustomView': {
+        // Show a view: the grid goes to the view's sheet first, so leaving this one does not record its place over the view's.
+        if (!committed()) return;
+        const view = wb.customViews.find((v) => v.id === arg);
+        if (!view) return;
+        const front = wb.sheet(view.activeSheetId);
+        if (front && !front.hidden && front.id !== wb.activeSheetId) wb.setActiveSheet(front.id);
+        wb.showCustomView(view.id);
+        grid.reloadSheetView();
+        refreshPageView(true);
+        statusBar?.announce(`View ${view.name} shown`);
+        notify(); keepFocus();
+        return;
+      }
       case 'advancedFilter': if (!committed()) return; if (refusedByProtection('filter the list')) return; openAdvancedFilter(ctx); return;
       // Data ▸ Get & Transform Data and Queries & Connections (see ui/get-data.js, ui/query-editor.js, core/queries.js).
       case 'getDataText': if (!committed()) return; getDataText(ctx, editQuery); return;
@@ -3110,6 +3642,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       }
       case 'chart': return runChartAction(ctx, arg);
+      case 'smartArt': { if (!committed()) return; const changed = runSmartArtAction(ctx, arg); if (changed) keepFocusUnlessPane(); notify(); return; }
       case 'editChart': {
         const chart = wb.chartById(sheetId, arg || grid.selectedChart);
         if (chart?.type === 'slicer') openSlicerDialog(ctx, chart);
@@ -3117,6 +3650,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         else if (chart?.type === 'scroll') openScrollDialog(ctx, chart);
         else if (chart?.type === 'text' && chart.equation) openEquationDialog(ctx, { equation: chart });
         else if (chart?.type === 'text') openTextBoxDialog(ctx, { textbox: chart });
+        else if (chart?.type === 'smartart') { grid.selectChart(chart.id, { focus: false }); smartArtPane.show({ focus: true }); }
         else if (chart && chart.type !== 'image') openChartDialog(ctx, { chart });
         return;
       }
@@ -3127,7 +3661,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         const kind = wb.chartById(sheetId, id)?.type;
         if (kind === 'timeline') { if (!deleteTimeline(wb, sheetId, id)) return; }
         else if (!wb.deleteChart(sheetId, id)) return;
-        toast(kind === 'slicer' ? 'Slicer deleted' : kind === 'timeline' ? 'Timeline deleted' : kind === 'image' ? 'Image deleted' : kind === 'text' ? 'Text box deleted' : 'Chart deleted', { icon: 'trash', duration: 1600 });
+        toast(kind === 'slicer' ? 'Slicer deleted' : kind === 'timeline' ? 'Timeline deleted' : kind === 'image' ? 'Image deleted' : kind === 'text' ? 'Text box deleted' : kind === 'smartart' ? 'SmartArt deleted' : 'Chart deleted', { icon: 'trash', duration: 1600 });
         keepFocus();
         return;
       }
@@ -3163,16 +3697,18 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') { toast('This browser cannot copy images; use Download instead', { icon: 'info', duration: 3500 }); return; }
         try {
           let blob;
-          if (ch.type === 'image') {
-            const raw = await (await fetch(ch.src)).blob();
-            blob = raw.type === 'image/png' && !ch.flipH && !ch.flipV && !ch.srcRect && !ch.fillRect && !ch.rotation ? raw : await imageToPng(ch.src, ch);
+          if (ch.type === 'smartart') blob = await svgToPng(smartArtPicture(ch), ch.w, ch.h);
+          else if (ch.type === 'image') {
+            const shown = linkedPictureNow(ch);
+            const raw = await (await fetch(shown.src)).blob();
+            blob = raw.type === 'image/png' && pictureIsPlain(shown) ? raw : await imageToPng(shown.src, shown);
           } else {
             const cs = getComputedStyle(grid.viewport);
             const svg = standaloneSvg(renderChartSvg(chartData(wb, sheetId, ch), ch, ch.w, ch.h), (n) => cs.getPropertyValue(n));
             blob = await svgToPng(svg, ch.w, ch.h);
           }
           await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-          toast(ch.type === 'image' ? 'Image copied' : 'Chart copied as a picture', { icon: 'copy', duration: 1800 });
+          toast(ch.type === 'image' ? 'Image copied' : ch.type === 'smartart' ? 'SmartArt copied as a picture' : 'Chart copied as a picture', { icon: 'copy', duration: 1800 });
         } catch (e) {
           console.error(e);
           toast('Could not copy the picture', { icon: 'alert' });
@@ -3187,8 +3723,16 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         try {
           let blob;
           let name;
-          if (ch.type === 'image') {
-            if (ch.flipH || ch.flipV || ch.srcRect || ch.fillRect || ch.rotation) blob = await imageToPng(ch.src, ch);
+          if (ch.type === 'smartart') {
+            const format = arg?.format === 'svg' ? 'svg' : 'png', svg = smartArtPicture(ch);
+            blob = format === 'svg' ? new Blob([svg], { type: 'image/svg+xml' }) : await svgToPng(svg, ch.w, ch.h);
+            name = `${P.sanitizeName(ch.name || 'SmartArt') || 'SmartArt'}.${format}`;
+          } else if (ch.type === 'image' && ch.pictureRef) {
+            const shown = linkedPictureNow(ch);
+            blob = await imageToPng(shown.src, shown);
+            name = `${P.sanitizeName(ch.title || 'picture') || 'picture'}.png`;
+          } else if (ch.type === 'image') {
+            if (!pictureIsPlain(ch)) blob = await imageToPng(ch.src, ch);
             else {
               const drawing = ch.drawingShape && await (await import('../core/drawingml-raster.js')).drawingRasterSource(ch.src, ch);
               blob = await (await fetch(drawing?.src || ch.src)).blob();
@@ -3212,13 +3756,40 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         keepFocus();
         return;
       }
-      case 'insertImage': if (!committed()) return; replaceImageId = null; imageInput.click(); return;
-      case 'replaceImage': replaceImageId = arg || grid.selectedChart || null; if (replaceImageId) imageInput.click(); return;
+      // Insert ▸ Pictures: over the cells, or with 'cell' into the active cell as its value (Place in Cell).
+      case 'insertImage': if (!committed()) return; replaceImageId = null; imageIntoCell = arg === 'cell'; imageInput.click(); return;
+      case 'sheetBackground': {
+        if (!committed()) return;
+        const sheet = wb.sheet(sheetId);
+        if (!sheet || sheet.kind === 'chart') return;
+        if (arg === 'delete') {
+          if (wb.setSheetBackground(sheetId, null)) statusBar?.announce('Sheet background deleted');
+          else toast('This sheet has no background', { icon: 'info' });
+          keepFocus();
+          return;
+        }
+        if (refusedByProtection('change the background')) return;
+        backgroundSheet = sheetId;
+        backgroundInput.click();
+        return;
+      }
+      case 'replaceImage': {
+        const id = arg || grid.selectedChart || null;
+        // A linked picture's double-click (or Enter) goes to the cells it shows.
+        const linked = id && wb.chartById(sheetId, id)?.pictureRef;
+        if (linked) {
+          const target = linkedPictureTarget(wb, sheetId, linked);
+          if (target) { grid.selectChart(null); selectLocation(target.sheetId, target.range); }
+          else toast(`The cells this picture showed (${linked}) are gone`, { icon: 'info', duration: 3000 });
+          return;
+        }
+        replaceImageId = id; imageIntoCell = false; if (replaceImageId) imageInput.click(); return;
+      }
       case 'insertImagePuter': {
         if (!P.canPickFiles() || !committed()) return;
         if (refusedByProtection('insert images')) return;
         // The picker and file read may finish after the user has moved to another cell or sheet.
-        const target = { sheetId: grid.sheetId, anchor: { ...grid.active } };
+        const target = { sheetId: grid.sheetId, anchor: { ...grid.active }, inCell: arg === 'cell' };
         if (session.signedOut && (!await session.signIn() || destroyed)) return;
         const picked = await P.pickFile({ accept: ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'] });
         if (destroyed) return;
@@ -3243,12 +3814,12 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       case 'insertImageUrl': {
         // A picture from the web, fetched through Puter so it lands in the file like an uploaded one.
         const url = await promptDialog({
-          title: 'Insert image from URL', label: 'Address of a PNG, JPEG, GIF, WebP, or SVG image', placeholder: 'https://example.com/logo.png', confirmLabel: 'Insert',
+          title: arg === 'cell' ? 'Place picture in cell from URL' : 'Insert image from URL', label: 'Address of a PNG, JPEG, GIF, WebP, or SVG image', placeholder: 'https://example.com/logo.png', confirmLabel: arg === 'cell' ? 'Place in Cell' : 'Insert',
           validate: urlProblem,
         });
         if (!url) { keepFocus(); return; }
         if (!committed()) return;
-        const target = { sheetId: grid.sheetId, anchor: { ...grid.active } };
+        const target = { sheetId: grid.sheetId, anchor: { ...grid.active }, inCell: arg === 'cell' };
         try {
           const bytes = await P.fetchBytes(url.trim());
           if (destroyed) return;
@@ -3275,9 +3846,15 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         wb.removeLink(sheetId, grid.active.r, grid.active.c);
         keepFocus();
         return;
+      // Automate (ui/automate.js): scripts, the Code Editor, Record Actions and script buttons.
+      case 'scriptsPane': case 'newScript': case 'openScript': case 'recordActions': case 'stopRecording': case 'scriptGallery':
+      case 'runScript': case 'stopScript': case 'scriptReference': case 'insertScriptButton':
+        return automate?.run(cmd, arg);
       case 'openDrawingLink': {
         const url = safeLinkUrl(wb.chartById(sheetId, arg)?.hyperlink);
         if (!url) return;
+        // A script button (Automate ▸ Script Button) runs its script.
+        if (scriptOfLink(url) != null) { automate?.run('runScript', { name: scriptOfLink(url) }); return; }
         if (url.startsWith('#')) { followInternalLink(url); return; }
         window.open(url, '_blank', 'noopener');
         return;
@@ -3362,6 +3939,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       }
       case 'print':
         openPrintDialog(ctx);
+        if (wb.sheet(sheetId)?.kind !== 'chart') { previewedSheets.add(sheetId); refreshPageView(true); }
         return;
       case 'find': if (!committed()) return; findBar.open({ replace: arg === 'replace' }); return;
       case 'findNext': if (!committed()) return; findBar.findNext(); return;
@@ -3439,6 +4017,16 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
     const png = file.type === 'image/png';
     return { src: canvas.toDataURL(png ? 'image/png' : 'image/jpeg', 0.86), width: canvas.width, height: canvas.height };
+  }
+
+  /** A SmartArt diagram as a picture of its own, in the workbook's theme (one another program drew, as it drew it). */
+  function smartArtPicture(ch) {
+    if (ch.fallback?.src) return decodeURIComponent(escape(atob(ch.fallback.src.split(',')[1])));
+    return smartArtSvg(ch, ch.w, ch.h, { ...smartArtLook(wb), idPrefix: 'sap', label: ch.decorative ? '' : ch.description || smartArtAltText(ch) });
+  }
+  /** After a SmartArt command the keyboard goes back to the sheet, unless the Text Pane has it. */
+  function keepFocusUnlessPane() {
+    if (!ctx.smartArt?.pane?.el.contains(document.activeElement)) keepFocus();
   }
 
   function svgToPng(svg, width, height) {
@@ -3892,9 +4480,31 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   }
 
   /** A picture from the clipboard lands as a floating image at the active cell. */
-  function insertPastedImage(picture) {
+  /**
+   * A picture pasted while a cell is selected floats over the cells; the Paste Options button then offers
+   * it placed in the cell instead (or back over the cells), each choice the paste done again that way.
+   */
+  async function insertPastedImage(picture, { inCell = false } = {}) {
     replaceImageId = null;
-    insertImageFile(new File([picture], picture.name || `Pasted image.${picture.type.split('/')[1]?.replace('jpeg', 'jpg').replace('svg+xml', 'svg') || 'png'}`, { type: picture.type }));
+    const file = new File([picture], picture.name || `Pasted image.${picture.type.split('/')[1]?.replace('jpeg', 'jpg').replace('svg+xml', 'svg') || 'png'}`, { type: picture.type });
+    const from = { sheetId: grid.sheetId, active: { ...grid.active }, range: { ...grid.range } };
+    const before = wb.historyTop;
+    const made = await insertImageFile(file, { sheetId: from.sheetId, anchor: from.active, inCell });
+    const mark = wb.historyTop;
+    if (!made || !mark || mark === before || destroyed) return;
+    optionButton.show({
+      kind: 'paste', sheetId: from.sheetId, range: { r1: from.active.r, c1: from.active.c, r2: from.active.r, c2: from.active.c }, mark,
+      items: [{ header: 'Paste Picture' }, { key: 'floating', label: 'Place over Cells', icon: 'placeOverCells' }, { key: 'cell', label: 'Place in Cell', icon: 'placeInCell' }],
+      checked: made,
+      onPick: (item) => {
+        if (item.key === made || wb.historyTop !== mark || grid.sheetId !== from.sheetId) { optionButton.hide(); return; }
+        historyMove = 'undo';
+        try { wb.undo(); } finally { historyMove = 'push'; }
+        grid.selectChart(null);
+        grid.setSelection(S.fromRange(from.range, from.active), { scroll: false });
+        insertPastedImage(picture, { inCell: item.key === 'cell' });
+      },
+    });
   }
 
   /**
@@ -4363,6 +4973,12 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   async function pasteFromClipboard({ valuesOnly = false, mode = null, paste = null } = {}) {
     if (grid.editing) { document.execCommand?.('paste'); return; }
     if (!oneRange('paste into')) return; // said before the clipboard is read, which can wait on a permission prompt
+    // Paste Special ▸ Picture and Linked Picture: a picture of the cells copied here.
+    if (paste?.picture) {
+      if (!clip || clip.cut || clip.multi || !wb.sheet(clip.sheetId)) { toast('Copy a range of cells first, then paste it as a picture', { icon: 'info', duration: 3000 }); keepFocus(); return; }
+      pictures.run('pastePicture', { linked: paste.picture === 'linked', source: { sheetId: clip.sheetId, range: clip.range } });
+      return;
+    }
     const read = await readClipboard();
     if (!read) return;
     if (read.picture) { insertPastedImage(read.picture); return; }
@@ -4384,9 +5000,11 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const mark = wb.historyTop;
     if (moving || !mark || mark === before) { optionButton.hide(); return; }
     lastPaste = { text, html, paste: pasteOptions(paste), from, mark, external: !internal };
+    if (!appOption('pasteOptionsButton')) { optionButton.hide(); return; } // turned off in the options
     optionButton.show({
       kind: 'paste', sheetId: grid.sheetId, range: { ...grid.range }, mark,
-      items: pasteGallery({ external: !internal }).map((item) => (item.header ? item : { ...item, key: JSON.stringify(pasteOptions(item.paste)) })),
+      // The pictures of the cells are pastes of their own, not another way of pasting these cells.
+      items: pasteGallery({ external: !internal }).filter((item) => !item.paste?.picture).map((item) => (item.header ? item : { ...item, key: JSON.stringify(pasteOptions(item.paste)) })),
       checked: JSON.stringify(lastPaste.paste),
       onPick: (item) => repasteWith(item.paste),
     });
@@ -4403,12 +5021,64 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     grid.focus();
   }
 
+  /**
+   * What Flash Fill would write in column `c` around row `r`: the examples typed in the column teach the pattern
+   * from the cells beside them. { entries, examples, rows }: the cells to fill, how many examples taught it, and
+   * the rows looked at ({ r, target }).
+   */
+  function flashFillPlan(sheetId, r, c) {
+    const region = wb.dataRegion(sheetId, r, c) || { r1: r, c1: c, r2: r, c2: c };
+    const area = { r1: region.r1, r2: region.r2, c1: Math.min(region.c1, c - 1 >= 0 ? c - 1 : c), c2: Math.max(region.c2, c) };
+    const cols = [];
+    for (let cc = area.c1; cc <= area.c2; cc++) if (cc !== c) cols.push(cc);
+    const shown = (rr, cc) => { const v = wb.getValue(sheetId, rr, cc); return v == null || (typeof v === 'object') ? null : wb.getDisplay(sheetId, rr, cc); };
+    const rows = [];
+    for (let rr = area.r1; rr <= area.r2; rr++) {
+      const target = wb.getCell(sheetId, rr, c);
+      rows.push({ r: rr, sources: cols.map((cc) => shown(rr, cc)), target: target?.v != null || target?.f != null ? shown(rr, c) : null });
+    }
+    // A header above the examples fits no pattern: try again without the first row before giving up.
+    let filled = flashFill(rows), from = 0;
+    if (!filled && rows.length > 1) { filled = flashFill(rows.slice(1)); from = 1; }
+    const entries = [];
+    if (filled) filled.forEach((text, i) => { const row = rows[i + from]; if (text != null && text !== '' && row.sources.some((v) => v != null)) entries.push({ r: row.r, c, cell: { v: text, f: null, s: wb.getCell(sheetId, row.r, c)?.s } }); });
+    return { entries, examples: filled ? rows.slice(from).filter((row) => row.target != null && row.target !== '').length : 0, rows: rows.slice(from) };
+  }
+
+  /**
+   * Flash Fill as you type (the options): once a second example in a row follows a pattern from the cells beside
+   * it, and the column below is still empty, a notice offers to fill the rest the same way.
+   */
+  let flashOffer = null;
+  function offerFlashFill(sheetId, r, c) {
+    flashOffer?.dismiss?.();
+    flashOffer = null;
+    if (!appOption('autoFlashFill') || grid.sheetId !== sheetId || r < 1) return;
+    const above = wb.getCell(sheetId, r - 1, c);
+    if (above?.v == null || above.f != null || typeof wb.getValue(sheetId, r, c) !== 'string') return;
+    const { entries, examples, rows } = flashFillPlan(sheetId, r, c);
+    // The examples must be the column's first entries, the one just typed the last of them, with only blanks below.
+    const typed = rows.filter((row) => row.target != null && row.target !== '').map((row) => row.r);
+    if (examples < 2 || !entries.length || typed.at(-1) !== r || typed.some((rr, i) => i && rr !== typed[i - 1] + 1) || entries.some((e) => e.r < r)) return;
+    const mark = wb.historyTop;
+    flashOffer = toast(`Flash Fill can fill ${entries.length} more cell${entries.length === 1 ? '' : 's'} in this column the same way`, {
+      icon: 'flashFill', duration: 8000,
+      action: { label: 'Fill', onClick: () => {
+        // Only while the sheet is as it was when offered: an edit since may have changed the pattern.
+        if (destroyed || wb.historyTop !== mark || grid.editing) return;
+        if (wb.setCells(sheetId, entries, 'Flash Fill')) statusBar?.announce(`Flash Fill changed ${entries.length} cells`);
+        keepFocus();
+      } },
+    });
+  }
+
   /** After a fill-handle drag: the Auto Fill Options button, to fill the same cells again another way. */
   function offerAutoFill({ source, target, inverted = false }, kind = null) {
     const mark = wb.historyTop;
     if (!mark) return;
     const sheetId = grid.sheetId;
     lastFill = { sheetId, source: normalizeRange(source), target: normalizeRange(target), mark, kind: kind || defaultAutoFill(wb, sheetId, source, target, inverted) };
+    if (!appOption('fillOptionsButton')) { optionButton.hide(); return; } // turned off in the options
     optionButton.show({
       kind: 'fill', sheetId, range: lastFill.target, mark,
       items: autoFillChoices(wb, sheetId, source, target).map(([key, label]) => ({ key, label })),
@@ -4767,6 +5437,23 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     else refreshTitle();
   }
 
+  /**
+   * Sharing hands out a file: an unsaved spreadsheet is saved first, as for a link to a range. Saved by hand,
+   * not flushed: a flush has nothing to write for a blank book that was never changed. A file that is not an
+   * .xlsx (a .csv opened from the drive) is saved as one first, where its edits go from now on: shared as it
+   * was, it would never see them. Resolves whether there is a file to share now.
+   */
+  async function savedForSharing() {
+    if (grid.editing && !grid.commitEdit()) return false;
+    if (session.signedOut && (!await session.signIn() || destroyed)) return false;
+    if (!doc.path || !doc.isXlsxPath) {
+      try { await doc.save(); } catch (e) { toast(e?.message || 'Could not save the spreadsheet', { icon: 'alert', duration: 4000 }); return false; }
+      if (destroyed) return false;
+    }
+    if (!doc.path) { toast('Save the spreadsheet first, then share it', { icon: 'info' }); return false; }
+    return true;
+  }
+
   async function saveAs() {
     if (grid.editing && !grid.commitEdit()) return;
     if (session.signedOut && (!await session.signIn() || destroyed)) return;
@@ -4811,28 +5498,79 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   });
   // Images float over the sheet like charts and travel in the file as data URLs.
   let replaceImageId = null;
+  let imageIntoCell = false; // the picture chosen goes into the active cell (Insert ▸ Pictures ▸ Place in Cell)
   const imageInput = el('input', {
     type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml', hidden: true, 'aria-hidden': 'true', tabindex: -1,
     onchange: async () => {
       const f = imageInput.files?.[0];
       imageInput.value = '';
-      const replaceId = replaceImageId;
-      replaceImageId = null;
-      if (f) await insertImageFile(f, { replaceId });
+      const replaceId = replaceImageId, inCell = imageIntoCell;
+      replaceImageId = null; imageIntoCell = false;
+      if (f) await insertImageFile(f, { replaceId, inCell });
     },
   });
-  /** Put an image file on the sheet at the active cell, or into the image being replaced. */
-  async function insertImageFile(f, { sheetId = grid.sheetId, anchor = { ...grid.active }, replaceId = null } = {}) {
-    if (destroyed) return;
+  // Page Layout ▸ Background: a picture tiled behind the cells of the sheet in view.
+  let backgroundSheet = null;
+  const backgroundInput = el('input', {
+    type: 'file', accept: 'image/png,image/jpeg,image/gif,image/bmp,image/webp,image/svg+xml', hidden: true, 'aria-hidden': 'true', tabindex: -1,
+    onchange: async () => {
+      const f = backgroundInput.files?.[0], sheetId = backgroundSheet;
+      backgroundInput.value = '';
+      backgroundSheet = null;
+      if (!f || destroyed || !wb.sheet(sheetId)) return;
+      try {
+        let { src, width, height } = await readImageFile(f);
+        // The file keeps a background as a PNG, JPEG, GIF or BMP picture: others are drawn into a PNG.
+        if (!/^data:image\/(png|jpeg|gif|bmp);/i.test(src)) {
+          const img = await new Promise((resolve, reject) => { const im = new Image(); im.onload = () => resolve(im); im.onerror = reject; im.src = src; });
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(width)); canvas.height = Math.max(1, Math.round(height));
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          src = canvas.toDataURL('image/png');
+        }
+        if (destroyed) return;
+        if (wb.isProtected(sheetId)) { toast('This sheet is protected. Unprotect it before changing its background', { icon: 'lock', duration: 3500 }); return; }
+        if (wb.setSheetBackground(sheetId, src)) {
+          toast('Background set. It shows behind the cells on screen and is not printed', { icon: 'image', duration: 3000 });
+          statusBar?.announce('Sheet background set');
+        } else toast('That picture is too large for a background', { icon: 'info', duration: 3000 });
+      } catch (e) {
+        if (destroyed) return;
+        toast(e?.code === 'too-large' ? `${f.name} is too large (over ${MAX_IMAGE_BYTES / (1024 * 1024)} MB)` : 'Could not read that image', { icon: 'alert', duration: 3500 });
+      }
+      keepFocus();
+    },
+  });
+  /** A linked picture as it shows now: the picture of its cells, drawn afresh (a static picture as it is). */
+  function linkedPictureNow(ch) {
+    const target = ch.pictureRef && linkedPictureTarget(wb, grid.sheetId, ch.pictureRef);
+    const live = target && rangePicture(wb, target.sheetId, target.range);
+    return live ? { ...ch, src: svgDataUrl(live.svg), srcRect: null, fillRect: null } : ch;
+  }
+
+  /**
+   * Put an image file on the sheet at the active cell, into the image being replaced, or with `inCell`
+   * into the cell itself as its value. Resolves to what was made: 'floating', 'cell', or null.
+   */
+  async function insertImageFile(f, { sheetId = grid.sheetId, anchor = { ...grid.active }, replaceId = null, inCell = false } = {}) {
+    if (destroyed) return null;
     const atDestination = () => grid.sheetId === sheetId && grid.active.r === anchor.r && grid.active.c === anchor.c && !grid.editing;
+    let made = null;
     try {
       const { src, width, height } = await readImageFile(f);
-      if (destroyed || !wb.sheet(sheetId)) return;
-      if (wb.isProtected(sheetId)) {
+      if (destroyed || !wb.sheet(sheetId)) return null;
+      if (wb.isProtected(sheetId) && !inCell) {
         toast('This sheet is protected. Unprotect it before inserting or replacing images', { icon: 'lock', duration: 3500 });
-        return;
+        return null;
       }
-      if (replaceId) {
+      if (inCell) {
+        // The picture is the cell's value: it moves, sorts and copies with the cell. Its file name is a first alt text.
+        const alt = f.name && !/^(?:pasted )?image(?:\.\w+)?$/i.test(f.name) ? f.name.replace(/\.[^.]+$/, '') : '';
+        if (await pictures.placeSourceInCell(src, { sheetId, at: anchor, alt })) {
+          made = 'cell';
+          statusBar?.announce(`Picture placed in ${cellName(anchor.r, anchor.c)}`);
+        }
+      } else if (replaceId) {
         if (!wb.chartById(sheetId, replaceId)) return;
         wb.updateChart(sheetId, replaceId, { src, title: f.name }, 'Replace image');
         toast('Image replaced', { icon: 'image', duration: 1600 });
@@ -4840,7 +5578,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // Fit large pictures to a sensible on-sheet size; they keep their proportions.
         const scale = Math.min(1, 480 / width, 320 / height);
         const id = wb.addChart(sheetId, { type: 'image', src, title: f.name, anchor, dx: 4, dy: 4, w: Math.round(width * scale), h: Math.round(height * scale) });
-        if (!id) return;
+        if (!id) return null;
+        made = 'floating';
         if (atDestination()) grid.selectChart(id);
         toast('Image inserted. Drag to move, drag the corner to resize', { icon: 'image', duration: 2600 });
       }
@@ -4851,6 +5590,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       else { console.error(e); toast('Could not read that image', { icon: 'alert' }); }
     }
     if (atDestination()) keepFocus();
+    return made;
   }
   // Where the assistant is on screen, open or collapsed to its strip: a file dropped there goes with the next message.
   function overAssistant(x, y) {
@@ -4909,16 +5649,90 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
 
   /* ---------- Top bar and menu bar ---------- */
 
+  /* ---------- Editing together (a shared workbook; see collab/ and coauthor.js) ---------- */
+
+  const room = doc.collab || null;
+  const FLAG_MS = 4000;
+  /** Show where someone is: their sheet, with their selection. */
+  const jumpTo = (person) => {
+    if (!person.sheet || !wb.sheet(person.sheet)) { toast(`${person.name} has not picked a cell yet`, { icon: 'info', duration: 2200 }); return; }
+    if (grid.editing && !grid.commitEdit()) return;
+    if (wb.activeSheetId !== person.sheet) wb.setActiveSheet(person.sheet);
+    const target = person.sel || { r1: person.active.r, c1: person.active.c, r2: person.active.r, c2: person.active.c };
+    grid.setRanges([target], person.active || { r: target.r1, c: target.c1 });
+    statusBar?.announce(`At ${person.name}'s selection`);
+    keepFocus();
+  };
+  const peopleBar = room ? createPeopleBar({ client: room, wb, jump: jumpTo }) : null;
+  let lastPresence = '';
+  const sharePresence = () => {
+    if (!room) return;
+    const state = { sheet: grid.sheetId, sel: grid.range, active: grid.active, editing: grid.editing };
+    const key = JSON.stringify(state);
+    if (key === lastPresence) return;
+    lastPresence = key;
+    room.setPresence(state);
+  };
+  // A person's name flag shows while they move or type, then shrinks to a tab in their colour, so names do not cover the cells.
+  const movedAt = new Map(); // session → { key, at }
+  let flagTimer = null;
+  const showPeople = () => {
+    if (!room || destroyed) return;
+    const now = Date.now();
+    const people = peopleHere(room).map((p) => {
+      const key = JSON.stringify([p.sheet, p.sel, p.active, p.editing]);
+      const seen = movedAt.get(p.id);
+      if (seen?.key !== key) movedAt.set(p.id, { key, at: now });
+      return { ...p, quiet: !p.editing && now - movedAt.get(p.id).at > FLAG_MS };
+    });
+    peopleBar.update();
+    grid.setPeers(people);
+    clearTimeout(flagTimer);
+    const next = Math.min(...people.filter((p) => !p.quiet && !p.editing).map((p) => movedAt.get(p.id).at + FLAG_MS - now + 20));
+    if (Number.isFinite(next)) flagTimer = setTimeout(showPeople, Math.max(50, next));
+    const bySheet = new Map();
+    for (const p of people) if (p.sheet) bySheet.set(p.sheet, [...(bySheet.get(p.sheet) || []), { name: p.name, color: p.color }]);
+    sheetTabs.setPeers(bySheet);
+  };
+  const onRoomRefused = (e) => toast(e.detail?.message || 'That change could not be shared', { icon: 'alert', duration: 4000 });
+  const onRoomRole = (e) => toast(e.detail?.role === 'viewer' ? 'You can now only view this shared workbook' : 'You can now edit this shared workbook', { icon: 'info', duration: 4000 });
+  const onRoomClosed = (e) => toast(`${e.detail?.message || 'This shared workbook is no longer available'} What you see stays open; use File > Save a copy to keep it.`, { icon: 'alert', duration: 8000 });
+  // Rows or columns someone else inserted, deleted or moved carry this person's selection along with the cells.
+  const onRoomRemote = (e) => {
+    const ops = (e.detail?.ops || []).filter((op) => op.s === grid.sheetId && op.axis);
+    if (!ops.length || grid.editing) return;
+    const map = (range) => {
+      let { r1, c1, r2, c2 } = range;
+      for (const op of ops) {
+        const along = op.axis === 'row' ? ['r1', 'r2'] : ['c1', 'c2'];
+        const box = { r1, c1, r2, c2 };
+        let a = mapLine(op, op.s, op.axis, box[along[0]]), b = mapLine(op, op.s, op.axis, box[along[1]]);
+        if (a < 0 || b < 0) { a = Math.max(0, mapGap(op, op.s, op.axis, box[along[0]])); b = Math.max(a, mapGap(op, op.s, op.axis, box[along[1]] + 1) - 1); }
+        if (op.t === 'insert' && box[along[0]] < op.at && box[along[1]] >= op.at) b = box[along[1]] + op.n;
+        box[along[0]] = a; box[along[1]] = Math.max(a, b);
+        ({ r1, c1, r2, c2 } = box);
+      }
+      return { r1, c1, r2, c2 };
+    };
+    const ranges = grid.ranges.map(map);
+    const act = map({ r1: grid.active.r, c1: grid.active.c, r2: grid.active.r, c2: grid.active.c });
+    grid.setRanges(ranges, { r: act.r1, c: act.c1 });
+  };
+  const onRoomOnline = () => room?.resume();
+  const onRoomVisible = () => { if (document.visibilityState === 'visible') room?.resume(); };
+
   // The tooltip carries the whole name: the title is cut short with an ellipsis when the window is narrow.
   const titleTip = () => `Rename "${doc.name}"`;
   // A name in a right-to-left script is laid out that way, its number at its own end, as a cell is.
   const titleBtn = el('button.doc-title', { type: 'button', dir: 'auto', title: titleTip(), onclick: () => run('rename') }, doc.name);
+  // Beside the name while several sheets are grouped: what is typed lands on all of them.
+  const groupBadge = el('span.doc-group-badge', { hidden: true, title: 'Several sheets are grouped: edits apply to each of them. Click a sheet outside the group, or right-click a tab, to ungroup.' }, '[Group]');
   // A plain status while signed in; without a session it is the button that starts the sign-in and the save.
   const status = el('button.save-status', { type: 'button', 'aria-live': 'polite', disabled: true, onclick: () => { if (session.signedOut) run('save'); } });
   const searchBtn = el('button.icon-btn.desktop-only', { type: 'button', html: icon('search', 20), 'aria-label': 'Search the menus', title: `Search the menus (${MOD_KEY}+Shift+P)`, onclick: () => run('palette') });
   const avatar = el('button.icon-btn.user-btn', {
     type: 'button', 'aria-label': 'Account menu', 'aria-haspopup': 'menu',
-    onclick: (e) => openAppMenu(e.currentTarget),
+    onclick: (e) => openAppMenu(e.currentTarget, { onOptions: () => run('options') }),
   });
   renderAccountButton(avatar);
 
@@ -4944,15 +5758,24 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     el('span.brand-mark.desktop-only', { html: icon('brand', 16, 2.2), 'aria-hidden': 'true' }),
     quickAccess,
     el('div.topbar-menus', {}, menubar.el),
-    el('div.topbar-title-wrap', {}, titleBtn, status),
+    el('div.topbar-title-wrap', {}, titleBtn, groupBadge, status),
     el('div.topbar-actions', {}, searchBtn,
       // The Comments button beside Share: the sheet's comment threads in the Comments pane.
       el('button.icon-btn.desktop-only.topbar-comments', { type: 'button', html: icon('chat', 20), 'aria-label': 'Comments', title: 'Comments', onclick: () => run('toggleComments') }),
+      peopleBar?.el,
       ...(P.canShare() ? [el('button.btn.share-btn.desktop-only', { type: 'button', title: 'Share this spreadsheet', onclick: () => run('share') },
       el('span', { html: icon('share', 16) }), el('span', {}, 'Share'))] : []), avatar));
   const header = el('header.editor-header', {}, topbar);
 
   function refreshStatus() {
+    if (room) {
+      const [ic, label, title] = roomStatus(room);
+      status.disabled = true;
+      status.className = `save-status shared ${room.status.state}`;
+      status.replaceChildren(el('span', { html: icon(ic, 14, 2), className: ic === 'spinner' ? 'spin' : '' }), el('span.save-label', {}, label));
+      status.title = title;
+      return;
+    }
     if (session.signedOut) {
       // Nowhere to write yet: the pill invites the sign-in that saving needs. The edits are normally copied into
       // this browser's draft meanwhile; when they could not be (the book outgrew local storage), it says so here
@@ -4991,31 +5814,78 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   function refreshTitle() {
     titleBtn.textContent = doc.name;
     titleBtn.title = titleTip();
-    document.title = `${doc.name} · Spreadsheet`;
-    P.setWindowTitle(doc.name);
+    groupBadge.hidden = !wb.sheetGroup;
+    const group = wb.sheetGroup ? ' [Group]' : '';
+    document.title = `${doc.name}${group} · Spreadsheet`;
+    P.setWindowTitle(`${doc.name}${group}`);
     refreshStatus();
   }
 
   /* ---------- Assemble ---------- */
 
   let aiPanel = null;
+  let languagePane = null; // Review ▸ Thesaurus and Translate, made below
   let queriesPane = null; // Data ▸ Queries & Connections, made below
+  let automate = null; // Automate: scripts, the Code Editor and Record Actions, made below
+  // Pictures in cells, Picture Format, and pictures of copied cells (ui/pictures.js).
+  const pictures = createPictures(ctx, { keepFocus: () => keepFocus(), selectLocation: (sid, range) => selectLocation(sid, range) });
+  ctx.pictures = pictures;
+  let changesPane = null; // Review ▸ Show Changes, made below
   const toolbar = createRibbon(ctx);
   ctx.ribbon = toolbar;
+  // The Quick Access Toolbar holds what the person keeps there (ui/quick-access.js): in the title row, or in a
+  // row of its own under the ribbon.
+  const qatBar = el('div.quick-access-bar', { hidden: true });
+  const qatHome = { parent: quickAccess.parentNode, next: quickAccess.nextSibling };
+  const qat = createQuickAccess(ctx, { root: quickAccess, place: (below) => {
+    if (below) { qatBar.append(quickAccess); qatBar.hidden = false; }
+    else if (quickAccess.parentNode !== qatHome.parent) { qatHome.parent.insertBefore(quickAccess, qatHome.next); qatBar.hidden = true; }
+  } });
+  ctx.subscribe(() => qat.refresh());
   const formulaBar = createFormulaBar(ctx, { fixedActions: true });
   const sheetTabs = createSheetTabs(ctx, { excelLayout: true });
   const statusBar = createStatusBar(ctx);
   const watchWindow = createWatchWindow({ ...ctx, run, docName: () => doc.name, goTo: (sid, r, c) => selectLocation(sid, { r1: r, c1: c, r2: r, c2: c }) });
   // Review ▸ Check Accessibility: a finding goes to its cells, or selects its object.
+  // Review ▸ Thesaurus and Translate, answered by Puter's AI.
+  languagePane = createLanguagePane({ ...ctx, run,
+    ai: P.canAI() ? (prompt) => P.aiChat(prompt, { feature: 'thesaurus' }) : null,
+    translate: P.canAI() ? (text, from, to) => aiTranslate(translatePrompt(text, from || '', to || 'English')) : null });
+  // Page Layout ▸ Arrange ▸ Selection Pane: the sheet's drawing objects, front first.
+  selectionPane = createSelectionPane({ ...ctx, run, notify });
+  // SmartArt Design ▸ Text Pane: the selected diagram's outline to type into.
+  const smartArtPane = ctx.smartArt.pane = createSmartArtPane(ctx);
   const accessibilityPane = createAccessibilityPane({ ...ctx, run, reveal: (item) => {
     if (item.target?.range) { selectLocation(item.sheetId, item.target.range); return; }
     const obj = item.target?.chartId && wb.chartById(item.sheetId, item.target.chartId);
     if (obj) { selectLocation(item.sheetId, { r1: obj.anchor.r, c1: obj.anchor.c, r2: obj.anchor.r, c2: obj.anchor.c }); grid.selectChart(obj.id); return; }
     if (wb.sheet(item.sheetId) && !wb.sheet(item.sheetId).hidden) wb.setActiveSheet(item.sheetId);
   } });
+  // Review ▸ Show Changes: the recent edits, each with who made it; the signed-in user is the author of the edits made here.
+  changesPane = createChangesPane({ ...ctx, run, reveal: (sid, range) => selectLocation(sid, range), currentUser: () => session.user?.username || null });
+  const syncChangeAuthor = () => { wb.changeAuthor = displayUserName(session.user?.username) || null; };
+  syncChangeAuthor();
   // Data ▸ Queries & Connections: the queries of the workbook, beside the sheet.
   ctx.autofitColumns = (sid, c1, c2) => autofitColumns(c1, c2, sid);
   queriesPane = createQueriesPane({ ...ctx, run, edit: (id) => editQuery(ctx, { queryId: id }), allowQuerySources });
+  // Automate: scripts run apart from the app (lib/script-sandbox.js); what they ask of the editor comes through here.
+  automate = ctx.automate = createAutomate(ctx, {
+    notify,
+    keepFocus: () => keepFocus(),
+    // While a script runs, the sheet, the formula bar and the sheet tabs take no input of their own.
+    busy: (on) => { for (const node of [grid.el, formulaBar.el, sheetTabs.el]) node.inert = on; },
+    env: () => ({
+      name: doc.name,
+      selection: () => ({ sheetId: grid.sheetId, range: { ...grid.range } }),
+      select: (sheetId, range) => selectLocation(sheetId, range),
+      autofit: (sheetId, axis, from, to) => {
+        if (axis === 'col') autofitColumns(from, to, sheetId);
+        else if (sheetId === grid.sheetId) grid.autoFitRows(from, Math.min(to, from + 2000), { force: true });
+      },
+      // A formula a script writes that reaches outside the file waits for the user's Allow, as one in a shared file does.
+      distrust: () => doc.distrustExternal(),
+    }),
+  });
   ctx.onQueriesChanged = () => { queriesPane.render(true); notify(); };
   const findBar = createFindBar(ctx);
   // Background error checking's smart tag beside the active cell (Convert to Number, Ignore Error…).
@@ -5023,8 +5893,18 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   const quickAnalysis = createQuickAnalysis({ ...ctx, run });
   const errorTag = createErrorSmartTag({ ...ctx, run, focusFormulaBar: () => formulaBar.focusInput(), refreshErrorTag: () => errorTag.sync() });
   // Threaded comments: the card beside a cell and the Comments pane (Review ▸ Comments).
-  const comments = createComments(ctx, { author: () => session.user?.username || 'You', keepFocus: () => keepFocus(),
-    refused: (what) => refusedByProtection(what), onPaneToggle: () => notify() });
+  // @mentions: the people a comment can name, telling them when it is posted, and telling the user when a
+  // comment names them (ui/mention-notify.js).
+  const mentionNotifier = createMentionNotifier({ doc, wb, mailer, me: () => session.user });
+  const comments = createComments(ctx, { author: () => displayUserName(session.user?.username) || 'You', keepFocus: () => keepFocus(),
+    refused: (what) => refusedByProtection(what), onPaneToggle: () => notify(),
+    mentionPeople: () => mentionNotifier.candidates(),
+    onMentioned: (posted) => { mentionNotifier.notify(posted).catch((e) => console.error(e)); } });
+  const mentionAlerts = createMentionAlerts({
+    wb, me: () => session.user, fileKey: () => doc.uid || doc.path,
+    goTo: (sheetId, r, c) => { if (destroyed) return; if (selectLocation(sheetId, { r1: r, c1: c, r2: r, c2: c })) comments.run('showComment'); },
+  });
+  mentionAlerts.start();
   comments.attach();
   ctx.comments = comments;
   ctx.subscribe(() => comments.sync());
@@ -5072,27 +5952,40 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     fileInput,
     sheetsInput,
     imageInput,
+    backgroundInput,
     header,
     // The sheet's column, and the assistant beside it from under the title row down (a thin strip when collapsed).
     el('div.editor-body', {},
       el('div.editor-main', {},
         toolbar.el,
+        qatBar,
         formulaBar.el,
         externalNotice,
+        automate.notice,
         pivotNotice,
         // The page's main landmark: the grid (the panel the sheet tabs control) and the find bar over it.
-        el('main.editor-grid', {}, grid.el, findBar.el),
+        // The task panes (Accessibility, Thesaurus and Translate, Changes, Selection, Queries) dock at the grid's right
+        // edge, under the ribbon and beside whatever column is open to the right; one at a time (see taskPanes).
+        el('main.editor-grid', {}, grid.el, findBar.el, accessibilityPane.el, languagePane.el, changesPane.el, selectionPane.el, queriesPane.el, smartArtPane.el),
         sheetTabs.el,
         statusBar.el,
         watchWindow.el,
-        accessibilityPane.el,
         errorTag.el,
-        quickAnalysis.el,
-        queriesPane.el),
+        quickAnalysis.el),
       chartUi.pane,
       comments.el,
+      automate.pane,
       aiPanel?.el,
       aiPanel?.rail));
+  // The task panes over the grid take turns: opening one closes whichever other was open, so none hides another.
+  const taskPanes = [accessibilityPane, languagePane, changesPane, selectionPane, queriesPane, smartArtPane];
+  for (const pane of taskPanes) {
+    const show = pane.show.bind(pane);
+    pane.show = (...args) => {
+      for (const other of taskPanes) if (other !== pane && other.open) other.hide();
+      return show(...args);
+    };
+  }
   // Alt (or F10) shows key tips on the ribbon; they wait while an entry, a menu or a dialog has the keyboard.
   const keyTips = attachKeyTips({
     ribbon: toolbar.el, fileButton: () => menubar.el.querySelector('[data-menu="file"]'), openFile: () => menubar.open('file'),
@@ -5129,6 +6022,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   });
   let pageViewKey = null;
   let pageLayoutKey = null;
+
   function refreshPageView(force = false) {
     const mode = sheetViewMode();
     const on = mode === 'pageBreak';
@@ -5142,11 +6036,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       if (!fresh && key !== pageLayoutKey) grid.refresh();
       pageLayoutKey = key;
     } else { grid.setPageLayout(null); pageLayoutKey = null; }
-    const key = on ? `${grid.sheetId}|${wb.version}` : null;
+    // Normal view can show where the pages break (View ▸ Page Breaks, or after a print preview), as dashed lines.
+    const lines = mode === 'normal' && pageBreakLinesOn(grid.sheetId);
+    const key = on || lines ? `${grid.sheetId}|${wb.version}|${on}` : null;
     if (!force && key === pageViewKey) return;
     pageViewKey = key;
-    const breaks = on ? pageBreaks(wb, grid.sheetId) : null;
-    grid.setPageView(on ? { area: breaks?.area || { r1: 0, c1: 0, r2: 0, c2: 0 }, pages: pagesOf(breaks) } : null);
+    const breaks = on || lines ? pageBreaks(wb, grid.sheetId) : null;
+    if (on) grid.setPageView({ area: breaks?.area || { r1: 0, c1: 0, r2: 0, c2: 0 }, pages: pagesOf(breaks), rowBreaks: breaks?.rowBreaks || [], colBreaks: breaks?.colBreaks || [] });
+    else grid.setPageView(lines && breaks ? { lines: true, area: breaks.area, rowBreaks: breaks.rowBreaks, colBreaks: breaks.colBreaks } : null);
   }
   ctx.viewMode = sheetViewMode;
   const unsubscribePageView = ctx.subscribe(() => refreshPageView());
@@ -5175,6 +6072,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   let lastProtectedKey = null;
   let trackedEdit = false;
   const onWbChange = (e) => {
+    if (e.detail?.type === 'sheet-group') { refreshTitle(); notify(); return; }
     abandoned = false;
     // One activation per editor session, including typing, pasting and AI-made data changes.
     if (!trackedEdit && e.detail?.type === 'cells' && wb.dirty) {
@@ -5271,10 +6169,23 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     notify();
   };
   wb.addEventListener('change', onWbChange);
+  if (room) {
+    room.addEventListener('people', showPeople);
+    room.addEventListener('remote', onRoomRemote);
+    room.addEventListener('status', refreshStatus);
+    room.addEventListener('refused', onRoomRefused);
+    room.addEventListener('role', onRoomRole);
+    room.addEventListener('closed', onRoomClosed);
+    window.addEventListener('online', onRoomOnline);
+    document.addEventListener('visibilitychange', onRoomVisible);
+    ctx.subscribe(sharePresence);
+    setTimeout(() => { sharePresence(); showPeople(); }, 0);
+  }
   doc.addEventListener('status', refreshStatus);
   doc.addEventListener('draft', refreshStatus); // whether this browser holds a copy of the edits changed
   doc.addEventListener('path', refreshTitle);
   const onSession = () => {
+    syncChangeAuthor();
     renderAccountButton(avatar);
     refreshStatus();
     // Edits made before signing in now have a place to go.
@@ -5357,7 +6268,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         }
         return true;
       };
-      const regions = [menubar.el, toolbar.el, formulaBar.el, grid.el, sheetTabs.el, statusBar.el, aiPanel && (aiPanel.isOpen ? aiPanel.el : aiPanel.rail)].filter(Boolean).filter(visible);
+      const regions = [menubar.el, toolbar.el, formulaBar.el, grid.el, sheetTabs.el, statusBar.el, automate?.paneOpen && automate.pane, aiPanel && (aiPanel.isOpen ? aiPanel.el : aiPanel.rail)].filter(Boolean).filter(visible);
       const at = regions.findIndex((region) => region.contains(e.target));
       if (grid.editing && !grid.commitEdit()) return;
       for (let step = 1; step <= regions.length; step++) {
@@ -5378,12 +6289,50 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     else if (k === 'o' && P.canPickFiles()) { e.preventDefault(); run('open'); }
     else if (k === 'g' && !e.shiftKey) { e.preventDefault(); run('goTo'); }
     else if ((k === 'j' || e.code === 'KeyJ') && !e.shiftKey && !e.altKey && aiPanel) { e.preventDefault(); run('aiPanel'); }
+    // Ctrl/Cmd+, opens the options, as preferences open in desktop apps.
+    else if ((k === ',' || e.code === 'Comma') && !e.shiftKey && !e.altKey) { e.preventDefault(); run('options'); }
     else if (e.key === 'Backspace' && !grid.editing && !e.target.closest?.('input, textarea')) { e.preventDefault(); run('scrollToActive'); }
     else if (k === 'z' && !grid.editing && !e.target.closest?.('input, textarea')) { e.preventDefault(); run(e.shiftKey ? 'redo' : 'undo'); }
     // Bold, italic and underline apply to the cell mid-edit too; the grid takes them when nothing is being edited.
     else if ((k === 'b' || k === 'i' || k === 'u') && grid.editing && !e.shiftKey && !e.altKey) { e.preventDefault(); run({ b: 'bold', i: 'italic', u: 'underline' }[k]); }
   };
   root.addEventListener('keydown', onKey);
+  // Shortcuts of the person's own (Options ▸ Keyboard Shortcuts) come before the built-in ones, on the sheet and in
+  // the window around it; a built-in shortcut turned off there does nothing. Typing into a field keeps its keys.
+  const onCustomKey = (e) => {
+    if (isComposing(e) || e.defaultPrevented || grid.editing) return;
+    const keymap = keymapStore.get();
+    if (!Object.keys(keymap).length || e.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+    const chord = chordFromEvent(e, IS_MAC);
+    if (!chord || !Object.hasOwn(keymap, chord)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!keymap[chord]) return;
+    const { cmd, arg } = parseCommandId(keymap[chord]);
+    run(cmd, arg);
+  };
+  root.addEventListener('keydown', onCustomKey, true);
+  // Options changed (here, in another editor, or brought in from the account): the editor follows at once.
+  const offOptions = onAppOptions((options, keys) => {
+    if (destroyed) return;
+    applyView();
+    syncNewSheetDefaults();
+    syncChangeAuthor();
+    if (keys.includes('aiFeatures')) {
+      setAiProviders();
+      if (!options.aiFeatures && aiPanel?.isOpen) aiPanel.close();
+      if (aiPanel) { aiPanel.el.hidden = !options.aiFeatures; if (aiPanel.rail) aiPanel.rail.hidden = !options.aiFeatures; }
+    }
+    if (keys.some((k) => ['commentIndicators', 'fillHandle', 'showObjects'].includes(k))) grid.refresh();
+    notify();
+  });
+  const offKeymap = keymapStore.subscribe(() => notify());
+  // The account's copies of the options and customizations, when another device changed them.
+  if (!session.signedOut) {
+    syncAppOptions().catch(() => {});
+    syncCustomizations();
+    syncErrorChecking().then(() => { if (!destroyed) { grid.redraw(); errorTag.sync(); } }).catch(() => {});
+  }
   // Focus can fall back to the page itself while a cell is being edited (the
   // button that opened a menu was re-rendered away, say). Those keys are the
   // cell's too; the page has nothing else to do with them.
@@ -5462,6 +6411,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   }
   if (!session.signedOut) checkViewOnly();
 
+  // A saved book with links to other workbooks: its Startup Prompt says whether opening it updates them, offers to, or leaves them.
+  if (doc.path && wb.externalWorkbooks?.books?.some((b) => !b.kind) && wb.linkStartup !== 'none') {
+    setTimeout(() => {
+      if (destroyed) return;
+      const host = linkHost();
+      if (wb.linkStartup === 'update' && wb.externalAllowed !== false) { updateAllLinks(ctx, host); return; }
+      toast('This workbook reads values from other workbooks', { icon: 'link', duration: 9000,
+        action: { label: 'Update links', onClick: async () => { if (await host.allow()) updateAllLinks(ctx, host); } } });
+    }, 0);
+  }
+
   return {
     el: root,
     doc,
@@ -5471,6 +6431,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     dragOver,
     /** Select a "Sheet!A1:B2" range (from an address with ?range=), switching sheets if needed. */
     goTo(range) { return followInternalLink(`#${range}`); },
+    /** Run an editor command, as the menus and the palette do (tests and automation). */
+    run,
     destroy() {
       destroyed = true;
       palette?.close();
@@ -5482,6 +6444,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       stopSheetFonts();
       document.removeEventListener('keydown', onStrayKey);
       document.removeEventListener('keydown', onChromeKey);
+      offOptions();
+      offKeymap();
+      qat.destroy();
+      flashOffer?.dismiss?.();
       document.removeEventListener('copy', onNativeCopy);
       document.removeEventListener('cut', onNativeCut);
       document.removeEventListener('paste', onPasteEvent);
@@ -5490,6 +6456,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       doc.removeEventListener('conflict', onConflict);
       window.removeEventListener('app:locale', onLocale);
       wb.removeEventListener('change', onWbChange);
+      if (room) {
+        clearTimeout(flagTimer);
+        room.removeEventListener('people', showPeople);
+        room.removeEventListener('remote', onRoomRemote);
+        room.removeEventListener('status', refreshStatus);
+        room.removeEventListener('refused', onRoomRefused);
+        room.removeEventListener('role', onRoomRole);
+        room.removeEventListener('closed', onRoomClosed);
+        window.removeEventListener('online', onRoomOnline);
+        document.removeEventListener('visibilitychange', onRoomVisible);
+      }
       wb.removeEventListener('change', syncChartTheme);
       wb.removeEventListener('change', disarmCutOnChange);
       unsubscribePageView();
@@ -5506,11 +6483,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       statusBar.destroy();
       watchWindow.destroy();
       accessibilityPane.destroy();
+      languagePane.destroy();
+      changesPane.destroy();
+      selectionPane.destroy();
+      smartArtPane.destroy();
       errorTag.destroy();
       quickAnalysis.destroy();
       queriesPane.destroy();
+      automate?.destroy();
       chartUi.destroy();
       comments.destroy();
+      mentionAlerts.stop();
       findBar.destroy();
       aiPanel?.destroy();
       grid.destroy();

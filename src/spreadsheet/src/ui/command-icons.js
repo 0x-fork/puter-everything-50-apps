@@ -224,6 +224,9 @@ export const COMMAND_ICONS = {
   nextComment: p('M2.5 3.5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7.5l-2.5 2v-2H3.5a1 1 0 0 1-1-1z', 'of') + p('M10.5 15h7M14.5 12l3 3-3 3', 'p thick'),
   showComments: r(11.5, 2.5, 6, 15, 'of', 1) + p('M13 6h3M13 9h3M13 12h3', 'p') + p('M2.5 5.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H6l-2 1.5v-1.5h-.5a1 1 0 0 1-1-1z', 'pf'),
   send: p('M3 9.5l14-6-5 14-2.5-5.5z', 'pf') + p('M9.5 12l7.5-8.5', 'p'),
+  /* Email: an envelope, with what goes out in it (a sheet for a copy, a link for a link). */
+  sendCopy: r(2.5, 6.5, 15, 10.5, 'of', 1.4) + p('M2.8 7l7.2 5.5L17.2 7', 'o') + r(10.5, 2.5, 7, 7.5, 'gf', 0.8) + p('M10.5 5h7M10.5 7.5h7M13.5 2.5v7.5', 'g'),
+  sendLink: r(2.5, 6.5, 15, 10.5, 'of', 1.4) + p('M2.8 7l7.2 5.5L17.2 7', 'o') + p('M11 4.2l1-1a1.8 1.8 0 0 1 2.5 2.5l-1 1M13.5 3.5l-2.2 2.2M12.2 7.3l-1 1a1.8 1.8 0 0 1-2.5-2.5l1-1', 'b thick'),
   textBox: r(3.5, 4.5, 13, 11, 'of', 1.6) + ci(3.5, 4.5, 1.2, 'bs') + ci(16.5, 4.5, 1.2, 'bs') + ci(3.5, 15.5, 1.2, 'bs') + ci(16.5, 15.5, 1.2, 'bs') + t(10, 14, 'A', 9),
   headerFooter: page(4.5, 2.5, 11, 15) + r(6, 4.5, 8, 2.5, 'bw') + r(6, 13.5, 8, 2, 'bw') + lines(6.5, 9, 7, 2, 2),
   pageLayout: page(4.5, 2.5, 11, 15) + r(6, 4.5, 8, 2.5, 'bw') + r(6, 13.5, 8, 2, 'bw') + lines(6.5, 9, 7, 2, 2),
@@ -246,6 +249,11 @@ export const COMMAND_ICONS = {
   printArea: page(4.5, 2.5, 11, 15) + r(6.5, 6.5, 6, 7, 'b dash') + r(6.5, 6.5, 6, 7, 'bw'),
   printer: r(5.5, 2.5, 9, 5, 'of') + r(2.5, 7, 15, 7.5, 'bs', 2) + r(5.5, 11.5, 9, 6, 'of', 0.8) + lines(7, 14, 6, 2, 2) + ci(15, 9.3, 0.7, 'glint'),
   printTitles: page(4.5, 2.5, 11, 15) + r(4.5, 5.5, 8, 3, 'bw') + lines(6.5, 11, 7, 3, 2),
+  // Breaks: the foot of one page and the head of the next, a solid line drawn between them.
+  breaks: p('M4.5 8.5V3.7a1.2 1.2 0 0 1 1.2-1.2h8.6a1.2 1.2 0 0 1 1.2 1.2v4.8', 'of') + p('M4.5 11.5v4.8a1.2 1.2 0 0 0 1.2 1.2h8.6a1.2 1.2 0 0 0 1.2-1.2v-4.8', 'of')
+    + lines(6.5, 5, 7, 2, 2) + lines(6.5, 13.5, 7, 2, 2) + p('M1.5 10h17', 'b thick'),
+  // Background: a picture tiled under the sheet's cells.
+  background: r(2.5, 3.5, 15, 13, 'bw') + p('M2.5 16.5l4.5-6 3.5 4 2.5-2.5 4.5 4.5z', 'gf') + ci(13.5, 7, 1.6, 'ys') + cells(2.5, 3.5, 15, 13, 3, 3, { frame: 'o' }),
   sliders: r(2.5, 3.5, 15, 13, 'of', 2) + p('M5 7.5h10M5 12.5h10', 'o ln') + ci(8, 7.5, 1.7, 'bs') + ci(12.5, 12.5, 1.7, 'bs'),
   pageSetup: page(4.5, 2.5, 11, 15) + lines(6.5, 6.5, 5, 3, 2) + ci(14, 14, 3.9, 'knock') + ci(14, 14, 3, 'ns') + ci(14, 14, 1, 'knock'),
   fileDown: page(4.5, 2.5, 11, 15) + r(2.5, 10.5, 10, 5, 'rs', 1) + t(7.5, 14.5, 'PDF', 4.6, { weight: 700, c: 'txw' }),
@@ -310,13 +318,26 @@ export const COMMAND_ICONS = {
   hideDetail: cells(7.5, 3.5, 10, 13, 1, 4, { frame: 'of' }) + ci(4, 10, 3, 'bs') + p('M2.6 10h2.8', 'wh'),
   group: cells(6.5, 3.5, 11, 13, 1, 4, { frame: 'of' }) + p('M3.5 5v10h2', 'b') + ci(3.5, 10, 2.4, 'bs') + p('M2.4 10h2.2M3.5 8.9v2.2', 'wh'),
   ungroup: cells(6.5, 3.5, 11, 13, 1, 4, { frame: 'of' }) + p('M3.5 5v10h2', 'b') + ci(3.5, 10, 2.4, 'bs') + p('M2.4 10h2.2', 'wh'),
+  // Auto Outline: a column of cells with nested bracket levels drawn beside it, and a spark for "worked out".
+  autoOutline: cells(7.5, 3.5, 10, 13, 1, 4, { frame: 'of' }) + p('M3 4.5v11h2.5M5.2 8.5v3.8h1.3', 'b') + p('M3.5 1.2l.6 1.3 1.3.6-1.3.6-.6 1.3-.6-1.3-1.3-.6 1.3-.6z', 'ys'),
+  // Clear Outline: the bracket struck out.
+  clearOutline: cells(7.5, 3.5, 10, 13, 1, 4, { frame: 'of' }) + p('M3.5 4.5v11h2', 'o ln') + p('M1.5 8l4 4M5.5 8l-4 4', 'r thick'),
+  // Outline settings: the bracket over a pair of sliders.
+  outlineSettings: cells(7.5, 3.5, 10, 8, 1, 2, { frame: 'of' }) + p('M3.5 4.5v6.5h2', 'b') + p('M3 15h14M3 18h14', 'o ln') + ci(7, 15, 1.4, 'bs') + ci(13, 18, 1.4, 'bs'),
   subtotal: cells(2.5, 3.5, 11, 13, 1, 4, { frame: 'of' }) + p('M18 4.5h-5l3 3.2-3 3.3h5', 'b thick') + r(2.5, 13.25, 11, 3.25, 'bw'),
   columnStats: chartAxes + columns([[6, 'bf'], [11, 'bf'], [8, 'bf']]) + p('M4 6.5h13', 'r dash'),
+  // Solver: a curve over the axes with its peak found (the dot) and the search's steps toward it.
+  solver: chartAxes + p('M4.5 15.5C6.5 6 13.5 6 16.5 15.5', 'b thick') + p('M6 12.8l2-3.6 2.1-1.5', 'g dash') + ci(10.5, 8.4, 1.9, 'rs'),
+  // Data Analysis: a histogram with a bell curve over it.
+  dataAnalysis: chartAxes + columns([[3.5, 'bf'], [8, 'bf'], [10.5, 'bf'], [6, 'bf']], 4.6, 2.6, 0.9) + p('M3.8 15.6C7 15.6 7.6 4.6 10.4 4.6S14 15.6 17 15.6', 'r thick'),
   powerQuery: cells(2.5, 3.5, 12, 13, 2, 3, { frame: 'of' }) + p('M13 9.5l2.5-5 2 1-2.5 5z', 'nf'),
   /* Get & Transform: Get Data sources, the Queries & Connections pane, and the query editor's commands. */
   fromText: page(4.5, 2.5, 11, 15) + lines(6.5, 8, 7, 4) + p('M9 7v8.5M11.5 7v8.5', 'g dash'),
   fromTable: cells(2.5, 4.5, 10, 11, 2, 3, { head: 'bw', frame: 'of' }) + arrowRight(12.5, 10, 5.5, 'g'),
   blankQuery: page(4.5, 2.5, 11, 15) + p('M7 9h6M7 11.5h6M7 14h4', 'o dash'),
+  // Data Form: a card of labelled fields with the record's arrows; Edit Links: a workbook joined to another by a chain link.
+  dataForm: r(2.5, 2.5, 15, 15, 'of', 1.6) + p('M4.5 6h3M4.5 10h3M4.5 14h3', 'o ln') + r(9, 4.75, 6.5, 2.5, 'bw', 0.6) + r(9, 8.75, 6.5, 2.5, 'bw', 0.6) + r(9, 12.75, 6.5, 2.5, 'gw', 0.6) + p('M9 4.75h6.5v2.5H9zM9 8.75h6.5v2.5H9zM9 12.75h6.5v2.5H9z', 'o ln'),
+  editLinks: cells(2.5, 2.5, 9, 10, 2, 3, { head: 'bw', frame: 'of' }) + r(10, 10, 8.5, 8, 'knock', 2) + p('M12 15.5l-.6.6a1.8 1.8 0 0 1-2.5-2.5l1.6-1.6a1.8 1.8 0 0 1 2.5 0', 'o thick') + p('M14.5 12.5l.6-.6a1.8 1.8 0 0 1 2.5 2.5L16 16a1.8 1.8 0 0 1-2.5 0', 'b thick'),
   queriesPane: r(2.5, 3.5, 15, 13, 'of', 1) + r(11.5, 3.5, 6, 13, 'bw') + p('M11.5 3.5v13', 'o') + p('M13 7h3M13 10h3M13 13h3', 'b thick') + p('M4.5 7h5M4.5 10h5M4.5 13h5', 'o ln'),
   closeLoad: cells(7.5, 7.5, 10, 10, 2, 3, { head: 'gw', frame: 'of' }) + r(2.5, 2.5, 7, 5, 'nf', 1) + p('M6 7.5v4.5h4M8.5 10l1.5 2-1.5 2', 'g'),
   chooseColumns: cells(2.5, 3.5, 15, 13, 3, 2) + r(2.5, 3.5, 5, 13, 'bw') + r(12.5, 3.5, 5, 13, 'bw') + cells(2.5, 3.5, 15, 13, 3, 2, { frame: 'o' }) + p('M8.5 9.5l1.5 1.5 2.5-3', 'g thick'),
@@ -328,6 +349,10 @@ export const COMMAND_ICONS = {
 
   /* Review */
   spell: t(8.5, 10, 'abc', 8.5) + p('M7 14l2.5 2.5 6-6', 'g thick'),
+  autoCorrect: t(7, 15.5, 'ab', 8.5) + p('M14.5 2.5 11 9.5h3l-1.5 6 5-8h-3l1.5-5z', 'ys'),
+  spellCheck: t(10, 9.5, 'abc', 9) + p('M5.5 13.5l3 3 6-6', 'g thick'),
+  thesaurus: p('M10 5.2C8 3.8 5.5 3.6 3 4.4v11.4c2.5-.8 5-.6 7 .8z', 'bf') + p('M10 5.2c2-1.4 4.5-1.6 7-.8v11.4c-2.5-.8-5-.6-7 .8z', 'of') + p('M12 8h3M12 10.5h3M12 13h2', 'o ln') + t(6.6, 12.2, 'A', 5.5, { serif: true, c: 'txb2' }),
+  translate: r(2.5, 2.5, 10, 9, 'bf', 1.6) + t(7.5, 9.5, 'A', 6.5, { weight: 600, c: 'txb2' }) + p('M5 11.5v3l2.5-3', 'bf') + r(8.5, 8.5, 9, 8, 'of', 1.6) + t(13, 14.8, 'a', 6.5, { serif: true }),
   stats: page(4.5, 2.5, 11, 15) + r(6.8, 10.5, 1.6, 4.5, 'bs', 0.5) + r(9.2, 7.5, 1.6, 7.5, 'bs', 0.5) + r(11.6, 9, 1.6, 6, 'ns', 0.5),
   deleteNote: p('M3.5 3.5h11v7l-4 4h-7z', 'yf') + badge(15, 15, 'x', 'r'),
   notes: p('M5.5 5.5h11v7l-4 4h-7z', 'yf') + p('M3.5 13V3.5h10', 'o'),
@@ -337,6 +362,8 @@ export const COMMAND_ICONS = {
   protectRanges: cells(2.5, 3.5, 13, 11, 2, 3, { frame: 'of' }) + r(2.5, 7.17, 13, 3.67, 'bw') + lock(10, 12.5),
   share: p('M3.5 9.5v7h13v-7', 'o') + p('M10 12.5v-10M7 5.5l3-3 3 3', 'b thick'),
   versions: p('M3.5 10a6.5 6.5 0 1 0 2-4.7', 'o') + p('M3 3v3h3', 'o') + p('M10 6v4l3 2', 'b'),
+  // A sheet with one changed cell picked out, and a clock over its corner: the edits made over time.
+  showChanges: cells(2.5, 2.5, 13, 12, 2, 3, { frame: 'of' }) + r(9, 6.5, 6.5, 4, 'yf', 0.6) + ci(14.5, 14.5, 4.9, 'knock') + ci(14.5, 14.5, 4, 'bw') + ci(14.5, 14.5, 4, 'o') + p('M14.5 12.3v2.4l1.6 1', 'b thick'),
   unprotect: page(2.5, 2.5, 10, 14) + p('M11 11.5v-2a2.5 2.5 0 0 1 5 0', 'o') + r(9.5, 11.5, 8, 6, 'nf', 1),
 
   /* View */
@@ -350,12 +377,42 @@ export const COMMAND_ICONS = {
   freeze: cells(2.5, 3.5, 15, 13, 3, 3, { frame: 'of' }) + r(2.5, 3.5, 15, 4.33, 'bw') + r(2.5, 3.5, 5, 13, 'bw') + cells(2.5, 3.5, 15, 13, 3, 3, { frame: 'o' }) + p('M2.5 7.83h15M7.5 3.5v13', 'b thick'),
   split: r(2.5, 3.5, 15, 13, 'of', 2) + r(2.5, 3.5, 7.5, 6.5, 'bw') + p('M10 3.5v13M2.5 10h15', 'b thick'),
   showHide: p('M1.5 10s3-5.5 8.5-5.5 8.5 5.5 8.5 5.5-3 5.5-8.5 5.5S1.5 10 1.5 10z', 'of') + ci(10, 10, 3, 'bs') + ci(11, 9, 0.9, 'glint'),
+  // Custom Views: a saved arrangement of the window, two views stacked with an eye on the front one.
+  customViews: r(2.5, 3, 11, 9, 'of', 1.6) + r(6.5, 7.5, 11, 9.5, 'bf', 1.6) + p('M8.5 12.25s1.6-2.6 3.5-2.6 3.5 2.6 3.5 2.6-1.6 2.6-3.5 2.6-3.5-2.6-3.5-2.6z', 'of') + ci(12, 12.25, 1.2, 'bs'),
+  // Sheet View: a sheet seen through one person's own eye.
+  sheetView: cells(2.5, 2.5, 13, 11, 3, 3, { frame: 'of' }) + ci(14, 14.5, 4.3, 'knock') + p('M9.5 14.5s2-3 4.5-3 4.5 3 4.5 3-2 3-4.5 3-4.5-3-4.5-3z', 'pf') + ci(14, 14.5, 1.3, 'ps'),
+  // Selection Pane: the objects on the sheet, listed in a panel beside them.
+  selectionPane: r(2.5, 4.5, 6, 5, 'bf', 1) + ci(6.5, 13, 2.5, 'gf') + r(10.5, 2.5, 7, 15, 'of', 1.4) + p('M12 6h4M12 9.5h4M12 13h4', 'o') + ci(12, 6, .6, 'bs') + ci(12, 9.5, .6, 'bs'),
+  // Arrange: objects lined up along a common edge.
+  alignObjects: p('M3.5 2.5v15', 'b thick') + r(5, 4.5, 11, 4, 'bf', 1) + r(5, 11.5, 7, 4, 'gf', 1),
+  // Group: two shapes inside one dashed frame with handles at its corners.
+  groupObjects: r(2.5, 2.5, 15, 15, 'o dash ln', 0) + r(4.5, 4.5, 6.5, 5.5, 'bf', 1) + ci(12.5, 12.5, 3.3, 'gf') + r(1.5, 1.5, 2, 2, 'bs', 0) + r(16.5, 1.5, 2, 2, 'bs', 0) + r(1.5, 16.5, 2, 2, 'bs', 0) + r(16.5, 16.5, 2, 2, 'bs', 0),
+  // Bring Forward and Send Backward: two overlapping sheets, the one moving drawn solid on top or tucked beneath.
+  bringForward: r(2.5, 2.5, 9, 9, 'of', 1.4) + r(8.5, 8.5, 9, 9, 'of', 1.4) + r(5.5, 5.5, 9, 9, 'bs', 1.4),
+  sendBackward: r(5.5, 5.5, 9, 9, 'bf', 1.4) + r(2.5, 2.5, 9, 9, 'of', 1.4) + r(8.5, 8.5, 9, 9, 'of', 1.4),
+  // Exit a view: an arrow leaving a sheet.
+  exitView: cells(6.5, 3.5, 11, 13, 2, 3, { frame: 'of' }) + p('M10 10H2.5M5.5 7 2.5 10l3 3', 'b thick'),
+  // Rotate: a shape and the turning arrow around it (Rotate Left turns the other way).
+  rotateObjects: p('M7 6.5 13.5 13l-6.5 3.5z', 'bf') + p('M4 10a6 6 0 0 1 10.5-4M14.5 3v3h-3', 'b thick'),
+  rotateLeft: p('M13 6.5 6.5 13l6.5 3.5z', 'bf') + p('M16 10a6 6 0 0 0-10.5-4M5.5 3v3h3', 'b thick'),
+  // Flips: a shape and its mirror image across a dashed axis.
+  flipH: p('M10 2.5v15', 'o dash') + p('M8.5 5 2.5 15h6z', 'bf') + p('M11.5 5l6 10h-6z', 'o'),
+  flipV: p('M2.5 10h15', 'o dash') + p('M5 8.5 15 2.5v6z', 'bf') + p('M5 11.5l10 6v-6z', 'o'),
+  // Distribute: three objects with equal gaps along the axis.
+  distributeH: p('M2.5 3v14M17.5 3v14', 'o ln') + r(4, 6, 3, 8, 'bf', 0.8) + r(8.5, 4, 3, 12, 'bf', 0.8) + r(13, 7, 3, 6, 'bf', 0.8),
+  distributeV: p('M3 2.5h14M3 17.5h14', 'o ln') + r(6, 4, 8, 3, 'bf', 0.8) + r(4, 8.5, 12, 3, 'bf', 0.8) + r(7, 13, 6, 3, 'bf', 0.8),
   hideEye: p('M1.5 10s3-5.5 8.5-5.5 8.5 5.5 8.5 5.5-3 5.5-8.5 5.5S1.5 10 1.5 10z', 'of') + ci(10, 10, 3, 'bs') + p('M3 17 17 3', 'r thick'),
   focus: p('M2.5 7V3.5a1 1 0 0 1 1-1H7M13 2.5h3.5a1 1 0 0 1 1 1V7M17.5 13v3.5a1 1 0 0 1-1 1H13M7 17.5H3.5a1 1 0 0 1-1-1V13', 'o') + r(6.5, 6.5, 7, 7, 'bf'),
   fullscreen: r(2.5, 3.5, 15, 10, 'of', 1.6) + r(3.8, 4.8, 12.4, 7.4, 'bs', 0.8) + p('M7 17.5h6M10 13.5v4', 'o'),
   windows: r(2.5, 3.5, 11, 9, 'of', 1.6) + r(6.5, 7.5, 11, 9, 'bf glassy', 1.6) + p('M6.5 10.5h11', 'b'),
 
   /* Quick access and file */
+  // Options: a panel of three sliders. Customize the Ribbon: a tab strip over its commands. Quick Access: a short
+  // bar of buttons with the arrow that customizes it. Keyboard: keys with one picked out.
+  options: r(2.5, 3, 15, 14, 'of', 1.6) + p('M5 7h10M5 10h10M5 13h10', 'o ln') + ci(8, 7, 1.6, 'bs') + ci(12.5, 10, 1.6, 'bs') + ci(7, 13, 1.6, 'bs'),
+  customizeRibbon: r(2.5, 6, 15, 10.5, 'of', 1.6) + r(2.5, 3.5, 5, 2.5, 'bs', 0.8) + r(8, 3.5, 4, 2.5, 'of', 0.8) + r(5, 9, 4, 4.5, 'bf', 0.8) + r(10.5, 9, 4, 4.5, 'of', 0.8),
+  customizeQuickAccess: r(2.5, 6.5, 15, 7, 'of', 1.6) + r(4.3, 8.5, 3, 3, 'bs', 0.6) + r(8.3, 8.5, 3, 3, 'of', 0.6) + p('M13.3 9.3l1.5 1.5 1.5-1.5', 'o thick'),
+  customizeKeyboard: r(2, 5, 16, 10, 'of', 1.6) + p('M5 8h1M8 8h1M11 8h1M14 8h1M5 11h1M14 11h1', 'o thick') + r(7.5, 10, 5, 2, 'bs', 0.6),
   save: p('M5 3.5h9l2.5 2.5V15a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V5A1.5 1.5 0 0 1 5 3.5z', 'bs') + r(6, 3.5, 7, 4.5, 'of', 0.6) + r(6, 11, 8, 5.5, 'of', 0.6),
   undo: p('M7 4.5 3.5 8 7 11.5', 'o thick') + p('M3.5 8h8.5a4.5 4.5 0 0 1 0 9H8', 'o thick'),
   redo: p('M13 4.5 16.5 8 13 11.5', 'o thick') + p('M16.5 8H8a4.5 4.5 0 0 0 0 9h4', 'o thick'),
@@ -436,7 +493,119 @@ Object.assign(COMMAND_ICONS, {
   resetStyle: r(3.5, 3.5, 11, 11, 'of', 1) + p('M7 7a4 4 0 1 1-1 4', 'b') + p('M5 6.5l1.5 1.5L8 6.5', 'b'),
 });
 
+/* The pie variants and the newer chart types: hierarchies, statistics, funnels, prices and surfaces. */
+/** A ring sector about (cx, cy) from radius r0 to r1, between angles a0 and a1 (degrees clockwise from the top). */
+const sector = (cx, cy, r0, r1, a0, a1, c) => {
+  const pt = (rad, a) => { const t = (a * Math.PI) / 180; return `${+(cx + rad * Math.sin(t)).toFixed(2)} ${+(cy - rad * Math.cos(t)).toFixed(2)}`; };
+  const large = a1 - a0 > 180 ? 1 : 0;
+  return p(`M${pt(r1, a0)}A${r1} ${r1} 0 ${large} 1 ${pt(r1, a1)}${r0 ? `L${pt(r0, a1)}A${r0} ${r0} 0 ${large} 0 ${pt(r0, a0)}` : `L${cx} ${cy}`}z`, c);
+};
+/** A price period: its high-low line, and an open-close bar (`bar` solid when the price fell) or a close tick. */
+const candle = (x, hi, lo, open, close, c = 'bs') => p(`M${x} ${hi}V${lo}`, 'o') + (open == null ? p(`M${x} ${close}h1.8`, 'o thick') : r(x - 1, Math.min(open, close), 2, Math.abs(close - open), close < open ? 'of' : c, 0.3));
+/** The floor of a surface seen from above and to the side, as a mesh of `n` × `n` cells. */
+const meshFloor = (n, c) => {
+  const at = (u, v) => `${+(2.5 + u * 8 + v * 7).toFixed(2)} ${+(12 + u * 4.5 - v * 5).toFixed(2)}`;
+  let d = '';
+  for (let i = 0; i <= n; i++) d += `M${at(i / n, 0)}L${at(i / n, 1)}M${at(0, i / n)}L${at(1, i / n)}`;
+  return p(d, c);
+};
+Object.assign(COMMAND_ICONS, {
+  chartPieExploded: p('M9 4a6.5 6.5 0 1 0 6.5 6.5H9z', 'bs') + p('M11 2.5a6.5 6.5 0 0 1 6.5 6.5H11z', 'ns'),
+  chartDoughnutExploded: sector(9.5, 10.5, 3.6, 7, 90, 360, 'bs') + sector(10.5, 9.5, 3.6, 7, 0, 90, 'ns'),
+  chartPieOfPie: sector(6.5, 10, 0, 5, 50, 410, 'bs') + sector(6.5, 10, 0, 5, 50, 130, 'ns') + p('M10.4 6.8l4.6-1.6M10.4 13.2l4.6 1.6', 'o ln') + sector(15.5, 10, 0, 3, 0, 200, 'ns') + sector(15.5, 10, 0, 3, 200, 360, 'ys'),
+  chartBarOfPie: sector(6.5, 10, 0, 5, 50, 410, 'bs') + sector(6.5, 10, 0, 5, 50, 130, 'ns') + p('M10.4 6.8l4.1-2.8M10.4 13.2l4.1 2.8', 'o ln') + r(14.5, 4, 3, 7, 'ns', 0.3) + r(14.5, 11, 3, 5, 'ys', 0.3),
+  chartTreemap: r(2.5, 3.5, 7.5, 13, 'bs', 0.6) + r(10.75, 3.5, 6.75, 6.5, 'ns', 0.6) + r(10.75, 10.75, 3, 5.75, 'gs', 0.6) + r(14.5, 10.75, 3, 5.75, 'ys', 0.6),
+  chartSunburst: sector(10, 10, 2.6, 5, 0, 220, 'bs') + sector(10, 10, 2.6, 5, 220, 360, 'ns') + sector(10, 10, 5.6, 8, 0, 130, 'bf') + sector(10, 10, 5.6, 8, 130, 220, 'bf')
+    + sector(10, 10, 5.6, 8, 220, 300, 'nf'),
+  chartBoxWhisker: chartAxes + p('M7 4.5v3M7 13v2.5M6 4.5h2M6 15.5h2M13.5 6v2M13.5 12v2.5M12.5 6h2M12.5 14.5h2', 'o') + r(5.5, 7.5, 3, 5.5, 'bf', 0.5) + p('M5.5 10.5h3', 'b thick')
+    + r(12, 8, 3, 4, 'nf', 0.5) + p('M12 10h3', 'n thick') + ci(13.5, 3.8, 0.8, 'o'),
+  chartFunnel: r(2.5, 3, 15, 2.8, 'bs', 0.6) + r(4.5, 6.7, 11, 2.8, 'bs', 0.6) + r(6.5, 10.4, 7, 2.8, 'ns', 0.6) + r(8, 14.1, 4, 2.8, 'ns', 0.6),
+  chartStockHlc: chartAxes + candle(6.5, 6, 13, null, 10) + candle(10.5, 4, 11, null, 7) + candle(14.5, 7, 14.5, null, 12),
+  chartStockOhlc: chartAxes + candle(6.5, 5, 14, 12, 7) + candle(10.5, 3.5, 12, 6, 10) + candle(14.5, 6, 14.5, 13, 8),
+  chartStockVhlc: chartAxes + columns([[3, 'nf'], [4.5, 'nf'], [2.5, 'nf']], 5.2, 2.6, 1.4) + candle(6.5, 4, 10, null, 7) + candle(10.5, 3, 9, null, 5) + candle(14.5, 5, 11, null, 9),
+  chartStockVohlc: chartAxes + columns([[3, 'nf'], [4.5, 'nf'], [2.5, 'nf']], 5.2, 2.6, 1.4) + candle(6.5, 3.5, 11, 9.5, 5) + candle(10.5, 3, 10, 4.5, 8.5) + candle(14.5, 4.5, 11.5, 10, 6),
+  chartSurface: p('M2.5 12c2-3 4-1 6-3s3-4 5-3l4 1.5L11 10c-2 1-3 3.5-5 4z', 'ns') + p('M2.5 12l3.5 2c2-.5 3-3 5-4l6.5-2.5L10.5 16.5z', 'bs') + meshFloor(3, 'o ln'),
+  chartSurfaceWireframe: meshFloor(3, 'o ln') + p('M2.5 11c2-2 4-3 6-2.5s4-3 6-3.5l3 1.5M4.5 12.8c2-2 4-2 6-1.5s4-2.5 6-2.5M7 14.2c2-1.5 4-2 6-1s3-2 4.5-2', 'b')
+    + p('M2.5 11l8 4.5M6 9.4l7.5 4.6M10 8.5l6.5 3.5M14 6.6l3.5 1.9', 'n'),
+  chartContour: r(2.5, 3.5, 15, 13, 'bs', 1) + p('M5 15.5c-1-4 2-8 6-9s6 2 5 6-3 3-6 3.5S5.5 17 5 15.5z', 'ns') + p('M8.5 12c0-2 1.5-3.5 3.5-3.5s2.5 2 1.5 3.5-2 1.5-3.5 1.5-1.5-.5-1.5-1.5z', 'ys'),
+  chartContourWireframe: r(2.5, 3.5, 15, 13, 'o', 1) + p('M5 15.5c-1-4 2-8 6-9s6 2 5 6-3 3-6 3.5S5.5 17 5 15.5z', 'b') + p('M8.5 12c0-2 1.5-3.5 3.5-3.5s2.5 2 1.5 3.5-2 1.5-3.5 1.5-1.5-.5-1.5-1.5z', 'n'),
+});
+
+/* ---- Automate: scripts, drawn as pages and windows of code in braces ---- */
+/** A pair of curly braces about (cx, cy), `h` tall and `w` apart. */
+const braces = (cx, cy, h = 6, w = 5, c = 'b') => {
+  const t = cy - h / 2, b = cy + h / 2, l = cx - w / 2, r = cx + w / 2;
+  return p(`M${l + 1} ${t}c-.8 0-1 .4-1 1v${h / 2 - 1.6}c0 .4-.3.6-.8.6.5 0 .8.2.8.6v${h / 2 - 1.6}c0 .6.2 1 1 1`
+    + `M${r - 1} ${t}c.8 0 1 .4 1 1v${h / 2 - 1.6}c0 .4.3.6.8.6-.5 0-.8.2-.8.6v${h / 2 - 1.6}c0 .6-.2 1-1 1`, `${c} thick`);
+};
+const scriptPage = (c = 'b') => page(3.5, 2.5, 13, 15, 3.5) + braces(10, 11.5, 7, 6, c);
+Object.assign(COMMAND_ICONS, {
+  recordActions: ci(10, 10, 7.5, 'of') + ci(10, 10, 4.2, 'rs') + ci(8.6, 8.6, 1.1, 'glint'),
+  stopScript: r(4.5, 4.5, 11, 11, 'rs', 2.2),
+  runScript: ci(10, 10, 7.5, 'gs') + p('M8.3 6.6v6.8l5.4-3.4z', 'wh thick') + p('M8.9 7.7v4.6l3.6-2.3z', 'glint'),
+  newScript: page(2.5, 2.5, 12.5, 15, 3.5) + braces(8.5, 11.5, 7, 5.5) + badge(15, 15, 'plus'),
+  scriptFile: scriptPage(),
+  scriptSample: scriptPage('n') + ci(14.5, 4.5, 2.6, 'knock') + p('M14.5 2.3l.6 1.5 1.6.1-1.2 1 .4 1.6-1.4-.9-1.4.9.4-1.6-1.2-1 1.6-.1z', 'ys'),
+  scriptLibrary: p('M2.5 5a1 1 0 0 1 1-1h4l1.6 1.8h7.4a1 1 0 0 1 1 1V16a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1z', 'yf') + braces(10, 11.6, 6, 6),
+  codeEditor: r(2.5, 3, 15, 14, 'of', 1.6) + p('M2.5 6.2h15', 'o') + ci(4.6, 4.6, 0.55, 's') + ci(6.4, 4.6, 0.55, 's')
+    + p('M7.6 9.6 5.4 11.8l2.2 2.2M12.4 9.6l2.2 2.2-2.2 2.2', 'b thick') + p('M10.9 9.2 9.1 14.4', 'o'),
+  allScripts: r(2.5, 2.5, 6.5, 6.5, 'bf', 1.2) + r(11, 2.5, 6.5, 6.5, 'of', 1.2) + r(2.5, 11, 6.5, 6.5, 'of', 1.2) + r(11, 11, 6.5, 6.5, 'of', 1.2)
+    + braces(5.75, 5.75, 3.6, 3.4) + lines(12.6, 5, 3.4, 2, 1.8) + lines(4.1, 13.5, 3.4, 2, 1.8) + lines(12.6, 13.5, 3.4, 2, 1.8),
+  scriptReference: p('M10 5.2C8.4 4 6.2 3.5 3 3.8v11.6c3.2-.3 5.4.2 7 1.4 1.6-1.2 3.8-1.7 7-1.4V3.8c-3.2-.3-5.4.2-7 1.4z', 'of') + p('M10 5.2v11.6', 'o')
+    + p('M6.8 7.6c-.6 0-.8.3-.8.7v.9c0 .3-.2.5-.6.5.4 0 .6.2.6.5v.9c0 .4.2.7.8.7M13.2 7.6c.6 0 .8.3.8.7v.9c0 .3.2.5.6.5-.4 0-.6.2-.6.5v.9c0 .4-.2.7-.8.7', 'b'),
+  highlightDuplicates: cells(2.5, 3.5, 15, 13, 3, 4) + r(7.5, 6.75, 5, 3.25, 'ys') + r(2.5, 13.25, 5, 3.25, 'ys') + cells(2.5, 3.5, 15, 13, 3, 4, { frame: 'o' }),
+  unhideAll: p('M1.8 10S4.8 4.6 10 4.6 18.2 10 18.2 10 15.2 15.4 10 15.4 1.8 10 1.8 10z', 'of') + ci(10, 10, 3, 'bs') + ci(9, 9, 0.9, 'glint'),
+  sumColumns: cells(2.5, 2.5, 15, 10, 3, 3) + r(2.5, 13.5, 15, 4, 'gf', 1) + p('M5 14.6h3.4L6.6 15.5l1.8.9H5', 'g'),
+  tableOfContents: page(3.5, 2.5, 13, 15, 3.5) + ci(6.6, 7.6, 0.9, 'bs') + ci(6.6, 10.6, 0.9, 'bs') + ci(6.6, 13.6, 0.9, 'bs') + lines(8.6, 7.6, 5, 3, 3, 'b'),
+  styleHeaderRow: cells(2.5, 3.5, 15, 13, 3, 4, { head: 'bs' }) + p('M2.5 6.75h15', 'b thick') + p('M14.5 1.8v4.4M12.6 2.9l3.8 2.2M12.6 5.1l3.8-2.2', 'b'),
+  removeBlankRows: cells(2.5, 3.5, 13, 13, 2, 4) + r(2.5, 9.9, 13, 3.2, 'rw') + badge(15.5, 15, 'minus', 'r'),
+  // A button drawn on the sheet, with the pointer that presses it.
+  scriptButton: r(2, 4.5, 15, 9, 'gs', 2.4) + p('M7.4 6.9v4.2l3.6-2.1z', 'glint') + p('M12.5 10.5l5 5-2 .3 1.2 2.4-1.2.6-1.2-2.4-1.6 1.4z', 'of'),
+});
+
+/* ---- Pictures: in cells, linked, and the Picture Format tab ---- */
+/** A small landscape picture in the box (x, y, w, h): sky, a hill and the sun. */
+const photo = (x, y, w, h, frame = 'bf') => r(x, y, w, h, frame, 1.2)
+  + p(`M${x} ${y + h * 0.78}l${w * 0.3}-${h * 0.38} ${w * 0.24} ${h * 0.26} ${w * 0.16}-${h * 0.16} ${w * 0.3} ${h * 0.28}v${h * 0.22}h-${w}z`, 'gs')
+  + ci(x + w * 0.7, y + h * 0.3, Math.min(w, h) * 0.12, 'ys');
+Object.assign(COMMAND_ICONS, {
+  // Crop: the two corner brackets of a crop frame over the picture.
+  crop: photo(6, 6, 8, 8, 'bw') + p('M6 2.5v11.5h11.5', 'o thick') + p('M2.5 6h11.5v11.5', 'b thick'),
+  // Corrections: a sun half in light, half in shade.
+  corrections: ci(10, 10, 4.2, 'of') + p('M10 5.8a4.2 4.2 0 0 1 0 8.4z', 'ys')
+    + p('M10 1.8v2M10 16.2v2M1.8 10h2M16.2 10h2M4.2 4.2l1.4 1.4M14.4 14.4l1.4 1.4M4.2 15.8l1.4-1.4M14.4 5.6l1.4-1.4', 'o'),
+  pictureColor: ci(7.6, 7.8, 4.3, 'rf') + ci(12.4, 7.8, 4.3, 'gf') + ci(10, 12.2, 4.3, 'bf'),
+  // Transparency: a picture fading into a checked ground.
+  transparency: r(2.5, 3.5, 15, 13, 'of', 1.6) + r(2.5, 3.5, 3.75, 3.25, 'nw') + r(10, 3.5, 3.75, 3.25, 'nw') + r(6.25, 6.75, 3.75, 3.25, 'nw')
+    + r(13.75, 6.75, 3.75, 3.25, 'nw') + r(2.5, 10, 3.75, 3.25, 'nw') + r(10, 10, 3.75, 3.25, 'nw') + r(6.25, 13.25, 3.75, 3.25, 'nw') + r(13.75, 13.25, 3.75, 3.25, 'nw')
+    + p('M2.5 16.5 17.5 3.5v13z', 'bw') + r(2.5, 3.5, 15, 13, 'o', 1.6),
+  resetPicture: photo(2.5, 2.5, 11, 10) + ci(14.5, 14.5, 4.4, 'knock') + p('M11.4 14.2a3.1 3.1 0 1 0 1-2.4', 'b thick') + p('M11 10.6v2.2h2.2', 'b thick'),
+  // Picture Styles: a framed picture lifted off the page by its shadow.
+  pictureStyles: r(4.5, 5, 13, 12, 'nw', 1.4) + r(2.5, 3, 13, 12, 'of', 1.4) + photo(4.5, 5, 9, 8),
+  // Place in Cell: a picture settled into one cell of the grid.
+  placeInCell: cells(2.5, 3.5, 15, 13, 2, 2) + photo(3.4, 4.4, 5.7, 4.7, 'bw') + cells(2.5, 3.5, 15, 13, 2, 2, { frame: 'o' }),
+  // Place over Cells: the picture lifted out of its cell to float above the grid.
+  placeOverCells: cells(2.5, 6.5, 15, 11, 3, 3) + r(6.5, 2, 10, 8.5, 'nw', 1.2) + photo(5.5, 1.5, 10, 8),
+  // Linked Picture: a picture of cells, with a link.
+  linkedPicture: r(2.5, 2.5, 13, 11, 'of', 1.4) + cells(4, 4, 10, 8, 2, 3, { head: 'bf', frame: 'o' })
+    + ci(14.5, 14.5, 4.2, 'knock') + p('M12.6 15.6l-.6.6a1.6 1.6 0 0 1-2.3-2.3l1.2-1.2a1.6 1.6 0 0 1 2.3 0M16.4 13.4l.6-.6a1.6 1.6 0 0 0-2.3-2.3l-1.2 1.2a1.6 1.6 0 0 0 0 2.3', 'b thick'),
+  // Paste as Picture: the clipboard holding a picture.
+  pastePicture: r(3, 3.5, 11, 14, 'nf', 2) + r(5.5, 2, 6, 3.2, 'of', 1.2) + photo(8, 8, 9.5, 9),
+});
+
 /** The icons drawn here with a larger canvas in mind are the same drawings; the ribbon shows them at 32px. */
+/* SmartArt: the gallery, the Text Pane and the commands of its Design and Format tabs. */
+Object.assign(COMMAND_ICONS, {
+  smartArt: r(7, 2.5, 6, 4.5, 'bf', 1) + p('M10 7v3M5 10h10M5 10v2.5M15 10v2.5', 'o') + r(2, 12.5, 6, 4.5, 'gf', 1) + r(12, 12.5, 6, 4.5, 'nf', 1),
+  textPane: r(2.5, 3.5, 15, 13, 'of') + ci(5.5, 7, 0.9, 'bs') + ci(8.5, 10, 0.9, 'bs') + ci(5.5, 13, 0.9, 'bs') + p('M7.5 7h7M10.5 10h4.5M7.5 13h7', 'o ln'),
+  addShape: r(2.5, 5.5, 10, 8, 'bf', 1.5) + badge(15, 14, 'plus'),
+  rightToLeft: p('M3 5.5h9M3 9.5h9M3 13.5h9', 'o ln') + p('M17 15.5H6.5M9 13l-2.5 2.5L9 18', 'b'),
+  convertShapes: r(2.5, 2.5, 7, 6, 'bf', 1) + ci(14, 5.5, 3.2, 'gf') + p('M6 11.5l3.5 6h-7z', 'pf') + r(11, 11.5, 6.5, 6, 'nf', 1),
+  changeShape: r(2.5, 2.5, 8, 8, 'bf', 1.5) + ci(13.5, 13.5, 4, 'nf') + p('M12.5 3.5a4 4 0 0 1 4 4M15.5 6l1 1.5 1.5-1', 'b'),
+  shapeLarger: r(5.5, 5.5, 9, 9, 'bf', 1.5) + p('M2.5 6V2.5H6M14 2.5h3.5V6M17.5 14v3.5H14M6 17.5H2.5V14', 'b'),
+  shapeSmaller: r(6.5, 6.5, 7, 7, 'bf', 1.5) + p('M2.5 2.5l3 3M17.5 2.5l-3 3M17.5 17.5l-3-3M2.5 17.5l3-3', 'b'),
+});
+
 export function commandIcon(name, size) {
   const body = COMMAND_ICONS[name];
   if (!body) return null;

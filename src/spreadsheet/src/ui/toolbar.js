@@ -10,6 +10,7 @@ import { fillColorCss } from '../core/fill-color.js';
 import { el, fieldId } from './dom.js';
 import { icon } from './icons.js';
 import { openMenu, ariaKeyShortcuts } from './menu.js';
+import { effectiveShortcut } from './custom-shortcuts.js';
 import { MOD_KEY } from './dom.js';
 import { cellName } from '../core/cell.js';
 import { RTL_LEAD } from '../core/bidi.js';
@@ -17,6 +18,7 @@ import { CURRENCIES, FONTS, fontName, fontStack, formatValue, currencyDecimals, 
 import { openCustomFormatDialog } from './numfmtdialog.js';
 import { customColorRows } from './colorpicker.js';
 import { themeColorBlock } from './themes.js';
+import { GROUP_BLOCKED_REASON } from '../core/sheet-group.js';
 
 /* Presets built on the custom-format engine; matched by their code. */
 /**
@@ -113,14 +115,24 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
   const root = el('div.toolbar', { role: 'toolbar', 'aria-label': 'Formatting', 'aria-orientation': 'horizontal' });
 
   // A button with a shortcut names it in its tooltip and, in the spelling aria-keyshortcuts takes, in that attribute, so it can be heard as well as read.
-  const btn = (name, label, cmd, arg, extra = {}) => el('button.tb-btn', {
-    type: 'button', html: icon(name, 18), 'aria-label': label, title: extra.title || (extra.shortcut ? `${label} (${extra.shortcut})` : label),
-    'aria-keyshortcuts': ariaKeyShortcuts(extra.shortcut),
-    'aria-pressed': extra.toggle ? 'false' : null, 'aria-haspopup': extra.menu ? 'menu' : null, tabindex: -1,
-    // An object argument (the Percent and Currency buttons' { fmt, toggle }) is named by its text values, so data-arg reads "percent", not "[object Object]".
-    dataset: { cmd, arg: arg != null && typeof arg === 'object' ? Object.values(arg).filter((v) => typeof v === 'string').join(' ') : arg ?? '' },
-    onclick: () => ctx.run(cmd, arg),
-  });
+  const btn = (name, label, cmd, arg, extra = {}) => {
+    const b = el('button.tb-btn', {
+      type: 'button', html: icon(name, 18), 'aria-label': label, title: extra.title || (extra.shortcut ? `${label} (${extra.shortcut})` : label),
+      'aria-keyshortcuts': ariaKeyShortcuts(extra.shortcut),
+      'aria-pressed': extra.toggle ? 'false' : null, 'aria-haspopup': extra.menu ? 'menu' : null, tabindex: -1,
+      // An object argument (the Percent and Currency buttons' { fmt, toggle }) is named by its text values, so data-arg reads "percent", not "[object Object]".
+      dataset: { cmd, arg: arg != null && typeof arg === 'object' ? Object.values(arg).filter((v) => typeof v === 'string').join(' ') : arg ?? '' },
+      onclick: () => ctx.run(cmd, arg),
+    });
+    // What the button runs, for the Quick Access Toolbar and the ribbon's own tabs (see command-catalog.js).
+    b._command = { cmd, arg: extra.menu ? null : arg ?? null, label, glyph: name };
+    // A shortcut of the person's own (Options ▸ Keyboard Shortcuts) is the one the tooltip names.
+    if (!extra.title) b.addEventListener('pointerenter', () => {
+      const keys = effectiveShortcut({ cmd, arg, shortcut: extra.shortcut });
+      b.title = keys ? `${label} (${keys})` : label;
+    });
+    return b;
+  };
   const sep = () => el('div.tb-sep', { role: 'separator', 'aria-orientation': 'vertical' });
   const group = (...kids) => el('div.tb-group', {}, ...kids);
 
@@ -390,6 +402,12 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
         { label: 'From this device…', icon: 'image', onSelect: () => ctx.run('insertImage') },
         ctx.flags?.()?.pick && { label: 'From Puter…', icon: 'folderOpen', onSelect: () => ctx.run('insertImagePuter') },
         { label: 'From a URL…', icon: 'external', onSelect: () => ctx.run('insertImageUrl') },
+        { separator: true },
+        { label: 'Place in Cell', icon: 'placeInCell', submenu: [
+          { label: 'From this device…', icon: 'image', onSelect: () => ctx.run('insertImage', 'cell') },
+          ctx.flags?.()?.pick && { label: 'From Puter…', icon: 'folderOpen', onSelect: () => ctx.run('insertImagePuter', 'cell') },
+          { label: 'From a URL…', icon: 'external', onSelect: () => ctx.run('insertImageUrl', 'cell') },
+        ].filter(Boolean) },
       ],
     }),
   });
@@ -414,6 +432,8 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
         { separator: true },
         { label: 'Pivot table…', icon: 'pivot', onSelect: () => ctx.run('pivot') },
         { label: 'Goal seek…', icon: 'sliders', onSelect: () => ctx.run('goalSeek') },
+        { label: 'Solver…', icon: 'solver', onSelect: () => ctx.run('solver') },
+        { label: 'Data analysis…', icon: 'dataAnalysis', onSelect: () => ctx.run('dataAnalysis') },
         { label: 'Column stats…', icon: 'chartColumn', onSelect: () => ctx.run('columnStats') },
       ],
     }),
@@ -517,7 +537,10 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
     // There they are tab stops like AutoSave and Save beside them: this toolbar's roving tab stop no longer reaches them.
     if (ctx.quickAccess) {
       for (const b of [undoBtn, undoArrow, redoBtn]) b.tabIndex = 0;
-      undoBtn.classList.add('qat-btn'); redoBtn.classList.add('qat-btn'); ctx.quickAccess.append(undoBtn, undoArrow, redoBtn);
+      undoBtn.classList.add('qat-btn'); redoBtn.classList.add('qat-btn');
+      // The Quick Access Toolbar places them (ui/quick-access.js), with whatever else the person put there.
+      undoBtn.dataset.qat = 'undo'; undoArrow.dataset.qat = 'undo'; redoBtn.dataset.qat = 'redo';
+      ctx.quickAccess.append(undoBtn, undoArrow, redoBtn);
     }
     root.append(
       ...(ctx.quickAccess ? [] : [namedGroup('Undo', stack(undoBtn, redoBtn)), sep()]),
@@ -705,6 +728,13 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
     const editing = ctx.grid.editing;
     set(paintBtn, !!ctx.painting?.());
     for (const b of [sortBtn, rowsBtn, colsBtn, paintBtn]) b.disabled = editing;
+    // Grouped sheets: sorting, filtering, freezing and the rules are for one sheet at a time; the buttons wait and say why.
+    const grouped = !!ctx.wb.sheetGroup;
+    for (const b of [sortBtn, filterBtn, freezeBtn, cfBtn, dvBtn]) {
+      if (b.dataset.title == null) b.dataset.title = b.title;
+      if (grouped) b.disabled = true; else if (b !== sortBtn) b.disabled = false;
+      b.title = grouped ? `${b.dataset.title}: ${GROUP_BLOCKED_REASON}` : b.dataset.title;
+    }
     // Dates, times, text and custom codes have no decimal places to step, so the buttons are greyed as the menus grey them.
     decLess.disabled = decMore.disabled = editing || ['date', 'time', 'datetime', 'text', 'custom'].includes(s.fmt);
     // Indenting and clearing formatting style the cell being edited, as Bold and the number formats do since

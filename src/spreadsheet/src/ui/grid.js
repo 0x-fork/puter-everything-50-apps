@@ -19,6 +19,9 @@ import { numberFormatParts, measureFormatParts, layoutFormatParts, rotatedFormat
 import { formatLayoutNode } from './format-layout.js';
 import { richTextMeasure, largestRichTextSize } from '../core/rich-text-font.js';
 import { fontColorCss } from '../core/font-color.js';
+import { appOption } from '../lib/app-options.js';
+import { applyFixedDecimal } from '../core/entry-options.js';
+import { confirmDialog } from './modal.js';
 /**
  * The grid: a virtualized, keyboard-first spreadsheet surface.
  *
@@ -37,8 +40,12 @@ import { fontColorCss } from '../core/font-color.js';
 import { measureRows } from '../core/row-height.js';
 import { MIN_COL_WIDTH, MAX_COL_WIDTH, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT, MAX_ROWS, MAX_COLS, safeLinkUrl } from '../core/workbook.js';
 import { pictureNode } from './picture.js';
+import { pictureFrameCss, pictureStyled } from '../core/picture-format.js';
+import { linkedPictureTarget, rangePicture, svgDataUrl } from '../core/range-picture.js';
+import { cellPictureLabel, cellPictureObjectPosition } from '../core/cell-picture.js';
 import { AxisOffsets, MAX_CANVAS_EXTENT } from './axis-offsets.js';
 import { chartSheetLayout } from '../core/chartsheet.js';
+import { withGroups, snapRect } from '../core/arrange.js';
 
 import { isComposing, el, clamp, isMod, IS_MAC } from './dom.js';
 import { cellName, cellKey, rangeName, normalizeRange, parseRange, parseCellRef, colIndex } from '../core/cell.js';
@@ -58,6 +65,8 @@ import { chartData, chartTitles, CHART_MIN_W, CHART_MIN_H, IMAGE_MIN, TEXT_MIN, 
 import { renderChartSvg, renderSparklineSvg, chartCornerRadius, themeSeriesKey } from './chartsvg.js';
 import { equationBody } from './equation-view.js';
 import { textBoxEffectCss } from '../core/theme-effects.js';
+import { smartArtSvg, smartArtAltText, SMARTART_MIN } from '../core/smartart.js';
+import { smartArtLook, fallbackPicture } from './smartart.js';
 import { paintCellFill } from './cell-fill.js';
 import { fillColorCss } from '../core/fill-color.js';
 import { nativeFillOverridesNormal } from '../core/native-fill.js';
@@ -271,6 +280,11 @@ export function createGrid(opts) {
   objectsLayer.addEventListener('focusout', schedule);
   const chartBoxes = new Map(); // chart id → { el, sig }
   let selectedChart = null;
+  // Every object selected with it (Shift- or Cmd-click adds one; a group's members come together); the set
+  // only counts while selectedChart is set, and always holds it.
+  let selectedSet = new Set();
+  const objectSelected = (id) => !!selectedChart && (id === selectedChart || selectedSet.has(id));
+  const selectedObjects = () => (selectedChart ? [selectedChart, ...[...selectedSet].filter((id) => id !== selectedChart)] : []);
   let chartView = null;
   const selRange = el('div.sel-range', { 'aria-hidden': 'true' });
   const extraLayer = el('div.sel-extras', { 'aria-hidden': 'true' });
@@ -309,6 +323,9 @@ export function createGrid(opts) {
   linkPop.addEventListener('pointerdown', (e) => e.stopPropagation());
   linkPop.addEventListener('dblclick', (e) => e.stopPropagation());
   const refLayer = el('div.ref-layer', { 'aria-hidden': 'true' });
+  // Where the other people editing a shared workbook are: each one's selection outlined in their colour, with their name.
+  const peerLayer = el('div.peer-layer', { 'aria-hidden': 'true' });
+  let peers = []; // [{ id, name, color, sel, active, editing }] on this sheet
   const hlLayer = el('div.hl-layer', { 'aria-hidden': 'true' });
   let highlights = { cells: [], current: -1 };
   const editor = el('textarea.grid-editor', {
@@ -318,11 +335,13 @@ export function createGrid(opts) {
   const tableLayer = el('div.grid-tables', { 'aria-hidden': 'true' });
   // Page Break Preview: each printed page outlined in blue with its number, the rest of the sheet greyed.
   const pageLayer = el('div.grid-pages', { 'aria-hidden': 'true', hidden: true });
-  let pageView = null; // { pages: [{ r1, c1, r2, c2, n }], area }
+  // { pages: [{ r1, c1, r2, c2, n }], area, rowBreaks: [{ at, manual }], colBreaks } in Page Break Preview, or
+  // { lines: true, area, rowBreaks, colBreaks } for the dashed page-break lines Normal view can show.
+  let pageView = null;
   const tablePreviewEl = el('div.sel-range.table-preview', { hidden: true, 'aria-hidden': 'true' });
   // Page Layout view: the sheets of paper beneath the cells, with their headers and footers.
   const paperLayer = el('div.grid-paper');
-  const canvas = el('div.grid-canvas', {}, paperLayer, cellsLayer, pageLayer, hlLayer, refLayer, extraLayer, cutRangeEl, selRange, selActive, tableLayer, tablePreviewEl, fillHandle, fillPreviewEl, movePreviewEl, objectsLayer, notePop, promptPop, linkPop, listButton, editor);
+  const canvas = el('div.grid-canvas', {}, paperLayer, cellsLayer, pageLayer, hlLayer, refLayer, extraLayer, cutRangeEl, peerLayer, selRange, selActive, tableLayer, tablePreviewEl, fillHandle, fillPreviewEl, movePreviewEl, objectsLayer, notePop, promptPop, linkPop, listButton, editor);
   const viewport = el('div.grid-viewport', {
     role: 'grid', tabindex: 0, 'aria-label': 'Spreadsheet grid', 'aria-multiselectable': 'true',
   }, canvas);
@@ -1002,7 +1021,8 @@ export function createGrid(opts) {
    * but it is meant for the frozen cell drawn over the handle.
    */
   function onFillHandle(clientX, clientY, target = null) {
-    if (edit || wb.isProtected(sheetId)) return false;
+    // The options can turn the fill handle (and dragging cells about) off.
+    if (edit || wb.isProtected(sheetId) || !appOption('fillHandle')) return false;
     const { range, vx, vy, hidden } = handlePlace();
     if (hidden) return false;
     // A press the browser reports on the handle itself has its whole hit area, but only where the
@@ -1060,6 +1080,11 @@ export function createGrid(opts) {
    * (it reports that itself): the rules of Workbook.moveRange, in its order.
    */
   function moveProblem(src, dst) {
+    return knownMoveProblem(src, dst) || 'Those cells cannot be moved there';
+  }
+
+  /** Why a move from `src` to `dst` will be refused, when it can be told beforehand; null otherwise. */
+  function knownMoveProblem(src, dst) {
     if ((src.r2 - src.r1 + 1) * (src.c2 - src.c1 + 1) > 200000) return 'Select at most 200,000 cells to move at once';
     const s = sheet();
     const overlaps = (a, b) => !(a.r2 < b.r1 || a.r1 > b.r2 || a.c2 < b.c1 || a.c1 > b.c2);
@@ -1075,7 +1100,7 @@ export function createGrid(opts) {
     const shifted = (m) => ({ r1: m.r1 + dr, c1: m.c1 + dc, r2: m.r2 + dr, c2: m.c2 + dc });
     const landing = s.tables.find((t) => inside(t.range, src) && s.tables.some((o) => !inside(o.range, src) && overlaps(shifted(t.range), o.range)));
     if (landing) return `Table ${landing.name} cannot be dropped on another table`;
-    return 'Those cells cannot be moved there';
+    return null;
   }
 
   function place(node, box) {
@@ -1258,9 +1283,11 @@ export function createGrid(opts) {
     node.style.width = `${w}px`;
     node.style.height = `${h}px`;
     const note = s.notes.get(cellKey(r, c));
-    if (note) { node.classList.add('has-note'); node.title = note; }
+    const noteMarks = appOption('commentIndicators');
+    // Comment indicators (the options): the corner mark, with the note as a tooltip only when hovering is wanted.
+    if (note && noteMarks !== 'none') { node.classList.add('has-note'); if (noteMarks === 'hover') node.title = note; }
     const thread = s.comments?.get(cellKey(r, c));
-    if (thread) node.classList.add('has-comment', ...(thread.done ? ['comment-done'] : []));
+    if (thread && noteMarks !== 'none') node.classList.add('has-comment', ...(thread.done ? ['comment-done'] : []));
     const filterHead = filterHeadAt(s, r, c);
     if (filterHead) {
       node.classList.add('filter-head');
@@ -1416,8 +1443,10 @@ export function createGrid(opts) {
     let picture = false;
     if (value && typeof value === 'object' && value.image && !showFormulas) {
       node.classList.add('img-cell', `fit-${value.fit || 'contain'}`);
-      node.append(el('img', { src: value.image, alt: '', draggable: false, loading: 'lazy' }));
-      node.title = value.image.startsWith('data:') ? 'Image' : value.image;
+      // The picture sits against the sides the cell's alignment names (centred when it names none).
+      node.append(el('img', { src: value.image, alt: value.alt || '', draggable: false, loading: 'lazy', style: { objectPosition: cellPictureObjectPosition(st) } }));
+      node.title = value.alt || (value.image.startsWith('data:') ? 'Picture' : value.image);
+      node.setAttribute('aria-label', cellPictureLabel(value));
       picture = true;
     } else if (value && typeof value === 'object' && value.sparkline && !showFormulas) {
       node.classList.add('sparkline');
@@ -1700,7 +1729,7 @@ export function createGrid(opts) {
   function syncOverlayClones() {
     for (const layer of [frzRows, frzCols, frzCorner]) {
       if (layer.el.hidden) { if (layer.overlays.childElementCount) layer.overlays.replaceChildren(); continue; }
-      layer.overlays.replaceChildren(...[hlLayer, refLayer, extraLayer, cutRangeEl, selRange, selActive, fillPreviewEl, movePreviewEl, fillHandle].map((n) => n.cloneNode(true)));
+      layer.overlays.replaceChildren(...[hlLayer, refLayer, extraLayer, cutRangeEl, peerLayer, selRange, selActive, fillPreviewEl, movePreviewEl, fillHandle].map((n) => n.cloneNode(true)));
     }
   }
 
@@ -1744,17 +1773,55 @@ export function createGrid(opts) {
     try { if (wb.ensureSize(sheetId, rows, cols)) rebuildOffsets(); } finally { growingByScroll = false; }
   }
 
+  /**
+   * The sheet's background picture (Page Layout ▸ Background), tiled from A1 behind the cells at its own
+   * size times the zoom; a cell's fill covers it. The frozen panes' tracks share the canvas coordinates,
+   * so they tile it the same way. The picture's size is read once it has loaded.
+   */
+  const backgroundSizes = new Map();
+  let backgroundShown = null;
+  function paintBackground(s) {
+    const bg = s.kind === 'chart' ? null : s.background || null;
+    let size = bg && backgroundSizes.get(bg.src);
+    if (bg && !size) {
+      if (backgroundSizes.size > 8) backgroundSizes.clear();
+      backgroundSizes.set(bg.src, size = { w: 0, h: 0 });
+      const img = new Image();
+      img.onload = () => { size.w = img.naturalWidth; size.h = img.naturalHeight; backgroundShown = null; schedule(); };
+      img.src = bg.src;
+    }
+    const on = !!bg && size.w > 0 && size.h > 0;
+    const tracks = [frzRows.track, frzCols.track, frzCorner.track];
+    if (on) for (const track of tracks) { track.style.width = canvas.style.width; track.style.height = canvas.style.height; }
+    if (backgroundShown && backgroundShown.bg === bg && backgroundShown.zoom === zoom && on) return;
+    if (!on && !backgroundShown) return;
+    backgroundShown = on ? { bg, zoom } : null;
+    for (const node of [canvas, ...tracks]) {
+      node.style.backgroundImage = on ? `url("${bg.src}")` : '';
+      node.style.backgroundSize = on ? `${size.w * zoom}px ${size.h * zoom}px` : '';
+      node.style.backgroundRepeat = on ? 'repeat' : '';
+      if (!on && node !== canvas) { node.style.width = ''; node.style.height = ''; }
+    }
+    root.classList.toggle('has-background', on);
+  }
+
   let shownChart = null;
+  let shownChartSet = '';
   function render() {
     if (destroyed) return;
     const s = sheet();
     if (!s) return;
-    if (selectedChart !== shownChart) { shownChart = selectedChart; opts.onChartSelection?.(selectedChart); }
+    if (selectedChart && !selectedSet.has(selectedChart)) selectedSet = new Set([selectedChart]);
+    const shownKey = selectedObjects().join('|');
+    if (selectedChart !== shownChart || shownKey !== shownChartSet) { shownChart = selectedChart; shownChartSet = shownKey; opts.onChartSelection?.(selectedChart); }
     fillViewport(s);
     const chartSheet = s.kind === 'chart';
     const defaultBg = wb.nativeDefaultCellFormat?.style.bg;
     root.style.setProperty('--cell-default-bg', fillColorCss(defaultBg) || 'var(--surface)');
     for (const layer of [viewport, frzRows.el, frzCols.el, frzCorner.el]) layer.style.backgroundColor = chartSheet ? '' : fillColorCss(defaultBg);
+    paintBackground(s);
+    // In a sheet view of one's own (View ▸ Sheet View) the headings take a tint, so it is plain which view is on show.
+    root.classList.toggle('in-sheet-view', !!s.personalView);
     root.classList.toggle('chart-sheet', chartSheet);
     if (chartSheet) {
       chartView = chartSheetLayout(s, viewport.clientWidth, viewport.clientHeight, zoom);
@@ -1886,6 +1953,7 @@ export function createGrid(opts) {
 
   function renderObjects() {
     const s = sheet();
+    root.classList.toggle('multi-objects', !!selectedChart && selectedSet.size > 1);
     const objectScale = chartView?.scale ?? zoom;
     const seen = new Set();
     for (const ch of s.charts) {
@@ -1898,24 +1966,34 @@ export function createGrid(opts) {
         // clip here would cut off corners extending beyond the original frame.
         if (image) body.style.overflow = 'visible';
         const textBox = ch.type === 'text';
-        const noun = ch.type === 'slicer' ? 'slicer' : ch.type === 'timeline' ? 'timeline' : ch.type === 'scroll' ? 'scroll bar' : image ? 'image' : textBox ? ch.equation ? 'equation' : 'text box' : 'chart';
+        const smartArt = ch.type === 'smartart';
+        const noun = ch.type === 'slicer' ? 'slicer' : ch.type === 'timeline' ? 'timeline' : ch.type === 'scroll' ? 'scroll bar' : image ? 'image' : textBox ? ch.equation ? 'equation' : 'text box' : smartArt ? 'SmartArt' : 'chart';
         const tools = el('div.chart-tools', {},
           el('button.chart-tool.chart-open-link', { type: 'button', title: 'Open link', 'aria-label': 'Open link', onclick: e => { e.stopPropagation(); if (safeLinkUrl(wb.chartById(sheetId, ch.id)?.hyperlink)) opts.onCommand?.('openDrawingLink', ch.id); } }, 'Open link'),
-          !image && el('button.chart-tool', { type: 'button', title: `Edit ${noun}`, 'aria-label': `Edit ${noun}`, onclick: (e) => { e.stopPropagation(); opts.onCommand?.('editChart', ch.id); } }, 'Edit'),
+          !image && el('button.chart-tool', { type: 'button', title: `Edit ${noun}${smartArt ? ' text' : ''}`, 'aria-label': `Edit ${noun}${smartArt ? ' text' : ''}`, onclick: (e) => { e.stopPropagation(); opts.onCommand?.('editChart', ch.id); } }, 'Edit'),
           el('button.chart-tool', { type: 'button', title: `Delete ${noun}`, 'aria-label': `Delete ${noun}`, onclick: (e) => { e.stopPropagation(); opts.onCommand?.('deleteChart', ch.id); } }, 'Delete'));
         const handle = el('div.chart-resize', { title: 'Resize' });
-        const node = el('div.chart-box', { dataset: { chart: ch.id }, className: `chart-box${image ? ' image-box' : ''}${textBox ? ' text-box' : ''}`, role: textBox ? 'note' : 'figure', tabindex: -1 }, body, tools, handle);
+        const node = el('div.chart-box', { dataset: { chart: ch.id }, className: `chart-box${image ? ' image-box' : ''}${textBox ? ' text-box' : ''}${smartArt ? ' smartart-box' : ''}`, role: textBox ? 'note' : 'figure', tabindex: -1 }, body, tools, handle);
         // Where a frozen pane has scrolled over the box, the presses are for the frozen cells drawn over it.
         node.addEventListener('pointerdown', (e) => chartPointerDown(e, ch.id, e.target === handle));
         // A double-click opens what the object has to edit: the chart or text dialog, or the picker for a
         // picture to put in the image's place; it never reaches the cell under the object.
         node.addEventListener('dblclick', (e) => { if (underFrozenPane(node, e.clientX, e.clientY)) return; e.stopPropagation(); opts.onCommand?.(image ? 'replaceImage' : 'editChart', ch.id); });
-        node.addEventListener('contextmenu', (e) => { if (underFrozenPane(node, e.clientX, e.clientY)) return; e.preventDefault(); e.stopPropagation(); selectChart(ch.id); opts.onContextMenu?.({ x: e.clientX, y: e.clientY, kind: 'chart', chartId: ch.id }); });
+        node.addEventListener('contextmenu', (e) => { if (underFrozenPane(node, e.clientX, e.clientY)) return; e.preventDefault(); e.stopPropagation(); if (!objectSelected(ch.id)) selectChart(ch.id); opts.onContextMenu?.({ x: e.clientX, y: e.clientY, kind: 'chart', chartId: ch.id }); });
         box = { el: node, body, sig: null };
         chartBoxes.set(ch.id, box);
         objectsLayer.append(node);
       }
-      box.el.querySelector('.chart-open-link').hidden = !safeLinkUrl(ch.hyperlink);
+      const linkTool = box.el.querySelector('.chart-open-link');
+      linkTool.hidden = !safeLinkUrl(ch.hyperlink);
+      // A script button's link runs its script (Automate ▸ Script Button).
+      const runs = String(ch.hyperlink || '').startsWith('#script:');
+      if (linkTool.dataset.runs !== String(runs)) {
+        linkTool.dataset.runs = String(runs);
+        linkTool.textContent = runs ? 'Run script' : 'Open link';
+        linkTool.title = linkTool.textContent;
+        linkTool.setAttribute('aria-label', linkTool.textContent);
+      }
       box.el.style.cursor = safeLinkUrl(ch.hyperlink) ? 'pointer' : '';
       box.el.title = safeLinkUrl(ch.hyperlink) ? `${ch.hyperlinkTooltip || ch.hyperlink} (Shift-click to select)` : '';
       // Decorative content stays visible and editable without being read as document content.
@@ -1934,12 +2012,20 @@ export function createGrid(opts) {
       const inCols = frozen.cols > 0 && rect.left + rect.width <= frozen.w;
       const layer = inRows && inCols ? frzCorner.track : inRows ? frzRows.track : inCols ? frzCols.track : objectsLayer;
       if (box.el.parentNode !== layer) layer.append(box.el);
-      const live = drag?.kind === 'chartmove' && drag.id === ch.id ? drag.rect : drag?.kind === 'chartresize' && drag.id === ch.id ? drag.rect : rect;
+      const companion = drag?.kind === 'chartmove' && drag.shift ? drag.others?.find((m) => m.id === ch.id) : null;
+      const live = drag?.kind === 'chartmove' && drag.id === ch.id ? drag.rect : drag?.kind === 'chartresize' && drag.id === ch.id ? drag.rect
+        : companion ? { ...companion.from, left: companion.from.left + drag.shift.x, top: companion.from.top + drag.shift.y } : rect;
       box.el.style.transform = `translate(${live.left}px, ${live.top}px)`;
       box.el.style.width = `${live.width}px`;
       box.el.style.height = `${live.height}px`;
-      box.el.classList.toggle('selected', selectedChart === ch.id);
-      box.el.style.zIndex = selectedChart === ch.id ? '1' : ''; // the selected one lies over any it overlaps
+      box.el.classList.toggle('selected', objectSelected(ch.id));
+      box.el.classList.toggle('primary', selectedChart === ch.id);
+      // The sheet's own stacking order (Page Layout ▸ Arrange): later objects lie over earlier ones.
+      box.el.style.zIndex = String(s.charts.indexOf(ch) + 1);
+      // A hidden object (the Selection Pane's eye) is not drawn and takes no presses.
+      box.el.style.display = ch.hidden ? 'none' : '';
+      // A text box turns and flips about its centre (Arrange ▸ Rotate); a picture turns its own content.
+      if (ch.type === 'text' && (ch.rotation || ch.flipH || ch.flipV)) box.el.style.transform += ` rotate(${ch.rotation || 0}deg) scale(${ch.flipH ? -1 : 1}, ${ch.flipV ? -1 : 1})`;
       // A chart in Excel's style draws its own outline (or none); the frame's border would double it.
       if (ch.type !== 'text') box.el.classList.toggle('borderless', ch.border === false || ch.appearance?.border === false || !!ch.appearance?.borderColor);
       box.el.classList.toggle('chart-shadow', !!ch.appearance?.effects?.chartArea?.shadow);
@@ -1947,7 +2033,6 @@ export function createGrid(opts) {
       const cornerRadius = chartCornerRadius(ch);
       box.el.style.borderRadius = box.body.style.borderRadius = cornerRadius == null ? '' : `${cornerRadius * objectScale}px`;
       if (ch.type === 'slicer') {
-        box.el.style.display = ch.hidden ? 'none' : '';
         box.el.classList.add('borderless');
         if (!box.slicer) {
           box.slicer = createSlicerControl(document, values => setSlicerSelection(wb, sheetId, ch.id, values));
@@ -2011,16 +2096,66 @@ export function createGrid(opts) {
         }
         continue;
       }
+      if (ch.type === 'smartart') {
+        // A SmartArt diagram is drawn from its outline each time it changes, in the workbook's theme, with the
+        // shapes picked in it framed while it is selected.
+        const look = smartArtLook(wb), picked = objectSelected(ch.id) ? opts.smartArtSelection?.(ch.id) || null : null;
+        const sig = JSON.stringify([ch.layout, ch.items, ch.colors, ch.style, ch.rtl, ch.w, ch.h, look, picked && [...picked], ch.fallback?.src?.length, ch.decorative, ch.description]);
+        box.el.classList.add('borderless');
+        if (box.sig !== sig) {
+          box.sig = sig;
+          box.body.innerHTML = ch.fallback ? fallbackPicture(ch.fallback)
+            : smartArtSvg(ch, ch.w, ch.h, { ...look, placeholders: true, selected: picked, idPrefix: `sa-${String(ch.id).replace(/[^\w-]/g, '')}` });
+          box.el.setAttribute('aria-label', ch.decorative ? 'Decorative SmartArt graphic' : `SmartArt graphic: ${(ch.description || smartArtAltText(ch)).slice(0, 300)}`);
+        }
+        continue;
+      }
       if (ch.type === 'image') {
+        // Picture Format ▸ Picture Styles: a frame, rounded or oval outline and a shadow of the picture's own
+        // stand in for the box's plain border.
+        const frame = pictureFrameCss(ch, objectScale);
+        if (pictureStyled(ch)) box.el.classList.add('borderless');
+        const frameSig = JSON.stringify(frame);
+        if (box.frameSig !== frameSig) {
+          box.frameSig = frameSig;
+          Object.assign(box.body.style, { border: frame.border || '', borderRadius: frame.borderRadius || '', boxShadow: frame.boxShadow || '', boxSizing: 'border-box' });
+          box.body.style.overflow = frame.borderRadius ? 'hidden' : 'visible';
+          box.el.classList.toggle('picture-styled', pictureStyled(ch));
+        }
+        // A linked picture draws the cells its reference names, again whenever they change.
+        if (ch.pictureRef) {
+          const target = linkedPictureTarget(wb, sheetId, ch.pictureRef);
+          if (box.version !== wb.version || box.pictureRef !== ch.pictureRef || box.imageTransform !== JSON.stringify([imageTransform(ch), ch.adjust, ch.recolor, ch.transparency])) {
+            box.version = wb.version; box.pictureRef = ch.pictureRef;
+            box.imageTransform = JSON.stringify([imageTransform(ch), ch.adjust, ch.recolor, ch.transparency]);
+            const picture = target && rangePicture(wb, target.sheetId, target.range, { idPrefix: `lp${ch.id}-` });
+            const sig = picture ? picture.svg : `src:${ch.src}`;
+            if (box.sig !== sig || box.imageSrc !== null) {
+              box.sig = sig; box.imageSrc = null;
+              // Drawn inline the picture takes the page's fonts, as the cells do; corrections need the picture path.
+              if (picture && !ch.adjust && !ch.recolor) {
+                box.body.innerHTML = picture.svg;
+                const svg = box.body.firstElementChild;
+                svg.setAttribute('role', ch.decorative ? 'presentation' : 'img');
+                if (!ch.decorative) svg.setAttribute('aria-label', `Picture of ${ch.pictureRef}`);
+                svg.style.opacity = ch.transparency ? String(1 - ch.transparency) : '';
+                svg.style.transform = imageTransform(ch);
+              } else box.body.replaceChildren(pictureNode({ ...ch, src: picture ? svgDataUrl(picture.svg) : ch.src, srcRect: null, fillRect: null }));
+            }
+            box.el.setAttribute('aria-label', ch.decorative ? 'Decorative linked picture' : `Linked picture of ${ch.pictureRef}${target ? '' : ' (the cells it showed are gone)'}`);
+          }
+          continue;
+        }
         // Different pictures can have the same encoded length and file name.
         // Keep the source itself so replacements and undo always refresh it.
-        const transform = JSON.stringify([imageTransform(ch), ch.srcRect, ch.fillRect, ch.decorative]);
+        const transform = JSON.stringify([imageTransform(ch), ch.srcRect, ch.fillRect, ch.decorative, ch.description, ch.adjust, ch.recolor, ch.transparency]);
         if (box.imageSrc !== ch.src || box.imageTitle !== ch.title || box.imageTransform !== transform) {
           box.imageSrc = ch.src;
           box.imageTitle = ch.title;
           box.imageTransform = transform;
+          box.sig = null;
           box.body.replaceChildren(pictureNode(ch));
-          box.el.setAttribute('aria-label', ch.decorative ? 'Decorative image' : ch.title ? `Image: ${ch.title}` : 'Image');
+          box.el.setAttribute('aria-label', ch.decorative ? 'Decorative image' : ch.description ? `Image: ${ch.description}` : ch.title ? `Image: ${ch.title}` : 'Image');
         }
         continue;
       }
@@ -2092,7 +2227,10 @@ export function createGrid(opts) {
       }
     }
     for (const [id, box] of chartBoxes) {
-      if (!seen.has(id)) { box.el.remove(); chartBoxes.delete(id); staleCharts.delete(id); if (selectedChart === id) selectedChart = null; }
+      if (!seen.has(id)) {
+        box.el.remove(); chartBoxes.delete(id); staleCharts.delete(id); selectedSet.delete(id);
+        if (selectedChart === id) selectedChart = selectedSet.size ? [...selectedSet][0] : null;
+      }
     }
   }
 
@@ -2209,14 +2347,28 @@ export function createGrid(opts) {
     return { sig: `${sum1 >>> 0}:${sum2 >>> 0}`, formulas };
   }
 
-  function selectChart(id) {
+  /**
+   * Select an object (its whole group with it), or with `add` add it to the objects selected — or take it,
+   * and its group, out again when it is one of them already (Shift- or Cmd-click).
+   */
+  function selectChart(id, { add = false, focus = true } = {}) {
     if (edit && !commitEdit()) return;
+    const members = id ? withGroups(sheet()?.charts || [], [id]) : [];
+    if (add && selectedChart) {
+      if (selectedSet.has(id) && selectedSet.size > members.length) {
+        for (const m of members) selectedSet.delete(m);
+        selectedChart = selectedSet.has(selectedChart) ? selectedChart : [...selectedSet][0];
+        schedule();
+        return;
+      }
+      for (const m of members) selectedSet.add(m);
+    } else selectedSet = new Set(members);
     selectedChart = id;
-    viewport.focus({ preventScroll: true });
+    if (focus) viewport.focus({ preventScroll: true });
     schedule();
     if (id) {
       const ch = wb.chartById(sheetId, id);
-      if (ch) opts.announce?.(safeLinkUrl(ch.hyperlink) ? `${ch.hyperlinkTooltip || ch.title || 'Linked drawing'} selected. Press Enter to open link, Delete to remove` : ch.type === 'image' ? `${ch.title || 'Image'} selected. Press Delete to remove` : ch.type === 'text' ? 'Text box selected. Press Enter to edit, Delete to remove' : `${chartTitles(wb, sheetId, ch).title ?? (ch.title || `${ch.type} chart`)} selected. Press Enter to edit, Delete to remove`);
+      if (ch) opts.announce?.(safeLinkUrl(ch.hyperlink) ? `${ch.hyperlinkTooltip || ch.title || 'Linked drawing'} selected. Press Enter to open link, Delete to remove` : ch.type === 'smartart' ? 'SmartArt graphic selected. Press Enter to type its text, Delete to remove' : ch.type === 'image' ? `${ch.title || 'Image'} selected. Press Delete to remove` : ch.type === 'text' ? 'Text box selected. Press Enter to edit, Delete to remove' : `${chartTitles(wb, sheetId, ch).title ?? (ch.title || `${ch.type} chart`)} selected. Press Enter to edit, Delete to remove`);
     }
   }
 
@@ -2227,13 +2379,26 @@ export function createGrid(opts) {
     e.stopPropagation();
     const ch = wb.chartById(sheetId, id);
     if (!ch) return;
-    selectChart(id);
+    // Shift- or Cmd/Ctrl-click adds the object to those selected (or takes it out); a press on one of several
+    // selected keeps them all, so they move together.
+    const adding = !onHandle && (e.shiftKey || e.metaKey || e.ctrlKey);
+    // A press on a shape of a SmartArt diagram already selected picks that shape (Shift or Cmd/Ctrl: adds it).
+    const pickedShape = ch.type === 'smartart' && !onHandle && objectSelected(id) ? e.target.closest?.('[data-item]') : null;
+    const pickedPart = ch.type === 'smartart' && !onHandle && objectSelected(id) && selectedSet.size <= 1;
+    if (pickedPart) { selectedChart = id; viewport.focus({ preventScroll: true }); schedule(); }
+    else if (adding) selectChart(id, { add: true });
+    else if (!(objectSelected(id) && selectedSet.size > 1)) selectChart(id);
+    else { selectedChart = id; viewport.focus({ preventScroll: true }); schedule(); }
+    if (!objectSelected(id)) return;
     if ((ch.type === 'slicer' || ch.type === 'timeline') && ch.lockedPosition) return;
     if (sheet().kind === 'chart' && !['image', 'text'].includes(ch.type)) return;
     const objectScale = chartView?.scale ?? zoom;
     const node = e.currentTarget;
     const rect = chartBoxRect(ch);
-    drag = { kind: onHandle ? 'chartresize' : 'chartmove', id, startX: e.clientX, startY: e.clientY, from: rect, rect, moved: false };
+    // The others selected move with the one pressed.
+    const others = onHandle ? [] : selectedObjects().filter((other) => other !== id).map((other) => wb.chartById(sheetId, other))
+      .filter((o) => o && !o.lockedPosition).map((o) => ({ id: o.id, from: chartBoxRect(o) }));
+    drag = { kind: onHandle ? 'chartresize' : 'chartmove', id, startX: e.clientX, startY: e.clientY, from: rect, rect, moved: false, others };
     try { node.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
     const move = (ev) => {
       if (!drag || drag.id !== id) return;
@@ -2243,15 +2408,33 @@ export function createGrid(opts) {
       if (drag.kind === 'chartmove') {
         // The box stays within the sheet, so it cannot be dragged out of reach past its edge.
         ensureOffsets();
-        const s = sheet();
-        drag.rect = { ...drag.from, left: clamp(drag.from.left + dx, 0, Math.max(0, (chartView?.width ?? colOffsets.total()) - drag.from.width)), top: clamp(drag.from.top + dy, 0, Math.max(0, (chartView?.height ?? rowOffsets.total()) - drag.from.height)) };
+        let left = clamp(drag.from.left + dx, 0, Math.max(0, (chartView?.width ?? colOffsets.total()) - drag.from.width));
+        let top = clamp(drag.from.top + dy, 0, Math.max(0, (chartView?.height ?? rowOffsets.total()) - drag.from.height));
+        // Snap to Grid and Snap to Shape (Arrange ▸ Align); Alt held while dragging lets the box go free.
+        const snap = sheet().kind === 'chart' || ev.altKey ? null : opts.snap?.();
+        if (snap?.grid || snap?.shape) {
+          const box = { x: left, y: top, w: drag.from.width, h: drag.from.height }, xs = [], ys = [];
+          if (snap.grid) {
+            for (const x of [left, left + box.w]) { const c = colOffsets.indexAt(x); xs.push(colX(c), colEnd(c)); }
+            for (const y of [top, top + box.h]) { const r = rowOffsets.indexAt(y); ys.push(rowY(r), rowEnd(r)); }
+          }
+          if (snap.shape) for (const o of sheet().charts) {
+            if (o.hidden || o.id === id || drag.others.some((m) => m.id === o.id)) continue;
+            const r = chartBoxRect(o);
+            xs.push(r.left, r.left + r.width); ys.push(r.top, r.top + r.height);
+          }
+          const at = snapRect(box, xs, ys, 8);
+          left = at.x; top = at.y;
+        }
+        drag.rect = { ...drag.from, left, top };
+        drag.shift = { x: left - drag.from.left, y: top - drag.from.top };
       } else {
-        const minW = (ch.type === 'scroll' ? 12 : ch.type === 'image' ? IMAGE_MIN : ch.type === 'text' ? TEXT_MIN : CHART_MIN_W) * objectScale;
-        const minH = (ch.type === 'scroll' ? 12 : ch.type === 'image' ? IMAGE_MIN : ch.type === 'text' ? TEXT_MIN : CHART_MIN_H) * objectScale;
+        const minW = (ch.type === 'scroll' ? 12 : ch.type === 'image' ? IMAGE_MIN : ch.type === 'text' ? TEXT_MIN : ch.type === 'smartart' ? SMARTART_MIN : CHART_MIN_W) * objectScale;
+        const minH = (ch.type === 'scroll' ? 12 : ch.type === 'image' ? IMAGE_MIN : ch.type === 'text' ? TEXT_MIN : ch.type === 'smartart' ? SMARTART_MIN : CHART_MIN_H) * objectScale;
         let width = Math.max(minW, drag.from.width + dx);
         let height = Math.max(minH, drag.from.height + dy);
-        // Images keep their proportions unless Shift is held.
-        if (ch.type === 'image' && !ev.shiftKey) {
+        // Images keep their proportions unless Shift is held; one unlocked (Picture Format ▸ Size) the other way round.
+        if (ch.type === 'image' && (ch.lockAspect !== false) !== ev.shiftKey) {
           const ratio = drag.from.width / drag.from.height;
           if (Math.abs(dx) >= Math.abs(dy)) height = Math.max(minH, width / ratio); else width = Math.max(minW, height * ratio);
         }
@@ -2270,10 +2453,16 @@ export function createGrid(opts) {
     const up = () => {
       const d = end();
       if (!d || !d.moved) {
+        if (d && pickedPart) opts.onCommand?.('smartArt', { action: 'pick', id, item: pickedShape ? Number(pickedShape.dataset.item) : null, add: adding });
         if (d && !onHandle && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && safeLinkUrl(ch.hyperlink)) opts.onCommand?.('openDrawingLink', id);
         schedule(); return;
       }
-      if (d.kind === 'chartmove') placeChart(id, d.rect.left, d.rect.top);
+      if (d.kind === 'chartmove' && d.others.length) {
+        // Several objects dragged together: one step moves them all by the same distance.
+        const scale = chartView?.scale ?? zoom, shift = { x: (d.rect.left - d.from.left) / scale, y: (d.rect.top - d.from.top) / scale };
+        wb.placeObjects(sheetId, [id, ...d.others.map((m) => m.id)].map((m) => wb.objectRect(sheetId, m)).filter(Boolean)
+          .map((r) => ({ id: r.id, x: r.x + shift.x, y: r.y + shift.y })), 'Move objects');
+      } else if (d.kind === 'chartmove') placeChart(id, d.rect.left, d.rect.top);
       else wb.updateChart(sheetId, id, { w: Math.round(d.rect.width / objectScale), h: Math.round(d.rect.height / objectScale) }, 'Resize chart');
     };
     // A drag the browser gives up (a touch it decided to scroll with, a lost capture) acts on
@@ -2313,10 +2502,17 @@ export function createGrid(opts) {
     placeChart(id, left, top);
   }
 
+  /** Arrow keys with several objects selected: all of them move a few pixels together. */
+  function nudgeObjects(dr, dc) {
+    wb.placeObjects(sheetId, selectedObjects().map((id) => wb.objectRect(sheetId, id)).filter(Boolean)
+      .map((r) => ({ id: r.id, x: Math.max(0, r.x + dc * 8), y: Math.max(0, r.y + dr * 8) })), 'Move objects');
+  }
+
   /** Ctrl+Alt+O: select the next floating object (Shift: the previous) in the sheet's order, bringing its anchor into view. */
   function selectNextChart(step) {
     const s = sheet();
-    const charts = s.charts;
+    // Objects hidden in the options cannot be picked from the keyboard either.
+    const charts = appOption('showObjects') ? s.charts : [];
     if (!charts.length) { opts.announce?.('No charts, images or text boxes on this sheet'); return; }
     const at = charts.findIndex((ch) => ch.id === selectedChart);
     const next = charts[at < 0 ? (step > 0 ? 0 : charts.length - 1) : (at + step + charts.length) % charts.length];
@@ -2395,20 +2591,71 @@ export function createGrid(opts) {
     if (pageGeo || colRuler.childElementCount) { colRuler.replaceChildren(...rulerNodes('col', view)); rowRuler.replaceChildren(...rulerNodes('row', view)); }
   }
 
-  /** One drag corner per table (tables with a totals row are resized from their dialog). */
-  function renderPages() {
-    pageLayer.hidden = !pageView;
-    root.classList.toggle('page-break-preview', !!pageView);
-    if (!pageView) { if (pageLayer.childElementCount) pageLayer.replaceChildren(); return; }
-    const area = el('div.page-area');
-    place(area, rangeBox(pageView.area));
-    pageLayer.replaceChildren(area, ...pageView.pages.map((p) => {
-      const box = el('div.page-box', {}, el('span.page-label', {}, `Page ${p.n}`));
-      place(box, rangeBox(p));
-      return box;
-    }));
+  // Half the thickness a page-break line or print-area edge can be pressed across.
+  const BREAK_GRIP = 4;
+  /** Where a page break before line `at` is drawn across the print area: a strip centred on the line between pages. */
+  function breakBox(axis, at, area) {
+    const box = rangeBox(area), s = sheet();
+    if (axis === 'row') { const y = at > s.rows - 1 ? rowEnd(s.rows - 1) : rowY(at); return { left: box.left, top: y - BREAK_GRIP, width: box.width, height: BREAK_GRIP * 2 }; }
+    const x = at > s.cols - 1 ? colEnd(s.cols - 1) : colX(at);
+    return { left: x - BREAK_GRIP, top: box.top, width: BREAK_GRIP * 2, height: box.height };
   }
 
+  /**
+   * Page Break Preview: the print area outlined and the sheet outside it greyed, each page's number, and
+   * the lines between pages (solid where the sheet keeps a manual break, dashed where the paper ran out),
+   * which a press drags; the print area's edges drag too. Normal view's page-break lines are the same
+   * lines, dashed and out of the way of the pointer.
+   */
+  function renderPages() {
+    // A line being dragged keeps its node (and its place under the pointer) until it is dropped.
+    if (drag?.kind === 'pageBreak' && drag.node.isConnected) return;
+    pageLayer.hidden = !pageView;
+    const preview = !!pageView && !pageView.lines;
+    root.classList.toggle('page-break-preview', preview);
+    pageLayer.classList.toggle('lines-only', !!pageView?.lines);
+    if (!pageView) { if (pageLayer.childElementCount) pageLayer.replaceChildren(); return; }
+    const lines = (axis, list) => (list || []).map(({ at, manual }) => {
+      const line = el(`div.page-break-line.${axis}${manual ? '.manual' : ''}`, {
+        dataset: { axis, at: String(at), manual: manual ? '1' : '' },
+        title: preview ? `${manual ? 'Manual' : 'Automatic'} page break: drag to move it${manual ? ', or off the print area to remove it' : ''}` : null,
+      });
+      place(line, breakBox(axis, at, pageView.area));
+      return line;
+    });
+    if (!preview) {
+      pageLayer.replaceChildren(...lines('row', pageView.rowBreaks), ...lines('col', pageView.colBreaks));
+      return;
+    }
+    const area = el('div.page-area');
+    const box = rangeBox(pageView.area);
+    place(area, box);
+    // The print area's own edges, pressed to make the area larger or smaller.
+    const edges = [['top', 'row', pageView.area.r1], ['bottom', 'row', pageView.area.r2 + 1], ['left', 'col', pageView.area.c1], ['right', 'col', pageView.area.c2 + 1]].map(([edge, axis, at]) => {
+      const node = el(`div.page-area-edge.${axis}`, { dataset: { edge, axis, at: String(at) }, title: 'Drag to change the print area' });
+      place(node, breakBox(axis, at, pageView.area));
+      return node;
+    });
+    pageLayer.replaceChildren(area, ...pageView.pages.map((p) => {
+      const page = el('div.page-box', {}, el('span.page-label', {}, `Page ${p.n}`));
+      place(page, rangeBox(p));
+      return page;
+    }), ...lines('row', pageView.rowBreaks), ...lines('col', pageView.colBreaks), ...edges);
+  }
+
+  /** The line boundary nearest the pointer along an axis: the index of the line that would follow a break there. */
+  function boundaryAt(axis, clientX, clientY) {
+    ensureOffsets();
+    const vp = viewport.getBoundingClientRect(), s = sheet();
+    if (axis === 'row') {
+      const y = contentY(clientY - vp.top), r = clamp(rowOffsets.indexAt(y), 0, s.rows - 1);
+      return y > rowY(r) + rowH(r) / 2 ? r + 1 : r;
+    }
+    const x = contentX(clientX - vp.left), c = clamp(colOffsets.indexAt(x), 0, s.cols - 1);
+    return x > colX(c) + colW(c) / 2 ? c + 1 : c;
+  }
+
+  /** One drag corner per table (tables with a totals row are resized from their dialog). */
   function renderTables() {
     renderPages();
     const s = sheet();
@@ -2454,7 +2701,31 @@ export function createGrid(opts) {
     else cutRangeEl.hidden = true;
   }
 
+  function renderPeers() {
+    const s = sheet();
+    const shown = peers.filter((p) => p.sheet === sheetId && p.sel && s);
+    peerLayer.replaceChildren(...shown.flatMap((p) => {
+      const sel = { r1: p.sel.r1, c1: p.sel.c1, r2: Math.min(p.sel.r2, s.rows - 1), c2: Math.min(p.sel.c2, s.cols - 1) };
+      if (sel.r2 < sel.r1 || sel.c2 < sel.c1) return [];
+      const box = rangeBox(sel);
+      const active = p.active ? (mergeAt(p.active.r, p.active.c) || { r1: p.active.r, c1: p.active.c, r2: p.active.r, c2: p.active.c }) : null;
+      const outline = el('div.peer-sel', { style: { '--peer': p.color }, dataset: { peer: p.id } });
+      place(outline, box);
+      const nodes = [outline];
+      if (active && (active.r1 !== sel.r1 || active.c1 !== sel.c1 || active.r2 !== sel.r2 || active.c2 !== sel.c2)) {
+        const cell = el('div.peer-active', { style: { '--peer': p.color } });
+        place(cell, rangeBox(active));
+        nodes.push(cell);
+      }
+      const flag = el('div.peer-flag', { style: { '--peer': p.color }, className: `peer-flag${p.editing ? ' editing' : ''}${p.quiet ? ' quiet' : ''}${box.top < 18 ? ' below' : ''}` }, p.editing ? `${p.name} · typing` : p.name);
+      flag.style.transform = `translate(${box.left}px, ${box.top}px)`;
+      nodes.push(flag);
+      return nodes;
+    }));
+  }
+
   function renderSelection(view = viewMetrics()) {
+    renderPeers();
     renderTables();
     root.classList.toggle('protected', wb.isProtected(sheetId));
     root.classList.toggle('no-gridlines', sheet().gridlines === false);
@@ -2471,7 +2742,7 @@ export function createGrid(opts) {
     const box = rangeBox(range);
     fillHandle.style.transform = `translate(${box.left + box.width - 4}px, ${box.top + box.height - 4}px)`;
     const handle = handlePlace(view);
-    fillHandle.hidden = !!edit || handle.gone;
+    fillHandle.hidden = !!edit || handle.gone || !appOption('fillHandle');
     // Scrolled under a frozen pane the handle is out of sight: it takes no press and shows no cursor through the pane.
     fillHandle.classList.toggle('under-pane', handle.hidden);
     if (fillPreview) { fillPreviewEl.hidden = false; place(fillPreviewEl, rangeBox(fillPreview)); }
@@ -2489,7 +2760,7 @@ export function createGrid(opts) {
       listButton.style.height = `${Math.min(28, activeBox.height)}px`;
       showPop(listButton, activeBox.width, 0);
     } else listButton.hidden = true;
-    const note = hideCellPopovers ? null : sheet().notes.get(cellKey(sel.active.r, sel.active.c));
+    const note = hideCellPopovers || appOption('commentIndicators') === 'none' ? null : sheet().notes.get(cellKey(sel.active.r, sel.active.c));
     if (note) { notePop.textContent = note; showPop(notePop, activeBox.width + (listButton.hidden ? 6 : 30), 0); } else notePop.hidden = true;
     // A validation rule's input message sits under the cell while it is selected.
     const promptRule = hideCellPopovers ? null : (sheet().validations.length ? wb.validationAt(sheetId, sel.active.r, sel.active.c) : null);
@@ -2911,6 +3182,7 @@ export function createGrid(opts) {
     if (focusEditor) scrollIntoView({ r, c });
     edit = { r, c, sheetId, text: initial, mode, refInsert: null, point: null, pasted: false, preserveRichText,
       arrayRange: array ? { r1: array.r1, c1: array.c1, r2: array.r2, c2: array.c2 } : null };
+    opts.autocorrect?.reset?.();
     editor.value = initial;
     editor.spellcheck = spellcheck && !initial.startsWith('=');
     editor.hidden = false;
@@ -2977,7 +3249,10 @@ export function createGrid(opts) {
     if (!edit) return false;
     if (validationPending) return false;
     returnHome();
-    const { r, c, text, preserveRichText } = edit;
+    const { r, c, preserveRichText } = edit;
+    // A whole number typed without a decimal point gets one, when the options fix the decimal places.
+    const text = appOption('fixedDecimal') && !edit.arrayRange && !arrayEntry
+      ? applyFixedDecimal(edit.text, appOption('fixedDecimalPlaces'), localeInfo().decimal) : edit.text;
     // The cell was protected while its entry was being typed: the workbook would refuse the write in
     // silence, so the entry stays open (the workbook's notice says why) rather than being dropped.
     if (wb.lockedAt(sheetId, r, c)) { editor.focus({ preventScroll: true }); return false; }
@@ -3051,18 +3326,23 @@ export function createGrid(opts) {
         const sized = rowSizedByHand(r);
         wb.transaction('Edit cell', () => {
           wb.setInput(sheetId, r, c, text, { preserveRichText });
+          opts.extendEntry?.({ sheetId, r, c, text });
           if (multiline && !wraps) wb.applyStyle(sheetId, { r1: r, c1: c, r2: r, c2: c }, { wrap: true });
           autoFitRows(r, r, { grow: sized });
         });
       } else {
         wb.transaction('Edit cell', () => {
           wb.setInput(sheetId, r, c, text, { preserveRichText });
+          // A list's formatting and formulas carried on to the new row join the entry's step (the options).
+          opts.extendEntry?.({ sheetId, r, c, text });
           // A column widened for the entry has its rows of wrapped text fitted within the same step, as
           // a dragged column does, so Ctrl+Z takes the entry back rather than a row height first.
           const was = wb.colWidth(sheetId, c);
           if (widenForEntry(r, c)) { invalidateOffsets(); refitWrappedRows([c], new Map([[c, was]])); }
         });
       }
+      // The entry is in: a correction of its last word (AutoCorrect) follows as a step of its own.
+      opts.afterCommit?.({ sheetId, r, c, text });
     }
     if (move === 'down') enterDown(false);
     else if (move === 'up') enterDown(true);
@@ -3218,6 +3498,20 @@ export function createGrid(opts) {
   }
 
   function enterDown(shift) {
+    // Where Enter moves is the person's choice (the options): down by default; right, up or left; or nowhere,
+    // though a range still walks its cells. Shift goes the other way.
+    const moves = appOption('enterMove');
+    const dir = appOption('enterDirection');
+    const single = S.isSingle(sel) && !extras.length;
+    if (!moves && single) { tabOrigin = null; schedule(); return; }
+    if (moves && (dir === 'right' || dir === 'left')) {
+      const back = (dir === 'left') !== !!shift;
+      tabOrigin = null;
+      if (back) tabStep(true); else tabStep(false);
+      tabOrigin = null;
+      return;
+    }
+    if (moves && dir === 'up') shift = !shift;
     const walked = stepAreas('down', shift);
     if (walked) { tabOrigin = null; setSelection(walked, { scrollActive: true, add: true }); return; }
     const next = stepSelection('down', shift);
@@ -3525,6 +3819,17 @@ export function createGrid(opts) {
     if (e.target === editor || editor.contains(e.target)) return;
     ensureOffsets(); // the frozen pane's extent, read below, comes from the layout
     notePane(e.clientX, e.clientY);
+    // Page Break Preview: a page break or an edge of the print area, dragged to a new line.
+    const pageGrip = pageView && !pageView.lines ? e.target.closest?.('.page-break-line, .page-area-edge') : null;
+    if (pageGrip && e.button === 0) {
+      e.preventDefault();
+      if (edit && !commitEdit()) return;
+      const at = Number(pageGrip.dataset.at);
+      drag = { kind: 'pageBreak', axis: pageGrip.dataset.axis, from: at, to: at, manual: pageGrip.dataset.manual === '1', edge: pageGrip.dataset.edge || null, node: pageGrip };
+      pageGrip.classList.add('dragging');
+      grab(viewport, e);
+      return;
+    }
     const tableHandle = e.target.closest?.('.table-handle');
     if (tableHandle && !underFrozenPane(tableHandle, e.clientX, e.clientY)) {
       e.preventDefault();
@@ -3564,7 +3869,7 @@ export function createGrid(opts) {
     }
     handlePresses = 0;
     // Dragging the selection by its border moves it (Alt/Ctrl copies).
-    if (e.pointerType !== 'touch' && !e.shiftKey && onSelectionBorder(e.clientX, e.clientY)) {
+    if (e.pointerType !== 'touch' && !e.shiftKey && appOption('fillHandle') && onSelectionBorder(e.clientX, e.clientY)) {
       e.preventDefault();
       if (edit && !commitEdit()) return;
       const source = S.selRange(sel);
@@ -3723,6 +4028,11 @@ export function createGrid(opts) {
       if (rangeName(next) !== rangeName(movePreview || src)) { movePreview = next; schedule(); }
       return;
     }
+    if (drag.kind === 'pageBreak') {
+      const to = boundaryAt(drag.axis, e.clientX, e.clientY);
+      if (to !== drag.to) { drag.to = to; place(drag.node, breakBox(drag.axis, to, pageView?.area || { r1: 0, c1: 0, r2: 0, c2: 0 })); }
+      return;
+    }
     if (drag.kind === 'tableResize') {
       const t = wb.tableById(sheetId, drag.id);
       if (!t) return;
@@ -3809,29 +4119,28 @@ export function createGrid(opts) {
       const target = movePreview;
       movePreview = null;
       if (target && rangeName(target) !== rangeName(d.source)) {
-        // The workbook reports a protected cell in the way itself and writes nothing, for a copy as
-        // for a move; any other refusal of a move is explained here.
-        let locked = false;
-        const onProtected = (ev) => { if (ev.detail?.type === 'protected') locked = true; };
-        wb.addEventListener('change', onProtected);
-        let done;
-        if (d.copy) {
-          const rows = Array.from({ length: d.source.r2 - d.source.r1 + 1 }, (_, i) => d.source.r1 + i);
-          const cols = Array.from({ length: d.source.c2 - d.source.c1 + 1 }, (_, i) => d.source.c1 + i);
-          wb.pasteCells(sheetId, wb.copyRange(sheetId, d.source), target.r1, target.c1, { r: d.source.r1, c: d.source.c1 }, null,
-            { nativeSparklines: wb.copyNativeSparklines(sheetId, rows, cols) });
-          done = !locked;
-        }
-        else done = wb.moveRange(sheetId, d.source, target.r1, target.c1);
-        wb.removeEventListener('change', onProtected);
-        if (!done) {
-          if (!locked) { const message = moveProblem(d.source, target); opts.onInvalid?.({ message }); opts.announce?.(message); }
+        // Dropping onto cells that hold something asks first, when the options say to warn before overwriting.
+        // A move that will be refused anyway says why at once, without asking first.
+        if (appOption('overwriteAlert') && !(!d.copy && knownMoveProblem(d.source, target)) && dropOverwrites(d.source, target)) {
           schedule();
+          confirmDialog({
+            title: 'Replace the contents?',
+            message: `${rangeName(target)} already holds data. Replace it with the cells you are ${d.copy ? 'copying' : 'moving'}?`,
+            confirmLabel: 'Replace', danger: true,
+          }).then((ok) => { if (ok) dropMove(d, target); else viewport.focus({ preventScroll: true }); });
           return;
         }
-        setSelection(S.fromRange(target, { r: target.r1 + (sel.active.r - d.source.r1), c: target.c1 + (sel.active.c - d.source.c1) }));
-        opts.announce?.(`${d.copy ? 'Copied' : 'Moved'} to ${rangeName(target)}`);
+        dropMove(d, target);
       } else schedule();
+      return;
+    }
+    if (d.kind === 'pageBreak') {
+      d.node.classList.remove('dragging');
+      if (d.to === d.from) { renderPages(); return; }
+      // An edge's line is the last one inside the area at its bottom and right.
+      if (d.edge) opts.onPrintAreaEdge?.({ edge: d.edge, to: d.edge === 'bottom' || d.edge === 'right' ? d.to - 1 : d.to });
+      else opts.onPageBreakMove?.({ axis: d.axis, from: d.from, to: d.to, manual: d.manual });
+      renderPages();
       return;
     }
     if (d.kind === 'tableResize') {
@@ -3882,6 +4191,42 @@ export function createGrid(opts) {
     }
   }
 
+  /** True when dropping `source` at `target` writes over a cell outside the source that holds something. */
+  function dropOverwrites(source, target) {
+    for (let r = target.r1; r <= target.r2; r++) for (let c = target.c1; c <= target.c2; c++) {
+      if (r >= source.r1 && r <= source.r2 && c >= source.c1 && c <= source.c2) continue;
+      const cell = wb.getCell(sheetId, r, c);
+      if (cell && (cell.f != null || (cell.v != null && cell.v !== ''))) return true;
+    }
+    return false;
+  }
+
+  /** The end of a drag that moves (or, with Alt or Ctrl, copies) the selection to `target`. */
+  function dropMove(d, target) {
+    // The workbook reports a protected cell in the way itself and writes nothing, for a copy as
+    // for a move; any other refusal of a move is explained here.
+    let locked = false;
+    const onProtected = (ev) => { if (ev.detail?.type === 'protected') locked = true; };
+    wb.addEventListener('change', onProtected);
+    let done;
+    if (d.copy) {
+      const rows = Array.from({ length: d.source.r2 - d.source.r1 + 1 }, (_, i) => d.source.r1 + i);
+      const cols = Array.from({ length: d.source.c2 - d.source.c1 + 1 }, (_, i) => d.source.c1 + i);
+      wb.pasteCells(sheetId, wb.copyRange(sheetId, d.source), target.r1, target.c1, { r: d.source.r1, c: d.source.c1 }, null,
+        { nativeSparklines: wb.copyNativeSparklines(sheetId, rows, cols) });
+      done = !locked;
+    }
+    else done = wb.moveRange(sheetId, d.source, target.r1, target.c1);
+    wb.removeEventListener('change', onProtected);
+    if (!done) {
+      if (!locked) { const message = moveProblem(d.source, target); opts.onInvalid?.({ message }); opts.announce?.(message); }
+      schedule();
+      return;
+    }
+    setSelection(S.fromRange(target, { r: target.r1 + (sel.active.r - d.source.r1), c: target.c1 + (sel.active.c - d.source.c1) }));
+    opts.announce?.(`${d.copy ? 'Copied' : 'Moved'} to ${rangeName(target)}`);
+  }
+
   function onDoubleClick(e) {
     if (sheet()?.kind === 'chart') return;
     if (onScrollbar(e)) return;
@@ -3920,6 +4265,7 @@ export function createGrid(opts) {
     if (wb.validationAt(sheetId, r, c)?.type === 'checkbox') return;
     // A date cell opens the calendar instead (F2 or typing still edits it).
     if (isDateCell(r, c) && wb.getCell(sheetId, r, c)?.f == null && opts.onDateOpen) { opts.onDateOpen({ r, c }); return; }
+    if (!appOption('editInCell') && opts.onEditInBar?.() === true) return;
     if (beginEdit({ mode: 'inplace' })) placeCaretAt(e.clientX);
   }
 
@@ -4357,11 +4703,17 @@ export function createGrid(opts) {
       if (key.toLowerCase() === 'c' && !e.shiftKey && !e.altKey) { e.preventDefault(); opts.onCommand?.('copyChart', { id: selectedChart }); return; }
     } else if (selectedChart) {
       // A selected chart takes the editing keys; the arrows nudge it (a whole cell with Shift).
-      if (key === 'Delete' || key === 'Backspace') { e.preventDefault(); const id = selectedChart; selectedChart = null; opts.onCommand?.('deleteChart', id); return; }
+      if (key === 'Delete' || key === 'Backspace') {
+        e.preventDefault();
+        const ids = selectedObjects();
+        selectedChart = null; selectedSet = new Set();
+        if (ids.length > 1) opts.onCommand?.('deleteObjects', ids); else opts.onCommand?.('deleteChart', ids[0]);
+        return;
+      }
       // Enter follows a drawing's link; otherwise it opens the object's editor.
       if (key === 'Enter') { e.preventDefault(); opts.onCommand?.(safeLinkUrl(wb.chartById(sheetId, selectedChart)?.hyperlink) ? 'openDrawingLink' : wb.chartById(sheetId, selectedChart)?.type === 'image' ? 'replaceImage' : 'editChart', selectedChart); return; }
       if (key === 'Escape') { e.preventDefault(); selectedChart = null; schedule(); return; }
-      if (dir && !e.altKey) { e.preventDefault(); nudgeChart(selectedChart, dir[0], dir[1], e.shiftKey); return; }
+      if (dir && !e.altKey) { e.preventDefault(); if (selectedSet.size > 1) nudgeObjects(dir[0], dir[1]); else nudgeChart(selectedChart, dir[0], dir[1], e.shiftKey); return; }
       // Moving on or starting to type leaves the chart; Delete afterwards then clears cells, not the chart.
       if (key === 'Tab' || key === 'F2' || (key.length === 1 && !e.altKey)) { selectedChart = null; schedule(); }
     }
@@ -4489,6 +4841,8 @@ export function createGrid(opts) {
         e.preventDefault();
         if (mod && !e.shiftKey && !e.altKey) { opts.onCommand?.('print'); return; } // Ctrl+F2: print preview
         if (e.shiftKey) { opts.onCommand?.('note'); return; }
+        // With editing in cells turned off (the options), F2 edits in the formula bar.
+        if (!appOption('editInCell') && opts.onEditInBar?.() === true) return;
         beginEdit({ mode: 'inplace' });
         return;
       case 'F3':
@@ -4523,6 +4877,12 @@ export function createGrid(opts) {
       case 'F9':
         e.preventDefault();
         opts.onCommand?.('recalc');
+        return;
+      case 'F7':
+        // F7 checks the spelling; Shift+F7 opens the thesaurus.
+        if (mod || e.altKey) break;
+        e.preventDefault();
+        opts.onCommand?.(e.shiftKey ? 'thesaurus' : 'spelling');
         return;
       case 'F11':
         // Shift+F11 inserts a sheet; F11 alone charts the selection on a chart sheet of its own.
@@ -4673,6 +5033,12 @@ export function createGrid(opts) {
     if (hints.handleKey(e)) return;
     const input = editInput();
     const key = e.key;
+    // Ctrl/Cmd+Z straight after an AutoCorrect puts the word back as it was typed.
+    if (isMod(e) && !e.shiftKey && !e.altKey && key.toLowerCase() === 'z' && opts.autocorrect?.undo?.(input)) {
+      e.preventDefault();
+      setEditText(input.value, { fromEditor: input === editor });
+      return;
+    }
     // The ready-mode chords a browser also owns (Ctrl+R reloads, Ctrl+D bookmarks, Ctrl+9, 0, [, ], \ and `
     // switch or zoom its tabs) do nothing while an entry is typed, as in Excel, rather than reaching the browser.
     if (isMod(e) && !e.altKey && (/^[rd[\]\\`90]$/i.test(key) || e.code === 'Digit9' || e.code === 'Digit0')) { e.preventDefault(); return; }
@@ -4774,7 +5140,7 @@ export function createGrid(opts) {
    * on replaces it.
    */
   function completeFromColumn() {
-    if (!edit) return;
+    if (!edit || !appOption('autoComplete')) return;
     const text = editor.value;
     if (!text || text.startsWith('=') || text.startsWith("'") || /\n/.test(text)) return;
     if (editor.selectionStart !== text.length || editor.selectionEnd !== text.length) return;
@@ -4893,6 +5259,8 @@ export function createGrid(opts) {
   // event, so a formula reaching out would otherwise be let out on a drag nobody consented to.
   editor.addEventListener('drop', () => { if (edit) edit.pasted = true; });
   editor.addEventListener('input', (e) => {
+    // AutoCorrect looks at the word a space or a punctuation mark just ended (never in a formula).
+    if (edit && !isComposing(e) && e.inputType === 'insertText') opts.autocorrect?.input?.(editor, e.data);
     setEditText(editor.value, { fromEditor: true });
     if (!isComposing(e) && e.inputType === 'insertText') completeFromColumn();
   });
@@ -5003,8 +5371,12 @@ export function createGrid(opts) {
     const size = axis === 'row' ? rowH : colW;
     const lo = axis === 'row' ? vr.r0 : vr.c0;
     const hi = axis === 'row' ? vr.r1 : vr.c1;
+    // The button sits on the group's summary line: the one after it, or the one before it when the sheet's
+    // outline settings put summary rows above (or summary columns left of) their detail.
+    const settings = s.outlineSettings || {};
+    const summaryAfter = axis === 'row' ? settings.summaryBelow !== false : settings.summaryRight !== false;
     for (const g of groups) {
-      const after = Math.min(g.to + 1, total - 1);
+      const after = summaryAfter || g.from === 0 ? Math.min(g.to + 1, total - 1) : g.from - 1;
       if (g.to < lo - 1 || g.from > hi + 1) continue;
       const offset = (g.level - 1) * OUTLINE_STEP + 4;
       const start = pos(g.from);
@@ -5467,6 +5839,25 @@ export function createGrid(opts) {
     get editing() { return !!edit; },
     get editState() { return edit ? { ...edit } : null; },
     get keyMode() { return keyMode; },
+    /**
+     * Take each sheet's saved selection and scroll position afresh (a custom view was shown): what the grid
+     * remembered of the sheets it has shown is forgotten, and the sheet in view goes to its saved place.
+     */
+    reloadSheetView() {
+      if (edit) return;
+      if (drag || tap || freezeDrag) cancelDrag();
+      perSheet.clear();
+      const s = sheet();
+      if (!s) return;
+      if (s.viewZoom != null && s.viewZoom !== zoom) setZoom(s.viewZoom, true);
+      rebuildOffsets();
+      rendered.key = null;
+      pendingOrigin = s.kind === 'chart' ? null : s.viewOrigin || { r: 0, c: 0 };
+      const saved = savedSheetSelection();
+      extras = saved?.extras || [];
+      setSelection(saved?.sel || S.single(0, 0), { scroll: false, announce: false, add: true, grow: false });
+      schedule();
+    },
     /** Show the printed pages over the sheet (Page Break Preview), or null for the normal view. */
     setPageView(view) { pageView = view; renderPages(); },
     /**
@@ -5523,6 +5914,8 @@ export function createGrid(opts) {
     focus() { if (!validationPending) (edit ? editor : viewport).focus({ preventScroll: true }); },
     focusEditor() { if (edit && !validationPending) editor.focus({ preventScroll: true }); },
     refresh() { rebuildOffsets(); rendered.key = null; schedule(); },
+    /** Show where the other people in a shared workbook are: [{ id, name, color, sheet, sel, active, editing }]. */
+    setPeers(list) { peers = Array.isArray(list) ? list : []; renderPeers(); },
     setHighlights(cells, current = -1) { highlights = { cells, current }; renderHighlights(visibleRange()); schedule(); },
     /** Outline the cells cut on the sheet shown (null ends it): the box shows while that sheet is on screen. */
     setCutRange(range) { cutRange = range ? { sheetId, range: normalizeRange(range) } : null; renderCutRange(); schedule(); },
@@ -5537,6 +5930,16 @@ export function createGrid(opts) {
     get zoom() { return userZoom; },
     setZoom,
     get selectedChart() { return selectedChart; },
+    /** Every object selected, the one last pressed first. */
+    get selectedCharts() { return selectedObjects(); },
+    /** Select these objects (the first is the one the Format tabs act on), or none with an empty list. */
+    selectCharts(ids, { focus = true } = {}) {
+      const live = ids.filter((id) => wb.chartById(sheetId, id));
+      if (!live.length) { selectedChart = null; selectedSet = new Set(); schedule(); return; }
+      selectChart(live[0], { focus });
+      for (const id of live.slice(1)) for (const m of withGroups(sheet().charts, [id])) selectedSet.add(m);
+      schedule();
+    },
     selectChart,
     /** Ink: the canvas point (zoomed pixels, as objects are laid out) under a client point; a frozen pane has not scrolled. */
     canvasPoint(clientX, clientY) {
