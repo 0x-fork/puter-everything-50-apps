@@ -20507,6 +20507,45 @@ test("Shift-clicking a selected object with a wobble only deselects it", async (
   }
 });
 
+test("a picked fill applies when the picker closes on a press elsewhere on the board", async () => {
+  const app = await setup();
+  const { doc, w } = app;
+  try {
+    const { selected, pointer } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 200, h: 100 }),
+      item("rect", 400, 0, { w: 200, h: 100 }),
+    ]);
+    const [a, b] = selected;
+    const press = (p) => {
+      pointer("pointerdown", p);
+      pointer("pointerup", p);
+    };
+    const colors = () =>
+      Object.fromEntries(allClipboard(app).map((i) => [i.id, i.color]));
+    const original = colors()[b.id];
+    // The picker sends input as a colour is picked and its change only as
+    // it closes, after the press that closed it has been handled.
+    const pick = async (color, closingPress) => {
+      press({ x: a.x + 100, y: a.y + 50 });
+      await app.tick();
+      const fill = doc.querySelector("#fill-color");
+      fill.value = color;
+      fill.dispatchEvent(new w.Event("input", { bubbles: true }));
+      press(closingPress);
+      fill.dispatchEvent(new w.Event("change", { bubbles: true }));
+      await app.tick();
+    };
+    await pick("#ddffaa", { x: 300, y: 400 });
+    assert.equal(colors()[a.id], "#ddffaa", "Empty board");
+    assert.equal(colors()[b.id], original);
+    await pick("#aabbcc", { x: b.x + 100, y: b.y + 50 });
+    assert.equal(colors()[a.id], "#aabbcc", "Another object");
+    assert.equal(colors()[b.id], original, "which the change does not paint");
+  } finally {
+    await app.close();
+  }
+});
+
 async function rotationFixture(
   app,
   objects = [item("rect", 0, 0, { w: 200, h: 100, text: "Rotate me" })],

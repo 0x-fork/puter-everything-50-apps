@@ -5993,7 +5993,7 @@ function renderSelectionTools(locked, resizeBox, anchor) {
     };
   });
   const fill = panel.querySelector("#fill-color");
-  if (fill) fill.onchange = () => fillSelection(fill.value);
+  if (fill) bindColorPicker(fill, () => fillSelection(fill.value));
   panel
     .querySelectorAll("[data-format]")
     .forEach((b) => (b.onclick = () => formatSelection(b.dataset.format)));
@@ -6046,12 +6046,15 @@ function renderSelectionTools(locked, resizeBox, anchor) {
   if (valign)
     valign.onchange = () => formatSelection("textValign", valign.value);
   const color = panel.querySelector("#text-color");
-  if (color) color.onchange = () => formatSelection("textColor", color.value);
+  if (color)
+    bindColorPicker(color, () => formatSelection("textColor", color.value));
   const auto = panel.querySelector("#text-color-auto");
   if (auto) auto.onclick = () => formatSelection("textColor", null);
   const highlight = panel.querySelector("#text-highlight");
   if (highlight)
-    highlight.onchange = () => formatSelection("highlight", highlight.value);
+    bindColorPicker(highlight, () =>
+      formatSelection("highlight", highlight.value),
+    );
   const clearHighlight = panel.querySelector("#text-highlight-clear");
   if (clearHighlight)
     clearHighlight.onclick = () => formatSelection("highlight", null);
@@ -6261,6 +6264,22 @@ function openSelectionPopover(panel, toggle, focus = false) {
     pop
       .querySelector("button:not(:disabled), input, select")
       ?.focus({ preventScroll: true });
+}
+// A colour picked in the browser's picker applies once anything is pressed,
+// before that press is handled: a press elsewhere on the board would clear
+// the selection or end text editing before the picker's own change arrives,
+// leaving the colour nothing to apply to. That change then applies nothing
+// more.
+function bindColorPicker(input, apply) {
+  let applied = null;
+  const commit = () => {
+    removeEventListener("pointerdown", commit, true);
+    if (input.value === applied) return;
+    applied = input.value;
+    apply();
+  };
+  input.oninput = () => addEventListener("pointerdown", commit, true);
+  input.onchange = commit;
 }
 function bindSelectionPopovers(panel) {
   for (const toggle of panel.querySelectorAll("[data-popover]")) {
