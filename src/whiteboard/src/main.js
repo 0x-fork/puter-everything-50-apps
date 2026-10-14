@@ -2424,23 +2424,28 @@ async function runCommand(entry) {
     );
   return action(entry.id);
 }
+// The object whose quick-connect ports show. They hide while a press or
+// drag is under way, which the selection toolbar asks past with
+// `pressing`, so it keeps above where they will be once the press ends.
+function quickConnectSource(pressing = false) {
+  return current &&
+    selection.size === 1 &&
+    tool === "select" &&
+    !space &&
+    (pressing || !drag) &&
+    !editing &&
+    !isSharedReadOnly() &&
+    !boardSearch.isOpen() &&
+    !objectLinks.isOpen() &&
+    !hasLocked(current.items, selection)
+    ? current.items.find((i) => selection.has(i.id) && canQuickConnect(i))
+    : null;
+}
 const quickPorts = createQuickConnectUI({
   state: () => ({
     board: current,
     view,
-    source:
-      current &&
-      selection.size === 1 &&
-      tool === "select" &&
-      !space &&
-      !drag &&
-      !editing &&
-      !isSharedReadOnly() &&
-      !boardSearch.isOpen() &&
-      !objectLinks.isOpen() &&
-      !hasLocked(current.items, selection)
-        ? current.items.find((i) => selection.has(i.id) && canQuickConnect(i))
-        : null,
+    source: quickConnectSource(),
     skip: quickConnectSkip,
   }),
   draw,
@@ -6154,9 +6159,9 @@ function placeSelectionTools(panel, box) {
     const r = side.getBoundingClientRect();
     if (r.width) limit = Math.min(limit, r.left - rect.left - margin);
   }
-  const gap = document.querySelector("#quick-ports")?.hidden
-    ? TOOLBAR_GAP
-    : TOOLBAR_PORT_GAP;
+  // Pressing an object hides its ports until the release, which leaves
+  // the toolbar where it was rather than dropping it for that moment.
+  const gap = quickConnectSource(true) ? TOOLBAR_PORT_GAP : TOOLBAR_GAP;
   const offer = document.querySelector("#tour-offer")?.getBoundingClientRect();
   const place = (minX) => {
     // Between the tool rail and the edge or a side panel the toolbar may be

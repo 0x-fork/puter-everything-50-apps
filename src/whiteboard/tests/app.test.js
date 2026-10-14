@@ -20550,6 +20550,35 @@ test("Ctrl- or Cmd-click adds an object to the selection or takes it out", async
   }
 });
 
+test("pressing an object keeps its toolbar where it settles once released", async () => {
+  const app = await setup();
+  try {
+    const { selected, pointer } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 200, h: 100 }),
+    ]);
+    const panel = app.doc.querySelector("#selection-tools");
+    const empty = { x: 300, y: 400 },
+      at = { x: selected[0].x + 100, y: selected[0].y + 50 };
+    pointer("pointerdown", empty);
+    pointer("pointerup", empty);
+    await app.tick();
+    assert.equal(panel.hidden, true);
+    // Its quick-connect ports show only once the press ends; the toolbar
+    // keeps clear of them from the press on rather than jumping then.
+    pointer("pointerdown", at);
+    await app.tick();
+    assert.ok(panel.classList.contains("is-floating"));
+    const pressed = panel.style.transform;
+    assert.match(pressed, /^translate\(\d+px, -?\d+px\)$/);
+    pointer("pointerup", at);
+    await app.tick();
+    assert.equal(app.doc.querySelector("#quick-ports").hidden, false);
+    assert.equal(panel.style.transform, pressed);
+  } finally {
+    await app.close();
+  }
+});
+
 test("a picked fill applies when the picker closes on a press elsewhere on the board", async () => {
   const app = await setup();
   const { doc, w } = app;
