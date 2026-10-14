@@ -45,7 +45,7 @@ test("history groups edits into versions and rebuilds any earlier state", async 
     update: encode(doc.update()),
   });
   doc.destroy();
-  let clock = 1_000_000;
+  let clock = env.now + 60_000;
   boards.now = () => clock;
   await commit(boards, owner, b.id, (s) => (s.items[0].text = "Second"));
   const secondAt = clock;
@@ -67,9 +67,11 @@ test("history groups edits into versions and rebuilds any earlier state", async 
     read.every(([prefix, values]) => !prefix.includes(":log:") || !values),
     JSON.stringify(read),
   );
-  assert.equal(versions.length, 2);
+  // Two versions of edits, then the board as it was created.
+  assert.equal(versions.length, 3);
   assert.deepEqual(versions[0].authors, ["Alice"]);
   assert.equal(versions[1].at, secondAt);
+  assert.equal(versions[2].original, true);
   const { update } = await boards.call(owner, {
     op: "history.state",
     room: b.id,
@@ -118,6 +120,274 @@ test("history groups edits into versions and rebuilds any earlier state", async 
   );
 });
 
+test("a board's starting content is a version, even when its first edit removed it", async () => {
+  const env = environment(),
+    boards = env.service;
+  const b = board("Imported"),
+    doc = new SharedDocument();
+  // Content it began with, as from an import, a template or a copy.
+  b.items = Array.from({ length: 5 }, (_, n) =>
+    item("note", n * 100, 0, { text: `Imported ${n}` }),
+  );
+  doc.commit(b);
+  await boards.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(doc.update()),
+  });
+  doc.destroy();
+  const created = env.now;
+  const { token } = await boards.call(owner, {
+    op: "invite",
+    room: b.id,
+    role: "editor",
+  });
+  await boards.call(editor, { op: "join", room: b.id, token });
+  // Cleared in the same millisecond, then edited again later.
+  await commit(boards, editor, b.id, (s) => (s.items = []));
+  env.now += 10 * 60_000;
+  await commit(boards, editor, b.id, (s) =>
+    s.items.push(item("note", 0, 0, { text: "New" })),
+  );
+  // Ownership moving on leaves the creator named.
+  await boards.call(owner, { op: "transfer", room: b.id, uuid: editor.uuid });
+  const objects = async (at) => {
+    const { update } = await boards.call(editor, {
+      op: "history.state",
+      room: b.id,
+      at,
+    });
+    const then = new SharedDocument(decode(update));
+    try {
+      return then.snapshot().items.map((i) => i.text);
+    } finally {
+      then.destroy();
+    }
+  };
+  const { versions, more } = await boards.call(editor, {
+    op: "history.list",
+    room: b.id,
+  });
+  assert.equal(more, false);
+  assert.deepEqual(
+    versions.map((v) => [v.edits, v.original === true]),
+    [
+      [1, false],
+      [1, false],
+      [0, true],
+    ],
+  );
+  assert.deepEqual(versions[2], {
+    start: created,
+    until: created,
+    edits: 0,
+    authors: ["Alice"],
+    at: created,
+    original: true,
+  });
+  // The clearing edit, stamped as the board was created, is listed after
+  // it, and the original state has none of it.
+  assert.ok(versions[1].at > created);
+  assert.deepEqual(await objects(versions[1].at), []);
+  assert.deepEqual(await objects(versions[0].at), ["New"]);
+  assert.equal((await objects(created)).length, 5);
+  // Paging reaches it once, after the versions before it.
+  const older = await boards.call(editor, {
+    op: "history.list",
+    room: b.id,
+    before: versions[0].at,
+  });
+  assert.deepEqual(older.versions, versions.slice(1));
+  const none = await boards.call(editor, {
+    op: "history.list",
+    room: b.id,
+    before: created,
+  });
+  assert.deepEqual(none.versions, []);
+});
+
+test("objects added and removed within one version can still be recovered", async () => {
+  const env = environment(),
+    boards = env.service;
+  // On the hour, so the edits below share a quarter of an hour.
+  env.now = Date.parse("2026-03-02T09:00:00Z");
+  const b = board("Decisions"),
+    doc = new SharedDocument();
+  b.items = [item("note", 0, 0, { text: "Seed" })];
+  doc.commit(b);
+  await boards.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(doc.update()),
+  });
+  doc.destroy();
+  for (const [user, role] of [
+    [editor, "editor"],
+    [viewer, "viewer"],
+  ]) {
+    const { token } = await boards.call(owner, {
+      op: "invite",
+      room: b.id,
+      role,
+    });
+    await boards.call(user, { op: "join", room: b.id, token });
+  }
+  env.now += 60_000;
+  await commit(boards, owner, b.id, (s) => (s.items[0].text = "Seed v1"));
+  // Half an hour later, a decision is noted, tagged, and kept for four
+  // minutes; meanwhile the facilitator puts up an answer hidden from
+  // participants. Both go, with the tag, within the same version.
+  env.now += 30 * 60_000;
+  const decision = item("note", 100, 0, {
+    text: "Decision",
+    tagIds: ["urgent"],
+  });
+  await commit(boards, editor, b.id, (s) => {
+    s.tags = [{ id: "urgent", name: "Urgent", color: "#ff0000" }];
+    s.items.push(decision);
+  });
+  env.now += 60_000;
+  const answer = item("note", 300, 0, { text: "Answer" });
+  await commit(boards, owner, b.id, (s) => {
+    s.items.push(answer);
+    s.workshop = { settings: { hide: [answer.id] } };
+  });
+  env.now += 60_000;
+  await commit(boards, editor, b.id, (s) => {
+    s.items = s.items.filter((i) => i.id !== decision.id);
+    delete s.tags;
+  });
+  env.now += 2 * 60_000;
+  await commit(boards, owner, b.id, (s) => {
+    s.items = s.items.filter((i) => i.id !== answer.id);
+    delete s.workshop;
+  });
+  const { versions } = await boards.call(owner, {
+    op: "history.list",
+    room: b.id,
+  });
+  assert.deepEqual(
+    versions.map((v) => v.edits),
+    [4, 1, 0],
+  );
+  // Neither version holds them.
+  for (const v of versions) {
+    const { update } = await boards.call(owner, {
+      op: "history.state",
+      room: b.id,
+      at: v.at,
+    });
+    const then = new SharedDocument(decode(update));
+    assert.deepEqual(
+      then.snapshot().items.map((i) => i.text),
+      [v.original ? "Seed" : "Seed v1"],
+    );
+    then.destroy();
+  }
+  const removed = (user, after = versions[1].at) =>
+    boards.call(user, {
+      op: "history.removed",
+      room: b.id,
+      at: versions[0].at,
+      after,
+    });
+  // Each as it last stood, with the tag it carried.
+  const all = await removed(owner);
+  const text = (r) => r.items.map((i) => i.text).sort();
+  assert.deepEqual(text(all), ["Answer", "Decision"]);
+  assert.deepEqual(all.items.find((i) => i.id === decision.id).tagIds, [
+    "urgent",
+  ]);
+  assert.deepEqual(all.tags, [
+    { id: "urgent", name: "Urgent", color: "#ff0000" },
+  ]);
+  // What the workshop hid from participants then stays hidden from them.
+  for (const user of [editor, viewer])
+    assert.deepEqual(
+      (await removed(user)).items.map((i) => i.text),
+      ["Decision"],
+    );
+  // Nothing came and went in the version before, and asking from long
+  // before replays no more than a version's quarter of an hour.
+  assert.deepEqual(
+    (
+      await boards.call(owner, {
+        op: "history.removed",
+        room: b.id,
+        at: versions[1].at,
+        after: versions[2].at,
+      })
+    ).items,
+    [],
+  );
+  assert.deepEqual(text(await removed(owner, 0)), ["Answer", "Decision"]);
+  await assert.rejects(
+    boards.call(owner, {
+      op: "history.removed",
+      room: b.id,
+      at: versions[1].at,
+      after: versions[0].at,
+    }),
+    { status: 400 },
+  );
+});
+
+test("a restoration report names a time in the board's life, and no more objects than it has held", async () => {
+  const env = environment(),
+    boards = env.service;
+  const b = board("Audit"),
+    doc = new SharedDocument();
+  b.items = [item("note", 0, 0, { text: "One" })];
+  doc.commit(b);
+  await boards.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(doc.update()),
+  });
+  doc.destroy();
+  const created = env.now;
+  env.now += 60_000;
+  // Three objects added, then two of them removed: four in all.
+  await commit(boards, owner, b.id, (s) =>
+    s.items.push(...[1, 2, 3].map((n) => item("note", n * 100, 0))),
+  );
+  await commit(boards, owner, b.id, (s) => (s.items = s.items.slice(0, 2)));
+  const report = (details) => {
+    env.now++;
+    return boards.call(owner, {
+      op: "history.restored",
+      room: b.id,
+      ...details,
+    });
+  };
+  for (const at of [123, created - 1, env.now + 3600_000, "soon"])
+    await assert.rejects(report({ at, scope: "board", objects: 1 }), {
+      status: 400,
+    });
+  await report({ at: created, scope: "board", objects: 99999 });
+  await report({ at: null, scope: "deleted", objects: 2 });
+  await report({ scope: "objects", objects: -5 });
+  // A version on the device can hold objects deleted before the board was
+  // shared, which it never held.
+  await report({ at: null, scope: "board", objects: 40 });
+  await report({ at: null, scope: "board", objects: 99999 });
+  const audit = [...env.data]
+    .filter(
+      ([k, v]) =>
+        k.startsWith("org:audit:") && v.action === "board.content.restored",
+    )
+    .map(([, v]) => v)
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((v) => v.details);
+  assert.deepEqual(audit, [
+    { version: created, scope: "board", objects: 4 },
+    { version: null, scope: "deleted", objects: 2 },
+    { version: null, scope: "objects", objects: null },
+    { version: null, scope: "board", objects: 40 },
+    { version: null, scope: "board", objects: 5004 },
+  ]);
+});
+
 test("shared history arrives a page at a time so every version can be reached", async () => {
   const env = environment(),
     boards = env.service;
@@ -159,8 +429,10 @@ test("shared history arrives a page at a time so every version can be reached", 
     before: first.versions.at(-1).at,
   });
   assert.equal(rest.more, false);
-  // The five oldest spaced versions and the early one.
-  assert.equal(rest.versions.length, 6);
+  // The five oldest spaced versions, the early one, and the board as it
+  // was created.
+  assert.equal(rest.versions.length, 7);
+  assert.equal(rest.versions.at(-1).original, true);
   assert.ok(rest.versions.every((v) => v.at < first.versions.at(-1).at));
   // A board from before checkpoints, whose first edits are op: records,
   // still reads only the pages its versions need, not its whole log.
@@ -368,6 +640,7 @@ test("an object is unchanged whatever order its fields are listed in", () => {
 test("versions after the latest checkpoint are rebuilt from it", async () => {
   const env = environment(),
     boards = env.service;
+  env.now = Date.parse("2026-03-01T11:00:00Z");
   const b = board("Checkpointed"),
     doc = new SharedDocument();
   b.items = [item("note", 0, 0, { text: "One" })];
@@ -969,6 +1242,7 @@ test("opening an earlier version as a copy leaves out what is hidden from this p
 
 test("listing a long shared history reads only as far back as the page shown", async () => {
   const env = environment();
+  env.now = Date.parse("2025-12-31T00:00:00Z");
   const b = board("Long");
   b.items = [item("note", 0, 0)];
   const seed = new SharedDocument();
@@ -1021,7 +1295,17 @@ test("listing a long shared history reads only as far back as the page shown", a
       cursor: end < found.length ? String(end) : undefined,
     };
   };
-  const expected = historyVersions(all, undefined, Infinity);
+  const expected = [
+    ...historyVersions(all, undefined, Infinity),
+    {
+      start: env.now,
+      until: env.now,
+      edits: 0,
+      authors: ["Alice"],
+      at: env.now,
+      original: true,
+    },
+  ];
   const shown = [];
   let before,
     first = 0;
@@ -1048,6 +1332,7 @@ test("listing a long shared history reads only as far back as the page shown", a
 
 test("listing a history of long working sessions reads only as far back as the page shown", async () => {
   const env = environment();
+  env.now = Date.parse("2025-12-31T00:00:00Z");
   const b = board("Workshops");
   b.items = [item("note", 0, 0)];
   const seed = new SharedDocument();
@@ -1094,7 +1379,17 @@ test("listing a history of long working sessions reads only as far back as the p
     if (pattern.includes(":log:")) read += items.length;
     return { items, cursor: end < found.length ? String(end) : undefined };
   };
-  const expected = historyVersions(all, undefined, Infinity);
+  const expected = [
+    ...historyVersions(all, undefined, Infinity),
+    {
+      start: env.now,
+      until: env.now,
+      edits: 0,
+      authors: ["Alice"],
+      at: env.now,
+      original: true,
+    },
+  ];
   const shown = [];
   let before,
     first = 0;
@@ -1112,6 +1407,122 @@ test("listing a history of long working sessions reads only as far back as the p
   }
   assert.deepEqual(shown, expected, "every version, as before");
   assert.ok(first < all.length / 2, `the first page read ${first} keys`);
+});
+
+test("each page of a history with no pauses reads about what it shows", async () => {
+  const env = environment();
+  env.now = Date.parse("2025-12-31T00:00:00Z");
+  const b = board("Busy");
+  b.items = [item("note", 0, 0)];
+  const seed = new SharedDocument();
+  seed.commit(b);
+  await env.service.call(owner, {
+    op: "create",
+    room: b.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  // A save every two minutes for four weeks, never pausing for five.
+  const all = [];
+  let t = Date.parse("2026-01-01T00:00:00Z");
+  const add = (n) => {
+    const iso = new Date(t).toISOString();
+    env.data.set(
+      `wb:${b.id}:log:${iso}:${owner.uuid}:${n.toString(16).padStart(64, "0")}`,
+      { at: t, author: owner.uuid, update: "" },
+    );
+    all.push({ at: t, author: owner.uuid, username: "Alice" });
+    t += 120_000;
+  };
+  for (let n = 0; n < 20_000; n++) add(n);
+  // Puter's listing position, here an offset from the newest key, which
+  // records added or removed since move.
+  let keys;
+  const sorted = () => (keys = [...env.data.keys()].sort());
+  sorted();
+  let lists = 0;
+  env.service.kv.list = async ({
+    pattern,
+    cursor,
+    limit,
+    reverse,
+    returnValues,
+  }) => {
+    const p = pattern.replace(/\*$/, "");
+    if (p.includes(":log:")) lists++;
+    let found = keys.filter((k) => k.startsWith(p));
+    if (reverse) found = found.reverse();
+    const at = Number(cursor || 0),
+      end = at + limit;
+    return {
+      items: found
+        .slice(at, end)
+        .map((key) =>
+          returnValues
+            ? { key, value: structuredClone(env.data.get(key)) }
+            : key,
+        ),
+      cursor: end < found.length ? String(end) : undefined,
+    };
+  };
+  const original = {
+    start: env.now,
+    until: env.now,
+    edits: 0,
+    authors: ["Alice"],
+    at: env.now,
+    original: true,
+  };
+  const pages = async (expected, changes = () => {}) => {
+    const shown = [],
+      read = [];
+    let before, next;
+    for (let page = 0; page < 20; page++) {
+      lists = 0;
+      const r = await env.service.call(owner, {
+        op: "history.list",
+        room: b.id,
+        ...(before ? { before, cursor: next } : {}),
+      });
+      read.push(lists);
+      shown.push(...r.versions);
+      before = r.versions.at(-1)?.at;
+      next = r.next;
+      if (!r.more) break;
+      changes(page);
+    }
+    assert.deepEqual(shown, expected, "every version once, in order");
+    return read;
+  };
+  const expected = [...historyVersions(all, undefined, Infinity), original];
+  // Versions end with each quarter of an hour, so a page stops reading at
+  // the version after the 300 it shows, and the next starts where it
+  // ended: 300 versions of seven or eight saves are about 12 requests.
+  const read = await pages(expected);
+  assert.ok(read.length >= 9, `${read.length} pages`);
+  assert.ok(
+    read.every((n) => n <= 13),
+    `requests per page: ${read}`,
+  );
+  // Saves arriving between pages move the position on; nothing is shown
+  // twice.
+  let now = [...historyVersions(all, undefined, Infinity), original];
+  await pages(now, (page) => {
+    if (page) return;
+    for (let n = 0; n < 3; n++) add(20_000 + n);
+    sorted();
+  });
+  // Records going, as when a board's newest edits are removed, move it
+  // back past older records; it is then not used, and that page is read
+  // from the newest edit rather than passing them over.
+  now = [...historyVersions(all, undefined, Infinity), original];
+  const reread = await pages(now, (page) => {
+    if (page) return;
+    for (const key of keys.filter((k) => k.includes(":log:")).slice(-400))
+      env.data.delete(key);
+    sorted();
+  });
+  assert.ok(reread[1] > read[1], `requests per page: ${reread}`);
 });
 
 test("restoring a board breaks a mind map loop on a restored object, not a kept one", async () => {
@@ -1197,7 +1608,7 @@ test("version history names no one to participants on a board that takes anonymo
     });
     await boards.call(user, { op: "join", room: b.id, token });
   }
-  let clock = 1_000_000;
+  let clock = env.now + 60_000;
   boards.now = () => clock;
   const authors = async (user) =>
     (await boards.call(user, { op: "history.list", room: b.id })).versions
@@ -1206,7 +1617,8 @@ test("version history names no one to participants on a board that takes anonymo
   await commit(boards, editor, b.id, (s) =>
     s.items.push(item("note", 300, 0, { text: "Named idea" })),
   );
-  assert.deepEqual(await authors(viewer), ["Bob"]);
+  // Alice created the board.
+  assert.deepEqual(await authors(viewer), ["Alice", "Bob"]);
   clock += 10 * 60_000;
   await commit(boards, owner, b.id, (s) => {
     s.workshop = { settings: { anonymous: true } };
@@ -1221,7 +1633,23 @@ test("version history names no one to participants on a board that takes anonymo
       "Participant",
       "Participant",
       "Participant",
+      "Participant",
     ]);
   // The owner, who runs the workshop, still does.
-  assert.deepEqual(await authors(owner), ["Alice", "Bob", "Bob"]);
+  assert.deepEqual(await authors(owner), ["Alice", "Alice", "Bob", "Bob"]);
+});
+
+test("a version's changes since are the objects deleted, changed and added since", async () => {
+  const { versionChanges } = await import("../src/history/preview.js");
+  const a = item("note", 0, 0, { text: "Kept" }),
+    b = item("note", 200, 0, { text: "Changed" }),
+    c = item("note", 400, 0, { text: "Deleted" }),
+    d = item("note", 600, 0, { text: "Added" });
+  const changes = versionChanges(
+    [{ ...a }, { ...b, text: "Changed since" }, d],
+    [a, b, c],
+  );
+  assert.deepEqual([...changes.removed], [c.id]);
+  assert.deepEqual([...changes.changed], [b.id]);
+  assert.equal(changes.added, 1);
 });

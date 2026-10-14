@@ -593,6 +593,8 @@ let boards = [],
   // behind a version write would only start after it, which a closing tab
   // may not wait for.
   revisionChain = Promise.resolve(),
+  // See keepRefusedEdits.
+  refusedVersion = null,
   // See storeShared.
   queuedShared = null,
   space = false,
@@ -977,17 +979,31 @@ const features = createFeatures({
     track("Board exported", { format, scope });
     collaboration?.request("export", { format, scope }).catch(() => {});
   },
-  sharedHistory: () =>
-    collaboration && {
-      list: (before) =>
-        collaboration.request(
+  sharedHistory: () => {
+    if (!collaboration) return collaboration;
+    // Where each page of versions ended, so the worker reads the next page
+    // from there rather than from the newest edit (see history.list).
+    const ends = new Map();
+    return {
+      list: async (before) => {
+        const page = await collaboration.request(
           "history.list",
-          before === undefined ? {} : { before },
-        ),
+          before === undefined
+            ? {}
+            : { before, ...(ends.has(before) && { cursor: ends.get(before) }) },
+        );
+        const last = page?.versions?.at?.(-1)?.at;
+        if (typeof page?.next === "string" && last !== undefined)
+          ends.set(last, page.next);
+        return page;
+      },
       load: (at) => collaboration.versionBoard(at),
+      // `{ items, tags }` added or there at `after` and removed by `at`.
+      removed: (at, after) => collaboration.removedObjects(at, after),
       note: (details) =>
         collaboration.request("history.restored", details).catch(() => {}),
-    },
+    };
+  },
   replaceItems: (items) =>
     mutate(() => {
       current.items = validateBoard({ ...current, items }).items;
@@ -996,17 +1012,28 @@ const features = createFeatures({
   restore: (b) => {
     // Throw so the caller cannot report a restoration that did not happen.
     if (isSharedReadOnly()) throw Error("This board is read-only.");
-    current.title = b.title;
-    current.items = validateBoard(b).items;
-    current.tags = b.tags && clone(b.tags);
-    history = new History();
-    selection.clear();
-    updateConnectors(current.items);
-    editor();
+    const { items } = validateBoard(b);
+    // One step, like any other edit: Undo takes the board back to what it
+    // was, and the steps before it stay.
+    mutate(
+      () => {
+        current.title = b.title;
+        current.items = items;
+        if (b.tags?.length) current.tags = clone(b.tags);
+        else delete current.tags;
+        selection.clear();
+      },
+      // The version's mind maps keep their own layout settings, rather than
+      // being read as moved by hand from where they are now.
+      { titled: true, mindLayout: true },
+    );
+    const title = document.querySelector("#board-title");
+    if (title && document.activeElement !== title) title.value = current.title;
+    showBoardTitle(current.title);
     fit();
-    save();
   },
   addBoard: adoptBoard,
+  undo: () => action("undo"),
 });
 const transfer = createTransfer({
   board: () => current,
@@ -2715,6 +2742,31 @@ function checkpoint(label = "Board edit", snapshot = undoCopy(current)) {
     .then(() => local.checkpoint(snapshot, label, { owned: true }))
     .catch(() => toast("Could not save a recovery version. Export a backup."));
 }
+// A save refused because another tab saved the board since leaves this
+// tab's edits in no stored copy, and reloading shows the other tab's. They
+// are kept as a version instead, one for as long as saves keep being
+// refused, updated with each, so they can be restored after the reload.
+function keepRefusedEdits(snapshot, error) {
+  revisionChain = revisionChain
+    .catch(() => {})
+    .then(() =>
+      local.checkpoint(snapshot, "Unsaved changes from another tab", {
+        owned: true,
+        kept: true,
+        replaces:
+          refusedVersion?.boardId === snapshot.id ? refusedVersion.id : null,
+      }),
+    )
+    .then(
+      (revision) => {
+        refusedVersion = { boardId: snapshot.id, id: revision.id };
+        toast(
+          "This board changed in another tab. Your changes here are kept in Version history. Reload to see the latest copy.",
+        );
+      },
+      () => toast(error.message),
+    );
+}
 function focusRegion(a, searchPanel, avoidSelection = false) {
   attention.stop();
   const r = document.querySelector("#canvas").getBoundingClientRect();
@@ -2865,8 +2917,17 @@ document.addEventListener(
 );
 // A notification, with one action when there is something to do about
 // it; that one stays longer, as it asks to be read and acted on.
+// A notification whose action undoes an edit, such as a restoration, goes
+// once anything else changes the board, Undo is pressed, or the board is
+// left: its action would then undo something else.
+function dropEditToast() {
+  if (!toast.untilEdit) return;
+  toast.untilEdit = false;
+  toastElement.classList.remove("visible");
+}
 function toast(message, action) {
   const el = toastElement;
+  toast.untilEdit = !!action?.untilEdit;
   const host =
     [...document.querySelectorAll("dialog[open]")].at(-1) || document.body;
   if (el.parentNode !== host) host.append(el);
@@ -3083,6 +3144,9 @@ function save({ outlined = false } = {}) {
     .then(() => local.save(snapshot))
     .then((saved) => {
       unsavedLocal.delete(saved.id);
+      // A save that goes through ends a run of refused ones: edits refused
+      // after it are kept in a version of their own.
+      if (refusedVersion?.boardId === saved.id) refusedVersion = null;
       // Another tab's library choice, carried by the save, shows here too.
       const b = boards.find((b) => b.id === saved.id);
       for (const key of ["favorite", "deletedAt"])
@@ -3107,6 +3171,8 @@ function save({ outlined = false } = {}) {
         unsavedLocal.add(snapshot.id);
       if (["StaleBoardError", "DeletedBoardError"].includes(error?.name)) {
         if (current?.id === snapshot.id) status("Not saved");
+        if (error.name === "StaleBoardError")
+          return keepRefusedEdits(snapshot, error);
         return toast(error.message);
       }
       if (current?.id === snapshot.id) status("Storage full");
@@ -3180,18 +3246,39 @@ function restoreUndoState(state) {
   Object.assign(current, state);
   if (!current.tags?.length) delete current.tags;
   if (!current.planning) delete current.planning;
+  if ("title" in state) {
+    const title = document.querySelector("#board-title");
+    if (title && document.activeElement !== title) title.value = current.title;
+    showBoardTitle(current.title);
+  }
+}
+// The state to keep for the other direction of an undo or redo step. A step
+// that changed the title, as restoring a version does, keeps it both ways;
+// other steps leave the title as it is.
+function undoStateFor(step) {
+  return step && "title" in step
+    ? { ...undoState(), title: current.title }
+    : undoState();
 }
 // A change that continues the one before it, as a held arrow key does,
-// records no undo step or recovery version of its own.
-function mutate(fn, { mindLayout = false, continues = false } = {}) {
+// records no undo step or recovery version of its own. One that may change
+// the board's title says so, and its undo step takes the title back too.
+function mutate(
+  fn,
+  { mindLayout = false, continues = false, titled = false } = {},
+) {
   if (isSharedReadOnly()) return toast(sharedReadOnlyReason());
+  dropEditToast();
   pointerUp();
   const future = history.future,
     recorded = !continues && !collaboration;
   // The recovery version of the board as it was is written once the change
   // has gone through: a refused change leaves none.
   const before = continues ? null : undoCopy(current);
-  if (recorded) history.push(undoState());
+  if (recorded)
+    history.push(
+      titled ? { ...undoState(), title: current.title } : undoState(),
+    );
   const priorMind = mindLayout
     ? []
     : current.items
@@ -3275,6 +3362,7 @@ async function home({
   previews = true,
 } = {}) {
   const left = current?.id;
+  dropEditToast();
   flushNudgeSave();
   onboarding.close(false);
   tags.close();
@@ -3522,7 +3610,7 @@ function renderCards() {
             if (b.cloud) return cloudCard(b, n);
             const shown = cardView(b),
               found = words.length ? libraryFound(b, words) : "";
-            return `<article class="board-card"><button class="board-open" data-open="${escape(b.id)}" aria-label="${b.deletedAt ? "Restore or delete" : "Open"} ${escape(b.title)}" aria-describedby="board-card-${n}-meta${found ? ` board-card-${n}-found` : ""}"><div class="board-preview">${shown.items.length ? preview(shown) : `<span class="empty-preview">${icon("pencil-ruler")}<span>A world of possibility</span></span>`}</div><div class="board-info"><h3 data-user-content title="${escape(b.title)}">${escape(b.title)}</h3><p id="board-card-${n}-meta"><span class="meta-count">${plural(shown.items.length, "{count} object", "{count} objects")}</span> <span class="meta-sep">·</span> <span class="meta-date">${cardDate(b.updated)}</span></p>${found ? `<p class="card-found" id="board-card-${n}-found">${found}</p>` : ""}${storageBadge(b)}</div></button>${b.deletedAt ? "" : `<button class="favorite ${b.favorite ? "is-favorite" : ""}" data-favorite="${escape(b.id)}" aria-label="Favorite ${escape(b.title)}" aria-pressed="${!!b.favorite}">${icon("star")}</button>`}<button class="card-more" data-more="${escape(b.id)}" aria-label="Options for ${escape(b.title)}" aria-haspopup="dialog">${icon("ellipsis")}</button></article>`;
+            return `<article class="board-card"><button class="board-open" data-open="${escape(b.id)}" aria-label="${b.deletedAt ? "Restore or delete" : "Open"} ${escape(b.title)}" aria-describedby="board-card-${n}-meta${found ? ` board-card-${n}-found` : ""}"><div class="board-preview">${shown.items.length ? preview(shown) : `<span class="empty-preview">${icon("pencil-ruler")}<span>A world of possibility</span></span>`}</div><div class="board-info"><h3 data-user-content title="${escape(b.title)}">${escape(b.title)}</h3><p id="board-card-${n}-meta"><span class="meta-count">${plural(shown.items.length, "{count} object", "{count} objects")}</span> <span class="meta-sep">·</span> <span class="meta-date">${b.deletedAt ? t("Deleted {date}").replace("{date}", cardDate(b.deletedAt)) : cardDate(b.updated)}</span></p>${found ? `<p class="card-found" id="board-card-${n}-found">${found}</p>` : ""}${storageBadge(b)}</div></button>${b.deletedAt ? "" : `<button class="favorite ${b.favorite ? "is-favorite" : ""}" data-favorite="${escape(b.id)}" aria-label="Favorite ${escape(b.title)}" aria-pressed="${!!b.favorite}">${icon("star")}</button>`}<button class="card-more" data-more="${escape(b.id)}" aria-label="Options for ${escape(b.title)}" aria-haspopup="dialog">${icon("ellipsis")}</button></article>`;
           },
         )
         .join("")
@@ -3993,6 +4081,7 @@ function observeChrome() {
   }
 }
 function editor() {
+  dropEditToast();
   tags.close();
   objectLinks.close();
   comments.close(false);
@@ -4020,7 +4109,7 @@ function editor() {
   // controls in the order they are laid out: header, top row, rail, then the
   // zoom controls at the bottom. Comment pins and link badges, which can
   // number hundreds, come after all of them.
-  app.innerHTML = `<main class="editor"><h1 id="board-heading" class="sr-only" data-user-content>${escape(current.title)}</h1><p id="board-announcer" class="sr-only" role="status" aria-live="polite"></p><header class="editor-header"><div class="editor-heading">${button("arrow-left", "Back to boards", "home")}<span class="mini-brand">${brandImage}</span><div><input id="board-title" aria-label="Board name" maxlength="200" value="${escape(current.title)}"><span id="save-state" role="status" aria-live="polite" title="${saveState}"${saveTone ? ` data-tone="${saveTone}"` : ""}>${saveState}</span></div></div><div class="editor-actions">${button("command", "Command palette (Ctrl/Cmd K)", "commands")}<details class="preferences"><summary class="icon-btn" aria-label="${t("Preferences")}" title="${t("Preferences")}">${icon("settings-2")}</summary><div class="preferences-menu" role="group" aria-label="${t("Preferences")}">${themeControl(true)}${current.shared ? `<label class="preferences-check"><input type="checkbox" id="show-authors" ${showAuthors ? "checked" : ""}><span>${t("Show sticky note authors")}</span></label>` : ""}</div></details>${button(boardStorage(current) === "cloud" ? "cloud-check" : "cloud-upload", cloudSaveLabel(current), "cloud-save", `data-storage="${boardStorage(current)}"`)}${button("download", "Export board", "export")}${button("ellipsis", "More tools", "more-tools")}<button class="primary share-button" data-action="share" aria-label="Share board">${icon("users")}<span>Share</span></button>${account.markup()}</div></header><div class="canvas-wrap"><canvas id="canvas" role="img" aria-label="Whiteboard canvas. Use Board objects to select and edit objects with the keyboard." tabindex="0"></canvas><div id="hover-outline" class="hover-outline" aria-hidden="true" hidden></div><div id="board-outline" class="sr-only" role="group" aria-label="Canvas objects" aria-describedby="board-outline-hint"></div><p id="board-outline-hint" class="sr-only">Arrow keys, Home and End move between objects. Page Down and Page Up move to the next or previous frame.</p><div class="canvas-top"><span class="board-tag" data-storage="${boardStorage(current)}" title="${escape(storageLabel(current))}">${storageTag(current)}</span><button class="participants" data-action="participants" hidden></button><div class="canvas-navigation"><button type="button" class="icon-btn live-access" data-action="live" aria-label="${t("Live reactions and raise hand")}" title="${t("Live reactions and raise hand")}" aria-haspopup="dialog" aria-controls="live-popover" aria-expanded="false" hidden>${icon("smile-plus")}</button>${button("tags", "Tags", "tags", 'id="tag-access" hidden')}${button("columns-3", "Table cells", "table-cells", 'id="table-cell-access" hidden')}${button("arrow-up-right", "Object link", "object-link", 'id="object-link-access" hidden')}${button("link", "Text links", "text-links", 'id="text-link-access" hidden')}<button type="button" class="icon-btn timer-access" data-action="timer" data-timer-access aria-label="${t("Timer")}" title="${t("Timer")}" aria-controls="workshop-timer" aria-expanded="false">${icon("timer")}<span class="timer-badge" hidden></span></button><button type="button" class="icon-btn facilitation-access" data-action="facilitation" aria-label="${t("Facilitation")}" title="${t("Facilitation")}" aria-controls="facilitation-panel" aria-expanded="false">${icon("vote")}</button>${button("sparkles", "AI assistant", "ai")}${button("message-square", "Comments", "comments", 'aria-expanded="false" aria-controls="comments-panel"')}${button("search", "Find on board (Ctrl/Cmd F)", "board-search", 'aria-expanded="false" aria-controls="board-search"')}${button("map", "Minimap (M)", "minimap", 'aria-controls="minimap" aria-expanded="false" aria-pressed="false"')}${button("scan", "Frames and navigation", "frames", 'aria-expanded="false" aria-controls="frames-panel"')}${button("list", "Board objects", "objects")}${button("presentation", "Presentation", "present")}</div></div><div class="left-rail"><div class="tools panel" role="toolbar" aria-label="Drawing tools">${tools.map(([key, ic, label, shortcut]) => button(ic, `${label} (${shortcut})`, `tool-${key}`, `aria-pressed="${tool === key}"`)).join("")}<span class="tool-divider"></span>${button("layout-template", "Templates", "templates")}${button("shapes", "Shapes (S)", "shapes")}${button("image-plus", "Add image", "image")}${button("circle-plus", "Add content", "add-content", 'aria-haspopup="dialog"')}</div><div class="panel history-tools">${button("undo-2", "Undo (Ctrl/Cmd Z)", "undo")}${button("redo-2", "Redo (Ctrl/Cmd Shift Z)", "redo")}${button("magnet", "Snap to objects", "toggle-snapping", `aria-pressed="${snapping}"`)}</div></div><div class="drop-hint" aria-hidden="true"><strong>Drop content here</strong><span>Images, files, text, and links</span></div><div id="selection-tools" class="selection-tools panel" hidden></div><div id="quick-ports" role="group" hidden></div><section id="minimap" class="minimap panel" hidden></section><div class="canvas-bottom"><span id="tool-hint" class="tool-hint">Select and move · Double-click to edit · Space to pan</span><div class="panel zoom-tools">${button("maximize", "Fit board to screen", "fit")}<span class="tool-divider"></span>${button("minus", "Zoom out", "zoom-out")}<button class="zoom-label" data-action="reset-zoom" title="Reset zoom to 100 percent">100%</button>${button("plus", "Zoom in", "zoom-in")}<span class="tool-divider"></span>${button("circle-help", "Help and training", "help-center")}</div></div><div id="object-link-badges" class="object-link-badges" role="group" aria-label="Object links"></div><div id="comment-pins" class="comment-pins" role="group" aria-label="Board comments"></div></div></main>`;
+  app.innerHTML = `<main class="editor"><h1 id="board-heading" class="sr-only" data-user-content>${escape(current.title)}</h1><p id="board-announcer" class="sr-only" role="status" aria-live="polite"></p><header class="editor-header"><div class="editor-heading">${button("arrow-left", "Back to boards", "home")}<span class="mini-brand">${brandImage}</span><div><input id="board-title" aria-label="Board name" maxlength="200" value="${escape(current.title)}"><span id="save-state" role="status" aria-live="polite" title="${saveState}"${saveTone ? ` data-tone="${saveTone}"` : ""}>${saveState}</span></div></div><div class="editor-actions">${button("command", "Command palette (Ctrl/Cmd K)", "commands")}<details class="preferences"><summary class="icon-btn" aria-label="${t("Preferences")}" title="${t("Preferences")}">${icon("settings-2")}</summary><div class="preferences-menu" role="group" aria-label="${t("Preferences")}">${themeControl(true)}${current.shared ? `<label class="preferences-check"><input type="checkbox" id="show-authors" ${showAuthors ? "checked" : ""}><span>${t("Show sticky note authors")}</span></label>` : ""}</div></details>${button(boardStorage(current) === "cloud" ? "cloud-check" : "cloud-upload", cloudSaveLabel(current), "cloud-save", `data-storage="${boardStorage(current)}"`)}${button("history", "Version history (Ctrl/Cmd Alt/Option Shift H)", "history")}${button("download", "Export board", "export")}${button("ellipsis", "More tools", "more-tools")}<button class="primary share-button" data-action="share" aria-label="Share board">${icon("users")}<span>Share</span></button>${account.markup()}</div></header><div class="canvas-wrap"><canvas id="canvas" role="img" aria-label="Whiteboard canvas. Use Board objects to select and edit objects with the keyboard." tabindex="0"></canvas><div id="hover-outline" class="hover-outline" aria-hidden="true" hidden></div><div id="board-outline" class="sr-only" role="group" aria-label="Canvas objects" aria-describedby="board-outline-hint"></div><p id="board-outline-hint" class="sr-only">Arrow keys, Home and End move between objects. Page Down and Page Up move to the next or previous frame.</p><div class="canvas-top"><span class="board-tag" data-storage="${boardStorage(current)}" title="${escape(storageLabel(current))}">${storageTag(current)}</span><button class="participants" data-action="participants" hidden></button><div class="canvas-navigation"><button type="button" class="icon-btn live-access" data-action="live" aria-label="${t("Live reactions and raise hand")}" title="${t("Live reactions and raise hand")}" aria-haspopup="dialog" aria-controls="live-popover" aria-expanded="false" hidden>${icon("smile-plus")}</button>${button("tags", "Tags", "tags", 'id="tag-access" hidden')}${button("columns-3", "Table cells", "table-cells", 'id="table-cell-access" hidden')}${button("arrow-up-right", "Object link", "object-link", 'id="object-link-access" hidden')}${button("link", "Text links", "text-links", 'id="text-link-access" hidden')}<button type="button" class="icon-btn timer-access" data-action="timer" data-timer-access aria-label="${t("Timer")}" title="${t("Timer")}" aria-controls="workshop-timer" aria-expanded="false">${icon("timer")}<span class="timer-badge" hidden></span></button><button type="button" class="icon-btn facilitation-access" data-action="facilitation" aria-label="${t("Facilitation")}" title="${t("Facilitation")}" aria-controls="facilitation-panel" aria-expanded="false">${icon("vote")}</button>${button("sparkles", "AI assistant", "ai")}${button("message-square", "Comments", "comments", 'aria-expanded="false" aria-controls="comments-panel"')}${button("search", "Find on board (Ctrl/Cmd F)", "board-search", 'aria-expanded="false" aria-controls="board-search"')}${button("map", "Minimap (M)", "minimap", 'aria-controls="minimap" aria-expanded="false" aria-pressed="false"')}${button("scan", "Frames and navigation", "frames", 'aria-expanded="false" aria-controls="frames-panel"')}${button("list", "Board objects", "objects")}${button("presentation", "Presentation", "present")}</div></div><div class="left-rail"><div class="tools panel" role="toolbar" aria-label="Drawing tools">${tools.map(([key, ic, label, shortcut]) => button(ic, `${label} (${shortcut})`, `tool-${key}`, `aria-pressed="${tool === key}"`)).join("")}<span class="tool-divider"></span>${button("layout-template", "Templates", "templates")}${button("shapes", "Shapes (S)", "shapes")}${button("image-plus", "Add image", "image")}${button("circle-plus", "Add content", "add-content", 'aria-haspopup="dialog"')}</div><div class="panel history-tools">${button("undo-2", "Undo (Ctrl/Cmd Z)", "undo")}${button("redo-2", "Redo (Ctrl/Cmd Shift Z)", "redo")}${button("magnet", "Snap to objects", "toggle-snapping", `aria-pressed="${snapping}"`)}</div></div><div class="drop-hint" aria-hidden="true"><strong>Drop content here</strong><span>Images, files, text, and links</span></div><div id="selection-tools" class="selection-tools panel" hidden></div><div id="quick-ports" role="group" hidden></div><section id="minimap" class="minimap panel" hidden></section><div class="canvas-bottom"><span id="tool-hint" class="tool-hint">Select and move · Double-click to edit · Space to pan</span><div class="panel zoom-tools">${button("maximize", "Fit board to screen", "fit")}<span class="tool-divider"></span>${button("minus", "Zoom out", "zoom-out")}<button class="zoom-label" data-action="reset-zoom" title="Reset zoom to 100 percent">100%</button>${button("plus", "Zoom in", "zoom-in")}<span class="tool-divider"></span>${button("circle-help", "Help and training", "help-center")}</div></div><div id="object-link-badges" class="object-link-badges" role="group" aria-label="Object links"></div><div id="comment-pins" class="comment-pins" role="group" aria-label="Board comments"></div></div></main>`;
   bindShared();
   account.bind();
   workshopTimer.bind();
@@ -12257,7 +12346,9 @@ function boardOptions(b) {
               button.disabled = true;
               // Trash keeps the board, so a version that cannot be saved,
               // as on a full device, does not stop it from being deleted.
-              await local.checkpoint(b, "Before deletion").catch(() => {});
+              await local
+                .checkpoint(b, "Before deletion", { kept: true })
+                .catch(() => {});
               b.deletedAt = Date.now();
               try {
                 await saveLibrary(b, "deletedAt");
@@ -12272,11 +12363,35 @@ function boardOptions(b) {
                 button.disabled = false;
                 return toast("Could not move this board to the trash.");
               }
-              if (!dialog.open || !dialog.isConnected)
-                return refreshLibraryKeepingFocus();
+              // The notification can take the board back out at once.
+              const undo = {
+                label: "Undo",
+                run: async () => {
+                  if (!b.deletedAt) return;
+                  const deletedAt = b.deletedAt;
+                  delete b.deletedAt;
+                  try {
+                    await saveLibrary(b, "deletedAt");
+                  } catch (error) {
+                    b.deletedAt = deletedAt;
+                    if (!(await followStore(b, error)))
+                      toast("Could not save this change on this device.");
+                    return refreshLibraryKeepingFocus();
+                  }
+                  if (current) return toast("Board restored.");
+                  refreshLibrary();
+                  focusLibraryCard(b.id);
+                  toast("Board restored.");
+                },
+              };
+              if (!dialog.open || !dialog.isConnected) {
+                refreshLibraryKeepingFocus();
+                return toast("Moved to the trash.", undo);
+              }
               dialog.close();
               await home();
               focusLibraryCard(b.id);
+              toast("Moved to the trash.", undo);
             };
           },
         );
@@ -12499,6 +12614,7 @@ function help() {
       ["Ctrl/Cmd + Alt/Option + K", "Insert or edit text link"],
       ["Ctrl/Cmd + Alt/Option + Shift + K", "Object link"],
       ["Ctrl/Cmd + Alt/Option + Shift + C", "Copy link to object"],
+      ["Ctrl/Cmd + Alt/Option + Shift + H", "Version history"],
       ["Ctrl or Cmd + Z", "Undo"],
       ["Ctrl or Cmd + Shift + Z or Ctrl or Cmd + Y", "Redo"],
       ["Ctrl or Cmd + S", "Save to Puter"],
@@ -13097,22 +13213,24 @@ async function action(a) {
     case "live":
       return liveUI.toggle();
     case "undo":
+      dropEditToast();
       if (collaboration) return sharedStep("undo");
       // Key repeat must not replace recovery versions with unchanged copies.
       if (isSharedReadOnly()) return toast("This board is read-only.");
       if (!history.past.length) return;
       checkpoint();
-      restoreUndoState(history.undo(undoState()));
+      restoreUndoState(history.undo(undoStateFor(history.past.at(-1))));
       selection.clear();
       draw();
       save({ outlined: true });
       return;
     case "redo":
+      dropEditToast();
       if (collaboration) return sharedStep("redo");
       if (isSharedReadOnly()) return toast("This board is read-only.");
       if (!history.future.length) return;
       checkpoint();
-      restoreUndoState(history.redo(undoState()));
+      restoreUndoState(history.redo(undoStateFor(history.future.at(-1))));
       selection.clear();
       draw();
       save({ outlined: true });
@@ -13336,14 +13454,17 @@ document.addEventListener("keydown", (e) => {
     mod &&
     e.altKey &&
     e.shiftKey &&
-    ["KeyC", "KeyK"].includes(e.code || `Key${e.key.toUpperCase()}`)
+    ["KeyC", "KeyK", "KeyH"].includes(e.code || `Key${e.key.toUpperCase()}`)
   ) {
     e.preventDefault();
+    const key = e.code || `Key${e.key.toUpperCase()}`;
     if (!e.repeat)
       action(
-        e.code === "KeyC" || shortcutLetter(e) === "c"
-          ? "copy-object-link"
-          : "object-link",
+        key === "KeyH"
+          ? "history"
+          : key === "KeyC" || shortcutLetter(e) === "c"
+            ? "copy-object-link"
+            : "object-link",
       );
     return;
   }

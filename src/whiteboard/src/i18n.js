@@ -447,6 +447,10 @@ const pairs = {
   "Could not copy the text.": "Impossible de copier le texte.",
   "This board changed in another tab. Reload to see the latest copy.":
     "Ce tableau a changé dans un autre onglet. Rechargez pour voir la dernière copie.",
+  "This board changed in another tab. Your changes here are kept in Version history. Reload to see the latest copy.":
+    "Ce tableau a changé dans un autre onglet. Vos modifications ici sont conservées dans l’historique des versions. Rechargez pour voir la dernière copie.",
+  "Unsaved changes from another tab":
+    "Modifications non enregistrées d’un autre onglet",
   "This board was deleted in another tab.":
     "Ce tableau a été supprimé dans un autre onglet.",
   "Not saved": "Non enregistré",
@@ -1068,6 +1072,11 @@ const pairs = {
   "Ctrl/Cmd + Shift + Down / Up": "Ctrl/Cmd + Maj + Bas / Haut",
   "Ctrl/Cmd + Alt/Option + Shift + K": "Ctrl/Cmd + Alt/Option + Maj + K",
   "Ctrl/Cmd + Alt/Option + Shift + C": "Ctrl/Cmd + Alt/Option + Maj + C",
+  "Ctrl/Cmd + Alt/Option + Shift + H": "Ctrl/Cmd + Alt/Option + Maj + H",
+  "Moved to the trash.": "Placé dans la corbeille.",
+  "Deleted {date}": "Supprimé le {date}",
+  "Version history (Ctrl/Cmd Alt/Option Shift H)":
+    "Historique des versions (Ctrl/Cmd Alt/Option Maj H)",
   "Ctrl or Cmd + Z": "Ctrl ou Cmd + Z",
   "Ctrl or Cmd + D": "Ctrl ou Cmd + D",
   "Ctrl or Cmd + Shift + L": "Ctrl ou Cmd + Maj + L",
@@ -1541,8 +1550,8 @@ const pairs = {
   "Board edit": "Modification du tableau",
   "Before deletion": "Avant la suppression",
   "No saved versions yet.": "Aucune version enregistrée pour le moment.",
-  "The 30 most recent versions are kept on this device, and one for each quarter hour of the last 30 days, within 50 MB. Restoring preserves the current version first.":
-    "Les 30 versions les plus récentes sont conservées sur cet appareil, ainsi qu’une par quart d’heure des 30 derniers jours, dans une limite de 50 Mo. La version actuelle est conservée avant toute restauration.",
+  "The 30 most recent versions are kept on this device, and one for each quarter hour of the last 30 days (up to 200 more), within 50 MB; when space runs short, the last version of each day is kept before the others. Pictures shared by several versions are stored once. Named checkpoints and the version saved before each restoration are kept apart from these: the newest 100, within another 50 MB.":
+    "Les 30 versions les plus récentes sont conservées sur cet appareil, ainsi qu’une par quart d’heure des 30 derniers jours (jusqu’à 200 de plus), dans une limite de 50 Mo ; quand la place manque, la dernière version de chaque jour est conservée avant les autres. Les images communes à plusieurs versions ne sont stockées qu’une fois. Les points de restauration nommés et la version enregistrée avant chaque restauration sont conservés à part : les 100 plus récents, dans une limite de 50 Mo supplémentaires.",
   "Version restored.": "Version restaurée.",
   "Checkpoint saved.": "Point de restauration enregistré.",
   "Could not save the checkpoint. Export a backup.":

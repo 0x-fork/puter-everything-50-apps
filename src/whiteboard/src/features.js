@@ -112,6 +112,8 @@ import {
   restoreBoard,
   withoutObjects,
 } from "./history/restore.js";
+import { createVersionPreview, versionChanges } from "./history/preview.js";
+import { keptRevision } from "./storage.js";
 import { readTableContent, pasteTable, tableHeight } from "./bulk-content.js";
 import { canSwitchShape, shapeKey, switchShape } from "./shapes.js";
 import { portableWorkshop, WORKSHOP_LIMITS } from "./facilitation/model.js";
@@ -1397,9 +1399,10 @@ export function createFeatures(api) {
     // Someone who cannot edit the board sees its versions and can open one
     // as a copy, but is not offered restoring.
     const readOnly = () => !!api.readOnly?.();
+    const retention = `<details class="history-retention"><summary>${t("How long versions are kept")}</summary><p class="dialog-copy">${t("The 30 most recent versions are kept on this device, and one for each quarter hour of the last 30 days (up to 200 more), within 50 MB; when space runs short, the last version of each day is kept before the others. Pictures shared by several versions are stored once. Named checkpoints and the version saved before each restoration are kept apart from these: the newest 100, within another 50 MB.")}</p></details>`;
     const d = api.modal(
       "Version history",
-      `<p class="dialog-copy">${t(shared ? "Everyone's edits to this shared board are kept, so any earlier version can be restored. Restoring saves a new version and never removes history." : "The 30 most recent versions are kept on this device, and one for each quarter hour of the last 30 days, within 50 MB. Restoring preserves the current version first.")}</p>${readOnly() ? `<p class="dialog-copy">${t("You can view earlier versions and open one as a copy. Only people who can edit this board restore versions.")}</p>` : ""}<p id="history-status" class="dialog-copy" role="status" aria-live="polite" tabindex="-1" hidden></p>${shared ? `<h3>${t("Shared board history")}</h3><div class="revision-list" id="shared-revisions"><p>${t("Loading…")}</p></div><h3>${t("Versions on this device")}</h3>` : ""}<div class="checkpoint-create"><label class="field">Checkpoint name<input id="checkpoint-label" maxlength="120" value="${t("Checkpoint")}"></label><button class="primary" id="checkpoint-create">Create checkpoint</button></div><div class="revision-list" id="local-revisions"></div>`,
+      `<div class="history-layout"><section class="history-preview" aria-labelledby="history-preview-title"><div class="history-preview-head"><div class="history-preview-name"><strong id="history-preview-title">${t("Preview of the version")}</strong><small id="history-preview-meta"></small></div><div class="history-zoom" role="group" aria-label="${t("Preview of the version")}"><button type="button" class="icon-btn" data-preview-zoom="out" aria-label="${t("Zoom out of the preview")}" title="${t("Zoom out of the preview")}" disabled><i data-lucide="minus" aria-hidden="true"></i></button><button type="button" class="icon-btn" data-preview-zoom="fit" aria-label="${t("Fit the version in the preview")}" title="${t("Fit the version in the preview")}" disabled><i data-lucide="maximize" aria-hidden="true"></i></button><button type="button" class="icon-btn" data-preview-zoom="in" aria-label="${t("Zoom in on the preview")}" title="${t("Zoom in on the preview")}" disabled><i data-lucide="plus" aria-hidden="true"></i></button></div></div><div class="history-stage"><canvas id="history-preview-canvas" role="img" tabindex="0" aria-describedby="history-changes history-preview-help" hidden></canvas><p class="history-empty">${t("Choose a version to see the board as it was then, with what has changed since.")}</p></div><p id="history-preview-help" class="sr-only">${t("Drag to move around this version. Ctrl/Cmd + scroll, a pinch or the + and - keys zoom.")}</p><div class="history-changes" id="history-changes" role="status" aria-live="polite"></div></section><div class="history-sidebar"><p class="dialog-copy">${t(shared ? "Everyone's edits to this shared board are kept, so any earlier version can be restored. Restoring saves a new version and never removes history." : "Versions of this board are saved on this device as you edit. Restoring one keeps the current version first, and Undo takes it back.")}</p>${shared ? "" : retention}${readOnly() ? `<p class="dialog-copy">${t("You can view earlier versions and open one as a copy. Only people who can edit this board restore versions.")}</p>` : ""}<p id="history-status" class="dialog-copy" role="status" aria-live="polite" tabindex="-1" hidden></p>${shared ? `<h3>${t("Shared board history")}</h3><div class="revision-list" id="shared-revisions"><p>${t("Loading…")}</p></div>` : ""}<h3>${t("Versions on this device")}</h3>${shared ? retention : ""}<details class="checkpoint-details"><summary autofocus><i data-lucide="bookmark-plus" aria-hidden="true"></i>${t("Name the current version")}</summary><form class="checkpoint-create"><label class="field">Checkpoint name<input id="checkpoint-label" maxlength="120" value="${t("Checkpoint")}"></label><button class="primary" id="checkpoint-create">Create checkpoint</button></form></details><label class="history-filter"><input type="checkbox" id="history-named">${t("Named versions only")}</label><div class="revision-list" id="local-revisions"></div></div></div>`,
     );
     // A history dialog can stay open through address-bar navigation. Its
     // versions must never be restored into whichever board is now open.
@@ -1413,6 +1416,142 @@ export function createFeatures(api) {
       status.hidden = false;
       if (d.isConnected) status.focus();
       return false;
+    }
+    d.classList.add("history-dialog");
+    // The chosen version is shown beside the list, as the board was then,
+    // with what changed since pointed out.
+    const stage = d.querySelector(".history-stage"),
+      previewCanvas = stage.querySelector("canvas"),
+      previewer = createVersionPreview(stage),
+      changesNote = d.querySelector("#history-changes"),
+      highlight = () =>
+        d.querySelector("#history-highlight")?.checked !== false;
+    d.addEventListener("close", () => previewer.destroy(), { once: true });
+    d.querySelectorAll("[data-preview-zoom]").forEach((button) => {
+      const zoom = button.dataset.previewZoom;
+      button.onclick = () =>
+        zoom === "in"
+          ? previewer.zoomIn()
+          : zoom === "out"
+            ? previewer.zoomOut()
+            : previewer.fit();
+    });
+    // Each version is read once while the dialog is open to show it and to
+    // list its restore options; restoring reads it again.
+    const loaded = new Map();
+    const cachedLoad = (key, load) => {
+      if (!loaded.has(key)) {
+        let pending;
+        try {
+          pending = Promise.resolve(load());
+        } catch (error) {
+          pending = Promise.reject(error);
+        }
+        loaded.set(
+          key,
+          pending.catch((error) => {
+            loaded.delete(key);
+            throw error;
+          }),
+        );
+      }
+      return loaded.get(key);
+    };
+    // How each listed version is named and read, by its key ("l:" and the
+    // id of a version on this device, "s:" and the time of a shared one).
+    const sources = new Map();
+    let picked = null;
+    const markPicked = () =>
+      d.querySelectorAll("[data-pick]").forEach((button) => {
+        const on = button.dataset.pick === picked;
+        button.setAttribute("aria-pressed", String(on));
+        button.closest(".revision-row")?.classList.toggle("picked", on);
+      });
+    async function pick(key) {
+      const source = sources.get(key);
+      if (!source || !onBoard()) return;
+      picked = key;
+      markPicked();
+      d.querySelector("#history-preview-title").textContent = source.title;
+      d.querySelector("#history-preview-meta").textContent = source.meta;
+      changesNote.textContent = t("Loading this version…");
+      let version;
+      try {
+        version = await cachedLoad(key, source.load);
+      } catch (error) {
+        if (picked === key && d.isConnected)
+          changesNote.textContent = t(
+            error.message || "Could not load this version.",
+          );
+        return;
+      }
+      if (picked !== key || !d.isConnected || !onBoard()) return;
+      // Nothing the workshop hides from this person, then or now, is shown
+      // or counted.
+      const current = api.board(),
+        hidden = api.concealedIn
+          ? new Set([...api.concealedIn(version), ...api.concealedIn(current)])
+          : new Set(),
+        items = version.items.filter((i) => !hidden.has(i.id)),
+        changes = versionChanges(
+          current.items.filter((i) => !hidden.has(i.id)),
+          items,
+        );
+      previewCanvas.hidden = false;
+      stage.querySelector(".history-empty").hidden = true;
+      d.querySelectorAll("[data-preview-zoom]").forEach(
+        (button) => (button.disabled = false),
+      );
+      previewCanvas.setAttribute(
+        "aria-label",
+        `${t("Preview of the version")}: ${source.title}, ${source.meta}`,
+      );
+      previewer.show({
+        items,
+        tags: version.tags,
+        changes,
+        highlight: highlight(),
+      });
+      const counts = [
+        ["removed", changes.removed.size, "{count} deleted since"],
+        ["changed", changes.changed.size, "{count} changed since"],
+        ["added", changes.added, "{count} added since"],
+      ].filter(([, count]) => count);
+      changesNote.innerHTML = `<span>${plural(items.length, "{count} object", "{count} objects")}</span>${
+        counts.length
+          ? counts
+              .map(
+                ([kind, count, text]) =>
+                  `<span class="history-change" data-change="${kind}">${plural(count, text, text)}</span>`,
+              )
+              .join("")
+          : `<span>${t("Same as the board now.")}</span>`
+      }${
+        changes.removed.size || changes.changed.size
+          ? `<label class="history-highlight"><input type="checkbox" id="history-highlight" ${highlight() ? "checked" : ""}>${t("Highlight changes")}</label>`
+          : ""
+      }`;
+      changesNote
+        .querySelector("#history-highlight")
+        ?.addEventListener("change", (e) =>
+          previewer.highlight(e.currentTarget.checked),
+        );
+    }
+    // The preview goes back to its hint, as when a shown version is deleted.
+    function unpick() {
+      picked = null;
+      previewer.clear();
+      previewCanvas.hidden = true;
+      stage.querySelector(".history-empty").hidden = false;
+      changesNote.textContent = "";
+      d.querySelector("#history-preview-title").textContent = t(
+        "Preview of the version",
+      );
+      d.querySelector("#history-preview-meta").textContent = "";
+      d.querySelectorAll("[data-preview-zoom]").forEach(
+        (button) => (button.disabled = true),
+      );
+      markPicked();
     }
     // A restore can await both a shared version and its recovery backup.
     // Keep every history action from starting a competing restoration.
@@ -1474,14 +1613,156 @@ export function createFeatures(api) {
         for (const sync of restoreState.dialogs) sync();
       };
     }
-    const when = (at) =>
-      new Date(at).toLocaleString(language === "fr" ? "fr-CA" : "en-CA");
+    const locale = () => (language === "fr" ? "fr-CA" : "en-CA");
+    const when = (at) => new Date(at).toLocaleString(locale());
+    // Versions are listed under their day, at the minute they were saved;
+    // seconds tell apart neighbours saved in the same minute.
+    const clock = (at, seconds = false) =>
+      new Date(at).toLocaleTimeString(locale(), {
+        hour: "numeric",
+        minute: "2-digit",
+        ...(seconds ? { second: "2-digit" } : {}),
+      });
+    const clocks = (times) => {
+      const short = times.map((at) => clock(at));
+      return times.map((at, n) =>
+        short[n] === short[n - 1] || short[n] === short[n + 1]
+          ? clock(at, true)
+          : short[n],
+      );
+    };
+    function dayName(at) {
+      const date = new Date(at),
+        today = new Date(),
+        start = (x) =>
+          new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime(),
+        days = Math.round((start(today) - start(date)) / 86400_000);
+      if (days === 0) return t("Today");
+      if (days === 1) return t("Yesterday");
+      return date.toLocaleDateString(locale(), {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+        ...(date.getFullYear() !== today.getFullYear()
+          ? { year: "numeric" }
+          : {}),
+      });
+    }
+    // Rows, each under the heading of its day.
+    const byDay = (entries, row) => {
+      let day = null;
+      const times = clocks(entries.map((e) => e.at));
+      return entries
+        .map((e, n) => {
+          const name = dayName(e.at),
+            heading =
+              name === day
+                ? ""
+                : `<h4 class="revision-day">${escape(name)}</h4>`;
+          day = name;
+          return heading + row(e, times[n], name);
+        })
+        .join("");
+    };
     // Granular restore choices for one version, loaded on demand.
     // `onDevice` versions are this device's own; the audit log records a
     // restoration from them without a shared version's time.
-    async function options(button, load, at, onDevice = false) {
+    function manageHTML(id) {
+      const r = id && find(id);
+      if (!r) return "";
+      const named = keptRevision(r);
+      return `<div class="revision-manage"><button type="button" class="text-btn" data-manage="name">${t(named ? "Rename" : "Name this version")}</button>${named ? `<button type="button" class="text-btn danger" data-manage="delete">${t("Delete version")}</button>` : ""}</div><form class="revision-rename" hidden><label class="field">${t("Version name")}<input maxlength="120" required></label><div class="dialog-footer"><button type="button" class="secondary" data-manage="cancel">${t("Cancel")}</button><button class="primary">${t("Save name")}</button></div></form><div class="revision-delete" role="group" aria-label="${t("Delete version")}" hidden><p class="dialog-copy">${t("This version is removed from this device for good.")}</p><div class="dialog-footer"><button type="button" class="secondary" data-manage="keep">${t("Keep version")}</button><button type="button" class="primary danger-fill" data-manage="confirm">${t("Delete version")}</button></div></div>`;
+    }
+    // Naming, renaming and deleting a version on this device, from its
+    // restore options. Deleting asks first, in place.
+    function manage(panel, id) {
+      const actions = panel.querySelector(".revision-manage"),
+        form = panel.querySelector(".revision-rename"),
+        input = form.querySelector("input"),
+        confirm = panel.querySelector(".revision-delete"),
+        options = panel.previousElementSibling?.querySelector(
+          "[data-revision-options]",
+        );
+      const show = (part) => {
+        actions.hidden = part !== actions;
+        form.hidden = part !== form;
+        confirm.hidden = part !== confirm;
+      };
+      // Once the list shows the change, the keyboard goes back to the row.
+      const finish = async (message) => {
+        panel.remove();
+        options?.setAttribute("aria-expanded", "false");
+        await render();
+        api.toast(message);
+        const row = d.querySelector(`[data-revision-options="${id}"]`);
+        (
+          row || d.querySelector("#local-revisions [data-revision-options]")
+        )?.focus({ preventScroll: true });
+      };
+      panel.querySelector('[data-manage="name"]').onclick = () => {
+        const r = find(id);
+        input.value = r && keptRevision(r) ? t(r.label) : "";
+        show(form);
+        input.focus();
+      };
+      panel
+        .querySelector('[data-manage="delete"]')
+        ?.addEventListener("click", () => {
+          show(confirm);
+          confirm.querySelector('[data-manage="keep"]').focus();
+        });
+      for (const back of panel.querySelectorAll(
+        '[data-manage="cancel"], [data-manage="keep"]',
+      ))
+        back.onclick = () => {
+          show(actions);
+          actions.querySelector("button").focus();
+        };
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const label = input.value.trim();
+        if (!label || !onBoard()) return;
+        const done = busy(form.querySelector(".primary"));
+        try {
+          await api.local.nameRevision(id, label);
+          if (picked === `l:${id}`)
+            d.querySelector("#history-preview-title").textContent = label;
+          await finish("Version named.");
+        } catch {
+          api.toast("Could not name this version.");
+        } finally {
+          done();
+        }
+      };
+      confirm.querySelector('[data-manage="confirm"]').onclick = async (e) => {
+        if (!onBoard()) return;
+        const done = busy(e.currentTarget);
+        try {
+          await api.local.removeRevision(id);
+          if (picked === `l:${id}`) unpick();
+          await finish("Version deleted.");
+        } catch {
+          api.toast("Could not delete this version.");
+        } finally {
+          done();
+        }
+      };
+    }
+    // `removed`, for a shared version, reads the objects that were added and
+    // deleted again within it, which no listed version holds.
+    async function options(
+      button,
+      load,
+      at,
+      onDevice = false,
+      key = null,
+      removed = null,
+    ) {
       if (!onBoard() || restoreState.pending || button.disabled) return;
       const row = button.closest(".revision-row");
+      if (key && picked !== key) pick(key);
+      // A version on this device can be named, renamed or deleted.
+      const localId = onDevice && key?.startsWith("l:") ? key.slice(2) : null;
       const existing = row.nextElementSibling;
       if (existing?.classList.contains("revision-options")) {
         existing.remove();
@@ -1489,9 +1770,12 @@ export function createFeatures(api) {
         return;
       }
       const done = busy(button);
-      let version;
+      let version, passing;
       try {
-        version = await load();
+        [version, passing] = await Promise.all([
+          load(),
+          removed ? removed().catch(() => null) : null,
+        ]);
       } catch (error) {
         api.toast(error.message || "Could not load this version.");
         return;
@@ -1501,16 +1785,37 @@ export function createFeatures(api) {
       }
       if (!row.isConnected || !d.isConnected || !onBoard()) return;
       const current = api.board();
+      // Objects deleted within the version can be recovered with those
+      // deleted since, behind what the version holds.
+      const held = new Set(version.items.map((i) => i.id)),
+        brief = (Array.isArray(passing?.items) ? passing.items : []).filter(
+          (i) => i && !held.has(i.id),
+        ),
+        known = new Set((version.tags || []).map((tag) => tag.id)),
+        everything = brief.length
+          ? {
+              ...version,
+              items: [...version.items, ...brief],
+              tags: [
+                ...(version.tags || []),
+                ...(passing.tags || []).filter((tag) => !known.has(tag?.id)),
+              ],
+            }
+          : version;
       // What the workshop hides from this person, then or now, is not
       // named or counted here.
       const hidden = api.concealedIn
-        ? new Set([...api.concealedIn(version), ...api.concealedIn(current)])
+        ? new Set([...api.concealedIn(everything), ...api.concealedIn(current)])
         : new Set();
       const shown = version.items.filter((i) => !hidden.has(i.id));
       const frames = shown.filter((i) => i.type === "frame");
       // Nothing hidden from this person is restored or recovered either.
-      const visible = { ...version, items: shown };
-      const missing = deletedSince(current, visible);
+      const visible = { ...version, items: shown },
+        recovering = {
+          ...everything,
+          items: everything.items.filter((i) => !hidden.has(i.id)),
+        };
+      const missing = deletedSince(current, recovering);
       // Deleted objects can be recovered one by one, as in Miro; a line
       // attached to them comes back with what it joins.
       const recoverable = missing.filter(
@@ -1527,8 +1832,9 @@ export function createFeatures(api) {
         recoverable.length > 1
           ? `<details class="connection-choices deleted-choices"><summary>${t("Choose deleted objects")}</summary><fieldset class="frame-choices"><legend class="sr-only">${t("Deleted objects")}</legend><div class="slide-choices">${listed.map((i) => `<label><input type="checkbox" value="${escape(i.id)}" checked><span>${objectNameHTML(i, 120)}</span></label>`).join("")}</div>${unlisted.length ? `<p class="dialog-copy">${t("The first {shown} are listed; the other {rest} are recovered with them.").replace("{shown}", listed.length).replace("{rest}", unlisted.length)}</p>` : ""}</fieldset></details>`
           : ""
-      }${frames.length ? `${frameChoicesHTML(frames, "restore-frame", "Frame")}<button class="secondary" data-part="frame" ${readOnly() ? "disabled" : ""}>${t("Restore this frame")}</button>` : ""}`;
+      }${frames.length ? `${frameChoicesHTML(frames, "restore-frame", "Frame")}<button class="secondary" data-part="frame" ${readOnly() ? "disabled" : ""}>${t("Restore this frame")}</button>` : ""}${manageHTML(localId)}`;
       row.after(panel);
+      if (localId) manage(panel, localId);
       button.setAttribute("aria-expanded", "true");
       const chosenDeleted = () =>
         new Set([
@@ -1604,10 +1910,11 @@ export function createFeatures(api) {
             const covered = api.concealedIn
               ? new Set([...hidden, ...api.concealedIn(api.board())])
               : hidden;
-            const source = {
-              ...visible,
-              items: visible.items.filter((i) => !covered.has(i.id)),
-            };
+            const from = part === "deleted" ? recovering : visible,
+              source = {
+                ...from,
+                items: from.items.filter((i) => !covered.has(i.id)),
+              };
             // The workshop may have hidden the frame since these options
             // opened.
             if (part === "frame" && !source.items.some((i) => i.id === frameId))
@@ -1624,7 +1931,9 @@ export function createFeatures(api) {
           if (!done) return;
           try {
             if (!plan()) return;
-            await api.local.checkpoint(api.board(), "Before restoration");
+            await api.local.checkpoint(api.board(), "Before restoration", {
+              kept: true,
+            });
             const checked = plan();
             if (!checked) return;
             const { source, covered } = checked;
@@ -1634,6 +1943,7 @@ export function createFeatures(api) {
                 : part === "frame"
                   ? restoreFrame(api.board(), source, frameId, covered)
                   : recoverDeleted(api.board(), source, chosenDeleted());
+            const before = new Map(api.board().items.map((i) => [i.id, i]));
             api.replaceItems(result.items);
             shared?.note({
               at: onDevice ? null : at,
@@ -1641,12 +1951,34 @@ export function createFeatures(api) {
               objects: result.count,
             });
             d.close();
+            // What came back is selected and brought into view, so it can
+            // be found, checked, and moved or undone at once.
+            const back = api
+              .board()
+              .items.filter(
+                (i) => !before.has(i.id) || !sameObject(before.get(i.id), i),
+              );
+            if (back.length) {
+              api.select(new Set(back.map((i) => i.id)));
+              const box = bounds(back),
+                shown = api.viewBounds?.();
+              if (
+                shown &&
+                (box.x < shown.x ||
+                  box.y < shown.y ||
+                  box.x + box.w > shown.x + shown.w ||
+                  box.y + box.h > shown.y + shown.h)
+              )
+                api.focusRegion?.(box);
+              api.draw();
+            }
             api.toast(
               plural(
                 result.count,
                 "{count} object restored.",
                 "{count} objects restored.",
               ),
+              { label: "Undo", run: () => api.undo?.(), untilEdit: true },
             );
           } catch (error) {
             api.toast(error.message || "Could not restore this version.");
@@ -1695,17 +2027,31 @@ export function createFeatures(api) {
           return restoreBoard(api.board(), version, hidden);
         };
         if (!plan()) return;
-        await api.local.checkpoint(api.board(), "Before restoration");
+        await api.local.checkpoint(api.board(), "Before restoration", {
+          kept: true,
+        });
         const restored = plan();
         if (!restored) return;
+        // The record says how many objects the restoration changed, added
+        // or removed, not how many the board holds.
+        const before = new Map(api.board().items.map((i) => [i.id, i])),
+          after = new Map(restored.items.map((i) => [i.id, i]));
+        let changed = 0;
+        for (const [id, i] of before)
+          if (!after.has(id) || !sameObject(i, after.get(id))) changed++;
+        for (const id of after.keys()) if (!before.has(id)) changed++;
         api.restore(restored);
         shared?.note({
           at: onDevice ? null : at,
           scope: "board",
-          objects: restored.items.length,
+          objects: changed,
         });
         d.close();
-        api.toast("Version restored.");
+        api.toast("Version restored.", {
+          label: "Undo",
+          run: () => api.undo?.(),
+          untilEdit: true,
+        });
       } catch {
         api.toast("Could not restore this version.");
       } finally {
@@ -1745,7 +2091,10 @@ export function createFeatures(api) {
         const options = retained.nextElementSibling;
         // Dates, labels and counts can follow the interface language without
         // replacing buttons that are focused or awaiting a response.
-        retained.firstElementChild.replaceWith(node.firstElementChild);
+        const name = retained.firstElementChild,
+          fresh = node.firstElementChild;
+        if (name.innerHTML !== fresh.innerHTML)
+          name.innerHTML = fresh.innerHTML;
         const labels = node.querySelectorAll(".revision-actions button");
         retained
           .querySelectorAll(".revision-actions button")
@@ -1771,15 +2120,17 @@ export function createFeatures(api) {
       }
     }
     // Shared versions arrive a page at a time, newest first.
-    let sharedRows = [];
+    let sharedRows = [],
+      sharedCreated = 0;
     const renderShared = async (older = false) => {
       if (!onBoard()) return;
       const list = d.querySelector("#shared-revisions"),
         focusedBeforeLoad = document.activeElement;
       try {
-        const { versions, more } = await shared.list(
+        const { versions, more, created } = await shared.list(
           older ? sharedRows.at(-1)?.at : undefined,
         );
+        if (Number.isSafeInteger(created)) sharedCreated = created;
         if (!d.isConnected || !onBoard()) return;
         // Only well-formed versions are shown; the list comes from the
         // board's worker and becomes markup.
@@ -1797,12 +2148,22 @@ export function createFeatures(api) {
         showRevisionRows(
           list,
           rows.length
-            ? rows
-                .map(
-                  (v, n) =>
-                    `<div class="revision-row"><div><strong id="shared-version-${v.at}">${when(v.at)}</strong><small><span data-user-content>${escape(v.authors.map(String).join(", "))}</span> · ${v.edits} ${t(v.edits === 1 ? "edit" : "edits")}${n === 0 ? ` · ${t("Current version")}` : ""}</small></div><div class="revision-actions"><button class="secondary" data-shared="${v.at}" aria-describedby="shared-version-${v.at}" ${n === 0 || readOnly() ? "disabled" : ""}>${t("Restore version")}</button><button class="text-btn" data-shared-options="${v.at}" aria-describedby="shared-version-${v.at}" aria-expanded="false">${t("More options")}</button></div></div>`,
-                )
-                .join("") +
+            ? byDay(
+                rows.map((v, n) => ({ ...v, n })),
+                (v, time, day) => {
+                  const authors = `<span data-user-content>${escape(v.authors.map(String).join(", "))}</span>`,
+                    title = v.original ? t("Original version") : time,
+                    details = v.original
+                      ? `${time}${v.authors.length ? ` · ${authors}` : ""}`
+                      : `${authors} · ${v.edits} ${t(v.edits === 1 ? "edit" : "edits")}${v.n === 0 ? ` · ${t("Current version")}` : ""}`;
+                  sources.set(`s:${v.at}`, {
+                    title,
+                    meta: v.original ? `${day}, ${time}` : day,
+                    load: () => shared.load(v.at),
+                  });
+                  return `<div class="revision-row"><button type="button" class="revision-pick" id="shared-version-${v.at}" data-pick="s:${v.at}" aria-pressed="false"><strong>${escape(title)}</strong><small>${details}</small></button><div class="revision-actions"><button class="secondary" data-shared="${v.at}" aria-describedby="shared-version-${v.at}" ${v.n === 0 || readOnly() ? "disabled" : ""}>${t("Restore version")}</button><button class="text-btn" data-shared-options="${v.at}" aria-describedby="shared-version-${v.at}" aria-expanded="false">${t("More options")}</button></div></div>`;
+                },
+              ) +
                 (more === true
                   ? `<button class="text-btn" id="shared-older">${t("Show older versions")}</button>`
                   : "")
@@ -1824,8 +2185,25 @@ export function createFeatures(api) {
         });
         list.querySelectorAll("[data-shared-options]").forEach((btn) => {
           const at = Number(btn.dataset.sharedOptions);
-          btn.onclick = () => options(btn, () => shared.load(at), at);
+          // A version's edits began after the one before it in the list.
+          const n = sharedRows.findIndex((v) => v.at === at),
+            after = sharedRows[n + 1]?.at ?? sharedCreated;
+          btn.onclick = () =>
+            options(
+              btn,
+              () => cachedLoad(`s:${at}`, () => shared.load(at)),
+              at,
+              false,
+              `s:${at}`,
+              shared.removed && !sharedRows[n]?.original
+                ? () => cachedLoad(`r:${at}`, () => shared.removed(at, after))
+                : null,
+            );
         });
+        list.querySelectorAll("[data-pick]").forEach((btn) => {
+          btn.onclick = () => pick(btn.dataset.pick);
+        });
+        markPicked();
         holdControls();
         api.refresh?.();
       } catch (error) {
@@ -1838,26 +2216,52 @@ export function createFeatures(api) {
         list.replaceChildren(alert);
       }
     };
+    // Versions on this device, newest first, read again after each change
+    // to them; the named-only filter shows them again without reading.
+    let revisions = [];
     const render = async () => {
       await api.waitForSaves();
       if (!d.isConnected || !onBoard()) return;
-      const revisions = (await api.local.revisions(boardId)).sort(
+      const read = (await api.local.revisions(boardId)).sort(
         (a, b) => b.created - a.created,
       );
       if (!d.isConnected || !onBoard()) return;
+      revisions = read;
+      showLocal();
+    };
+    // What the app names on its own, as opposed to what people name.
+    const SAFETY_LABELS = new Set([
+      "Before restoration",
+      "Before deletion",
+      "Unsaved changes from another tab",
+    ]);
+    function showLocal() {
+      const namedOnly = d.querySelector("#history-named").checked,
+        shown = namedOnly ? revisions.filter(keptRevision) : revisions;
       showRevisionRows(
         d.querySelector("#local-revisions"),
-        revisions.length
-          ? revisions
-              .map(
-                (r) =>
-                  `<div class="revision-row"><div id="local-version-${escape(r.id)}"><strong data-user-content>${escape(t(r.label))}</strong><small>${when(r.created)} · ${plural(r.board.items.length, "{count} object", "{count} objects")}</small></div><div class="revision-actions"><button class="secondary" data-revision="${r.id}" aria-describedby="local-version-${escape(r.id)}" ${readOnly() ? "disabled" : ""}>${t("Restore version")}</button><button class="text-btn" data-revision-options="${r.id}" aria-describedby="local-version-${escape(r.id)}" aria-expanded="false">${t("More options")}</button></div></div>`,
-              )
-              .join("")
-          : `<p>${t("No saved versions yet.")}</p>`,
+        shown.length
+          ? byDay(
+              shown.map((r) => ({ ...r, at: r.created })),
+              (r, time, day) => {
+                const named = keptRevision(r),
+                  label = escape(t(r.label)),
+                  count = plural(
+                    r.board.items.length,
+                    "{count} object",
+                    "{count} objects",
+                  );
+                sources.set(`l:${r.id}`, {
+                  title: named ? t(r.label) : time,
+                  meta: named ? `${day}, ${time}` : day,
+                  load: async () => find(r.id).board,
+                });
+                return `<div class="revision-row${named ? " named" : ""}"><button type="button" class="revision-pick" id="local-version-${escape(r.id)}" data-pick="l:${escape(r.id)}" aria-pressed="false"><strong>${named ? `<i data-lucide="${SAFETY_LABELS.has(r.label) ? "history" : "bookmark"}" aria-hidden="true"></i><span data-user-content>${label}</span>` : escape(time)}</strong><small>${named ? `${escape(time)} · ` : ""}${count}</small></button><div class="revision-actions"><button class="secondary" data-revision="${r.id}" aria-describedby="local-version-${escape(r.id)}" ${readOnly() ? "disabled" : ""}>${t("Restore version")}</button><button class="text-btn" data-revision-options="${r.id}" aria-describedby="local-version-${escape(r.id)}" aria-expanded="false">${t("More options")}</button></div></div>`;
+              },
+            )
+          : `<p>${t(namedOnly ? "No named versions yet." : "No saved versions yet.")}</p>`,
         "data-revision",
       );
-      const find = (id) => revisions.find((r) => r.id === id);
       d.querySelectorAll("[data-revision]").forEach(
         (btn) =>
           (btn.onclick = () =>
@@ -1876,12 +2280,21 @@ export function createFeatures(api) {
               async () => find(btn.dataset.revisionOptions).board,
               find(btn.dataset.revisionOptions).created,
               true,
+              `l:${btn.dataset.revisionOptions}`,
             )),
       );
+      d.querySelectorAll("#local-revisions [data-pick]").forEach((btn) => {
+        btn.onclick = () => pick(btn.dataset.pick);
+      });
+      markPicked();
       holdControls();
       api.refresh?.();
-    };
+    }
+    const find = (id) => revisions.find((r) => r.id === id);
+    d.querySelector("#history-named").onchange = showLocal;
     d.querySelector("#checkpoint-create").onclick = async (e) => {
+      // The form only lets Enter in the name field press this button.
+      e.preventDefault?.();
       // One checkpoint per press: a double click must not save two.
       const button = e.currentTarget;
       if (button.disabled || restoreState.pending || !onBoard()) return;
@@ -1890,6 +2303,7 @@ export function createFeatures(api) {
         await api.local.checkpoint(
           api.board(),
           d.querySelector("#checkpoint-label").value.trim() || "Checkpoint",
+          { kept: true },
         );
         api.toast("Checkpoint saved.");
         await render();

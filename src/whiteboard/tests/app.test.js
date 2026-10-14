@@ -5909,6 +5909,235 @@ test("French controls preserve user content and switch back to English", async (
   }
 });
 
+test("version history previews a chosen version with what changed since, and filters named versions", async () => {
+  const app = await setup();
+  const { doc, click, tick } = app;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="history"]');
+    // The keyboard starts on naming a version, not in its field.
+    assert.equal(doc.activeElement.tagName, "SUMMARY");
+    doc.querySelector("#checkpoint-label").value = "One idea";
+    await click("#checkpoint-create");
+    await click("dialog .dialog-header button");
+    await click('[data-action="duplicate"]');
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="history"]');
+    for (let n = 0; n < 20 && !doc.querySelector(".revision-row"); n++)
+      await tick();
+    const row = [
+      ...doc.querySelectorAll("#local-revisions .revision-row"),
+    ].find((r) => r.textContent.includes("One idea"));
+    assert.ok(row.classList.contains("named"));
+    assert.ok(doc.querySelector("#local-revisions .revision-day"));
+    const canvas = doc.querySelector("#history-preview-canvas");
+    assert.equal(canvas.hidden, true);
+    row.querySelector("[data-pick]").click();
+    for (let n = 0; n < 5; n++) await tick();
+    assert.equal(canvas.hidden, false);
+    assert.equal(
+      row.querySelector("[data-pick]").getAttribute("aria-pressed"),
+      "true",
+    );
+    assert.equal(
+      doc.querySelector("#history-preview-title").textContent,
+      "One idea",
+    );
+    const changes = doc.querySelector("#history-changes").textContent;
+    assert.match(changes, /1 object/);
+    assert.match(changes, /1 added since/);
+    assert.match(canvas.getAttribute("aria-label"), /One idea/);
+    // Only named versions, when asked.
+    const named = doc.querySelector("#history-named");
+    named.checked = true;
+    named.dispatchEvent(new doc.defaultView.Event("change"));
+    const labels = [
+      ...doc.querySelectorAll("#local-revisions .revision-row"),
+    ].map((r) => r.classList.contains("named"));
+    assert.ok(labels.length >= 1);
+    assert.ok(labels.every(Boolean));
+    doc.querySelector("dialog[open]").close();
+  } finally {
+    await app.close();
+  }
+});
+
+test("recovered objects are selected and the toast offers to undo the recovery", async () => {
+  const app = await setup();
+  const { doc, click, tick } = app;
+  const count = () => doc.querySelectorAll("#board-outline [data-id]").length;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="history"]');
+    doc.querySelector("#checkpoint-label").value = "With the note";
+    await click("#checkpoint-create");
+    await click("dialog .dialog-header button");
+    await click('[data-action="delete"]');
+    assert.equal(count(), 0);
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="history"]');
+    for (let n = 0; n < 20 && !doc.querySelector(".revision-row"); n++)
+      await tick();
+    const row = [
+      ...doc.querySelectorAll("#local-revisions .revision-row"),
+    ].find((r) => r.textContent.includes("With the note"));
+    await row.querySelector("[data-revision-options]").onclick();
+    await click('[data-part="deleted"]');
+    for (let n = 0; n < 5; n++) await tick();
+    assert.equal(count(), 1);
+    assert.equal(doc.querySelector("#selection-tools").hidden, false);
+    const undo = doc.querySelector(".toast-action");
+    assert.equal(undo.textContent, "Undo");
+    undo.click();
+    await tick();
+    assert.equal(count(), 0);
+    // Once something else changes the board, or the board is left, the
+    // notification's Undo would undo something else, so it goes.
+    const visible = () =>
+      doc.querySelector("#toast").classList.contains("visible");
+    for (const then of ["edit", "leave"]) {
+      await click('[data-action="more-tools"]');
+      await click('[data-feature="history"]');
+      for (let n = 0; n < 20 && !doc.querySelector(".revision-row"); n++)
+        await tick();
+      const again = [
+        ...doc.querySelectorAll("#local-revisions .revision-row"),
+      ].find((r) => r.textContent.includes("With the note"));
+      await again.querySelector("[data-revision-options]").onclick();
+      await click('[data-part="deleted"]');
+      for (let n = 0; n < 5; n++) await tick();
+      assert.ok(visible());
+      if (then === "edit") await click('[data-action="add-note"]');
+      else await click('[data-action="home"]');
+      assert.equal(visible(), false, then);
+      // The new note and the recovery are undone, so the note can be
+      // recovered again.
+      if (then === "edit") {
+        await click('[data-action="undo"]');
+        await click('[data-action="undo"]');
+        assert.equal(count(), 0);
+      }
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("versions on this device can be named, renamed and deleted from their options", async () => {
+  const app = await setup();
+  const { doc, click, tick } = app;
+  const rows = () =>
+    [...doc.querySelectorAll("#local-revisions .revision-pick")].map((r) =>
+      r.textContent.trim(),
+    );
+  const settle = async () => {
+    for (let n = 0; n < 10; n++) await tick();
+  };
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="history"]');
+    await settle();
+    const id = doc.querySelector("[data-revision-options]").dataset
+      .revisionOptions;
+    await doc.querySelector(`[data-revision-options="${id}"]`).onclick();
+    // An automatic version has no name to delete it by, only to give it.
+    assert.equal(doc.querySelector('[data-manage="delete"]'), null);
+    await click('[data-manage="name"]');
+    const name = doc.querySelector(".revision-rename input");
+    assert.equal(doc.activeElement, name);
+    name.value = "Kickoff";
+    doc
+      .querySelector(".revision-rename")
+      .dispatchEvent(new doc.defaultView.Event("submit", { cancelable: true }));
+    await settle();
+    assert.ok(rows()[0].startsWith("Kickoff"));
+    assert.equal(doc.activeElement.dataset.revisionOptions, id);
+    await doc.querySelector(`[data-revision-options="${id}"]`).onclick();
+    await click('[data-manage="delete"]');
+    assert.equal(doc.querySelector(".revision-delete").hidden, false);
+    await click('[data-manage="confirm"]');
+    await settle();
+    assert.ok(!rows().some((r) => r.startsWith("Kickoff")));
+    assert.equal(doc.querySelector(`[data-revision-options="${id}"]`), null);
+  } finally {
+    await app.close();
+  }
+});
+
+test("version history opens from the header and with Ctrl/Cmd+Alt/Option+Shift+H", async () => {
+  const app = await setup();
+  const { doc, w, click, tick } = app;
+  try {
+    await click('[data-action="new"]');
+    const open = () =>
+      doc.querySelector("dialog[open]")?.getAttribute("aria-label");
+    await click('.editor-actions [data-action="history"]');
+    assert.equal(open(), "Version history");
+    doc.querySelector("dialog[open]").close();
+    await tick();
+    doc.querySelector("#canvas").dispatchEvent(
+      new w.KeyboardEvent("keydown", {
+        key: "H",
+        code: "KeyH",
+        ctrlKey: true,
+        altKey: true,
+        shiftKey: true,
+        bubbles: true,
+      }),
+    );
+    await tick();
+    assert.equal(open(), "Version history");
+    doc.querySelector("dialog[open]").close();
+    await tick();
+  } finally {
+    await app.close();
+  }
+});
+
+test("moving a board to the trash can be undone from the notification", async () => {
+  const app = await setup();
+  const { doc, click, tick } = app;
+  const cards = () => doc.querySelectorAll(".board-card").length;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="home"]');
+    await click('[data-action="new"]');
+    await click('[data-action="home"]');
+    assert.equal(cards(), 2);
+    const first = doc.querySelector("[data-more]").dataset.more;
+    await click(`[data-more="${first}"]`);
+    await click("#remove-board");
+    await click("#confirm-delete");
+    assert.equal(cards(), 1);
+    const undo = doc.querySelector("#toast .toast-action");
+    assert.match(doc.querySelector("#toast").textContent, /Moved to the trash/);
+    undo.click();
+    for (let n = 0; n < 5; n++) await tick();
+    assert.equal(cards(), 2);
+    assert.equal(doc.activeElement.dataset.more, first);
+    await click('[data-filter="trash"]');
+    assert.equal(cards(), 0);
+    // A board in the trash says when it went there.
+    await click('[data-filter="all"]');
+    await click(`[data-more="${first}"]`);
+    await click("#remove-board");
+    await click("#confirm-delete");
+    await click('[data-filter="trash"]');
+    assert.match(
+      doc.querySelector(".board-card .meta-date").textContent,
+      /^Deleted /,
+    );
+  } finally {
+    await app.close();
+  }
+});
+
 test("checkpoints restore content and trash preserves boards for recovery", async () => {
   const app = await setup();
   const { doc, click, tick } = app;
@@ -5929,8 +6158,19 @@ test("checkpoints restore content and trash preserves boards for recovery", asyn
       r.textContent.includes("One idea"),
     );
     assert.ok(row);
-    row.querySelector("button").click();
+    row.querySelector("[data-revision]").click();
     await tick();
+    assert.equal(count(), 1);
+    // Restoring is one step: Undo takes it back, and the steps before it
+    // are still there.
+    assert.equal(doc.querySelector('[data-action="undo"]').disabled, false);
+    await click('[data-action="undo"]');
+    assert.equal(count(), 2);
+    await click('[data-action="undo"]');
+    assert.equal(count(), 1);
+    await click('[data-action="redo"]');
+    assert.equal(count(), 2);
+    await click('[data-action="redo"]');
     assert.equal(count(), 1);
     await click('[data-action="home"]');
     await click("[data-more]");
@@ -25307,7 +25547,7 @@ test("a board open in two tabs refuses a save over the other tab's edits instead
     assert.equal((await stored()).items.length, 2, "The newer copy stays");
     assert.equal(
       first.doc.querySelector("#toast").textContent,
-      "This board changed in another tab. Reload to see the latest copy.",
+      "This board changed in another tab. Your changes here are kept in Version history. Reload to see the latest copy.",
     );
     assert.equal(
       first.doc.querySelector("#save-state").textContent,
@@ -25316,6 +25556,84 @@ test("a board open in two tabs refuses a save over the other tab's edits instead
   } finally {
     await second?.close();
     await first.close();
+  }
+});
+
+test("edits a save refused for another tab's copy are kept as one version that a reload can restore", async () => {
+  const indexedDB = new IDBFactory();
+  const first = await setup(undefined, { indexedDB });
+  let second, reloaded;
+  try {
+    const addNote = async (app) => {
+      const canvas = app.doc.querySelector("#canvas");
+      canvas.focus();
+      canvas.dispatchEvent(
+        new app.w.KeyboardEvent("keydown", { key: "n", bubbles: true }),
+      );
+      await app.tick();
+      app.doc
+        .querySelector("#canvas-text-editor")
+        .dispatchEvent(
+          new app.w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        );
+      await app.tick();
+      await new Promise((r) => setTimeout(r, 100));
+    };
+    const rows = async (store) => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open("whiteboard-v1");
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const result = await new Promise((resolve, reject) => {
+        const request = db.transaction(store).objectStore(store).getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      db.close();
+      return result;
+    };
+    const refused = async () =>
+      (await rows("revisions")).filter(
+        (r) => r.label === "Unsaved changes from another tab",
+      );
+    await first.click('[data-action="new"]');
+    await addNote(first);
+    const id = (await rows("boards"))[0].id;
+    second = await setup(undefined, { indexedDB });
+    await second.click(`[data-open="${id}"]`);
+    await addNote(second);
+    // The first tab goes on editing its older copy: each save is refused,
+    // and one version holds the latest of what it refused.
+    await addNote(first);
+    await addNote(first);
+    await addNote(first);
+    assert.equal((await rows("boards"))[0].items.length, 2);
+    let kept = await refused();
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0].board.items.length, 4);
+    assert.equal(kept[0].kept, true);
+    assert.equal(
+      first.doc.querySelector("#toast").textContent,
+      "This board changed in another tab. Your changes here are kept in Version history. Reload to see the latest copy.",
+    );
+    // Reloaded, the tab shows the other tab's copy, and its own edits are
+    // in Version history.
+    await first.close();
+    reloaded = await setup(undefined, { indexedDB });
+    await reloaded.click(`[data-open="${id}"]`);
+    await reloaded.click('[data-action="more-tools"]');
+    await reloaded.click('[data-feature="history"]');
+    const row = () =>
+      [...reloaded.doc.querySelectorAll("#local-revisions .revision-row")].find(
+        (r) => r.textContent.includes("Unsaved changes from another tab"),
+      );
+    for (let n = 0; n < 40 && !row(); n++) await reloaded.tick();
+    assert.match(row()?.textContent || "", /4 objects/);
+  } finally {
+    await reloaded?.close();
+    await second?.close();
+    await first.close().catch(() => {});
   }
 });
 
@@ -28018,8 +28336,9 @@ test("restoring a version never changes content hidden from a participant", asyn
       doc.querySelector(".revision-options").textContent,
       /Answer key/,
     );
-    // Restoring the oldest version, from before the hidden frame, restores
-    // what this person sees and leaves what is hidden from them as it is.
+    // Restoring the oldest version, the board as it was created, before
+    // the hidden frame, restores what this person sees and leaves what is
+    // hidden from them as it is.
     const oldest = rows.at(-1).querySelector("[data-shared]");
     oldest.click();
     for (let n = 0; n < 40; n++) await app.tick();
@@ -28030,7 +28349,7 @@ test("restoring a version never changes content hidden from a participant", asyn
     sdoc.destroy();
     assert.deepEqual(
       snap.items.map((i) => i.text),
-      ["Ideas", "Warm-up 2", "Answer key frame", "Answer key v2"],
+      ["Ideas", "Warm-up", "Answer key frame", "Answer key v2"],
     );
     assert.ok(
       snap.items.some((i) => i.text === "Answer key v2"),

@@ -84,3 +84,114 @@ test("versions written within one millisecond keep the order they were made in",
   assert.equal(new Set(revisions.map((r) => r.created)).size, 5);
   assert.ok(revisions.every((r) => r.created - fixed < 5));
 });
+
+test("versions saved with their pictures inline keep working after the upgrade and are pruned as before", async (t) => {
+  globalThis.indexedDB = new IDBFactory();
+  const b = board("Older photos");
+  const src = "data:image/jpeg;base64," + "A".repeat(100_000);
+  b.items.push(item("image", 0, 0, { src }));
+  let now = Date.UTC(2026, 9, 9, 9, 0);
+  t.mock.method(Date, "now", () => (now += 2000));
+  // The database as the release before kept it: each version whole.
+  const legacy = await new Promise((resolve, reject) => {
+    const request = indexedDB.open("whiteboard-v1", 3);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore("boards", { keyPath: "id" });
+      request.result
+        .createObjectStore("revisions", { keyPath: "id" })
+        .createIndex("boardId", "boardId");
+      request.result.createObjectStore("templates", { keyPath: "id" });
+      request.result
+        .createObjectStore("collaboration", { keyPath: "id" })
+        .createIndex("scope", "scope");
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise((resolve, reject) => {
+    const tx = legacy.transaction("revisions", "readwrite");
+    for (let n = 0; n < 20; n++) {
+      const revision = {
+        id: crypto.randomUUID(),
+        boardId: b.id,
+        created: (now += 2000),
+        label: n ? "Board edit" : "Before the review",
+        board: structuredClone(b),
+        kept: !n,
+      };
+      revision.bytes = JSON.stringify(revision).length * 2;
+      tx.objectStore("revisions").put(revision);
+    }
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  legacy.close();
+  const { local } = await import("../src/storage.js?legacy=1");
+  let revisions = await local.revisions(b.id);
+  assert.equal(revisions.length, 20);
+  assert.ok(revisions.every((r) => r.board.items[0].src === src));
+  for (let n = 0; n < 30; n++) await local.checkpoint(b, "Board edit");
+  revisions = await local.revisions(b.id);
+  // The older inline versions give way to newer ones like any others; the
+  // named one stays.
+  assert.equal(revisions.length, 31);
+  assert.ok(revisions.some((r) => r.label === "Before the review"));
+  assert.ok(revisions.every((r) => r.board.items[0].src === src));
+});
+
+test("a tab still running the release before keeps its database open and goes on saving", async (t) => {
+  globalThis.indexedDB = new IDBFactory();
+  let now = Date.UTC(2026, 9, 9, 9, 0);
+  t.mock.method(Date, "now", () => (now += 2000));
+  // The release before opens the database at version 3 and lets it go when
+  // a newer release asks for a newer version.
+  const old = await new Promise((resolve, reject) => {
+    const request = indexedDB.open("whiteboard-v1", 3);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore("boards", { keyPath: "id" });
+      request.result
+        .createObjectStore("revisions", { keyPath: "id" })
+        .createIndex("boardId", "boardId");
+      request.result.createObjectStore("templates", { keyPath: "id" });
+      request.result
+        .createObjectStore("collaboration", { keyPath: "id" })
+        .createIndex("scope", "scope");
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  let closed = false;
+  old.onversionchange = () => {
+    old.close();
+    closed = true;
+  };
+  const { local } = await import("../src/storage.js?old-tab=1");
+  const b = board("Photos");
+  const src = "data:image/jpeg;base64," + "A".repeat(100_000);
+  b.items.push(item("image", 0, 0, { src }));
+  for (let n = 0; n < 3; n++) await local.checkpoint(b, "Board edit");
+  await local.save(b);
+  assert.ok(
+    (await local.revisions(b.id)).every((r) => r.board.items[0].src === src),
+  );
+  assert.equal(closed, false, "The older tab's connection stays open");
+  // It still saves, and the board's versions it lists are versions only.
+  const listed = await new Promise((resolve, reject) => {
+    const tx = old.transaction(["boards", "revisions"], "readwrite");
+    tx.objectStore("boards").put({ ...b, title: "Saved by the older tab" });
+    const read = tx.objectStore("revisions").index("boardId").getAll(b.id);
+    tx.oncomplete = () => resolve(read.result);
+    tx.onerror = () => reject(tx.error);
+  });
+  assert.equal(listed.length, 3);
+  assert.ok(listed.every((r) => r.boardId === b.id && r.board));
+  old.close();
+  // As it would be after a reload of the older tab.
+  const reopened = await new Promise((resolve, reject) => {
+    const request = indexedDB.open("whiteboard-v1", 3);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  assert.equal(reopened.version, 3);
+  reopened.close();
+});

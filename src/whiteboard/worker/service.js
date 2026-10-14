@@ -17,7 +17,7 @@ import {
 import { SharedDocument } from "../src/collaboration/document.js";
 import { sameJSON } from "../src/same-json.js";
 import { ListingQueue } from "./listings.js";
-import { oversized } from "../src/model.js";
+import { oversized, MAX_OBJECTS } from "../src/model.js";
 import { providerGroup } from "../src/content/providers.js";
 import { assignmentChanges } from "../src/planning/task.js";
 import { capturedTaskTitle } from "../src/planning/task-title.js";
@@ -380,11 +380,14 @@ export function boardSummary(board) {
     content: all.join("\n"),
   };
 }
-// Edits form one version until a pause of five minutes, or until the
-// version has run a quarter of an hour, so a long session leaves points to
-// go back to inside it.
+// Edits form one version until a pause of five minutes, and a version ends
+// with each quarter of an hour by the clock, so a long session leaves
+// points to go back to inside it. Where versions split then depends only
+// on the edits on either side, not on where the session began, so a page
+// of versions is read without reading back to its session's start.
 const VERSION_GAP = 5 * 60_000,
   VERSION_SPAN = 15 * 60_000;
+const quarter = (at) => Math.floor(at / VERSION_SPAN);
 // Group the edit log, oldest first, into versions, newest first.
 export function historyVersions(records, gap = VERSION_GAP, limit = 300) {
   const versions = [];
@@ -393,7 +396,7 @@ export function historyVersions(records, gap = VERSION_GAP, limit = 300) {
     if (
       !current ||
       r.at - current.until > gap ||
-      r.at - current.start > VERSION_SPAN
+      quarter(r.at) !== quarter(current.start)
     ) {
       current = { start: r.at, until: r.at, edits: 0, authors: [] };
       versions.push(current);
@@ -583,6 +586,16 @@ export class BoardService {
   async loadAt(room, at) {
     const meta = await this.kv.get(`wb:${room}:meta`);
     if (!meta) fail(404, "Board not found.");
+    // The moment the board was created, or any before, is its starting
+    // content, without edits stamped in that same millisecond or, by a
+    // clock running behind, earlier; the version list shows those just
+    // after it.
+    if (at <= meta.created) {
+      const doc = new SharedDocument(
+        decode(await this.cachedFile(meta.snapshot)),
+      );
+      return { doc, meta, count: 0 };
+    }
     const latest = await this.kv.get(`wb:${room}:cp`);
     const checkpoint =
       latest && latest.at <= at
@@ -1618,7 +1631,7 @@ export class BoardService {
     await this.setRecord(
       room,
       `wb:${room}:meta`,
-      { ...latest, owner: target },
+      { ...latest, owner: target, creator: latest.creator ?? latest.owner },
       { disableSharing: true },
     );
     await this.org.registerBoard(room, { owner: target, ownerName: username });
@@ -1683,6 +1696,7 @@ export class BoardService {
       throw error;
     } finally {
       if (!refused) await this.org.touch(user);
+      if (input?.op !== "commit") await this.writeDueActivity().catch(() => {});
       await this.org.flush();
       // Retention and scheduled reports never hold up saving, synchronizing
       // or checking in.
@@ -1753,6 +1767,8 @@ export class BoardService {
             await this.writeFile(snapshot, input.update);
             meta = {
               owner: user.uuid,
+              // Kept through transfers, for the original version's author.
+              creator: user.uuid,
               snapshot,
               keys,
               created: this.now(),
@@ -2221,7 +2237,11 @@ export class BoardService {
       }
       return { ok: true };
     }
-    if (input.op === "history.list" || input.op === "history.state")
+    if (
+      input.op === "history.list" ||
+      input.op === "history.state" ||
+      input.op === "history.removed"
+    )
       this.perMinute(`history|${room}|${user.uuid}`, HISTORY_READ_LIMIT);
     if (input.op === "history.list") {
       // Edit records hold the edits themselves, but their keys name the time
@@ -2233,42 +2253,46 @@ export class BoardService {
         ]),
       );
       const before = Number(input.before);
+      // The board's starting content is the version at its creation, so
+      // edits stamped then, or before by a clock running behind, are shown
+      // just after it.
+      const born = Number.isFinite(meta.created) ? meta.created : null;
+      const after = (at) => (born === null ? at : Math.max(at, born + 1));
       const record = (row) => {
         const parts = (typeof row === "string" ? row : row.key)
           .slice(`${prefix}log:`.length)
           .split(":");
         const author = parts.at(-2);
         return {
-          at: Date.parse(parts.slice(0, -2).join(":")),
+          at: after(Date.parse(parts.slice(0, -2).join(":"))),
           author,
           username: names.get(author) || "",
         };
       };
       // Keys are read newest first, a page at a time, until the versions
-      // this page shows, and the one after them for `more`, are complete.
-      // A pause ends a session, which holds one version or, once it runs
-      // long, several; where those split depends on where the session
-      // began, so a session's versions are counted once it is complete.
-      // Older edits are not read, however long the board's history.
+      // this page shows, and the one after them for `more`, are complete:
+      // a version is once an older edit is read before a pause or in an
+      // earlier quarter of an hour. Older edits are not read, however long
+      // the board's history.
       const legacy = (await this.list(`${prefix}op:`)).map((r) => ({
-        at: r.value.at,
+        at: after(r.value.at),
         author: r.value.author,
         username: r.value.username,
       }));
-      const logged = [];
-      let cursor,
-        complete = 0,
-        session = [],
-        last = null;
-      const close = () => {
-        complete += historyVersions(
-          session.reverse(),
-          undefined,
-          Infinity,
-        ).filter((v) => !Number.isFinite(before) || v.at < before).length;
-        session = [];
-      };
-      do {
+      // A page with `more` also gives `next`, which the app hands back with
+      // the next page's `before` so that page is read from where this one
+      // ended rather than from the newest edit. Puter's listing position
+      // says nothing sure once records are added or removed, so it is used
+      // only if the first key it gives is no older than `before`: nothing
+      // older can then have been passed over. Otherwise, or if Puter
+      // refuses it, the page is read from the newest edit.
+      const resume =
+        Number.isFinite(before) &&
+        typeof input.cursor === "string" &&
+        input.cursor.length <= 4096
+          ? input.cursor
+          : undefined;
+      const read = async (cursor) => {
         const page = await this.listPage({
           pattern: `${prefix}log:`,
           returnValues: false,
@@ -2276,20 +2300,72 @@ export class BoardService {
           reverse: true,
           ...(cursor ? { cursor } : {}),
         });
-        for (const row of Array.isArray(page) ? page : page.items) {
+        return { rows: Array.isArray(page) ? page : page.items, page };
+      };
+      const logged = [],
+        starts = new Map();
+      let cursor = resume,
+        resumed = resume !== undefined,
+        complete = 0,
+        session = [],
+        start,
+        last = null;
+      const close = () => {
+        const versions = historyVersions(
+          session.reverse(),
+          undefined,
+          Infinity,
+        );
+        if (versions.length) starts.set(versions[0].at, start);
+        complete += versions.filter(
+          (v) => !Number.isFinite(before) || v.at < before,
+        ).length;
+        session = [];
+      };
+      do {
+        let found = resumed ? await read(cursor).catch(() => null) : null;
+        if (
+          resumed &&
+          !(found?.rows.length && record(found.rows[0]).at >= before)
+        )
+          found = null;
+        if (!found) {
+          if (resumed) cursor = undefined;
+          found = await read(cursor);
+        }
+        resumed = false;
+        const { rows, page } = found;
+        for (const row of rows) {
           const r = record(row);
           if (!Number.isFinite(r.at)) continue;
-          // A pause closes the session holding the newer edits.
-          if (last !== null && last - r.at > VERSION_GAP) close();
+          // A pause, or the quarter of an hour before, closes the version
+          // holding the newer edits.
+          if (
+            last !== null &&
+            (last - r.at > VERSION_GAP || quarter(last) !== quarter(r.at))
+          )
+            close();
+          if (!session.length) start = cursor;
           session.push(r);
           last = r.at;
           logged.push(r);
         }
         cursor = page.cursor;
       } while (cursor && complete <= 300);
+      // Once the oldest edit is read, the board as it was created comes
+      // last, so content that was there from the start, as from an import,
+      // a template, or a copy, can be restored even if it was soon removed.
+      const creator = meta.creator || meta.owner;
+      const original =
+        !cursor && born !== null && legacy.length + logged.length > 0
+          ? { creator, at: born }
+          : null;
       // Administrators can edit without a membership; their names come from
       // their organization records.
-      for (const author of new Set(logged.map((r) => r.author)))
+      for (const author of new Set([
+        ...logged.map((r) => r.author),
+        ...(original ? [creator] : []),
+      ]))
         if (!names.has(author)) {
           const account = await this.org.user(author).catch(() => null);
           names.set(author, account?.username || "");
@@ -2300,23 +2376,40 @@ export class BoardService {
             names.set(author, (await this.org.accountOwner()).username || "");
         }
       for (const r of logged) r.username = names.get(r.author) || "";
+      if (original) original.username = names.get(creator) || "";
       // On a board that takes anonymous notes, votes or answers, who edited
       // when would tell participants who wrote them, so only its owner and
       // facilitators see names; everyone else sees "Participant".
       if (!canManage(member.role) && (await this.anonymousInput(room, meta)))
-        for (const r of [...legacy, ...logged]) r.username = "";
+        for (const r of [...legacy, ...logged, ...(original ? [original] : [])])
+          r.username = "";
       const records = [...legacy, ...logged]
         .filter((v) => Number.isFinite(v.at))
         .sort((a, b) => a.at - b.at);
       // Newest first, a page at a time: `before` asks for the versions
       // older than the last one shown.
-      const older = historyVersions(records, undefined, Infinity).filter(
-        (v) => !Number.isFinite(before) || v.at < before,
-      );
+      const older = [
+        ...historyVersions(records, undefined, Infinity),
+        ...(original
+          ? [
+              {
+                start: born,
+                until: born,
+                edits: 0,
+                authors: [original.username || "Participant"],
+                at: born,
+                original: true,
+              },
+            ]
+          : []),
+      ].filter((v) => !Number.isFinite(before) || v.at < before);
+      const versions = older.slice(0, 300),
+        next = older.length > 300 && starts.get(versions.at(-1).at);
       return {
         created: meta.created,
-        versions: older.slice(0, 300),
+        versions,
         more: older.length > 300,
+        ...(next ? { next } : {}),
       };
     }
     if (input.op === "history.state") {
@@ -2329,21 +2422,107 @@ export class BoardService {
         doc.destroy();
       }
     }
+    // Objects that came and went within a version: added, or there at the
+    // version before (`after`), and removed by the version's time (`at`),
+    // each as it last stood. Neither version holds them, so recovering
+    // them needs the edits in between. A version lies within one quarter
+    // of an hour, so no more than that is replayed whatever `after` says.
+    // Like a version's state, they come as a board's objects for the app
+    // to filter; those the workshop hid from this person when they were
+    // removed are left out here, since the board then is not sent.
+    if (input.op === "history.removed") {
+      const at = Number(input.at),
+        after = Number(input.after);
+      if (!Number.isFinite(at) || !Number.isFinite(after) || after >= at)
+        fail(400, "Choose a version.");
+      const from = Math.max(after, quarter(at) * VERSION_SPAN - 1);
+      const { doc } = await this.loadAt(room, from);
+      try {
+        const removed = new Map(),
+          manager = canManage(member.role);
+        let tags = new Map();
+        doc.watchRemovals((items, before) => {
+          tags = before.tags;
+          let hidden = null;
+          if (before.workshop) {
+            const c = concealment(
+              { workshop: before.workshop, items: before.items },
+              user.uuid,
+              manager,
+            );
+            hidden = new Set([...c.notes, ...c.frames, ...c.hidden]);
+          }
+          for (const item of items)
+            if (hidden?.has(item.id)) removed.delete(item.id);
+            else removed.set(item.id, item);
+        });
+        const records = [
+          ...(await this.list(`wb:${room}:op:`)).map((r) => r.value),
+          ...(await this.logSince(room, from + 1, at)).map((r) => r.value),
+        ]
+          .filter((v) => v && v.at > from && v.at <= at)
+          .sort((a, b) => a.at - b.at);
+        for (const value of records) await this.applyRecord(doc, value);
+        const items = [...removed.values()]
+          .filter((i) => !doc.items.has(i.id))
+          .sort((a, b) => (a.z || 0) - (b.z || 0) || (a.id < b.id ? -1 : 1));
+        const used = new Set(items.flatMap((i) => i.tagIds || []));
+        // The tags they carried, as last seen, even ones deleted since.
+        return {
+          at,
+          after: from,
+          items,
+          tags: [...tags.values()].filter((t) => used.has(t.id)),
+        };
+      } finally {
+        doc.destroy();
+      }
+    }
     if (input.op === "history.restored" || input.op === "export") {
       this.perMinute(`${room}|${user.uuid}`, REPORT_LIMIT);
     }
+    // The app reports a restoration it made, which the audit log records.
+    // Its version is a time in the board's life, or none for a version
+    // kept on the device; a few seconds' grace covers instances' clocks.
+    // Whether the restoration's edit is saved before or after the report,
+    // it changes no more objects than the board has ever held, and a
+    // version kept on the device no more than a board can hold besides:
+    // it can bring back objects deleted before the board was shared.
     if (input.op === "history.restored") {
       await this.member(room, user, true);
+      const at = input.at ?? null;
+      if (
+        at !== null &&
+        !(
+          Number.isFinite(at) &&
+          !(at < meta.created) &&
+          at <= this.now() + 5_000
+        )
+      )
+        fail(400, "Choose a version.");
+      let objects = null;
+      if (Number.isInteger(input.objects) && input.objects >= 0) {
+        const { entry } = await this.board(room, meta);
+        const doc = entry.live || new SharedDocument(this.durable(entry));
+        try {
+          objects = Math.min(
+            input.objects,
+            doc.objectsEver() + (at === null ? MAX_OBJECTS : 0),
+          );
+        } finally {
+          if (doc !== entry.live) doc.destroy();
+        }
+      }
       await this.org.audit(
         user,
         "board.content.restored",
         { type: "board", id: room },
         {
-          version: Number(input.at) || null,
+          version: at,
           scope: ["board", "objects", "frame", "deleted"].includes(input.scope)
             ? input.scope
             : "board",
-          objects: Number.isInteger(input.objects) ? input.objects : null,
+          objects,
         },
       );
       return { ok: true };
@@ -3190,7 +3369,9 @@ export class BoardService {
       // Directory, search index, and content audit records are written at
       // most once a minute per board and worker instance; counts in between
       // are added up. Busy workshops would otherwise spend the worker's
-      // storage quota on bookkeeping.
+      // storage quota on bookkeeping. A deletion is written at once, with
+      // what the minute held before it: counts held in memory go if the
+      // instance stops, and a deletion must reach the activity log.
       const activity = this.org.instance.activity;
       const entry = activity.get(room) || {
         at: 0,
@@ -3203,21 +3384,36 @@ export class BoardService {
       entry.changed += changed;
       entry.removed += removed;
       if (added || changed || removed) entry.editors.add(user.uuid);
-      if (activity.size > 1000) activity.clear();
+      activity.delete(room);
       activity.set(room, entry);
-      if (this.now() - entry.at >= 60_000 || before.title !== after.title)
+      // An instance keeps the boards edited through it most recently; one
+      // let go of has what it held back written first.
+      while (activity.size > 1000) {
+        const [old, kept] = activity.entries().next().value;
+        activity.delete(old);
+        if (kept.editor) await this.writeHeldActivity(old, kept, false);
+      }
+      if (
+        this.now() - entry.at >= 60_000 ||
+        before.title !== after.title ||
+        removed
+      )
         await this.writeActivity(room, user, after, entry);
-      // Otherwise the next synchronization after the minute writes it, so
-      // removed content does not stay findable when the board goes quiet,
-      // and revealed content becomes findable.
+      // Otherwise this instance's first request after the minute writes
+      // it, so revealed content becomes findable when the board goes quiet.
       else if (
         added ||
         changed ||
-        removed ||
         JSON.stringify(before.workshop?.settings) !==
           JSON.stringify(after.workshop?.settings)
-      )
+      ) {
         entry.editor = user;
+        const instance = this.org.instance;
+        instance.activityDue = Math.min(
+          instance.activityDue ?? Infinity,
+          entry.at + 60_000,
+        );
+      }
       await this.commentNotifications(room, user, before, after);
       await this.taskAssignments(room, user, before, after);
       for (const { action, details } of workshopEvents(
@@ -3232,6 +3428,54 @@ export class BoardService {
         );
     } catch {
       /* Activity records never block an acknowledged edit. */
+    }
+  }
+  // Writes what boards edited through this instance held back once their
+  // minute has passed, whichever request comes next: the board's own next
+  // synchronization may reach another instance, or never come.
+  async writeDueActivity() {
+    const instance = this.org.instance,
+      now = this.now();
+    if (!(now >= instance.activityDue)) return;
+    // Activity held back while this writes sets its own due time, which is
+    // kept: the time is worked out afresh here, not written over it.
+    instance.activityDue = Infinity;
+    let due = Infinity;
+    for (const [room, entry] of [...instance.activity])
+      if (!entry.editor) continue;
+      else if (now - entry.at >= 60_000)
+        await this.writeHeldActivity(room, entry).catch(() => {});
+      else due = Math.min(due, entry.at + 60_000);
+    instance.activityDue = Math.min(instance.activityDue, due);
+  }
+  // Writes a board's held-back activity from the board as this instance
+  // has it, loading it if `load` and it is not kept. Otherwise, or if it
+  // cannot be loaded, only the content audit record is written, and the
+  // directory entry and search text follow with the board's next write.
+  async writeHeldActivity(room, entry, load = true) {
+    const cached = DOCS.get(room);
+    let doc = null;
+    try {
+      if (cached?.state) doc = new SharedDocument(this.durable(cached));
+      else if (load) ({ doc } = await this.load(room));
+    } catch {
+      /* Counted without it. */
+    }
+    try {
+      if (doc)
+        return await this.writeActivity(
+          room,
+          entry.editor,
+          doc.snapshot(),
+          entry,
+        );
+      const user = entry.editor;
+      entry.editor = null;
+      await this.auditActivity(room, user, null, entry);
+    } catch {
+      /* Activity records never block a request. */
+    } finally {
+      doc?.destroy();
     }
   }
   // The directory entry, search index, and content audit record of a board,
@@ -3270,20 +3514,25 @@ export class BoardService {
     INDEXED.delete(room);
     if (INDEXED.size >= 1000) INDEXED.delete(INDEXED.keys().next().value);
     INDEXED.set(room, digest);
-    if (entry.added || entry.changed || entry.removed)
+    await this.auditActivity(room, user, board.title, entry);
+  }
+  // The content audit record of the edits counted since the last one.
+  async auditActivity(room, user, title, entry) {
+    const counts = {
+      added: entry.added,
+      changed: entry.changed,
+      removed: entry.removed,
+      editors: [...entry.editors].slice(0, 50),
+    };
+    entry.added = entry.changed = entry.removed = 0;
+    entry.editors.clear();
+    if (counts.added || counts.changed || counts.removed)
       await this.org.audit(
         user,
         "board.content.updated",
-        { type: "board", id: room, name: board.title },
-        {
-          added: entry.added,
-          changed: entry.changed,
-          removed: entry.removed,
-          editors: [...entry.editors].slice(0, 50),
-        },
+        { type: "board", id: room, name: title },
+        counts,
       );
-    entry.added = entry.changed = entry.removed = 0;
-    entry.editors.clear();
   }
   // Notifications carry the board's title and content, so only people who
   // could open the board now receive them: not guests whose access lapsed
