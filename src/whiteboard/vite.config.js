@@ -7,9 +7,12 @@ import puterLocalhost from "../../dev/puter-localhost.mjs";
 // Features opened on demand (the Miro migration, the administration console,
 // the PowerPoint, SVG and PDF writers, and the PDF reader) load as their own
 // files. Everything else stays in the main file, which the app and its tests
-// load as a single module.
+// load as a single module. Anything that imports pdf-lib must be listed here
+// too: in the main file it makes the main file import the PDF writer at
+// startup, and the writer, which needs helpers from the main file, then runs
+// before them and stops the app from loading.
 const LAZY =
-  /\/src\/(migration\/|organization\/admin-ui\.js|export-svg\.js|export-pptx\.js|export-pdf-vector\.js)|\/node_modules\/(pdfjs-dist|pdf-lib|@pdf-lib|pako)\//;
+  /\/src\/(migration\/|organization\/admin-ui\.js|export-svg\.js|export-pptx\.js|export-pdf-vector\.js|pdf-unicode-text\.js)|\/node_modules\/(pdfjs-dist|pdf-lib|@pdf-lib|pako)\//;
 
 // pdf.js decodes JBIG2, CCITT and JPEG 2000 images (common in scanned PDFs)
 // and ICC colors with WebAssembly modules it fetches by name from one folder,
