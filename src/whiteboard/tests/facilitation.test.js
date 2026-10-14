@@ -6036,6 +6036,11 @@ test("built collaborators: a participant's note over a hidden frame stays theirs
     // Library content inserted there stays visible too.
     await app.click('[data-action="more-tools"]');
     await app.click('[data-feature="icons"]');
+    // The library reads saved templates before it shows its icons.
+    await app.until(
+      () => app.doc.querySelector('[data-icon="sticker-thumbs-up"]'),
+      "The icon library opens",
+    );
     await app.click('[data-icon="sticker-thumbs-up"]');
     await app.until(
       () => app.outline().some((t) => t.includes("Thumbs up")),
