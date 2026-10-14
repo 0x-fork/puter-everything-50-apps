@@ -15767,6 +15767,12 @@ test("sharing adopts this device's comment identity and board JSON preserves dis
     doc.querySelector("#comment-text").value = "Edited after sharing";
     await click('#comment-form [type="submit"]');
     await click('[data-action="home"]');
+    // Leaving a shared board finishes before the library's address is set;
+    // closing earlier would leave that step running in a closed window.
+    const homeDeadline = Date.now() + 5000;
+    while (!doc.querySelector(".library") && Date.now() < homeDeadline)
+      await tick();
+    assert.ok(doc.querySelector(".library"), "The library opens");
     const create = env.calls.find((call) => call.op === "create");
     const stored = await storedSharedBoard(app, create.room);
     assert.equal(stored.comments[0].messages[0].authorId, owner.uuid);
