@@ -124,6 +124,11 @@ export function scrollsInside(event, target, root) {
 // Only active pointers are retained. Camera gestures never inspect board data.
 export function createCanvasNavigation(api) {
   let canvas, session, timer, safariGesture;
+  // Once a pen has touched the board, a finger only moves the view, so a
+  // palm resting between strokes draws, selects and places nothing, unless
+  // the person has turned that off in Preferences.
+  let penUsed = false;
+  const penMode = () => penUsed && api.penOnly?.() !== false;
   const touches = new Map();
   const wheel = createWheelNavigation();
   let mode = "auto";
@@ -216,6 +221,10 @@ export function createCanvasNavigation(api) {
     if (e.button !== 0 && e.button !== 1 && e.button !== 2 && !eraser) return;
     if (safariGesture) stop();
     const touch = e.pointerType === "touch";
+    if (e.pointerType === "pen" && !penUsed) {
+      penUsed = true;
+      if (penMode()) api.penStarted?.();
+    }
     // Ignore palms while the pen/mouse is in use and foreign mouse pointers.
     if (session && !session.touch) {
       if (touch || session.pointer !== e.pointerId) return;
@@ -237,7 +246,9 @@ export function createCanvasNavigation(api) {
       if (touches.size === 2) beginPinch();
       return;
     }
-    api.prepare(e);
+    // After a pen, a resting finger or palm closes nothing that is open,
+    // such as Find on board, until it moves.
+    if (!touch || !penMode()) api.prepare(e);
     const current = state();
     session = {
       board: current.board,
@@ -275,7 +286,10 @@ export function createCanvasNavigation(api) {
         }, 500);
       return;
     }
-    if (["pen", "arrow", "region"].includes(current.tool)) {
+    // After a pen, a still finger or palm does nothing; one that moves on
+    // pans, and two still pinch.
+    if (penMode()) session.kind = "still";
+    else if (["pen", "arrow", "region"].includes(current.tool)) {
       session.kind = "direct";
       settle();
       api.begin(e);
@@ -335,6 +349,10 @@ export function createCanvasNavigation(api) {
     ) {
       session.kind = "direct";
       api.begin(session.event, { size: true });
+    }
+    if (session.kind === "still" && Math.hypot(dx, dy) > 6) {
+      session.kind = "pan";
+      api.prepare(session.event);
     }
     if (session.kind === "pending" && Math.hypot(dx, dy) > 6) {
       clearTimer();

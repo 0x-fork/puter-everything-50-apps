@@ -13857,7 +13857,11 @@ test("touch pan, pinch and selected-object handoffs preserve geometry, selection
 });
 
 test("touch creation, pen cancellation, long-press selection and native pointer ownership are atomic", async () => {
-  const app = await setup();
+  // Fingers go on drawing and selecting after the pen here, as they do
+  // with that preference off.
+  const app = await setup(undefined, {
+    preferences: { "whiteboard-pen-only": "false" },
+  });
   const { doc, w, click, tick } = app;
   try {
     const { copy } = await snappingBoard(app);
@@ -20504,6 +20508,56 @@ test("Shift-clicking a selected object with a wobble only deselects it", async (
     assert.equal(left.y, b.y);
   } finally {
     await app.close();
+  }
+});
+
+test("after a pen, fingers only move the board, unless Preferences say otherwise", async () => {
+  const touchScreen = await setup(undefined, {
+    prepare: (w) =>
+      Object.defineProperty(w.navigator, "maxTouchPoints", { value: 5 }),
+  });
+  const plain = await setup();
+  try {
+    await plain.click('[data-action="new"]');
+    assert.equal(
+      plain.doc.querySelector("#pen-only"),
+      null,
+      "Offered only on a touch screen",
+    );
+    const app = touchScreen,
+      { doc, w, click } = app;
+    await click('[data-action="new"]');
+    doc.querySelector("#canvas").getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      right: 1000,
+      bottom: 800,
+      width: 1000,
+      height: 800,
+    });
+    const choice = doc.querySelector("#pen-only");
+    assert.equal(choice.checked, true, "On by default");
+    await click('[data-action="tool-pen"]');
+    const stroke = (id, x, extra = {}) => {
+      canvasPointer(app, "pointerdown", id, x, 300, extra);
+      canvasPointer(app, "pointermove", id, x + 60, 360, extra);
+      canvasPointer(app, "pointerup", id, x + 60, 360, extra);
+    };
+    stroke(4, 100, { pointerType: "pen" });
+    assert.equal(drawnObjects(app), 1);
+    assert.match(doc.querySelector("#toast").textContent, /^Pen in use/);
+    const view = renderedView(app);
+    stroke(2, 300);
+    assert.equal(drawnObjects(app), 1, "A finger draws nothing");
+    assert.notDeepEqual(renderedView(app), view, "but moves the board");
+    choice.checked = false;
+    choice.dispatchEvent(new w.Event("change"));
+    assert.equal(w.localStorage.getItem("whiteboard-pen-only"), "false");
+    stroke(2, 500);
+    assert.equal(drawnObjects(app), 2, "Turned off, a finger draws again");
+  } finally {
+    await plain.close();
+    await touchScreen.close();
   }
 });
 
@@ -35679,7 +35733,11 @@ test("point creation aborts outside release, capture loss, Escape and focus chan
 });
 
 test("comment point activation waits for release and cancelled presses keep the composer closed", async () => {
-  const app = await setup();
+  // A finger places a comment after the pen has, as with that preference
+  // off.
+  const app = await setup(undefined, {
+    preferences: { "whiteboard-pen-only": "false" },
+  });
   const { doc, click } = app;
   try {
     await click('[data-action="new"]');
@@ -35774,7 +35832,10 @@ async function createGeneratedText(app, mode) {
 }
 
 test("generated basic text captions retain their source declarations across every creation path, language switches and reopening", async () => {
-  const app = await setup(),
+  // A finger creates text after the pen has, as with that preference off.
+  const app = await setup(undefined, {
+      preferences: { "whiteboard-pen-only": "false" },
+    }),
     { doc, w, click, tick } = app;
   const setLanguage = async (value) => {
     doc.querySelector("#language").value = value;

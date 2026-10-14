@@ -114,11 +114,20 @@ function setup(tool = "select", { sizes = false } = {}) {
     marquee = false,
     deferred = false,
     continuing = false,
-    navigations = 0;
+    navigations = 0,
+    prepared = 0,
+    penNotices = 0,
+    penOnly = true;
   const calls = [];
   const nav = createCanvasNavigation({
     state: () => state,
-    prepare() {},
+    prepare() {
+      prepared++;
+    },
+    penOnly: () => penOnly,
+    penStarted() {
+      penNotices++;
+    },
     selection: () => [...selected],
     restoreSelection(value) {
       selected = [...value];
@@ -183,6 +192,9 @@ function setup(tool = "select", { sizes = false } = {}) {
     defer: (value = true) => (deferred = value),
     continues: (value = true) => (continuing = value),
     navigations: () => navigations,
+    prepared: () => prepared,
+    penNotices: () => penNotices,
+    penOnly: (value = true) => (penOnly = value),
   };
 }
 
@@ -442,6 +454,79 @@ test("a pen landing after a palm takes over from the finger, whose stroke is dro
   );
   app.event("pointerup", 4, 140, 140, { pointerType: "pen" });
   assert.equal(app.calls.at(-1)[0], "end");
+});
+
+test("after a pen, a finger or palm only moves the view: it draws, selects, places and closes nothing", () => {
+  for (const tool of ["pen", "select", "rect"]) {
+    const app = setup(tool, { sizes: true });
+    app.edit();
+    app.allowMarquee();
+    app.defer(tool === "rect");
+    const pen = { pointerType: "pen" };
+    app.event("pointerdown", 4, 100, 100, pen);
+    app.event("pointerup", 4, 100, 100, pen);
+    assert.equal(app.penNotices(), 1, "The change is announced");
+    const before = app.calls.length,
+      prepared = app.prepared();
+    // A palm resting between strokes, wobbling a little, then lifted.
+    app.event("pointerdown", 2, 300, 300);
+    app.event("pointermove", 2, 303, 302);
+    app.event("pointerup", 2, 303, 302);
+    assert.deepEqual(app.calls.slice(before), [], tool);
+    assert.equal(app.prepared(), prepared, "Nothing open is closed");
+    assert.deepEqual(app.state.view, base);
+    // A finger moved on pans, as on empty board.
+    app.event("pointerdown", 3, 300, 300);
+    app.event("pointermove", 3, 340, 320);
+    app.event("pointerup", 3, 340, 320);
+    assert.deepEqual(app.calls.slice(before), [], tool);
+    assert.deepEqual(app.state.view, {
+      ...base,
+      x: base.x + 40,
+      y: base.y + 20,
+    });
+    assert.equal(app.prepared(), prepared + 1);
+    // Two fingers still zoom.
+    app.event("pointerdown", 5, 300, 300);
+    app.event("pointerdown", 6, 400, 300);
+    app.event("pointermove", 6, 500, 300);
+    assert.ok(app.state.view.z > 1);
+    app.event("pointerup", 6, 500, 300);
+    app.event("pointerup", 5, 300, 300);
+    // A palm that drifted far enough to pan is put back when the pen lands.
+    const view = { ...app.state.view };
+    app.event("pointerdown", 2, 300, 300);
+    app.event("pointermove", 2, 330, 330);
+    assert.notDeepEqual(app.state.view, view);
+    app.event("pointerdown", 4, 120, 120, pen);
+    assert.deepEqual(app.state.view, view);
+    app.event("pointerup", 4, 120, 120, pen);
+    assert.ok(app.calls.slice(before).some(([call]) => call === "begin"));
+    assert.equal(app.penNotices(), 1, "once");
+  }
+});
+
+test("with fingers left to draw after a pen, a finger draws as before; turning it back on takes effect at once", () => {
+  const app = setup("pen");
+  app.penOnly(false);
+  const pen = { pointerType: "pen" };
+  app.event("pointerdown", 4, 100, 100, pen);
+  app.event("pointerup", 4, 100, 100, pen);
+  assert.equal(app.penNotices(), 0, "Nothing to announce");
+  app.calls.length = 0;
+  app.event("pointerdown", 2, 300, 300);
+  app.event("pointermove", 2, 310, 310);
+  app.event("pointerup", 2, 310, 310);
+  assert.deepEqual(
+    app.calls.map(([call]) => call),
+    ["begin", "move", "end"],
+  );
+  app.penOnly(true);
+  app.calls.length = 0;
+  app.event("pointerdown", 2, 300, 300);
+  app.event("pointermove", 2, 303, 302);
+  app.event("pointerup", 2, 303, 302);
+  assert.deepEqual(app.calls, []);
 });
 
 test("pointer ownership ignores palm touches and unrelated cancellation; stale board events cannot restore an old camera", () => {

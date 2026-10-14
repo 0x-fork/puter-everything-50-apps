@@ -1500,6 +1500,14 @@ const pairs = {
   "Sticky notes show who added them.":
     "Les notes adhésives indiquent qui les a ajoutées.",
   "Sticky note authors hidden.": "Auteurs des notes adhésives masqués.",
+  "After a pen, fingers only move the board":
+    "Après le stylet, les doigts ne font que déplacer le tableau",
+  "After a pen, fingers only move the board.":
+    "Après le stylet, les doigts ne font que déplacer le tableau.",
+  "Fingers draw and select, even after a pen.":
+    "Les doigts dessinent et sélectionnent, même après le stylet.",
+  "Pen in use: one finger moves the board and two zoom. You can change this in Preferences.":
+    "Stylet utilisé : un doigt déplace le tableau, deux doigts zooment. Vous pouvez changer cela dans les Préférences.",
   "Temporarily bypass snapping":
     "Désactiver temporairement l’alignement magnétique",
   "Cancel the current move or resize":
