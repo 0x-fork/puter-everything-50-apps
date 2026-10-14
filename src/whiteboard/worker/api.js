@@ -1,6 +1,7 @@
 import { hash } from "../src/collaboration/protocol.js";
 import { adminCall, apiKey, lockTeam, syncTeamMembers } from "./admin.js";
 import {
+  TEAM_ROLES,
   fail,
   listedBoard,
   memberChanges,
@@ -334,8 +335,33 @@ function groupResource(t, base, scimIds = new Map(), members = true) {
 async function findUser(org, scimId) {
   const mapped = await org.kv.get("org:scimid:" + scimId);
   const user = await org.freshUser(mapped || scimId);
-  return user && !user.scimDeleted ? user : null;
+  return listed(user) ? user : null;
 }
+// Who the identity provider sees: everyone in the organization but those it
+// deleted, and people from outside it who only joined a board as guests,
+// whom it neither knows nor manages.
+const listed = (user) =>
+  !!user &&
+  !user.scimDeleted &&
+  !(
+    user.source === "board" &&
+    user.role === "guest" &&
+    !user.email &&
+    !user.scimManaged
+  );
+// Writes only what a request changed on a stored person, so a change saved
+// meanwhile, such as a deactivation in the console or a group membership
+// the provider sent at the same time, stands.
+async function saveChanges(org, before, user) {
+  const changed = {};
+  for (const key of new Set([...Object.keys(before), ...Object.keys(user)]))
+    if (JSON.stringify(before[key]) !== JSON.stringify(user[key]))
+      changed[key] = user[key];
+  if (Object.keys(changed).length)
+    await org.updateUser(user.uuid, changed, { access: true });
+}
+// Some providers send booleans as strings, "True" or "False".
+const primary = (entry) => truthy(entry?.primary);
 // Roles come as a list, but a single role, written as its value or as one
 // role object, is read the same way, as a patch of the roles path is.
 function roleFrom(body, fallback = "member") {
@@ -343,7 +369,7 @@ function roleFrom(body, fallback = "member") {
   const roles = [body?.roles ?? []]
     .flat()
     .map((r) => (r && typeof r === "object" ? r : { value: r }));
-  const role = ext || roles.find((r) => r.primary)?.value || roles[0]?.value;
+  const role = ext || roles.find((r) => primary(r))?.value || roles[0]?.value;
   const canonical = typeof role === "string" ? role.toLowerCase() : role;
   return ["member", "guest"].includes(canonical) ? canonical : fallback;
 }
@@ -383,7 +409,7 @@ function applyAttributes(user, body) {
 function scimEmail(body) {
   const emails = Array.isArray(body?.emails) ? body.emails : [];
   const email =
-    emails.find((e) => e?.primary === true) ||
+    emails.find((e) => primary(e)) ||
     emails.find((e) => e?.type === "work") ||
     emails[0];
   const value = body?.userName ?? email?.value;
@@ -398,7 +424,13 @@ async function renameUser(org, user, email) {
     refuse(400, "userName must be the user's email address.", "invalidValue");
   const key = "org:email:" + (await hash(email));
   const holder = await org.kv.get(key);
-  if (holder && holder !== user.uuid)
+  // Someone the provider deleted gives up their address, as creating a
+  // user with it does (see the POST), so it can go to someone else.
+  if (
+    holder &&
+    holder !== user.uuid &&
+    !(await org.freshUser(holder))?.scimDeleted
+  )
     refuse(409, "A user with this userName already exists.", "uniqueness");
   if (user.email) {
     const old = "org:email:" + (await hash(user.email));
@@ -572,13 +604,13 @@ async function scimUsers(org, boards, identity, method, id, body, url, base) {
       const found = byEmail
         ? uuid && (await org.freshUser(uuid))
         : await findUser(org, byId.value);
-      users = found && !found.scimDeleted ? [found] : [];
+      users = listed(found) ? [found] : [];
     } else {
       const ownerRecord = await org.user(ownerId);
       users = [
         ...(await org.members()),
         ...(ownerRecord ? [ownerRecord] : []),
-      ].filter((u) => !u.scimDeleted);
+      ].filter(listed);
     }
     let rows = users.filter((u) =>
       filters.every(({ attr, value }) => {
@@ -598,67 +630,96 @@ async function scimUsers(org, boards, identity, method, id, body, url, base) {
     return listPage(url, rows, view);
   }
   if (method === "POST" && !id) {
-    const email = String(
-      body?.userName || body?.emails?.[0]?.value || "",
-    ).toLowerCase();
+    // The same address PUT and PATCH read: the userName, or else the
+    // primary or work email.
+    const email =
+      scimEmail({ ...body, userName: body?.userName || undefined }) || "";
     if (!validEmail(email))
       refuse(400, "userName must be the user's email address.", "invalidValue");
-    const emailKey = "org:email:" + (await hash(email));
-    const linked = await org.kv.get(emailKey);
-    let user = linked ? await org.freshUser(linked) : null;
-    if (user?.scimManaged)
+    // Two requests creating one person at once, as when a provider retries
+    // after a timeout, would each make a record: the first holds the
+    // address until it is done.
+    const claim = "org:emailclaim:" + (await hash(email));
+    if ((await org.kv.incr(claim)) !== 1)
       refuse(409, "A user with this userName already exists.", "uniqueness");
-    if (!user) {
-      const pendingId = "pending-" + (await hash(email)).slice(0, 24);
-      user = {
-        uuid: pendingId,
-        scimId: pendingId,
-        email,
-        emailVerified: false,
-        role: roleFrom(body),
-        status: "pending",
-        active: true,
-        created: org.now(),
-        source: "scim",
-        teams: [],
-      };
+    await org.kv.expire(claim, 30).catch(() => {});
+    try {
+      const emailKey = "org:email:" + (await hash(email));
+      const linked = await org.kv.get(emailKey);
+      let user = linked ? await org.freshUser(linked) : null;
+      if (user?.scimManaged)
+        refuse(409, "A user with this userName already exists.", "uniqueness");
+      // An address the provider deleted may now be someone else's, as when a
+      // shared or former colleague's address is given to a new hire. When the
+      // provider's identifier says it is another person, the deleted account
+      // keeps its deactivation and the address starts a new pending record,
+      // which whoever proves the mailbox links.
+      if (
+        user?.scimDeleted &&
+        user.externalId &&
+        body?.externalId != null &&
+        String(body.externalId).slice(0, 200) !== user.externalId
+      )
+        user = null;
+      const stored = user && structuredClone(user);
+      if (!user) {
+        // Never derived from the address: one given up, by a rename or a
+        // deletion, must not lead back to the record that held it.
+        const pendingId = "pending-" + crypto.randomUUID().replaceAll("-", "");
+        user = {
+          uuid: pendingId,
+          scimId: pendingId,
+          email,
+          emailVerified: false,
+          role: roleFrom(body),
+          status: "pending",
+          active: true,
+          created: org.now(),
+          source: "scim",
+          teams: [],
+        };
+      }
+      const was = user.status,
+        wasRole = user.role,
+        wasActive = user.active;
+      user.scimManaged = true;
+      delete user.scimDeleted;
+      user.scimId ||= user.uuid;
+      user.modified = org.now();
+      applyAttributes(user, body);
+      keepOwner(user, was, wasRole);
+      keepAdmin(user, was, wasRole, wasActive);
+      if (was && was !== "pending" && user.role !== wasRole)
+        user.roleChanged = user.modified;
+      if (stored) await saveChanges(org, stored, user);
+      else await org.saveUser(user);
+      await org.kv.set("org:scimid:" + user.scimId, user.uuid);
+      // Provisioning an existing account as inactive ends its sessions, as
+      // deactivating it does.
+      if (was === "active" && user.status === "deactivated")
+        await boards.revokeSessions(user.uuid);
+      await org.audit(
+        identity,
+        "scim.user.created",
+        { type: "user", id: user.uuid, name: email },
+        {
+          linked: user.status !== "pending",
+        },
+      );
+      await recordChange(user, was, wasRole);
+      return scim(
+        view(user),
+        201,
+        `${base}/scim/v2/Users/${user.scimId || user.uuid}`,
+      );
+    } finally {
+      await org.kv.del(claim).catch(() => {});
     }
-    const was = user.status,
-      wasRole = user.role,
-      wasActive = user.active;
-    user.scimManaged = true;
-    delete user.scimDeleted;
-    user.scimId ||= user.uuid;
-    user.modified = org.now();
-    applyAttributes(user, body);
-    keepOwner(user, was, wasRole);
-    keepAdmin(user, was, wasRole, wasActive);
-    if (was && was !== "pending" && user.role !== wasRole)
-      user.roleChanged = user.modified;
-    await org.saveUser(user);
-    await org.kv.set("org:scimid:" + user.scimId, user.uuid);
-    // Provisioning an existing account as inactive ends its sessions, as
-    // deactivating it does.
-    if (was === "active" && user.status === "deactivated")
-      await boards.revokeSessions(user.uuid);
-    await org.audit(
-      identity,
-      "scim.user.created",
-      { type: "user", id: user.uuid, name: email },
-      {
-        linked: user.status !== "pending",
-      },
-    );
-    await recordChange(user, was, wasRole);
-    return scim(
-      view(user),
-      201,
-      `${base}/scim/v2/Users/${user.scimId || user.uuid}`,
-    );
   }
   const user = id && (await findUser(org, id));
   if (!user) fail(404, "User not found.");
   if (method === "GET") return scim(view(user));
+  const stored = structuredClone(user);
   const before = user.status,
     role = user.role,
     active = user.active;
@@ -689,7 +750,7 @@ async function scimUsers(org, boards, identity, method, id, body, url, base) {
       user.modified = org.now();
       user.scimDeleted = true;
       delete user.scimManaged;
-      await org.saveUser(user);
+      await saveChanges(org, stored, user);
       await org.kv.del("org:scimid:" + user.scimId);
       await boards.revokeSessions(user.uuid);
     }
@@ -742,11 +803,28 @@ async function scimUsers(org, boards, identity, method, id, body, url, base) {
         if (/^userName$/i.test(path) || renamed === undefined) renamed = value;
       } else if (!path && op.value && typeof op.value === "object") {
         applyAttributes(user, patchValue(op.value));
+        // Microsoft Entra ID names the work address by its value path:
+        // { "emails[type eq \"work\"].value": "pat@example.ca" }.
+        // An address of another type, such as "other", is not the work
+        // address and does not rename the person.
+        const emails = [];
         const value = scimEmail(
           Object.fromEntries(
-            Object.entries(op.value).map(([k, v]) => [unqualified(k, CORE), v]),
+            Object.entries(op.value).flatMap(([k, v]) => {
+              const key = unqualified(k, CORE);
+              const typed =
+                /^emails(?:\[\s*type\s+eq\s+"([^"]*)"\s*\])?\.value$/i.exec(
+                  key,
+                );
+              if (!typed) return [[key, v]];
+              const type = (typed[1] ?? "work").toLowerCase();
+              emails.push({ value: v, type, primary: type === "work" });
+              return [];
+            }),
           ),
         );
+        const work = scimEmail({ emails: emails.filter((e) => e.primary) });
+        if (work !== undefined) renamed = work;
         if (value !== undefined) renamed = value;
       } else if (/^name$/i.test(path) && kind === "remove")
         applyAttributes(user, { name: { givenName: "", familyName: "" } });
@@ -814,7 +892,7 @@ async function scimUsers(org, boards, identity, method, id, body, url, base) {
   const emailChanged = await renameUser(org, user, renamed);
   user.modified = org.now();
   if (user.role !== role) user.roleChanged = user.modified;
-  await org.saveUser(user);
+  await saveChanges(org, stored, user);
   if (before === "active" && user.status === "deactivated")
     await boards.revokeSessions(user.uuid);
   await org.audit(
@@ -875,14 +953,16 @@ async function scimGroups(org, identity, method, id, body, url, base) {
       );
     return identifiers.get(value);
   };
-  // The team is saved first, then the people who joined or left it.
+  // People leaving, then the team, then people joining (see
+  // syncTeamMembers).
   const save = async (team, members) => {
     members = [...new Set(members)];
     const before = team.members || [];
     team.members = members;
     team.modified = org.now();
-    await org.kv.set("org:team:" + team.id, team);
-    await syncTeamMembers(org, team.id, before, members);
+    await syncTeamMembers(org, team.id, before, members, () =>
+      org.kv.set("org:team:" + team.id, team),
+    );
   };
   const resolve = async (list = []) => {
     // SCIM treats null as unassigned. Other collection shapes and members
@@ -1216,6 +1296,13 @@ export async function restRoute(org, boards, request, method, path, body) {
     const [resource, id] = parts;
     if (parts.length > 2 || (resource === "ServiceProviderConfig" && id))
       fail(404, "Unknown SCIM resource.");
+    // Endpoints the protocol defines but this service does not offer, as
+    // ServiceProviderConfig says for bulk, answer as RFC 7644 asks.
+    if (
+      (["Me", "Bulk", ".search"].includes(resource) && !id) ||
+      (["Users", "Groups"].includes(resource) && id === ".search")
+    )
+      fail(501, "This SCIM endpoint is not supported.");
     if (
       ["ServiceProviderConfig", "ResourceTypes", "Schemas"].includes(resource)
     ) {
@@ -1397,6 +1484,8 @@ export async function restRoute(org, boards, request, method, path, body) {
           id,
           name: body?.name,
           members: body?.members,
+          add: body?.add,
+          remove: body?.remove,
         }),
       );
     if (method === "DELETE" && id)
@@ -1414,6 +1503,8 @@ export async function restRoute(org, boards, request, method, path, body) {
         archived: q.archived === undefined ? undefined : q.archived === "true",
         deleted: q.deleted === "true",
         guests: q.guests === "true",
+        // Whether the query searches board content too; "false" is no.
+        content: q.content === "true",
       };
       return json(
         await call(identity, { ...filters, op: "org.boards", scope: "all" }),
@@ -1446,11 +1537,20 @@ export async function restRoute(org, boards, request, method, path, body) {
         !["private", "organization", "link"].includes(body.visibility)
       )
         fail(400, "Invalid visibility.");
-      const [meta, policy] = await Promise.all([
+      if (
+        body?.teamRole !== undefined &&
+        !TEAM_ROLES.includes(body.teamRole ?? "none")
+      )
+        fail(400, "Invalid team role.");
+      const [meta, policy, record] = await Promise.all([
         org.kv.get(`wb:${id}:meta`),
         org.policy(),
+        org.kv.get("org:board:" + id),
       ]);
       if (!meta) fail(404, "Board not found.");
+      // A role for the members of the board's team needs a team to give it.
+      if ((body?.teamRole ?? "none") !== "none" && !(meta.team || record?.team))
+        fail(400, "Choose a team for this board first.");
       if (
         body?.visibility === "link" &&
         meta.visibility !== "link" &&
@@ -1460,18 +1560,19 @@ export async function restRoute(org, boards, request, method, path, body) {
       const held =
         body?.legalHold !== undefined
           ? !!body.legalHold
-          : !!(
-              meta.legalHold || (await org.kv.get("org:board:" + id))?.legalHold
-            );
+          : !!(meta.legalHold || record?.legalHold);
       if (body?.deleted === true && (held || policy.retention.legalHold))
         fail(409, "This board is under a legal hold and cannot be deleted.");
       if (body?.owner)
         await boards.transfer(id, identity, body.owner, { admin: true });
-      if (body?.visibility)
+      if (body?.visibility || body?.teamRole !== undefined)
         await boards.call(identity, {
           op: "settings",
           room: id,
-          visibility: body.visibility,
+          ...(body.visibility ? { visibility: body.visibility } : {}),
+          ...(body.teamRole !== undefined
+            ? { teamRole: body.teamRole ?? "none" }
+            : {}),
         });
       // Restoring from the trash also unarchives, so it goes before an
       // archive asked for in the same request, and only for a deleted board.
@@ -1485,7 +1586,8 @@ export async function restRoute(org, boards, request, method, path, body) {
           await boards.call(identity, { op, room: id, enabled: !!body[key] });
       if (body?.deleted === true)
         await boards.call(identity, { op: "delete", room: id });
-      return json({ board: await org.kv.get("org:board:" + id) });
+      const board = await org.kv.get("org:board:" + id);
+      return json({ board: { ...board, teamRole: board.teamRole || "none" } });
     }
   }
   if (resource === "reports" && method === "GET") {
@@ -1571,7 +1673,8 @@ function documentedMethods(parts) {
       route.methods.forEach((m) => methods.add(m));
   return methods.size ? methods : null;
 }
-// A compact OpenAPI 3.1 description so CDS can automate against the API.
+// A compact OpenAPI 3.1 description, so organizations can automate against
+// the API.
 // Declares what every operation shares: parameters named in its path,
 // request bodies, and the success status each answers with.
 function completePaths(paths) {
@@ -1718,7 +1821,7 @@ export function openAPI(base) {
       "/v1/boards": {
         get: secured(
           "boards:read",
-          "Board directory with filters",
+          "Board directory with filters; each board includes its teamRole",
           query(
             "query",
             "owner",
@@ -1734,8 +1837,10 @@ export function openAPI(base) {
             "archived",
             "deleted",
             "guests",
+            "content",
             "sort",
             "limit",
+            "after",
             "offset",
           ),
         ),
@@ -1744,10 +1849,13 @@ export function openAPI(base) {
         get: secured("boards:read", "Boards that look duplicated"),
       },
       "/v1/boards/{room}": {
-        get: secured("boards:read", "Board metadata and members"),
+        get: secured(
+          "boards:read",
+          "Board metadata, including teamRole, and members",
+        ),
         patch: secured(
           "boards:write",
-          "Transfer ownership, archive, restore, delete, legal hold, or visibility",
+          "Transfer ownership, archive, restore, delete, legal hold, visibility, or teamRole: the role (none, editor, commenter, viewer) the board gives the members of the team it is filed under",
         ),
       },
       "/v1/boards/{room}/activity": {

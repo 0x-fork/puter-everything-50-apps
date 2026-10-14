@@ -43,12 +43,19 @@ import {
   createGoogle,
   defaultFetcher,
   ACCESS_ERROR,
+  NOT_FOUND_ERROR,
+  TAB_ERROR,
 } from "../src/content/google.js";
 import { documentKind, checkFile } from "../src/content/importer.js";
 import { embedCardLayout, drawEmbedCard } from "../src/content/embed-card.js";
 import { exportSVG } from "../src/export-svg.js";
 import { exportPDF, exportRegions } from "../src/export.js";
 import { drawObject } from "../src/render.js";
+import {
+  linkService,
+  linkCardTitle,
+  linkCardFooter,
+} from "../src/content/link-label.js";
 
 globalThis.DOMParser ??= new JSDOM("").window.DOMParser;
 const measure = createCanvas(10, 10).getContext("2d");
@@ -111,6 +118,52 @@ test("embed URLs normalize to each provider's official embed address", () => {
       "google-drive",
       `https://drive.google.com/drive/folders/${DOC_ID}`,
       `https://drive.google.com/embeddedfolderview?id=${DOC_ID}#grid`,
+    ],
+    // Older files and folders shared by link keep their resource key.
+    [
+      `https://drive.google.com/file/d/${DOC_ID}/view?usp=sharing&resourcekey=0-AbC_d-9`,
+      "google-drive",
+      `https://drive.google.com/file/d/${DOC_ID}/view?resourcekey=0-AbC_d-9`,
+      `https://drive.google.com/file/d/${DOC_ID}/preview?resourcekey=0-AbC_d-9`,
+    ],
+    [
+      `https://drive.google.com/open?id=${DOC_ID}&resourcekey=0-k1`,
+      "google-drive",
+      `https://drive.google.com/file/d/${DOC_ID}/view?resourcekey=0-k1`,
+      `https://drive.google.com/file/d/${DOC_ID}/preview?resourcekey=0-k1`,
+    ],
+    [
+      `https://drive.google.com/drive/u/0/folders/${DOC_ID}?resourcekey=0-xyz&usp=drive_link`,
+      "google-drive",
+      `https://drive.google.com/drive/folders/${DOC_ID}?resourcekey=0-xyz`,
+      `https://drive.google.com/embeddedfolderview?id=${DOC_ID}&resourcekey=0-xyz#grid`,
+    ],
+    // A key that is not one is dropped.
+    [
+      `https://drive.google.com/file/d/${DOC_ID}/view?resourcekey=1-"><x>`,
+      "google-drive",
+      `https://drive.google.com/file/d/${DOC_ID}/view`,
+      `https://drive.google.com/file/d/${DOC_ID}/preview`,
+    ],
+    // A Looker Studio sharing or editing link embeds as its /embed/ form.
+    [
+      "https://lookerstudio.google.com/u/0/reporting/1a2b3c4d-5e6f-7a8b-9c0d-112233445566/page/p_abc123?s=x",
+      "web",
+      "https://lookerstudio.google.com/embed/reporting/1a2b3c4d-5e6f-7a8b-9c0d-112233445566/page/p_abc123",
+      "https://lookerstudio.google.com/embed/reporting/1a2b3c4d-5e6f-7a8b-9c0d-112233445566/page/p_abc123",
+    ],
+    [
+      "https://datastudio.google.com/reporting/1a2b3c4d-5e6f/page/AbCd/edit",
+      "web",
+      "https://lookerstudio.google.com/embed/reporting/1a2b3c4d-5e6f/page/AbCd",
+      "https://lookerstudio.google.com/embed/reporting/1a2b3c4d-5e6f/page/AbCd",
+    ],
+    // The owner's video manager page, unlisted or not.
+    [
+      "https://vimeo.com/manage/videos/76979871/abcdef1234",
+      "vimeo",
+      "https://vimeo.com/76979871/abcdef1234",
+      "https://player.vimeo.com/video/76979871?h=abcdef1234&dnt=1",
     ],
     [
       "https://calendar.google.com/calendar/embed?src=team%40example.org&ctz=America%2FToronto&evil=1",
@@ -250,6 +303,16 @@ test("embed URLs normalize to each provider's official embed address", () => {
     assert.equal(normalizeEmbed(result.url).url, result.url, input);
     assert.ok(EMBED_PROVIDERS[provider]);
   }
+  // A stored Drive embed validates with its resource key and without one.
+  for (const url of [
+    `https://drive.google.com/file/d/${DOC_ID}/view?resourcekey=0-k1`,
+    `https://drive.google.com/drive/folders/${DOC_ID}?resourcekey=0-k1`,
+    `https://drive.google.com/file/d/${DOC_ID}/view`,
+  ])
+    assert.ok(
+      validEmbed({ type: "embed", provider: "google-drive", url }),
+      url,
+    );
   const covered = new Set(cases.map((c) => c[1]));
   for (const provider of Object.keys(EMBED_PROVIDERS))
     assert.ok(covered.has(provider), `${provider} is tested`);
@@ -266,6 +329,18 @@ test("chat, meeting, project and file tools that refuse framing are known, and t
     "https://github.com/fabrikam/platform",
     "https://www.dropbox.com/s/abc/file.pdf",
     "https://SLACK.COM./",
+    "https://linear.app/fabrikam/issue/ENG-42/fix-login",
+    "https://discord.com/channels/123/456",
+    "https://discord.gg/abc",
+    "https://fabrikam.webex.com/meet/ada",
+    "https://app.clickup.com/9011/v/li/901",
+    "https://fabrikam.notion.site/Plan-0123",
+    "https://www.canva.com/design/DAGabc123/view",
+    "https://maps.app.goo.gl/AbCdEfGh",
+    "https://onedrive.live.com/view.aspx?resid=ABC!123",
+    "https://1drv.ms/w/s!abc",
+    "https://fabrikam.monday.com/boards/1",
+    "https://fabrikam.sharepoint.com/sites/Team/SitePages/Home.aspx",
   ])
     assert.equal(refusesFraming(url), true, url);
   for (const url of [
@@ -274,11 +349,245 @@ test("chat, meeting, project and file tools that refuse framing are known, and t
     "https://notslack.com/",
     "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     "not a link",
+    // Their own embed pages are made to be framed.
+    "https://sharing.clickup.com/9011/l/h/abc/def",
+    "https://www.canva.com/design/DAGabc123/view?embed",
+    "https://fabrikam.sharepoint.com/:w:/s/Team/abc?action=embedview",
+    "https://fabrikam.sharepoint.com/sites/Team/_layouts/15/Embed.aspx?UniqueId=abc",
   ])
     assert.equal(refusesFraming(url), false, url);
-  const old = normalizeEmbed("https://github.com/fabrikam/platform");
-  assert.equal(old.provider, "web");
-  assert.ok(validEmbed({ type: "embed", ...old }));
+  for (const url of [
+    "https://github.com/fabrikam/platform",
+    "https://linear.app/fabrikam/issue/ENG-42/fix-login",
+    "https://maps.app.goo.gl/AbCdEfGh",
+    "https://onedrive.live.com/view.aspx?resid=ABC!123",
+  ]) {
+    const old = normalizeEmbed(url);
+    assert.equal(old.provider, "web", url);
+    assert.ok(validEmbed({ type: "embed", ...old }), url);
+  }
+  // OneDrive's own embed links are still Office embeds.
+  assert.equal(
+    normalizeEmbed("https://onedrive.live.com/embed?resid=ABC%21123&authkey=x")
+      .provider,
+    "office",
+  );
+});
+
+test("new link cards are named after the service they link to, in the interface language", async () => {
+  const { language, setLanguage } = await import("../src/i18n.js");
+  const previous = language;
+  const cases = [
+    ["https://meet.google.com/abc-defg-hij", "Google Meet", "Google Meet"],
+    [
+      "https://us02web.zoom.us/j/81234567890?pwd=abc",
+      "Zoom meeting",
+      "Réunion Zoom",
+    ],
+    ["https://zoom.us/rec/share/abc", "Zoom recording", "Enregistrement Zoom"],
+    [
+      "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0",
+      "Microsoft Teams meeting",
+      "Réunion Microsoft Teams",
+    ],
+    [
+      "https://teams.microsoft.com/meet/2915?p=abc",
+      "Microsoft Teams meeting",
+      "Réunion Microsoft Teams",
+    ],
+    [
+      "https://teams.microsoft.com/l/channel/19%3a1/General",
+      "Microsoft Teams",
+      "Microsoft Teams",
+    ],
+    ["https://app.slack.com/client/T012/C034", "Slack", "Slack"],
+    ["https://fabrikam.slack.com/archives/C034/p1", "Slack", "Slack"],
+    [
+      "https://fabrikam.atlassian.net/browse/PS-12",
+      "Jira issue PS-12",
+      "Ticket Jira PS-12",
+    ],
+    [
+      "https://fabrikam.atlassian.net/jira/software/projects/PS/boards/1?selectedIssue=PS-7",
+      "Jira issue PS-7",
+      "Ticket Jira PS-7",
+    ],
+    [
+      "https://fabrikam.atlassian.net/wiki/spaces/PS/overview",
+      "Confluence",
+      "Confluence",
+    ],
+    ["https://www.notion.so/team/Roadmap-0123", "Notion", "Notion"],
+    ["https://fabrikam.notion.site/Plan-0123", "Notion", "Notion"],
+    ["https://trello.com/b/abc123/board", "Trello board", "Tableau Trello"],
+    ["https://trello.com/c/abc123/card", "Trello card", "Carte Trello"],
+    ["https://app.asana.com/0/123/456", "Asana", "Asana"],
+    [
+      "https://linear.app/fabrikam/issue/ENG-42/fix-login",
+      "Linear issue ENG-42",
+      "Ticket Linear ENG-42",
+    ],
+    [
+      "https://github.com/fabrikam/platform/issues/12",
+      "GitHub issue #12",
+      "Ticket GitHub #12",
+    ],
+    [
+      "https://github.com/fabrikam/platform/pull/481",
+      "GitHub pull request #481",
+      "Demande de tirage GitHub #481",
+    ],
+    ["https://github.com/fabrikam/platform", "GitHub", "GitHub"],
+    [
+      "https://gitlab.com/fabrikam/platform/-/issues/9",
+      "GitLab issue #9",
+      "Ticket GitLab #9",
+    ],
+    [
+      "https://gitlab.com/fabrikam/platform/-/merge_requests/31",
+      "GitLab merge request !31",
+      "Demande de fusion GitLab !31",
+    ],
+    ["https://www.dropbox.com/s/abc/file.pdf", "Dropbox", "Dropbox"],
+    ["https://app.box.com/s/abc", "Box", "Box"],
+    ["https://1drv.ms/w/s!abc", "OneDrive", "OneDrive"],
+    [
+      "https://fabrikam-my.sharepoint.com/:w:/g/personal/a/abc",
+      "OneDrive",
+      "OneDrive",
+    ],
+    [
+      "https://fabrikam.sharepoint.com/sites/Team/Shared%20Documents",
+      "SharePoint",
+      "SharePoint",
+    ],
+    [
+      `https://drive.google.com/file/d/${DOC_ID}/view`,
+      "Google Drive file",
+      "Fichier Google Drive",
+    ],
+    [
+      `https://drive.google.com/drive/folders/${DOC_ID}`,
+      "Google Drive folder",
+      "Dossier Google Drive",
+    ],
+    [
+      `https://docs.google.com/spreadsheets/d/${DOC_ID}/edit`,
+      "Google Sheets",
+      "Google Sheets",
+    ],
+    [
+      `http://docs.google.com/document/u/1/d/${DOC_ID}/edit`,
+      "Google Docs",
+      "Google Docs",
+    ],
+    // Providers that could have been embedded, as when embeds are off.
+    ["https://vimeo.com/76979871", "Vimeo", "Vimeo"],
+    ["https://www.youtube.com/watch?v=dQw4w9WgXcQ", "YouTube", "YouTube"],
+    // Anything else keeps its host name.
+    [
+      "https://www.northwind.example/plan",
+      "www.northwind.example",
+      "www.northwind.example",
+    ],
+    ["https://münchen.de/straße", "münchen.de", "münchen.de"],
+    ["https://notgithub.com/a/b/issues/1", "notgithub.com", "notgithub.com"],
+  ];
+  try {
+    for (const [ui, column] of [
+      ["en", 1],
+      ["fr", 2],
+    ]) {
+      globalThis.document = { documentElement: {} };
+      setLanguage(ui);
+      for (const row of cases)
+        assert.equal(linkCardTitle(row[0]), row[column], `${ui} ${row[0]}`);
+      // The paste chooser's provider names the card.
+      assert.equal(
+        linkCardTitle(
+          `https://drive.google.com/file/d/${DOC_ID}/view`,
+          "google-drive",
+        ),
+        "Google Drive",
+      );
+      assert.equal(
+        linkCardTitle(
+          "https://calendar.google.com/calendar/embed?src=a%40b.c",
+          "google-calendar",
+        ),
+        ui === "fr" ? "Google Agenda" : "Google Calendar",
+      );
+    }
+    assert.equal(linkService("ftp://github.com/a/b/issues/1"), null);
+    assert.equal(linkService("not a link"), null);
+  } finally {
+    setLanguage(previous);
+    delete globalThis.document;
+  }
+});
+
+test("a stored link card titled with its host shows the service or address below, not the host again", () => {
+  const ctx = createCanvas(10, 10).getContext("2d");
+  ctx.font = "12px sans-serif";
+  const card = (text, url) => item("link", 0, 0, { w: 320, h: 115, text, url });
+  const teams =
+    "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0";
+  assert.equal(
+    linkCardFooter(card("teams.microsoft.com", teams), ctx, 288),
+    "Microsoft Teams meeting",
+  );
+  assert.equal(
+    linkCardFooter(card("Weekly sync", teams), ctx, 288),
+    "teams.microsoft.com",
+  );
+  assert.equal(
+    linkCardFooter(
+      card("www.northwind.example", "https://www.northwind.example/plan/q3"),
+      ctx,
+      288,
+    ),
+    "www.northwind.example/plan/q3",
+  );
+  // An internationalized host matches its Unicode title.
+  assert.equal(
+    linkCardFooter(
+      card("münchen.de", "https://xn--mnchen-3ya.de/stra%C3%9Fe"),
+      ctx,
+      288,
+    ),
+    "xn--mnchen-3ya.de/straße",
+  );
+  // Nothing more to say keeps the host; a long address is shortened.
+  assert.equal(
+    linkCardFooter(card("example.org", "https://example.org/"), ctx, 288),
+    "example.org",
+  );
+  const long = linkCardFooter(
+    card("example.org", `https://example.org/${"a".repeat(400)}`),
+    ctx,
+    120,
+  );
+  assert.match(long, /^example\.org\/a+…$/);
+  assert.ok(ctx.measureText(long).width <= 120);
+  // The canvas draws that line rather than the host twice.
+  const drawn = [];
+  const recorder = new Proxy(createCanvas(400, 200).getContext("2d"), {
+    get(target, key) {
+      if (key === "fillText") return (text) => drawn.push(text);
+      const value = target[key];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    set(target, key, value) {
+      target[key] = value;
+      return true;
+    },
+  });
+  drawObject(recorder, card("teams.microsoft.com", teams));
+  assert.ok(drawn.includes("Microsoft Teams meeting"), drawn.join(" | "));
+  assert.equal(
+    drawn.filter((text) => text === "teams.microsoft.com").length,
+    1,
+  );
 });
 
 test("disallowed, local, and malformed embed URLs are rejected", () => {
@@ -1503,6 +1812,89 @@ test("Google exports follow redirects to Google's file hosts only", async () => 
   }
 });
 
+test("Google imports say when a file or sheet tab is gone, and blame sharing only for access refusals", async () => {
+  const fileHost = "https://doc-08-4o-sheets.googleusercontent.com/export/abc";
+  const requests = [];
+  let status = 404;
+  // A sheet export redirects to Google's file host, which answers 400 for
+  // a tab that no longer exists; other exports answer on docs.google.com.
+  const fetcher = async (url) => {
+    requests.push(url);
+    if (/\/spreadsheets\/d\/[^/]+\/export/.test(url) && status === 400)
+      return new Response(null, {
+        status: 307,
+        headers: { location: `${fileHost}?${url.split("?")[1]}` },
+      });
+    return new Response("<html>Error</html>", {
+      status,
+      headers: { "content-type": "text/html" },
+    });
+  };
+  const google = createGoogle({ fetcher });
+  const sheet = `https://docs.google.com/spreadsheets/d/${DOC_ID}/edit#gid=7`;
+  const doc = `https://docs.google.com/document/d/${DOC_ID}/edit`;
+  const slides = `https://docs.google.com/presentation/d/${DOC_ID}/edit`;
+  const rejects = (promise, message) =>
+    assert.rejects(promise, (e) => e.message === message);
+  for (status of [404, 410]) {
+    await rejects(google.sheet(sheet), NOT_FOUND_ERROR);
+    await rejects(
+      google.refresh({ sourceUrl: `${sheet}&range=A1:B2`, cells: [["", ""]] }),
+      NOT_FOUND_ERROR,
+    );
+    await rejects(google.slides(slides), NOT_FOUND_ERROR);
+    // A document that is gone has no plain text to fall back to either.
+    requests.length = 0;
+    await rejects(google.document(doc), NOT_FOUND_ERROR);
+    assert.equal(requests.length, 1);
+  }
+  status = 400;
+  await rejects(google.sheet(sheet), TAB_ERROR);
+  await rejects(
+    google.refresh({ sourceUrl: `${sheet}&range=A1:B2`, cells: [["", ""]] }),
+    TAB_ERROR,
+  );
+  // Refusals and sign-in pages are still about sharing.
+  for (status of [401, 403, 200]) {
+    await rejects(google.sheet(sheet), ACCESS_ERROR);
+    await rejects(google.document(doc), ACCESS_ERROR);
+  }
+  // Puter's fetch, used when a direct request is refused, says the same.
+  const saved = { fetch: globalThis.fetch, window: globalThis.window };
+  globalThis.window = {
+    puter: {
+      auth: { isSignedIn: () => true },
+      net: {
+        fetch: async () =>
+          new Response("<html>Not found</html>", {
+            status: 404,
+            headers: { "content-type": "text/html" },
+          }),
+      },
+    },
+  };
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  try {
+    await rejects(createGoogle().sheet(sheet), NOT_FOUND_ERROR);
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+  // Both read in French too.
+  const { language, setLanguage, t } = await import("../src/i18n.js");
+  const previous = language;
+  globalThis.document = { documentElement: {} };
+  try {
+    setLanguage("fr");
+    assert.match(t(NOT_FOUND_ERROR), /^Ce fichier Google est introuvable/);
+    assert.match(t(TAB_ERROR), /^Cet onglet n’existe plus/);
+  } finally {
+    setLanguage(previous);
+    delete globalThis.document;
+  }
+});
+
 test("Google files shared by link download directly, without asking anyone to sign in to Puter", async () => {
   const saved = { fetch: globalThis.fetch, window: globalThis.window };
   const calls = [];
@@ -2278,7 +2670,8 @@ test("built app: links pasted without their scheme or over plain HTTP are still 
     }
     await until(() => outline().length === 5, "Everything pasted");
     const labels = outline();
-    assert.equal(labels.filter((l) => /youtube\.com/.test(l)).length, 2);
+    // Link cards for a recognized service are named after it.
+    assert.equal(labels.filter((l) => /YouTube/.test(l)).length, 2);
     assert.ok(
       labels.some((l) => /example\.com/.test(l)),
       labels.join(" | "),
@@ -2290,6 +2683,46 @@ test("built app: links pasted without their scheme or over plain HTTP are still 
       3,
       labels.join(" | "),
     );
+  } finally {
+    w.close();
+  }
+});
+
+test("built app: pasting a Google Slides link offers to import it as frames, as the Google Workspace dialog does", async () => {
+  const { w, doc, click, tick, until, transfer } = await app();
+  try {
+    await click('[data-action="new"]');
+    await until(() => doc.querySelector("#canvas"), "Board opened");
+    await tick();
+    const choices = () =>
+      [...doc.querySelectorAll("dialog[open] [data-choice]")].map(
+        (b) => b.dataset.choice,
+      );
+    transfer("paste", {
+      "text/plain": `https://docs.google.com/presentation/d/${DOC_ID}/edit#slide=id.p`,
+    });
+    await tick();
+    assert.deepEqual(choices(), ["slides", "link", "embed"]);
+    const button = doc.querySelector('dialog[open] [data-choice="slides"]');
+    assert.equal(button.textContent, "Import as frames");
+    button.click();
+    await tick();
+    const dialog = doc.querySelector("dialog[open]");
+    assert.equal(dialog.getAttribute("aria-label"), "Google Workspace");
+    assert.equal(
+      dialog.querySelector('[name="google-mode"]:checked').value,
+      "slides",
+    );
+    assert.match(dialog.querySelector("#google-url").value, /presentation/);
+    dialog.close();
+    await tick();
+    // A published presentation has nothing to import.
+    transfer("paste", {
+      "text/plain": `https://docs.google.com/presentation/d/e/2PACX-${"a".repeat(40)}/pub`,
+    });
+    await tick();
+    assert.deepEqual(choices(), ["link", "embed"]);
+    doc.querySelector("dialog[open]").close();
   } finally {
     w.close();
   }
@@ -2359,6 +2792,16 @@ test("built app: embeds, paste choice, live overlay, and document import are acc
   try {
     await click('[data-action="new"]');
     await until(() => doc.querySelector("#canvas"), "Board opened");
+    // The board's visible area, which jsdom does not lay out: live embeds
+    // stay within it.
+    doc.querySelector("#canvas").getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      right: 1200,
+      bottom: 900,
+      width: 1200,
+      height: 900,
+    });
     await tick();
     // Entry points: toolbar, drop hint, More tools.
     const importButton = doc.querySelector(
@@ -3780,6 +4223,99 @@ test("a focused Open live button that hides hands focus to the canvas", async ()
   }
 });
 
+test("a live embed stays within the visible board, below its top controls, with Open in new tab named", async () => {
+  const dom = new JSDOM(
+    `<div class="canvas-wrap"><div class="canvas-top"><span class="board-tag"></span></div><canvas id="canvas" tabindex="0"></canvas></div>`,
+    { url: "https://whiteboard.puter.site/" },
+  );
+  const saved = {
+    document: globalThis.document,
+    location: globalThis.location,
+  };
+  Object.assign(globalThis, {
+    document: dom.window.document,
+    location: dom.window.location,
+  });
+  try {
+    const { createLiveEmbeds } = await import("../src/content/embed-live.js");
+    const embed = {
+      id: "e1",
+      type: "embed",
+      x: -60,
+      y: 30,
+      w: 480,
+      h: 300,
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      provider: "youtube",
+      text: "Answer key video",
+    };
+    let view = { x: 0, y: 0, z: 1 },
+      width = 390;
+    const live = createLiveEmbeds({
+      board: () => ({ items: [embed] }),
+      selection: () => new Set(["e1"]),
+      view: () => view,
+      allows: () => true,
+      toast() {},
+      hidden: () => false,
+    });
+    const box = (left, top, w, h) => ({
+      left,
+      top,
+      right: left + w,
+      bottom: top + h,
+      width: w,
+      height: h,
+    });
+    document.querySelector("#canvas").getBoundingClientRect = () =>
+      box(0, 0, width, 700);
+    document.querySelector(".canvas-wrap").getBoundingClientRect = () =>
+      box(0, 0, width, 700);
+    // The board's top controls, here the board tag over the left side.
+    document.querySelector(".board-tag").getBoundingClientRect = () =>
+      box(16, 16, 160, 40);
+    assert.equal(live.open(embed), true);
+    const node = document.querySelector(".embed-live");
+    const px = (value) => parseFloat(value);
+    // On a phone the embed, wider than the screen and partly off it, fits
+    // inside with a margin and sits below the board tag it would be under.
+    assert.equal(px(node.style.left), 8);
+    assert.equal(px(node.style.width), 374);
+    assert.equal(px(node.style.top), 64);
+    assert.equal(px(node.style.height), 300);
+    // Open in new tab stays, with its words as its name and tooltip.
+    const link = node.querySelector(".embed-live-header a");
+    assert.equal(link.textContent, "Open in new tab");
+    assert.equal(link.title, "Open in new tab");
+    assert.equal(link.querySelector("svg").getAttribute("aria-hidden"), "true");
+    // Taller than the board: it shrinks to fit.
+    embed.h = 900;
+    live.render();
+    assert.equal(px(node.style.top), 64);
+    assert.equal(px(node.style.height), 700 - 8 - 64);
+    // On a wide screen, an embed in full view keeps its card's place.
+    embed.h = 300;
+    width = 1280;
+    view = { x: 400, y: 200, z: 1 };
+    live.render();
+    assert.deepEqual(
+      [node.style.left, node.style.top, node.style.width, node.style.height],
+      ["340px", "230px", "480px", "300px"],
+    );
+    // Partly off the board, it still keeps its card's place: the floating
+    // header and tool rail would cover it in the corner.
+    view = { x: 20, y: -10, z: 1 };
+    live.render();
+    assert.deepEqual(
+      [node.style.left, node.style.top, node.style.width, node.style.height],
+      ["-40px", "20px", "480px", "300px"],
+    );
+  } finally {
+    Object.assign(globalThis, saved);
+    dom.window.close();
+  }
+});
+
 test("Google holiday calendars can be embedded", () => {
   const url =
     "https://calendar.google.com/calendar/embed?src=en.canadian%23holiday%40group.v.calendar.google.com&ctz=America%2FToronto";
@@ -5053,4 +5589,17 @@ test("Markdown keeps private-use characters, such as icon font symbols, as writt
     { markdown: true },
   ).blocks;
   assert.equal(block.text, `Status ${icon}${other} *not bold* <tag> __init__`);
+});
+
+test("Microsoft Forms /e/ sharing links stay web embeds, so boards that hold one keep validating", () => {
+  for (const typed of [
+    "https://forms.office.com/e/AbCdEf1234",
+    "https://forms.office.com/e/AbCdEf1234?origin=lprLink",
+    "https://forms.cloud.microsoft/e/AbCdEf1234",
+  ]) {
+    const result = normalizeEmbed(typed);
+    assert.equal(result.provider, "web", typed);
+    const stored = { type: "embed", provider: "web", url: result.url };
+    assert.ok(validEmbed(stored), typed);
+  }
 });

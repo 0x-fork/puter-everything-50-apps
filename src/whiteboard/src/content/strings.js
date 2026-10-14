@@ -50,6 +50,7 @@ addTranslations({
   "Link card": "Carte de lien",
   "Import as table": "Importer comme tableau de données",
   "Import as sticky notes": "Importer en notes adhésives",
+  "Import as frames": "Importer en cadres",
   // Live embeds
   "Open live": "Ouvrir en direct",
   "Live embed": "Intégration en direct",
@@ -72,6 +73,20 @@ addTranslations({
   "Microsoft Office viewer": "Visionneuse Microsoft Office",
   "Google Calendar": "Google Agenda",
   "Google Drawings": "Google Dessins",
+  // Link card titles; brand names stay as they are.
+  "Zoom meeting": "Réunion Zoom",
+  "Zoom recording": "Enregistrement Zoom",
+  "Microsoft Teams meeting": "Réunion Microsoft Teams",
+  "Jira issue": "Ticket Jira",
+  "Trello board": "Tableau Trello",
+  "Trello card": "Carte Trello",
+  "Linear issue": "Ticket Linear",
+  "GitHub issue": "Ticket GitHub",
+  "GitHub pull request": "Demande de tirage GitHub",
+  "GitLab issue": "Ticket GitLab",
+  "GitLab merge request": "Demande de fusion GitLab",
+  "Google Drive file": "Fichier Google Drive",
+  "Google Drive folder": "Dossier Google Drive",
   // Import dialog
   "Add the content of a PDF, PowerPoint (.pptx), Word (.docx), Excel (.xlsx), CSV, text, or Markdown file as editable objects in a new frame.":
     "Ajoutez le contenu d’un fichier PDF, PowerPoint (.pptx), Word (.docx), Excel (.xlsx), CSV, texte ou Markdown sous forme d’objets modifiables dans un nouveau cadre.",
@@ -245,6 +260,10 @@ addTranslations({
     "Collez un lien vers une présentation Google Slides.",
   "Google did not share this file. Set sharing to “Anyone with the link” or publish it to the web, then try again.":
     "Google n’a pas partagé ce fichier. Réglez le partage sur « Tous les utilisateurs disposant du lien » ou publiez-le sur le Web, puis réessayez.",
+  "This Google file wasn’t found. It may have been deleted, or the link is wrong.":
+    "Ce fichier Google est introuvable. Il a peut-être été supprimé, ou le lien est erroné.",
+  "This sheet tab no longer exists. It may have been deleted from the spreadsheet.":
+    "Cet onglet n’existe plus. Il a peut-être été supprimé de la feuille de calcul.",
   "Could not reach Google. Check your connection and try again.":
     "Impossible de joindre Google. Vérifiez votre connexion et réessayez.",
   "This Google file is too large to import.":

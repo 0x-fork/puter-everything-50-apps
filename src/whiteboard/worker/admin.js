@@ -24,6 +24,7 @@ import {
   mergePolicy,
   normalizePolicy,
   publicHost,
+  teamGrants,
   validEmail,
 } from "./org.js";
 import { computeReports } from "./reports.js";
@@ -35,6 +36,8 @@ import {
   mail,
   sendHook,
   siem,
+  slackStatus,
+  testSlack,
 } from "./delivery.js";
 
 const text = (value, max = 200) =>
@@ -133,6 +136,9 @@ const publicUser = (u) => ({
   lastActive: u.lastActive || null,
   source: u.source || null,
   externalId: u.externalId || null,
+  // The id SCIM knows them by, so automation using both APIs can match
+  // people without comparing addresses.
+  scimId: u.scimId || null,
 });
 export const API_SCOPES = [
   "scim",
@@ -169,6 +175,16 @@ export const WEBHOOK_EVENTS = [
   "vote",
 ];
 
+// An identity provider that manages a person's account also manages their
+// address: verifying another one would hide them from its lookups, and its
+// deprovisioning would miss them.
+function managedAddress(user, email) {
+  if (user?.scimManaged && user.email && user.email !== email)
+    fail(
+      409,
+      "Your identity provider manages your email address. Ask your administrator to change it.",
+    );
+}
 // Link a verified email to an account. SCIM may already have provisioned a
 // pending record for that address; the account then inherits its role,
 // teams, and status, and keeps the SCIM identifier the IdP knows.
@@ -177,6 +193,7 @@ export async function linkEmail(org, identity, email, { onDeactivated } = {}) {
   const emailKey = "org:email:" + (await hash(email));
   const linked = await org.kv.get(emailKey);
   let user = await org.freshUser(identity.uuid);
+  managedAddress(user, email);
   const wasActive = !user || user.status === "active";
   if (linked && linked !== identity.uuid) {
     const other = await org.freshUser(linked);
@@ -258,18 +275,74 @@ export async function linkEmail(org, identity, email, { onDeactivated } = {}) {
   }
   return user;
 }
-// Record a team's membership change on the people who joined or left it.
-export async function syncTeamMembers(org, teamId, before, after) {
+// The accounts a team change names. Members are people the organization
+// knows, by account or by the identifier their identity provider uses; an
+// unknown identifier would otherwise be kept as a member no one is. Members
+// a team already has are taken as they are, and people being removed need
+// not still exist.
+async function teamMembers(org, ids, known = true, current = []) {
+  const kept = new Set(current),
+    owner = (await org.accountOwner()).uuid;
+  const out = [];
+  for (let n = 0; n < ids.length; n += 50)
+    out.push(
+      ...(await Promise.all(
+        ids.slice(n, n + 50).map(async (member) => {
+          if (kept.has(member) || member === owner) return member;
+          const mapped = await org.kv.get("org:scimid:" + member);
+          if (mapped) return mapped;
+          if (!known || (await org.user(member))) return member;
+          fail(400, `Unknown team member: ${member}.`);
+        }),
+      )),
+    );
+  return out;
+}
+// Record a team's membership change on the people who joined or left it,
+// around `write`, which saves the team itself. People leaving are updated
+// first and people joining after it, so a change that fails partway never
+// leaves anyone with access the team record does not show, and trying it
+// again finishes it. A board filed under the team can give its members a
+// role, so other worker instances read people's records again, once for
+// the whole change. People are updated 25 at a time, as an identity
+// provider can change thousands of members in one request, and the team's
+// claim is renewed as they go, so it does not lapse during a long change.
+export async function syncTeamMembers(
+  org,
+  teamId,
+  before,
+  after,
+  write = async () => {},
+) {
   const prior = new Set(before),
     next = new Set(after);
-  for (const uuid of new Set([...prior, ...next])) {
-    if (prior.has(uuid) === next.has(uuid)) continue;
-    const user = await org.freshUser(uuid);
-    if (!user) continue;
-    const teams = new Set(user.teams || []);
-    if (next.has(uuid)) teams.add(teamId);
-    else teams.delete(teamId);
-    await org.updateUser(uuid, { teams: [...teams] });
+  const leaving = [...prior].filter((uuid) => !next.has(uuid)),
+    joining = [...next].filter((uuid) => !prior.has(uuid));
+  let changed = false,
+    batches = 0;
+  const update = async (people) => {
+    for (let n = 0; n < people.length; n += 25) {
+      if (batches++)
+        await org.kv.expire("org:teamclaim:" + teamId, 30).catch(() => {});
+      await Promise.all(
+        people.slice(n, n + 25).map(async (uuid) => {
+          const user = await org.freshUser(uuid);
+          if (!user) return;
+          const teams = new Set(user.teams || []);
+          if (next.has(uuid)) teams.add(teamId);
+          else teams.delete(teamId);
+          await org.updateUser(uuid, { teams: [...teams] });
+          changed = true;
+        }),
+      );
+    }
+  };
+  try {
+    await update(leaving);
+    await write();
+    await update(joining);
+  } finally {
+    if (changed) await org.accessChanged();
   }
 }
 // Changes to one team are made one at a time, so two at once both stand:
@@ -366,7 +439,7 @@ export async function accountForEmail(org, email, { name, guest, source }) {
   const linked = await org.kv.get("org:email:" + (await hash(email)));
   const existing = linked && (await org.user(linked));
   if (existing) return existing;
-  const uuid = "pending-" + (await hash(email)).slice(0, 24);
+  const uuid = "pending-" + crypto.randomUUID().replaceAll("-", "");
   const user = {
     uuid,
     scimId: uuid,
@@ -1025,27 +1098,64 @@ async function jira(org, identity, input, boards) {
     if (!/^[A-Z][A-Z0-9_]+$/.test(config.project))
       fail(403, "Jira is not set up for your organization.");
     // Board editors can read only the organization's project, not every
-    // issue the integration account can see.
-    const jql = `project = "${config.project}" AND key in (${keys.join(",")})`;
-    // Jira answers in pages; every page is read.
+    // issue the integration account can see. Jira refuses a whole search
+    // that names an issue it no longer has; the issues its refusal names
+    // are left out and the rest searched again.
+    let asked = keys;
     const found = [];
-    let token = null;
-    do {
-      const query = new URLSearchParams({
-        jql,
-        fields: "status,assignee,duedate,summary",
-        maxResults: "100",
-        ...(token ? { nextPageToken: token } : {}),
-      });
-      const res = await org.fetcher(`${base}/rest/api/3/search/jql?${query}`, {
-        headers: { Authorization: auth, Accept: "application/json" },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!res.ok) fail(502, "Jira did not accept the request.");
-      const data = await res.json();
-      found.push(...(data.issues || []));
-      token = data.nextPageToken || null;
-    } while (token && found.length < keys.length);
+    for (let attempt = 0; asked.length && attempt < 5; attempt++) {
+      const jql = `project = "${config.project}" AND key in (${asked.join(",")})`;
+      // Jira answers in pages; every page is read.
+      let token = null,
+        gone = null;
+      found.length = 0;
+      do {
+        const query = new URLSearchParams({
+          jql,
+          fields: "status,assignee,duedate,summary",
+          maxResults: "100",
+          ...(token ? { nextPageToken: token } : {}),
+        });
+        const res = await org.fetcher(
+          `${base}/rest/api/3/search/jql?${query}`,
+          {
+            headers: { Authorization: auth, Accept: "application/json" },
+            signal: AbortSignal.timeout(10000),
+          },
+        );
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const named =
+            res.status === 400
+              ? asked.filter((key) =>
+                  (data.errorMessages || []).some(
+                    (m) => typeof m === "string" && m.includes(`'${key}'`),
+                  ),
+                )
+              : [];
+          if (named.length) {
+            gone = new Set(named);
+            break;
+          }
+          // Jira's own reason goes back beside the message, as for
+          // creation, so the person or an administrator can fix it.
+          const reason = jiraReason(data);
+          throw Object.assign(
+            Error(
+              [401, 403].includes(res.status)
+                ? "Jira refused the integration account. Check its email and API token in Organization settings."
+                : "Jira did not accept the request.",
+            ),
+            { status: 502, ...(reason ? { detail: reason } : {}) },
+          );
+        }
+        const data = await res.json();
+        found.push(...(data.issues || []));
+        token = data.nextPageToken || null;
+      } while (token && found.length < asked.length);
+      if (!gone) break;
+      asked = asked.filter((key) => !gone.has(key));
+    }
     return {
       issues: found.map((i) => ({
         key: i.key,
@@ -1294,6 +1404,7 @@ export async function adminCall(org, boards, identity, input) {
   if (op === "email.start") {
     const email = text(input.email, 254).toLowerCase();
     if (!validEmail(email)) fail(400, "Enter a valid email address.");
+    managedAddress(await org.freshUser(identity.uuid), email);
     // Whether another account holds the address is said only once its code
     // proves the mailbox is theirs: told before, anyone could ask about any
     // address in the domains.
@@ -1521,6 +1632,7 @@ export async function adminCall(org, boards, identity, input) {
     const scope = input.scope || "mine";
     let rows,
       total = null;
+    const teamOnly = new Set();
     if (scope === "all") {
       await admin();
       rows = (await org.list("org:board:")).map((r) => r.value);
@@ -1534,11 +1646,26 @@ export async function adminCall(org, boards, identity, input) {
       );
       const rooms = new Set(mine.keys());
       const role = scope === "organization" && (await org.role(identity));
-      if (role && role !== "guest")
+      const roomOf = (row) =>
+        (typeof row === "string" ? row : row.key).split(":").at(-1);
+      if (role && role !== "guest") {
         for (const row of await org.list("org:visible:", { values: false }))
-          rooms.add(
-            (typeof row === "string" ? row : row.key).split(":").at(-1),
-          );
+          rooms.add(roomOf(row));
+        // So are the boards that give the person's teams a role, read for
+        // every team at once. One found only that way, which the person's
+        // own list leaves out, as when they were removed from it by name,
+        // has its access checked below.
+        const lists = await Promise.all(
+          ((await org.user(identity.uuid))?.teams || []).map((team) =>
+            org.list(`org:teamboard:${team}:`, { values: false }),
+          ),
+        );
+        for (const row of lists.flat()) {
+          const room = roomOf(row);
+          if (!rooms.has(room)) teamOnly.add(room);
+          rooms.add(room);
+        }
+      }
       const found = await boardRows(org, rooms, scope !== "mine");
       total = found.total;
       rows = found.rows.map((b) => ({
@@ -1634,26 +1761,44 @@ export async function adminCall(org, boards, identity, input) {
     // even by title. Administrators open every board. Members can still
     // join boards shared with the organization that they have not opened
     // yet.
+    // Members can also join boards that give their team a role, unless a
+    // manager removed them; someone whose access came with how a board was
+    // shared comes in again the way it is shared now. Someone who has left
+    // a board's team can still be listed with the role it gave them, so
+    // those boards are checked as for a search.
     // Each batch's access records are read together first, so checking
     // each board reads nothing more.
+    const account = administers ? null : await org.user(identity.uuid);
     const canOpen = (b, member) =>
       boards.member(b.room, identity).then(
         () => true,
-        () => insider && b.visibility === "organization" && !member,
+        () =>
+          insider &&
+          ((b.visibility === "organization" && !member) ||
+            (teamGrants(b, account) && (!member || !!member.via))),
       );
-    if (!administers && (searching || !insider)) {
-      const open = [];
-      for (let n = 0; n < matched.length; n += 300) {
-        const batch = matched.slice(n, n + 300);
+    const doubtful = (b) =>
+      teamOnly.has(b.room) ||
+      (b.teamRole !== "none" && b.role && !teamGrants(b, account));
+    const checked = administers
+      ? []
+      : searching || !insider
+        ? matched
+        : matched.filter(doubtful);
+    if (checked.length) {
+      const shut = new Set();
+      for (let n = 0; n < checked.length; n += 300) {
+        const batch = checked.slice(n, n + 300);
         const members = await boards.accessMany(
           batch.map((b) => b.room),
           identity,
         );
-        open.push(
-          ...(await Promise.all(batch.map((b, i) => canOpen(b, members[i])))),
+        const open = await Promise.all(
+          batch.map((b, i) => canOpen(b, members[i])),
         );
+        batch.forEach((b, i) => open[i] || shut.add(b));
       }
-      matched = matched.filter((b, n) => open[n]);
+      matched = matched.filter((b) => !shut.has(b));
     }
     // A page of the matching boards, with how many matched in all. A page
     // can follow the last board shown (`after`, the `next` of the page
@@ -1929,6 +2074,7 @@ export async function adminCall(org, boards, identity, input) {
       policy: meta?.policy || normalizePolicy(),
       secrets,
       siem: (await org.kv.get("org:siem:status")) || null,
+      slack: await slackStatus(org, null, await org.secret("slack")),
       owner: await org.accountOwner(),
       platform: {
         saml: false,
@@ -2076,25 +2222,55 @@ export async function adminCall(org, boards, identity, input) {
           ? "active"
           : "deactivated"
         : user.status;
+      // An API key the account owner made acts for the owner here, as it
+      // does over SCIM, so offboarding automation reaches administrators
+      // too; it still never appoints one.
+      const ownerKey = !!identity.apiKey && identity.createdBy === owner.uuid;
       if (
         before.role === "admin" &&
         role !== "owner" &&
+        !ownerKey &&
         input.status !== current
       )
         fail(403, "Only the account owner can change an administrator.");
-      if (!pending) user.status = input.status;
-      else if (input.status === "active") {
+      if (!pending) {
+        user.status = input.status;
+        // Someone the identity provider deleted and an administrator lets
+        // back in is listed to it again, so its lookups and deprovisioning
+        // still reach them.
+        // An address the provider has since given to someone else stays
+        // theirs: the account is listed again only while it still holds
+        // its address, so no two listed people share a userName.
+        if (
+          input.status === "active" &&
+          user.scimDeleted &&
+          (!user.email ||
+            (await org.kv.get("org:email:" + (await hash(user.email)))) ===
+              uuid)
+        ) {
+          delete user.scimDeleted;
+          if (user.scimId) await org.kv.set("org:scimid:" + user.scimId, uuid);
+        }
+      } else if (input.status === "active") {
         user.active = true;
         delete user.inactiveByOwner;
       } else {
         user.active = false;
-        if (role === "owner") user.inactiveByOwner = true;
+        if (role === "owner" || ownerKey) user.inactiveByOwner = true;
       }
     }
     // Only what this request changed is written, so a team change or a
     // preference saved meanwhile is kept.
     const changed = Object.fromEntries(
-      ["role", "license", "roleChanged", "status", "active", "inactiveByOwner"]
+      [
+        "role",
+        "license",
+        "roleChanged",
+        "status",
+        "active",
+        "inactiveByOwner",
+        "scimDeleted",
+      ]
         .filter((field) => user[field] !== original[field])
         .map((field) => [field, user[field]]),
     );
@@ -2436,7 +2612,9 @@ export async function adminCall(org, boards, identity, input) {
         !Array.isArray(input.members) &&
         (Array.isArray(input.add) || Array.isArray(input.remove));
       const leaving = new Set(
-        changing && Array.isArray(input.remove) ? input.remove.map(id) : [],
+        changing && Array.isArray(input.remove)
+          ? await teamMembers(org, input.remove.map(id), false)
+          : [],
       );
       const members =
         op === "teams.delete"
@@ -2445,11 +2623,22 @@ export async function adminCall(org, boards, identity, input) {
             ? [
                 ...new Set([
                   ...existing.members.filter((uuid) => !leaving.has(uuid)),
-                  ...(Array.isArray(input.add) ? input.add.map(id) : []),
+                  ...(Array.isArray(input.add)
+                    ? await teamMembers(org, input.add.map(id))
+                    : []),
                 ]),
               ].slice(0, 5000)
             : Array.isArray(input.members)
-              ? [...new Set(input.members.map(id))].slice(0, 5000)
+              ? [
+                  ...new Set(
+                    await teamMembers(
+                      org,
+                      input.members.map(id),
+                      true,
+                      existing?.members,
+                    ),
+                  ),
+                ].slice(0, 5000)
               : existing?.members || [];
       // The record names the team as saved, not as typed: a blank name
       // keeps the one it had.
@@ -2457,15 +2646,20 @@ export async function adminCall(org, boards, identity, input) {
         op === "teams.delete"
           ? existing.name
           : text(input.name, 120) || existing?.name || "Untitled team";
-      // The team is saved first, then the people who joined or left it.
-      if (op === "teams.delete") await org.kv.del("org:team:" + teamId);
-      else
-        await org.kv.set("org:team:" + teamId, {
-          ...(existing || { id: teamId, created: org.now() }),
-          name,
-          members,
-        });
-      await syncTeamMembers(org, teamId, existing?.members || [], members);
+      await syncTeamMembers(
+        org,
+        teamId,
+        existing?.members || [],
+        members,
+        () =>
+          op === "teams.delete"
+            ? org.kv.del("org:team:" + teamId)
+            : org.kv.set("org:team:" + teamId, {
+                ...(existing || { id: teamId, created: org.now() }),
+                name,
+                members,
+              }),
+      );
       await org.audit(
         identity,
         `team.${op.split(".")[1]}d`,
@@ -2664,6 +2858,21 @@ export async function adminCall(org, boards, identity, input) {
       return { ok: true, matches: hookMatches(hook, "board.created") };
     } catch (error) {
       fail(502, error.message || "The webhook test failed.");
+    }
+  }
+  if (op === "org.slack.test") {
+    const url = await org.secret("slack");
+    if (!url) fail(400, "Enter a Slack incoming webhook URL.");
+    try {
+      await testSlack(org, url);
+      return { ok: true };
+    } catch (error) {
+      fail(
+        502,
+        /^Slack refused the message/.test(error.message || "")
+          ? error.message
+          : "Could not reach Slack.",
+      );
     }
   }
   if (op === "org.siem.test") {

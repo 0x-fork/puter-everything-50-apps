@@ -15,6 +15,7 @@ import {
   workshopEvents,
 } from "../src/facilitation/model.js";
 import { SharedDocument } from "../src/collaboration/document.js";
+import { slackStatus } from "./delivery.js";
 import { sameJSON } from "../src/same-json.js";
 import { ListingQueue } from "./listings.js";
 import { oversized, MAX_OBJECTS } from "../src/model.js";
@@ -44,12 +45,15 @@ import {
   BOARD_ROLES,
   DAY,
   OrgService,
+  TEAM_ROLES,
   guestRole,
   guestsShutOut,
   keepWritten,
   normalizePolicy,
   readKept,
+  sharedAccess,
   standing,
+  teamGrants,
 } from "./org.js";
 
 const fail = (status, message) => {
@@ -1030,9 +1034,10 @@ export class BoardService {
     this.access ??= new Map();
     if (!this.access.has(key))
       this.access.set(key, this.accessRecords(room, user));
-    let meta, member, orgRole, active, policy;
+    let meta, member, orgRole, active, policy, account;
     try {
-      [meta, member, orgRole, active, policy] = await this.access.get(key);
+      [meta, member, orgRole, active, policy, account] =
+        await this.access.get(key);
     } catch (error) {
       this.access.delete(key);
       throw error;
@@ -1059,13 +1064,14 @@ export class BoardService {
     // has since joined the organization keeps access and a member demoted
     // to guest is treated as one.
     const outsider = (!orgRole || orgRole === "guest") && !admin;
-    // Access that came with a public link, or with the board being open to
-    // the organization, ends when the board stops being shared that way or
-    // the person stops being a member; people invited by name keep theirs.
-    // The board's owner keeps it, however they first came to it: an owner
-    // record transferred before this was checked can still carry `via`.
+    // Access that came with a public link, with the board being open to
+    // the organization, or with its team, ends when the board stops being
+    // shared that way or the person stops being a member, or leaves the
+    // team; people invited by name keep theirs. The board's owner keeps
+    // it, however they first came to it: an owner record transferred
+    // before this was checked can still carry `via`.
     if (!admin && member?.via && meta?.owner !== user.uuid) {
-      if (member.via !== (meta?.visibility || "private"))
+      if (!sharedAccess(member, meta, account))
         fail(403, "You no longer have access to this board.");
       if (member.via === "organization" && outsider)
         fail(
@@ -1146,10 +1152,11 @@ export class BoardService {
     return record.expires ? Math.min(record.expires, ends ?? Infinity) : ends;
   }
   // The board's metadata, the caller's membership, their organization role
-  // and whether their account is active, read on every request. Each worker
-  // instance keeps them under the board's and the organization's access
-  // stamps (see AccessStamp), and reads what it cannot use, stamps due
-  // included, in one request. Its own changes apply at once.
+  // and whether their account is active, read on every request, and their
+  // user record, whose teams can give them access. Each worker instance
+  // keeps them under the board's and the organization's access stamps (see
+  // AccessStamp), and reads what it cannot use, stamps due included, in one
+  // request. Its own changes apply at once.
   async accessRecords(room, user) {
     const owner = await this.org.accountOwner();
     // The role of an API key or the account owner needs no user record.
@@ -1173,7 +1180,14 @@ export class BoardService {
       : person
         ? standing(account)
         : { role: "owner", active: true };
-    return [meta, member, role, active, normalizePolicy(orgMeta?.policy)];
+    return [
+      meta,
+      member,
+      role,
+      active,
+      normalizePolicy(orgMeta?.policy),
+      person ? account : null,
+    ];
   }
   // The access records of many boards for one person, read together, so
   // checking each board with member() afterwards reads nothing more. Each
@@ -1450,14 +1464,13 @@ export class BoardService {
     // access came with a way of sharing the board no longer has, nor
     // guests whose access has ended. When the guests counted lose access
     // is kept too, so reports leave them out once that time passes.
-    const visibility =
-      (await this.kv.get(`wb:${room}:meta`))?.visibility || "private";
+    const meta = await this.kv.get(`wb:${room}:meta`);
     const now = this.now();
     let memberCount = 0,
       guestCount = 0;
     const guestEnds = [];
     for (const [n, m] of members.entries()) {
-      if (m.via && m.via !== visibility) continue;
+      if (m.via && !sharedAccess(m, meta, accounts[n])) continue;
       const guest =
         m.uuid !== owner &&
         (accounts[n] ? accounts[n].role === "guest" : !!m.guest);
@@ -1777,6 +1790,9 @@ export class BoardService {
                   ? policy.defaultVisibility
                   : "private",
               orgRole: "editor",
+              // The team it is filed under, kept here too for the access
+              // check, which reads the metadata on every request.
+              ...(filed.team ? { team: filed.team } : {}),
             };
             await this.setRecord(room, prefix + "meta", meta, {
               disableSharing: true,
@@ -2007,12 +2023,25 @@ export class BoardService {
         this.kv.get("org:boardslack:" + room),
         this.managesIntegrations(meta, user),
       ]);
+      // Whoever connected the channel learns when Slack stops taking its
+      // posts, as when the channel is archived or the webhook removed.
+      const posted =
+        slack && integrations
+          ? await slackStatus(
+              this.org,
+              room,
+              typeof slack === "string" ? slack : slack.url,
+            )
+          : null;
       return {
         settings: {
           ...this.settings(meta),
           space: record?.space || null,
           team: record?.team || null,
           slack: !!slack,
+          ...(posted?.lastError && posted.lasting
+            ? { slackError: posted.lastError }
+            : {}),
           integrations,
         },
         sharing: await this.sharing(user, await this.org.accessPolicy()),
@@ -2074,7 +2103,8 @@ export class BoardService {
       // policy keeps guests off the organization's boards, and a guest who
       // came by a public link once the policy stops allowing those.
       const lapsed = async (m) => {
-        if (m.via && m.via !== (meta.visibility || "private")) return true;
+        if (m.via && !sharedAccess(m, meta, await this.org.user(m.uuid)))
+          return true;
         if (m.guest && m.uuid !== meta.owner) {
           if (guestsShutOut(policy)) return true;
           if (
@@ -2960,12 +2990,38 @@ export class BoardService {
       visibility: meta.visibility || "private",
       orgRole: meta.orgRole || "editor",
       linkRole: meta.linkRole || "viewer",
+      teamRole: meta.teamRole || "none",
       archived: !!meta.archived,
       legalHold: !!meta.legalHold,
     };
   }
-  // New membership: an invitation, organization-wide visibility, or a public
-  // link, each subject to the organization's external sharing policy.
+  // The role the board's sharing gives someone, and the way that gives it:
+  // being open to the organization, or the board's team, to members of the
+  // organization (`insider`), a public link to anyone. When more than one
+  // applies, the highest role does; `account` is the person's user record.
+  shared(meta, insider, account) {
+    let role = null,
+      via = null;
+    if (meta.visibility === "organization" && insider) {
+      role = meta.orgRole || "editor";
+      via = "organization";
+    } else if (meta.visibility === "link") {
+      role = meta.linkRole || "viewer";
+      via = "link";
+    }
+    if (
+      insider &&
+      teamGrants(meta, account) &&
+      (!role || BOARD_ROLES.indexOf(meta.teamRole) < BOARD_ROLES.indexOf(role))
+    ) {
+      role = meta.teamRole;
+      via = "team";
+    }
+    return { role, via };
+  }
+  // New membership: an invitation, organization-wide visibility, a public
+  // link, or the board's team, each subject to the organization's external
+  // sharing policy.
   async admit(room, user, input) {
     // A deactivated account joins nothing, so no membership, audit record,
     // or guest count is left behind for a later reactivation.
@@ -2989,19 +3045,33 @@ export class BoardService {
       const ends = await this.guestEnds(prior, user, await this.org.role(user));
       lapsed = ends !== null && ends < this.now();
     }
-    // Someone who came in through a public link or the organization, while
-    // the board is still shared that way, is already a member; once it is
-    // not, they come in again by whatever now admits them.
-    // An invitation still counts for someone who came in through the board
-    // being shared: it makes them a member by name, with its role if higher.
-    if (
-      prior &&
-      !lapsed &&
-      !(prior.via && input.token) &&
-      (!prior.via ||
-        prior.via === (await this.kv.get(prefix + "meta"))?.visibility)
-    )
-      return;
+    // Someone who came in through a public link, the organization or the
+    // board's team, while the board is still shared that way, is already a
+    // member; once it is not, or another of those ways now gives them a
+    // higher role, they come in again by whatever now admits them. An
+    // invitation still counts for someone who came in through the board
+    // being shared: it makes them a member by name, with its role if
+    // higher.
+    if (prior && !lapsed && !(prior.via && input.token)) {
+      if (!prior.via) return;
+      const [meta, account] = await Promise.all([
+        this.kv.get(prefix + "meta"),
+        this.org.user(user.uuid),
+      ]);
+      const { role } = standing(account);
+      const best = meta
+        ? this.shared(meta, !!role && role !== "guest", account)
+        : {};
+      if (
+        sharedAccess(prior, meta, account) &&
+        !(
+          best.via !== prior.via &&
+          BOARD_ROLES.indexOf(best.role) >= 0 &&
+          BOARD_ROLES.indexOf(best.role) < BOARD_ROLES.indexOf(prior.role)
+        )
+      )
+        return;
+    }
     const [meta, orgRole, policy, configured] = await Promise.all([
       this.kv.get(prefix + "meta"),
       this.org.role(user),
@@ -3046,28 +3116,42 @@ export class BoardService {
           "This link is only for members of the organization. Ask the person who shared it for a guest invitation.",
         );
       role = invite.role;
-      // Never lower than what the board's sharing already gave them.
-      if (
+      const higher =
         prior?.via &&
         !lapsed &&
         BOARD_ROLES.indexOf(prior.role) >= 0 &&
-        BOARD_ROLES.indexOf(prior.role) < BOARD_ROLES.indexOf(role)
+        BOARD_ROLES.indexOf(prior.role) < BOARD_ROLES.indexOf(role);
+      // Someone the board's team gives more than the invitation stays a
+      // member through the team, so leaving it, as the identity provider
+      // decides, still ends that access; a named copy of the team's role
+      // would outlast it.
+      if (
+        higher &&
+        prior.via === "team" &&
+        sharedAccess(prior, meta, await this.org.user(user.uuid))
       )
-        role = prior.role;
+        return;
+      // Never lower than what the board's sharing already gave them.
+      if (higher) role = prior.role;
       // On an organization's board, whether someone is a guest is whether
       // they are outside it; a member who opens a guest link is a member.
       guest = configured ? !insider : invite.guest === true;
-    } else if (meta.visibility === "organization" && insider) {
-      role = meta.orgRole || "editor";
-      via = "organization";
-    } else if (meta.visibility === "link") {
-      role = meta.linkRole || "viewer";
-      via = "link";
-      guest = !!configured && !insider;
-      // Public links stop admitting outsiders once the organization turns
-      // them off, like setting a board's visibility to a public link.
-      if (guest && (!policy.publicLinks || policy.externalSharing !== "anyone"))
-        fail(403, "Your organization does not allow public board links.");
+    } else {
+      ({ role, via } = this.shared(
+        meta,
+        insider,
+        await this.org.user(user.uuid),
+      ));
+      if (via === "link") {
+        guest = !!configured && !insider;
+        // Public links stop admitting outsiders once the organization turns
+        // them off, like setting a board's visibility to a public link.
+        if (
+          guest &&
+          (!policy.publicLinks || policy.externalSharing !== "anyone")
+        )
+          fail(403, "Your organization does not allow public board links.");
+      }
     }
     if (!role) return;
     // A guest's role is kept as the link gave it; every request limits it
@@ -3114,7 +3198,7 @@ export class BoardService {
       user,
       guest ? "board.guest.joined" : "board.joined",
       { type: "board", id: room },
-      { role, via: input.token ? "invitation" : meta.visibility },
+      { role, via: input.token ? "invitation" : via },
     );
   }
   async updateSettings(room, user, meta, input) {
@@ -3122,12 +3206,14 @@ export class BoardService {
     const configured = !!(await this.kv.get("org:meta"));
     // Who can open an organization's board is the organization's to decide:
     // a guest facilitating it manages its participants but cannot open it
-    // to the whole organization or to anyone with the link.
+    // to the whole organization, its team, or anyone with the link.
     if (
       configured &&
-      ["visibility", "orgRole", "linkRole"].some(
+      ["visibility", "orgRole", "linkRole", "teamRole"].some(
         (key) =>
-          input[key] !== undefined && input[key] !== this.settings(meta)[key],
+          input[key] !== undefined &&
+          (key === "teamRole" ? (input[key] ?? "none") : input[key]) !==
+            this.settings(meta)[key],
       ) &&
       meta.owner !== user.uuid &&
       ["guest", null].includes(await this.org.role(user))
@@ -3149,6 +3235,11 @@ export class BoardService {
         !/^https:\/\/hooks\.slack\.com\//.test(String(input.slack))
       )
         fail(400, "Enter a Slack incoming webhook URL.");
+      // A channel connected while Slack is off would start hearing about
+      // the board as soon as it is turned on, without an administrator
+      // having seen it; disconnecting is always allowed.
+      if (input.slack && !policy.integrations.slack.enabled)
+        fail(403, "Your organization has turned off Slack.");
     }
     const changes = {};
     if (input.visibility !== undefined) {
@@ -3171,9 +3262,28 @@ export class BoardService {
           fail(400, "Invalid default role.");
         changes[key] = input[key];
       }
+    if (input.teamRole !== undefined) {
+      const role = input.teamRole ?? "none";
+      if (!TEAM_ROLES.includes(role)) fail(400, "Invalid default role.");
+      changes.teamRole = role === "none" ? null : role;
+    }
     // Every field is checked before anything is saved, so a refused
     // request never changes the board's visibility on its own.
     const filed = await this.filing(user, input);
+    const old =
+      Object.keys(filed).length || input.teamRole !== undefined
+        ? await this.kv.get("org:board:" + room)
+        : null;
+    // The board's metadata keeps the team it is filed under, as the access
+    // check reads it; a board filed before teams gave access has it only in
+    // the directory. A board taken out of its team gives no team a role.
+    if (filed.team !== undefined || input.teamRole !== undefined) {
+      changes.team = filed.team !== undefined ? filed.team : old?.team || null;
+      if (!changes.team) {
+        if (changes.teamRole) fail(400, "Choose a team for this board first.");
+        if (meta.teamRole) changes.teamRole = null;
+      }
+    }
     // Only the requested fields change, on the latest copy, so a hold,
     // archive, or transfer made meanwhile is kept.
     const next = {
@@ -3183,17 +3293,19 @@ export class BoardService {
     await this.setRecord(room, `wb:${room}:meta`, next, {
       disableSharing: true,
     });
-    const patch = { visibility: next.visibility || "private", ...filed };
-    const old = Object.keys(filed).length
-      ? await this.kv.get("org:board:" + room)
-      : null;
+    const patch = {
+      visibility: next.visibility || "private",
+      ...filed,
+      ...("teamRole" in changes ? { teamRole: next.teamRole || null } : {}),
+    };
     const record = await this.org.registerBoard(room, patch);
     // Access that came with the old way of sharing ends, and access that
-    // came with the new one returns, in people's board lists too.
+    // came with the new one returns, in people's board lists too. Access
+    // that came with the board's team follows its team instead (below).
     if ((meta.visibility || "private") !== patch.visibility) {
       await this.refreshCounts(room);
       const came = (await this.members(room)).filter(
-        (m) => m.via && m.role !== "removed",
+        (m) => m.via && m.via !== "team" && m.role !== "removed",
       );
       for (let n = 0; n < came.length; n += 20)
         await Promise.all(
@@ -3208,6 +3320,11 @@ export class BoardService {
             ),
         );
     }
+    if (
+      (meta.team || null) !== (next.team || null) ||
+      (meta.teamRole || null) !== (next.teamRole || null)
+    )
+      await this.followTeam(room, next);
     if (input.slack !== undefined) {
       const had = !!(await this.kv.get("org:boardslack:" + room));
       // Who connected it is kept, so the channel stops hearing about the
@@ -3238,10 +3355,12 @@ export class BoardService {
         { type: "board", id: room },
         { from: meta.visibility || "private", to: next.visibility },
       );
-    // The access organization members and link holders get by default.
+    // The access organization members, link holders, and the members of
+    // the board's team get by default.
     for (const [key, setting, initial] of [
       ["orgRole", "organization", "editor"],
       ["linkRole", "link", "viewer"],
+      ["teamRole", "team", "none"],
     ])
       if ((meta[key] || initial) !== (next[key] || initial))
         await this.org.audit(
@@ -3251,8 +3370,10 @@ export class BoardService {
           {
             setting,
             from: meta[key] || initial,
-            to: next[key],
-            visibility: next.visibility || "private",
+            to: next[key] || initial,
+            ...(setting === "team"
+              ? { team: next.team || null }
+              : { visibility: next.visibility || "private" }),
           },
         );
     for (const key of ["space", "team"])
@@ -3271,6 +3392,41 @@ export class BoardService {
         team: record.team || null,
       },
     };
+  }
+  // Access that came with the board's team follows the team it is filed
+  // under and the role it gives them: people still on that team take the
+  // new role, and the rest lose theirs, in their board lists too. Their
+  // memberships are written without a new access stamp each, then the
+  // board's stamp is renewed once for them all.
+  async followTeam(room, meta) {
+    const came = (await this.members(room)).filter(
+      (m) => m.via === "team" && m.role !== "removed",
+    );
+    const accounts = await this.org.users(came.map((m) => m.uuid));
+    let changed = false;
+    for (let n = 0; n < came.length; n += 20)
+      await Promise.all(
+        came.slice(n, n + 20).map(async (m, i) => {
+          const holds = sharedAccess(m, meta, accounts[n + i]);
+          if (holds && m.role !== meta.teamRole) {
+            changed = true;
+            await this.setRecord(
+              room,
+              `wb:${room}:member:${m.uuid}`,
+              { ...m, role: meta.teamRole },
+              undefined,
+              true,
+            );
+          }
+          await this.org.indexMembership(
+            m.uuid,
+            room,
+            holds ? meta.teamRole : null,
+          );
+        }),
+      );
+    if (changed) await accessChanged(this.kv, room);
+    await this.refreshCounts(room);
   }
   async govern(room, user, meta, member, input) {
     const orgRole = await this.org.role(user);

@@ -1,5 +1,6 @@
 import { DAY, administers, publicHost } from "./org.js";
 import { commentExcerpt } from "../src/comments.js";
+import { hash } from "../src/collaboration/protocol.js";
 // Outbound delivery for organization events: SIEM export, signed webhooks,
 // security alerts, and notification email. Every function here is best effort
 // and bounded; the caller has already made the change durable.
@@ -57,14 +58,36 @@ export const bilingualSubject = (en, fr) => `${en} / ${fr}`;
 const bilingualPost = (en, fr) => `${en}\n\n${fr}`;
 export const bilingualBody = (en, fr) =>
   `(Le français suit.)\n\n${en}\n\n---\n\n${fr}`;
+// Administration, security, and sharing changes, and changes to what
+// someone may do on a board, are few and are what a SIEM watches for.
+// Content edits, API reads, and people joining boards come in bursts: a
+// workshop's start brings hundreds of joins.
+// AI use, people joining the organization, and an identity provider's
+// writes are administration too, but come in bursts as well, as when a
+// directory is first provisioned.
+const URGENT = new Set(["admin", "security", "sharing"]);
+const BURST = /^(ai\.|user\.joined$|scim\.)/;
+const urgent = (e) =>
+  (URGENT.has(e.category) && !BURST.test(e.action)) ||
+  e.action.startsWith("board.role.");
 export async function deliver(org, policy, events, notifications) {
-  // Export at most every few seconds per worker instance; the cursor picks
-  // up anything written meanwhile, and retrySiem sends it if no other
-  // audited change comes along.
+  // Bursts are exported at most every few seconds per worker instance; the
+  // cursor picks up anything written meanwhile, and sendHeldAudit sends it
+  // with the next request. An urgent event goes at once, with whatever is
+  // waiting, so the last change before the organization goes quiet is not
+  // held until it is next used.
+  // After a failed export, urgent events wait out the interval too, so
+  // requests do not each wait on an unreachable endpoint.
   const exporting = policy.siem.mode !== "none";
+  const exported = events.filter((e) =>
+    policy.siem.categories.includes(e.category),
+  );
   const exportNow =
-    exporting && org.now() - org.instance.siem >= org.siemInterval;
-  if (exporting && !exportNow && events.length) org.instance.siemBacklog = true;
+    exporting &&
+    (org.now() - org.instance.siem >= org.siemInterval ||
+      (!org.instance.siemFailed && exported.some(urgent)));
+  if (exporting && !exportNow && exported.length)
+    org.instance.siemBacklog = true;
   await Promise.allSettled([
     exportNow ? exportAudit(org, policy) : null,
     webhooks(org, policy, events),
@@ -200,10 +223,48 @@ export async function siem(org, policy, { force = false } = {}) {
 }
 // Sends waiting audit records and notes whether any are left: ones that
 // failed to send, or more than one batch holds.
+// One export runs at a time per instance: a request that asks while one
+// runs has it go once more when done, so what the request wrote is sent
+// and nothing is sent twice.
 async function exportAudit(org, policy) {
-  org.instance.siem = org.now();
-  const result = await siem(org, policy).catch((error) => ({ error }));
-  org.instance.siemBacklog = !!(result.error || result.more);
+  const instance = org.instance;
+  if (instance.siemRunning) {
+    instance.siemAgain = true;
+    return instance.siemRunning;
+  }
+  instance.siemRunning = (async () => {
+    try {
+      do {
+        instance.siemAgain = false;
+        instance.siem = org.now();
+        const result = await siem(org, policy).catch((error) => ({ error }));
+        instance.siemBacklog = !!(result.error || result.more);
+        instance.siemFailed = !!result.error;
+        if (result.error) break;
+      } while (instance.siemAgain);
+    } finally {
+      instance.siemRunning = null;
+    }
+  })();
+  return instance.siemRunning;
+}
+// Records an export held back go out with this instance's next request of
+// any kind once the interval has passed, such as a board's synchronization
+// or check-in, rather than waiting for a request that does scheduled work.
+// Nothing is read unless some are known to be waiting, and a SIEM that
+// just failed is tried again by scheduled work, so editing never waits on
+// an unreachable endpoint.
+export async function sendHeldAudit(org) {
+  if (
+    !org.instance.siemBacklog ||
+    org.instance.siemFailed ||
+    org.instance.siemRunning ||
+    org.now() - org.instance.siem < org.siemInterval
+  )
+    return;
+  const policy = await org.policy();
+  if (policy.siem.mode !== "none") await exportAudit(org, policy);
+  else org.instance.siemBacklog = false;
 }
 // Audit records an export did not send, because they came within the export
 // interval or the SIEM was unreachable, are sent even when no new audited
@@ -218,21 +279,34 @@ export async function retrySiem(org) {
   const policy = await org.policy();
   if (policy.siem.mode !== "none") await exportAudit(org, policy);
 }
+// Azure Government and Azure China have their own sign-in and ingestion
+// audience; the endpoint says which cloud a workspace is in.
+const AZURE_CLOUDS = {
+  com: { login: "login.microsoftonline.com", audience: "monitor.azure.com" },
+  us: { login: "login.microsoftonline.us", audience: "monitor.azure.us" },
+  cn: { login: "login.chinacloudapi.cn", audience: "monitor.azure.cn" },
+};
+export const azureCloud = (endpoint) =>
+  AZURE_CLOUDS[new URL(endpoint).hostname.split(".").at(-1)] ||
+  AZURE_CLOUDS.com;
 async function sentinelToken(org, config) {
   const secret = await org.secret("sentinel");
   if (!secret) throw Error("Add the Sentinel client secret.");
-  const key = `${config.tenantId}|${config.clientId}`;
+  // Tokens are kept per secret, so a replaced secret is tried at once,
+  // and a mistyped one fails its test rather than an hour later.
+  const key = `${config.tenantId}|${config.clientId}|${await hash(secret)}`;
   const cached = tokens.get(key);
   if (cached && cached.expires > org.now() + 60_000) return cached.token;
+  const { login, audience } = azureCloud(config.endpoint);
   const res = await org.fetcher(
-    `https://login.microsoftonline.com/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`,
+    `https://${login}/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`,
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: config.clientId,
         client_secret: secret,
-        scope: "https://monitor.azure.com//.default",
+        scope: `https://${audience}//.default`,
         grant_type: "client_credentials",
       }),
       signal: signal(),
@@ -243,6 +317,7 @@ async function sentinelToken(org, config) {
     throw Error(
       `Microsoft Entra sign-in failed (${res.status}): ${data.error || "no token"}`,
     );
+  if (tokens.size >= 100) tokens.delete(tokens.keys().next().value);
   tokens.set(key, {
     token: data.access_token,
     expires: org.now() + (Number(data.expires_in) || 3000) * 1000,
@@ -261,8 +336,7 @@ async function sentinel(org, policy, records) {
   )
     throw Error("Complete the Sentinel connection settings.");
   const token = await sentinelToken(org, config);
-  // The ingestion API accepts up to 1 MB per call.
-  for (let n = 0; n < records.length; n += 200) {
+  for (const chunk of sentinelChunks(records)) {
     const res = await org.fetcher(
       `${config.endpoint}/dataCollectionRules/${encodeURIComponent(config.dcrId)}/streams/${encodeURIComponent(config.stream)}?api-version=2023-01-01`,
       {
@@ -271,12 +345,44 @@ async function sentinel(org, policy, records) {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(records.slice(n, n + 200)),
+        body: chunk,
         signal: signal(),
       },
     );
     if (!res.ok) throw Error(`Sentinel ingestion failed (${res.status}).`);
   }
+}
+// The ingestion API refuses a call over 1 MB, and a refused batch would be
+// sent again at every export, holding back everything after it. Records go
+// in calls kept under that by their encoded size, as a large group sync's
+// member lists can make them several kilobytes each; a record too large to
+// send alone keeps its fields but not its details.
+const SENTINEL_BYTES = 1_000_000 - 50_000;
+const encoder = new TextEncoder();
+export function sentinelChunks(records) {
+  const chunks = [];
+  let parts = [],
+    size = 2;
+  for (const record of records) {
+    let json = JSON.stringify(record);
+    let bytes = encoder.encode(json).length;
+    if (bytes + 2 > SENTINEL_BYTES) {
+      json = JSON.stringify({
+        ...record,
+        Details: { truncated: true, bytes },
+      });
+      bytes = encoder.encode(json).length;
+    }
+    if (parts.length && size + bytes + 1 > SENTINEL_BYTES) {
+      chunks.push(`[${parts.join(",")}]`);
+      parts = [];
+      size = 2;
+    }
+    parts.push(json);
+    size += bytes + 1;
+  }
+  if (parts.length) chunks.push(`[${parts.join(",")}]`);
+  return chunks;
 }
 async function https(org, policy, records) {
   if (!policy.siem.url) throw Error("Add the SIEM HTTPS endpoint.");
@@ -496,7 +602,7 @@ export async function retryWebhooks(org) {
 }
 export async function slack(org, url, text) {
   if (!url || !/^https:\/\/hooks\.slack\.com\//.test(url)) return;
-  await org.fetcher(url, {
+  const res = await org.fetcher(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     // Slack reads <...> as links and mentions such as <!channel>; text
@@ -510,6 +616,79 @@ export async function slack(org, url, text) {
     }),
     signal: signal(),
   });
+  // Slack refuses a post to a removed webhook or an archived channel with
+  // a short reason, such as no_service or channel_is_archived.
+  if (!res.ok) {
+    const reason = (await res.text().catch(() => "")).trim();
+    throw Error(
+      /^[\w.-]{1,60}$/.test(reason)
+        ? `Slack refused the message (${res.status}): ${reason}`
+        : `Slack refused the message (${res.status}).`,
+    );
+  }
+}
+// Where a Slack channel's last post went, kept with a hash of the channel's
+// address: the alerts channel's, or a board's by its room. A channel that
+// stopped taking posts says so where it is set up, and one set up again
+// starts clean.
+export const slackStatusKey = (room) =>
+  "org:slackstatus:" + (room ? "board:" + room : "alerts");
+async function postSlack(org, room, url, text) {
+  const key = slackStatusKey(room),
+    address = await hash(url);
+  // A post that went through is recorded once an hour per instance, not
+  // for every mention, unless the last one had failed.
+  const posted = (org.instance.slackPosted ??= new Map());
+  try {
+    await slack(org, url, text);
+    const at = posted.get(key + address);
+    if (!at || org.now() - at > 3600_000 || at > org.now()) {
+      await org.kv.set(key, { url: address, lastSuccess: org.now() });
+      if (posted.size > 1000) posted.clear();
+      posted.set(key + address, org.now());
+    }
+  } catch (error) {
+    posted.delete(key + address);
+    // Slack's own refusal says why; anything else, such as a timeout,
+    // is said plainly. A removed webhook or an archived or forbidden
+    // channel stays that way until someone sets the channel up again;
+    // a busy or unreachable Slack is passing.
+    const message = /^Slack refused the message/.test(error.message || "")
+      ? error.message
+      : "Could not reach Slack.";
+    await org.kv
+      .set(key, {
+        url: address,
+        lastError: message.slice(0, 200),
+        lastErrorAt: org.now(),
+        lasting: /^Slack refused the message \((403|404|410)\)/.test(message),
+      })
+      .catch(() => {});
+    throw error;
+  }
+}
+export async function slackStatus(org, room, url) {
+  const status = url && (await org.kv.get(slackStatusKey(room)));
+  return status && status.url === (await hash(url))
+    ? {
+        lastSuccess: status.lastSuccess,
+        lastError: status.lastError,
+        lastErrorAt: status.lastErrorAt,
+        lasting: !!status.lasting,
+      }
+    : null;
+}
+// A test post to the alerts channel, from Organization settings.
+export async function testSlack(org, url) {
+  await postSlack(
+    org,
+    null,
+    url,
+    bilingualPost(
+      "Whiteboard can post to this channel.",
+      "Whiteboard peut publier dans ce canal.",
+    ),
+  );
 }
 // Sends through whichever method this runtime's SDK has: sendTransactional
 // now, send before it. Answers Puter's result ({ failed, suppressed }), or
@@ -673,8 +852,9 @@ async function sendAlerts(org, policy, matching) {
       ? org
           .secret("slack")
           .then((url) =>
-            slack(
+            postSlack(
               org,
+              null,
               url,
               bilingualPost(
                 lines,
@@ -791,8 +971,11 @@ async function boardSlack(org, policy, notifications) {
             `${who} a commenté dans ${title} : ${entry.excerpt}`,
           )
         : entry.text || "";
-    await slack(org, url, post + (entry.url ? `\n\n${entry.url}` : "")).catch(
-      () => {},
-    );
+    await postSlack(
+      org,
+      entry.board,
+      url,
+      post + (entry.url ? `\n\n${entry.url}` : ""),
+    ).catch(() => {});
   }
 }

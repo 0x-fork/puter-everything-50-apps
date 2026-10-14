@@ -4,7 +4,7 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import { adminCall } from "../worker/admin.js";
 import { restRoute } from "../worker/api.js";
-import { environment, owner, editor } from "./collaboration-helpers.js";
+import { environment, owner, editor, viewer } from "./collaboration-helpers.js";
 
 const PATCH = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
@@ -1398,4 +1398,552 @@ test("concurrent SCIM group changes keep every member", async () => {
     assert.equal(groups.length, users.indexOf(u) < 2 ? 0 : 1, u.id);
   }
   assert.equal(await org.kv.get("org:teamclaim:" + group.id), null);
+});
+
+test("an address given up by a rename never leads back to the record that held it", async () => {
+  const { org, boards, scim, request } = await setup();
+  const ann = await scim("Users", "POST", {
+    userName: "ann@example.ca",
+    externalId: "idp-ann",
+  });
+  await verifyEmail(org, boards, editor, "ann@example.ca");
+  await scim(`Users/${ann.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [
+      { op: "replace", path: "userName", value: "ann.lee@example.ca" },
+    ],
+  });
+  const annette = await scim("Users", "POST", {
+    userName: "ann@example.ca",
+    externalId: "idp-annette",
+  });
+  assert.notEqual(annette.id, ann.id);
+  assert.equal((await scim(`Users/${ann.id}`)).userName, "ann.lee@example.ca");
+  // Offboarding Ann reaches her account, not the newcomer's record.
+  await scim(`Users/${ann.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [{ op: "replace", path: "active", value: false }],
+  });
+  assert.equal(await org.active(editor), false);
+  assert.equal((await scim(`Users/${annette.id}`)).active, true);
+  assert.equal((await request(`Users/${annette.id}`)).status, 200);
+});
+
+test("an address the provider deleted and gives to someone else stays with the deactivated account's successor", async () => {
+  const { org, boards, scim, request } = await setup();
+  const former = await scim("Users", "POST", {
+    userName: "sales@example.ca",
+    externalId: "idp-111",
+  });
+  await verifyEmail(org, boards, editor, "sales@example.ca");
+  await request(`Users/${former.id}`, "DELETE");
+  const hire = await scim("Users", "POST", {
+    userName: "sales@example.ca",
+    externalId: "idp-999",
+  });
+  assert.notEqual(hire.id, former.id);
+  assert.equal(
+    hire["urn:ietf:params:scim:schemas:extension:whiteboard:2.0:User"].linked,
+    false,
+  );
+  assert.equal(await org.active(editor), false);
+  assert.equal(await org.role(editor), null);
+  const newcomer = {
+    uuid: "33333333-3333-4333-8333-333333333333",
+    username: "newcomer",
+  };
+  await verifyEmail(org, boards, newcomer, "sales@example.ca");
+  assert.equal(await org.role(newcomer), "member");
+  assert.equal(await org.active(editor), false);
+  // The same person, named by the provider's identifier, is linked again.
+  const again = await setup();
+  const kept = await again.scim("Users", "POST", {
+    userName: "pat@example.ca",
+    externalId: "idp-pat",
+  });
+  await verifyEmail(again.org, again.boards, editor, "pat@example.ca");
+  await again.request(`Users/${kept.id}`, "DELETE");
+  const rehired = await again.scim("Users", "POST", {
+    userName: "pat@example.ca",
+    externalId: "idp-pat",
+  });
+  assert.equal(
+    rehired["urn:ietf:params:scim:schemas:extension:whiteboard:2.0:User"]
+      .linked,
+    true,
+  );
+});
+
+test("a provisioned person cannot verify an address their identity provider does not manage", async () => {
+  const { org, boards, scim } = await setup();
+  const bob = await scim("Users", "POST", { userName: "bob@example.ca" });
+  await verifyEmail(org, boards, editor, "bob@example.ca");
+  await assert.rejects(
+    verifyEmail(org, boards, editor, "bob.private@example.org"),
+    { status: 409, message: /identity provider manages your email/ },
+  );
+  const found = await scim(
+    `Users?filter=${encodeURIComponent('userName eq "bob@example.ca"')}`,
+  );
+  assert.equal(found.totalResults, 1);
+  assert.equal(found.Resources[0].id, bob.id);
+  // The address the provider set can still be verified again.
+  await verifyEmail(org, boards, editor, "bob@example.ca");
+});
+
+test("a SCIM change written while the console deactivates someone keeps the deactivation", async () => {
+  const { org, boards, scim } = await setup();
+  const pat = await scim("Users", "POST", { userName: "pat@example.ca" });
+  await verifyEmail(org, boards, editor, "pat@example.ca");
+  // The provider's request reads Pat's record, then the console
+  // deactivates Pat before the request writes its change.
+  const read = org.freshUser.bind(org);
+  let resume;
+  org.freshUser = async (uuid) => {
+    const user = await read(uuid);
+    if (uuid === editor.uuid && !resume) {
+      org.freshUser = read;
+      await new Promise((r) => (resume = r));
+    }
+    return user;
+  };
+  const patched = scim(`Users/${pat.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [{ op: "replace", path: "name.givenName", value: "Pat" }],
+  });
+  while (!resume) await new Promise((r) => setTimeout(r, 1));
+  await adminCall(org, boards, owner, {
+    op: "org.users.update",
+    uuid: editor.uuid,
+    status: "deactivated",
+  });
+  resume();
+  await patched;
+  const stored = await org.freshUser(editor.uuid);
+  assert.equal(stored.status, "deactivated");
+  assert.equal(stored.givenName, "Pat");
+});
+
+test("REST team changes add and remove members one at a time, and only people the organization knows", async () => {
+  const { org, boards, scim } = await setup();
+  const { key } = await adminCall(org, boards, owner, {
+    op: "apikeys.create",
+    name: "Sync",
+    scopes: ["users:read", "users:write"],
+  });
+  const rest = async (path, method = "GET", body) => {
+    const response = await restRoute(
+      org,
+      boards,
+      new Request("https://w.puter.work/v1/" + path, {
+        method,
+        headers: { Authorization: `Bearer ${key}` },
+      }),
+      method,
+      path,
+      body,
+    );
+    return response.json();
+  };
+  const pat = await scim("Users", "POST", { userName: "pat@example.ca" });
+  await verifyEmail(org, boards, editor, "pat@example.ca");
+  const sam = await scim("Users", "POST", { userName: "sam@example.ca" });
+  await assert.rejects(
+    rest("teams", "POST", { name: "Ops", members: ["nobody"] }),
+    {
+      status: 400,
+    },
+  );
+  const { team } = await rest("teams", "POST", { name: "Ops", members: [] });
+  // An identity provider's id names the account it was linked to.
+  const added = await rest("teams/" + team.id, "PATCH", { add: [pat.id] });
+  assert.deepEqual(added.team.members, [editor.uuid]);
+  const both = await rest("teams/" + team.id, "PATCH", { add: [sam.id] });
+  assert.deepEqual(both.team.members, [editor.uuid, sam.id]);
+  const left = await rest("teams/" + team.id, "PATCH", { remove: [pat.id] });
+  assert.deepEqual(left.team.members, [sam.id]);
+  assert.deepEqual((await org.freshUser(editor.uuid)).teams, []);
+  await assert.rejects(
+    rest("teams/" + team.id, "PATCH", { add: ["not-a-user"] }),
+    { status: 400 },
+  );
+  assert.deepEqual((await org.kv.get("org:team:" + team.id)).members, [sam.id]);
+});
+
+test("someone an administrator reactivates after the identity provider deleted them is listed to it again", async () => {
+  const { org, boards, scim, request } = await setup();
+  const pat = await scim("Users", "POST", { userName: "pat@example.ca" });
+  await verifyEmail(org, boards, editor, "pat@example.ca");
+  await request(`Users/${pat.id}`, "DELETE");
+  await assert.rejects(request(`Users/${pat.id}`), { status: 404 });
+  await adminCall(org, boards, owner, {
+    op: "org.users.update",
+    uuid: editor.uuid,
+    status: "active",
+  });
+  assert.equal(await org.active(editor), true);
+  const found = await scim(`Users/${pat.id}`);
+  assert.equal(found.active, true);
+  assert.equal(found.userName, "pat@example.ca");
+  const listed = await scim(
+    `Users?filter=${encodeURIComponent('userName eq "pat@example.ca"')}`,
+  );
+  assert.equal(listed.totalResults, 1);
+  // Its deprovisioning reaches them again.
+  await scim(`Users/${pat.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [{ op: "replace", path: "active", value: false }],
+  });
+  assert.equal(await org.active(editor), false);
+});
+
+test("an API key the account owner made can deactivate an administrator through the REST API, as through SCIM", async () => {
+  const { org, boards } = await setup();
+  const { token } = await adminCall(org, boards, owner, {
+    op: "org.invite",
+    role: "admin",
+  });
+  await adminCall(org, boards, editor, { op: "org.join", token });
+  assert.equal(await org.role(editor), "admin");
+  const users = async (creator) => {
+    const { key } = await adminCall(org, boards, creator, {
+      op: "apikeys.create",
+      name: "Offboarding",
+      scopes: ["users:write"],
+    });
+    return (status) =>
+      restRoute(
+        org,
+        boards,
+        new Request(`https://w.puter.work/v1/users/${editor.uuid}`, {
+          method: "PATCH",
+          headers: { Authorization: `Bearer ${key}` },
+        }),
+        "PATCH",
+        `users/${editor.uuid}`,
+        { status },
+      );
+  };
+  const ownerKey = await users(owner);
+  assert.equal((await ownerKey("deactivated")).status, 200);
+  assert.equal(await org.active(editor), false);
+  assert.equal((await ownerKey("active")).status, 200);
+  assert.equal(await org.active(editor), true);
+  // A key an administrator made still cannot, nor can any key appoint one.
+  const viewerAdmin = { uuid: viewer.uuid, username: viewer.username };
+  const second = await adminCall(org, boards, owner, {
+    op: "org.invite",
+    role: "admin",
+  });
+  await adminCall(org, boards, viewerAdmin, {
+    op: "org.join",
+    token: second.token,
+  });
+  const adminKey = await users(viewerAdmin);
+  await assert.rejects(adminKey("deactivated"), { status: 403 });
+  assert.equal(await org.role(editor), "admin");
+});
+
+test("SCIM reads a user's address as identity providers send it", async () => {
+  const { scim } = await setup();
+  // The primary address, wherever it is in the list, trimmed.
+  const sam = await scim("Users", "POST", {
+    emails: [
+      { value: "sam@gmail.com", type: "home" },
+      { value: " Sam@Example.ca ", type: "work", primary: true },
+    ],
+  });
+  assert.equal(sam.userName, "sam@example.ca");
+  const trimmed = await scim("Users", "POST", { userName: " Kim@Example.ca " });
+  assert.equal(trimmed.userName, "kim@example.ca");
+  // Microsoft Entra ID's path-less patch names the work address by path.
+  const pat = await scim("Users", "POST", { userName: "pat@example.ca" });
+  const patched = await scim(`Users/${pat.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [
+      {
+        op: "Replace",
+        value: {
+          'emails[type eq "work"].value': "pat.lee@example.ca",
+          "name.givenName": "Pat",
+        },
+      },
+    ],
+  });
+  assert.equal(patched.userName, "pat.lee@example.ca");
+  assert.equal(patched.name.givenName, "Pat");
+});
+
+test('SCIM takes a primary flag sent as the string "False" as not primary', async () => {
+  const { scim } = await setup();
+  const user = await scim("Users", "POST", {
+    userName: "pat@example.ca",
+    roles: [
+      { value: "member", primary: "False" },
+      { value: "guest", primary: "True" },
+    ],
+  });
+  assert.equal(user.roles[0].value, "guest");
+  const sam = await scim("Users", "POST", {
+    emails: [
+      { value: "sam@gmail.com", primary: "False" },
+      { value: "sam@example.ca", primary: "true" },
+    ],
+  });
+  assert.equal(sam.userName, "sam@example.ca");
+});
+
+test("SCIM endpoints the service does not offer answer 501 Not Implemented", async () => {
+  const { request, scim } = await setup();
+  for (const [path, method] of [
+    ["Me", "GET"],
+    ["Bulk", "POST"],
+    [".search", "POST"],
+    ["Users/.search", "POST"],
+    ["Groups/.search", "POST"],
+  ])
+    await assert.rejects(request(path, method, {}), { status: 501 });
+  const config = await scim("ServiceProviderConfig");
+  assert.equal(config.bulk.supported, false);
+  await assert.rejects(request("Nothing"), { status: 404 });
+});
+
+test("people from outside who only joined a board are not listed to the identity provider, and REST users carry their SCIM id", async () => {
+  const { org, boards, scim } = await setup();
+  const pat = await scim("Users", "POST", { userName: "pat@example.ca" });
+  // As a board admits an outside guest.
+  await org.saveUser(
+    {
+      uuid: "55555555-5555-4555-8555-555555555555",
+      username: "outsider",
+      role: "guest",
+      status: "active",
+      license: "guest",
+      created: org.now(),
+      source: "board",
+      teams: [],
+    },
+    true,
+  );
+  const all = await scim("Users");
+  assert.deepEqual(
+    all.Resources.map((u) => u.userName),
+    ["pat@example.ca"],
+  );
+  await assert.rejects(scim("Users/55555555-5555-4555-8555-555555555555"), {
+    status: 404,
+  });
+  const { key: reader } = await adminCall(org, boards, owner, {
+    op: "apikeys.create",
+    name: "Directory",
+    scopes: ["users:read"],
+  });
+  const response = await restRoute(
+    org,
+    boards,
+    new Request("https://w.puter.work/v1/users", {
+      headers: { Authorization: `Bearer ${reader}` },
+    }),
+    "GET",
+    "users",
+    null,
+  );
+  const { users } = await response.json();
+  assert.equal(users.find((u) => u.email === "pat@example.ca").scimId, pat.id);
+  // REST still lists the guest, for administrators.
+  assert.ok(users.some((u) => u.username === "outsider"));
+});
+
+test("a large group change updates its members in parallel and keeps the team's claim", async () => {
+  const { org, scim } = await setup();
+  const people = [];
+  for (let n = 0; n < 120; n++)
+    people.push(
+      (await scim("Users", "POST", { userName: `p${n}@example.ca` })).id,
+    );
+  const group = await scim("Groups", "POST", { displayName: "Everyone" });
+  const read = org.freshUser.bind(org);
+  let reading = 0,
+    most = 0;
+  org.freshUser = async (uuid) => {
+    most = Math.max(most, ++reading);
+    await new Promise((r) => setTimeout(r, 1));
+    try {
+      return await read(uuid);
+    } finally {
+      reading--;
+    }
+  };
+  const renewed = [];
+  const expire = org.kv.expire.bind(org.kv);
+  org.kv.expire = (key, seconds) => {
+    if (key.startsWith("org:teamclaim:")) renewed.push(seconds);
+    return expire(key, seconds);
+  };
+  await scim(`Groups/${group.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [
+      { op: "add", path: "members", value: people.map((value) => ({ value })) },
+    ],
+  });
+  org.freshUser = read;
+  assert.ok(most > 1 && most <= 25, `${most}`);
+  // Taken once, then renewed after each of the first four batches.
+  assert.ok(renewed.length >= 5, `${renewed.length}`);
+  for (const id of people)
+    assert.deepEqual((await org.freshUser(id)).teams, [group.id]);
+});
+
+test("an address the identity provider deleted its user for can be renamed to", async () => {
+  const { org, boards, scim, request } = await setup();
+  const bob = await scim("Users", "POST", { userName: "bob@example.ca" });
+  await verifyEmail(org, boards, editor, "bob@example.ca");
+  await request(`Users/${bob.id}`, "DELETE");
+  const ann = await scim("Users", "POST", { userName: "ann@example.ca" });
+  const renamed = await scim(`Users/${ann.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [{ op: "replace", path: "userName", value: "bob@example.ca" }],
+  });
+  assert.equal(renamed.userName, "bob@example.ca");
+  assert.equal(await org.active(editor), false);
+  // Someone not deleted still keeps theirs: Ann now holds it.
+  const kim = await scim("Users", "POST", { userName: "kim@example.ca" });
+  await assert.rejects(
+    request(`Users/${kim.id}`, "PATCH", {
+      schemas: [PATCH],
+      Operations: [
+        { op: "replace", path: "userName", value: "bob@example.ca" },
+      ],
+    }),
+    { status: 409 },
+  );
+});
+
+test("reactivating someone whose address the provider gave to a newcomer does not list two people with it", async () => {
+  const { org, boards, scim, request } = await setup();
+  const former = await scim("Users", "POST", {
+    userName: "shared@example.ca",
+    externalId: "old",
+  });
+  await verifyEmail(org, boards, editor, "shared@example.ca");
+  await request(`Users/${former.id}`, "DELETE");
+  await scim("Users", "POST", {
+    userName: "shared@example.ca",
+    externalId: "new",
+  });
+  await adminCall(org, boards, owner, {
+    op: "org.users.update",
+    uuid: editor.uuid,
+    status: "active",
+  });
+  assert.equal(await org.active(editor), true);
+  const listed = (await scim("Users")).Resources.filter(
+    (u) => u.userName === "shared@example.ca",
+  );
+  assert.deepEqual(
+    listed.map((u) => u.externalId),
+    ["new"],
+  );
+});
+
+test("a board guest an administrator makes a member is listed to the identity provider", async () => {
+  const { org, boards, scim } = await setup();
+  const uuid = "55555555-5555-4555-8555-555555555555";
+  await org.saveUser(
+    {
+      uuid,
+      username: "outsider",
+      role: "guest",
+      status: "active",
+      license: "guest",
+      created: org.now(),
+      source: "board",
+      teams: [],
+    },
+    true,
+  );
+  assert.equal((await scim("Users")).totalResults, 0);
+  await adminCall(org, boards, owner, {
+    op: "org.users.update",
+    uuid,
+    role: "member",
+  });
+  const listed = await scim("Users");
+  assert.deepEqual(
+    listed.Resources.map((u) => u.userName),
+    ["outsider"],
+  );
+});
+
+test("re-provisioning someone with a long externalId links their account again", async () => {
+  const { org, boards, scim, request } = await setup();
+  const externalId = "x".repeat(250);
+  const pat = await scim("Users", "POST", {
+    userName: "pat@example.ca",
+    externalId,
+  });
+  await verifyEmail(org, boards, editor, "pat@example.ca");
+  await request(`Users/${pat.id}`, "DELETE");
+  const again = await scim("Users", "POST", {
+    userName: "pat@example.ca",
+    externalId,
+    active: true,
+  });
+  assert.equal(
+    again["urn:ietf:params:scim:schemas:extension:whiteboard:2.0:User"].linked,
+    true,
+  );
+  assert.equal(await org.active(editor), true);
+});
+
+test("a path-less patch renames a person to their work address, not another type", async () => {
+  const { scim } = await setup();
+  const pat = await scim("Users", "POST", { userName: "pat@example.ca" });
+  const patched = await scim(`Users/${pat.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [
+      {
+        op: "Replace",
+        value: {
+          'emails[type eq "work"].value': "pat.lee@example.ca",
+          'emails[type eq "other"].value': "pat.personal@gmail.com",
+        },
+      },
+    ],
+  });
+  assert.equal(patched.userName, "pat.lee@example.ca");
+  const other = await scim(`Users/${pat.id}`, "PATCH", {
+    schemas: [PATCH],
+    Operations: [
+      {
+        op: "Replace",
+        value: { 'emails[type eq "other"].value': "pat.home@gmail.com" },
+      },
+    ],
+  });
+  assert.equal(other.userName, "pat.lee@example.ca");
+});
+
+test("two requests creating one person at once make one record", async () => {
+  const { scim, request } = await setup();
+  const results = await Promise.allSettled([
+    request("Users", "POST", { userName: "pat@example.ca" }),
+    request("Users", "POST", { userName: "pat@example.ca" }),
+  ]);
+  assert.deepEqual(
+    results.map((r) => r.value?.status ?? r.reason.status).sort(),
+    [201, 409],
+  );
+  const listed = await scim("Users");
+  assert.equal(listed.totalResults, 1);
+  // The address is free for the next request once the first is done.
+  await assert.rejects(
+    request("Users", "POST", { userName: "pat@example.ca" }),
+    {
+      status: 409,
+      scimType: "uniqueness",
+    },
+  );
+  const sam = await request("Users", "POST", { userName: "sam@example.ca" });
+  assert.equal(sam.status, 201);
 });

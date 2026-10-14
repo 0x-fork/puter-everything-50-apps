@@ -10,13 +10,16 @@ A Whiteboard organization exports its audit log to Microsoft Sentinel in near re
 ## Push setup
 
 1. Register an application in Microsoft Entra ID and create a client secret. Note the tenant ID and the application (client) ID, and the object ID of its enterprise application (service principal).
-2. Deploy [`whiteboard-sentinel.json`](whiteboard-sentinel.json) to the resource group of the Log Analytics workspace that Sentinel uses:
+2. Deploy [`whiteboard-sentinel.json`](whiteboard-sentinel.json) to the resource group of the Log Analytics workspace that Sentinel uses, in the workspace's region (the data collection endpoint and rule must be in the same region as the workspace, which can differ from the resource group's):
 
    ```sh
    az deployment group create \
      --resource-group <resource-group> \
      --template-file docs/sentinel/whiteboard-sentinel.json \
-     --parameters workspaceName=<workspace> servicePrincipalObjectId=<object-id>
+     --parameters workspaceName=<workspace> servicePrincipalObjectId=<object-id> \
+       location=$(az monitor log-analytics workspace show \
+         --resource-group <resource-group> --workspace-name <workspace> \
+         --query location --output tsv)
    ```
 
    The template creates the `WhiteboardAudit_CL` table, a data collection endpoint, a data collection rule with the `Custom-WhiteboardAudit` stream, and grants the application the Monitoring Metrics Publisher role on the rule. Its outputs are the logs ingestion endpoint and the rule's immutable ID.
@@ -24,13 +27,14 @@ A Whiteboard organization exports its audit log to Microsoft Sentinel in near re
 3. In Whiteboard, open **Organization settings → Security → SIEM export**, choose **Microsoft Sentinel**, and enter the tenant ID, application ID, client secret, the logs ingestion endpoint, the data collection rule immutable ID, and `Custom-WhiteboardAudit` as the stream. Choose the event categories to export.
 4. Select **Send test event**. A `siem.test` record appears in `WhiteboardAudit_CL` within a few minutes of the first ingestion (new tables can take longer on first use). The Security tab shows the last delivery time, the number of events sent, and the last error.
 
-The client secret is stored only in the organization's worker storage with sharing disabled and is never returned to browsers. Access tokens are requested with the client credentials flow for the `https://monitor.azure.com//.default` scope and cached until shortly before they expire.
+The client secret is stored only in the organization's worker storage with sharing disabled and is never returned to browsers. Access tokens are requested with the client credentials flow for the `https://monitor.azure.com//.default` scope (`monitor.azure.us` with `login.microsoftonline.us` for an Azure Government endpoint, `monitor.azure.cn` with `login.chinacloudapi.cn` for Azure China) and cached until shortly before they expire.
 
 ### Delivery behavior
 
 - Every administrative, security, access, sharing, API, and (optionally) board content event is written to the audit log first, then exported. Export is at-least-once: each record carries a unique `EventId` for de-duplication.
 - The worker keeps an export cursor. If Sentinel is unreachable, the next request resumes from the cursor, so no events are skipped.
-- Records are sent in batches of up to 200 events.
+- Administrative, security, and sharing events, and changes to someone's role on a board, are sent as they happen, with any events waiting. Events that come in bursts (people joining boards or the organization, board content, AI use, API reads, and an identity provider's changes) are sent at most every 10 seconds, with the next request to the organization or its boards once that time has passed. While the SIEM is unreachable, every export waits the 10 seconds, and scheduled work tries again.
+- Each call to the ingestion API stays under its 1 MB limit. A record too large to send alone, which is rare, is sent without its `Details`, which stay in the audit log.
 
 ## Record format
 

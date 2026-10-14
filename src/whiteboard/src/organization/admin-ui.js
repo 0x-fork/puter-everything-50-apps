@@ -229,6 +229,14 @@ const DELIVERY_MESSAGES = [
     /^Microsoft Entra sign-in failed \((\d+)\): (.*)$/s,
     "Microsoft Entra sign-in failed ({status}): {error}",
   ],
+  [
+    /^Slack refused the message \((\d+)\)\.$/,
+    "Slack refused the message ({status}).",
+  ],
+  [
+    /^Slack refused the message \((\d+)\): (.*)$/s,
+    "Slack refused the message ({status}): {error}",
+  ],
 ];
 export function deliveryText(message) {
   for (const [pattern, template] of DELIVERY_MESSAGES) {
@@ -1897,9 +1905,9 @@ ${!managesAdmins ? `<p id="admin-permissions" class="dialog-copy">${t("Only the 
       const data = await load("org.policy.get");
       const p = data.policy.integrations;
       panel().innerHTML = `<form id="integrations-form" class="policy-form">
-<fieldset><legend>Google Workspace</legend>${check("i-google", "Allow Google Docs, Sheets, Slides, and Drive embeds and Sheets import", p.google.enabled)}<p class="dialog-copy">${t("Google Workspace SAML single sign-on needs the Puter account platform and is not available yet; people sign in with Puter accounts. Provision users and groups from Google Workspace with the SCIM endpoint on the Security tab.")}</p></fieldset>
-<fieldset><legend>Slack</legend>${check("i-slack", "Send notifications to Slack", p.slack.enabled)}<label class="field">${t("Slack incoming webhook URL")} ${data.secrets.slack ? `<span class="badge">${t("Configured")}</span>` : ""}<input id="i-slack-url" type="url" placeholder="https://hooks.slack.com/services/…" autocomplete="off"></label>${data.secrets.slack ? check("i-slack-off", "Disconnect Slack") : ""}<p class="dialog-copy">${t("Security alerts can go to this channel. Board owners can also connect a board to its own channel for mentions.")}</p></fieldset>
-<fieldset><legend>Jira</legend>${check("i-jira", "Send items to Jira and show their status on boards", p.jira.enabled)}${text("i-jira-site", "Jira Cloud site", p.jira.site, 'placeholder="team.atlassian.net"')}${text("i-jira-email", "Integration account email", p.jira.email)}${text("i-jira-project", "Project key", p.jira.project, 'placeholder="CDS"')}<label class="field">${t("API token")} ${data.secrets.jira ? `<span class="badge">${t("Configured")}</span>` : ""}<input id="i-jira-token" type="password" autocomplete="off"></label>${data.secrets.jira ? check("i-jira-off", "Remove the stored API token") : ""}</fieldset>
+<fieldset><legend>Google Workspace</legend>${check("i-google", "Allow Google Docs, Sheets, Slides, and Drive embeds and Sheets import", p.google.enabled)}<p class="dialog-copy">${t("People can sign in with their Google Workspace accounts, using Sign in with Google when they sign in to Puter. Google Workspace SAML single sign-on needs the Puter account platform and is not available yet. Provision users and groups from Google Workspace with the SCIM endpoint or the REST API on the Security tab.")}</p></fieldset>
+<fieldset><legend>Slack</legend>${check("i-slack", "Send notifications to Slack", p.slack.enabled)}<label class="field">${t("Slack incoming webhook URL")} ${data.secrets.slack ? `<span class="badge">${t("Configured")}</span>` : ""}<input id="i-slack-url" type="url" placeholder="https://hooks.slack.com/services/…" autocomplete="off"></label>${data.secrets.slack ? check("i-slack-off", "Disconnect Slack") : ""}<p class="dialog-copy">${t("Security alerts can go to this channel. Board owners can also connect a board to its own channel for mentions.")}</p>${data.secrets.slack ? `<p class="dialog-copy" role="status">${data.slack?.lastError ? `${labelled(t("Last error"), "")}${escape(deliveryText(data.slack.lastError))}` : data.slack?.lastSuccess ? `${labelled(t("Last post"), "")}${dateTime(data.slack.lastSuccess)}` : t("Nothing posted yet.")}</p>` : ""}<button type="button" class="secondary" id="i-slack-test">${t("Send test message")}</button></fieldset>
+<fieldset><legend>Jira</legend>${check("i-jira", "Send items to Jira and show their status on boards", p.jira.enabled)}${text("i-jira-site", "Jira Cloud site", p.jira.site, 'placeholder="team.atlassian.net"')}${text("i-jira-email", "Integration account email", p.jira.email)}${text("i-jira-project", "Project key", p.jira.project, 'placeholder="OPS"')}<label class="field">${t("API token")} ${data.secrets.jira ? `<span class="badge">${t("Configured")}</span>` : ""}<input id="i-jira-token" type="password" autocomplete="off"></label>${data.secrets.jira ? check("i-jira-off", "Remove the stored API token") : ""}</fieldset>
 <fieldset><legend>${t("Other integrations")}</legend>${check("i-embeds", "Allow embedded web content (video, design files, forms)", p.embeds.enabled)}${check("i-webhooks", "Deliver events to webhooks", p.webhooks.enabled)}${check("i-miro", "Allow Miro imports", p.miro.enabled)}</fieldset>
 <div class="dialog-footer">${unsavedNote()}<button class="primary">${t("Save integrations")}</button></div></form>`;
       const f = panel().querySelector("#integrations-form");
@@ -1917,32 +1925,52 @@ ${!managesAdmins ? `<p id="admin-permissions" class="dialog-copy">${t("Only the 
         webhooks: { enabled: v("i-webhooks").checked },
         miro: { enabled: v("i-miro").checked },
       });
-      const loaded = values();
+      let loaded = values();
       const saved = draft("integrations", f);
+      const saveIntegrations = async () => {
+        const sent = saved.snapshot();
+        const now = values();
+        // A field left empty keeps the stored secret; one marked for
+        // removal clears it, unless a new one was entered.
+        const secrets = {};
+        if (v("i-slack-url").value) secrets.slack = v("i-slack-url").value;
+        else if (v("i-slack-off")?.checked) secrets.slack = null;
+        if (v("i-jira-token").value) secrets.jira = v("i-jira-token").value;
+        else if (v("i-jira-off")?.checked) secrets.jira = null;
+        await request("org.policy.set", {
+          policy: changes({ integrations: now }, { integrations: loaded }),
+          secrets,
+        });
+        loaded = now;
+        saved(sent);
+        await org.refresh().catch(() => {});
+      };
       f.onsubmit = (e) => {
         e.preventDefault();
         guarded(f.querySelector(".primary"), async (reload) => {
-          const sent = saved.snapshot();
-          // A field left empty keeps the stored secret; one marked for
-          // removal clears it, unless a new one was entered.
-          const secrets = {};
-          if (v("i-slack-url").value) secrets.slack = v("i-slack-url").value;
-          else if (v("i-slack-off")?.checked) secrets.slack = null;
-          if (v("i-jira-token").value) secrets.jira = v("i-jira-token").value;
-          else if (v("i-jira-off")?.checked) secrets.jira = null;
-          await request("org.policy.set", {
-            policy: changes(
-              { integrations: values() },
-              { integrations: loaded },
-            ),
-            secrets,
-          });
-          saved(sent);
-          await org.refresh().catch(() => {});
+          await saveIntegrations();
           toast("Integrations saved.");
           reload("integrations");
         });
       };
+      // The test goes to the channel as entered, so what was typed is saved
+      // first, as the SIEM test does.
+      v("i-slack-test").onclick = (e) =>
+        guarded(e.currentTarget, async (reload) => {
+          await saveIntegrations();
+          try {
+            await request("org.slack.test");
+            // A test posts while notifications are off, so the channel can
+            // be checked before turning them on.
+            toast(
+              v("i-slack").checked
+                ? "Test message posted to Slack."
+                : "Test message posted to Slack. Slack notifications are off in Integrations, so nothing else is posted yet.",
+            );
+          } finally {
+            reload("integrations");
+          }
+        });
     },
     async security() {
       const [data, keys, hooks] = await Promise.all([
@@ -1952,7 +1980,7 @@ ${!managesAdmins ? `<p id="admin-permissions" class="dialog-copy">${t("Only the 
       ]);
       const s = data.policy.siem,
         a = data.policy.alerts;
-      panel().innerHTML = `<section class="policy-form"><h3>${t("Sign-in and identity")}</h3><p class="dialog-copy">${t("People sign in with Puter accounts, and Puter enforces multifactor authentication at sign-in. Google Workspace SAML single sign-on is an account platform feature; this organization verifies email domains itself and supports SCIM provisioning today.")}</p><dl class="admin-facts"><dt>${t("SCIM base URL")}</dt><dd><code data-user-content>${escape(org.server + "/scim/v2")}</code></dd><dt>${t("REST API reference")}</dt><dd><a href="${escape(org.server + "/v1/openapi.json")}" target="_blank" rel="noopener">${escape(org.server + "/v1/openapi.json")}</a></dd></dl></section>
+      panel().innerHTML = `<section class="policy-form"><h3>${t("Sign-in and identity")}</h3><p class="dialog-copy">${t("People sign in with Puter accounts, including with Sign in with Google, so members can use their Google Workspace accounts under Google's sign-in policies, such as 2-Step Verification. Puter enforces multifactor authentication at sign-in. SAML single sign-on, and requiring Google sign-in for the organization's domains, are account platform features; this organization verifies email domains itself and supports SCIM provisioning today.")}</p><dl class="admin-facts"><dt>${t("SCIM base URL")}</dt><dd><code data-user-content>${escape(org.server + "/scim/v2")}</code></dd><dt>${t("REST API reference")}</dt><dd><a href="${escape(org.server + "/v1/openapi.json")}" target="_blank" rel="noopener">${escape(org.server + "/v1/openapi.json")}</a></dd></dl></section>
 <form id="siem-form" class="policy-form"><fieldset><legend>${t("SIEM export")}</legend>${select(
         "s-mode",
         "Destination",
@@ -2108,7 +2136,13 @@ ${!managesAdmins ? `<p id="admin-permissions" class="dialog-copy">${t("Only the 
           el.onclick = () =>
             guarded(el, async () => {
               await request("webhooks.test", { id: el.dataset.testHook });
-              toast("Webhook test delivered.");
+              // A test reaches the endpoint even while deliveries are off,
+              // so the endpoint can be checked before turning them on.
+              toast(
+                data.policy.integrations.webhooks.enabled
+                  ? "Webhook test delivered."
+                  : "Webhook test delivered. Webhooks are off in Integrations, so events are not sent yet.",
+              );
             });
         });
       panel()

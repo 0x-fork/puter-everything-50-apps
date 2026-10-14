@@ -15,6 +15,8 @@ import { auditCategory, mergePolicy, normalizePolicy } from "../worker/org.js";
 import {
   hmac,
   sendHook,
+  azureCloud,
+  sentinelChunks,
   siem,
   siemRecord,
   unsentAudit,
@@ -3903,6 +3905,15 @@ test("only the board owner or an administrator connects a board to Slack", async
   });
   await join({ service: boards }, editor, { room, token });
   const hook = "https://hooks.slack.com/services/T/B/x";
+  // Nobody connects a channel while the organization has Slack off.
+  await assert.rejects(
+    boards.call(owner, { op: "settings", room, slack: hook }),
+    { status: 403, message: "Your organization has turned off Slack." },
+  );
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { integrations: { slack: { enabled: true } } },
+  });
   await assert.rejects(
     boards.call(editor, { op: "settings", room, slack: hook }),
     { status: 403 },
@@ -4904,7 +4915,13 @@ test("audit events an export missed reach the SIEM without another audited chang
   await call(owner, { op: "org.setup", name: "Fabrikam" });
   await call(owner, {
     op: "org.policy.set",
-    policy: { siem: { mode: "https", url: "https://siem.fabrikam.test/in" } },
+    policy: {
+      siem: {
+        mode: "https",
+        url: "https://siem.fabrikam.test/in",
+        categories: ["admin", "security", "access", "sharing", "content"],
+      },
+    },
   });
   const { input, room } = createInput("Board");
   await boards.call(owner, input);
@@ -4913,12 +4930,16 @@ test("audit events an export missed reach the SIEM without another audited chang
     fetched
       .filter((f) => f.url === "https://siem.fabrikam.test/in")
       .flatMap((f) => JSON.parse(f.options.body).events.map((e) => e.Action));
-  // An event just after an export waits for the interval to pass.
-  await call(owner, { op: "org.invite", role: "member" });
+  // A content event just after an export waits for the interval to pass.
+  await org.audit(owner, "board.export", { type: "board", id: room });
   await org.flush();
-  assert.ok(!exported().includes("user.invited"));
+  assert.ok(!exported().includes("board.export"));
   env.now += 15_000;
   await boards.call(owner, { op: "members", room });
+  assert.ok(exported().includes("board.export"), exported().join());
+  // A sharing, role, or administration change goes at once.
+  await call(owner, { op: "org.invite", role: "member" });
+  await org.flush();
   assert.ok(exported().includes("user.invited"), exported().join());
   // One the SIEM refused is sent again once it recovers.
   let down = true;
@@ -4950,30 +4971,49 @@ test("audit events an export missed reach the SIEM through organization and API 
     name: "Reports",
     scopes: ["reports:read"],
   });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: {
+      siem: {
+        mode: "https",
+        url: "https://siem.fabrikam.test/in",
+        categories: ["admin", "security", "access", "sharing", "content"],
+      },
+    },
+  });
   await org.flush();
-  const invited = () =>
+  const exports = () =>
     fetched
       .filter((f) => f.url === "https://siem.fabrikam.test/in")
       .flatMap((f) => JSON.parse(f.options.body).events)
-      .filter((e) => e.Action === "user.invited")
-      .map((e) => e.Details.role);
+      .filter((e) => e.Action === "board.export")
+      .map((e) => e.Details.format);
   const ask = (input) => organizationRequest(org, boards, owner, input);
-  // An invitation just after an export waits for the interval to pass,
+  const exported = async (format) => {
+    await org.audit(
+      owner,
+      "board.export",
+      { type: "board", id: "b" },
+      { format },
+    );
+    await org.flush();
+  };
+  // A content event just after an export waits for the interval to pass,
   // then goes out with the next request to the console.
   env.now += 15_000;
-  await ask({ op: "org.invite", role: "member" });
+  await exported("pdf");
   env.now += 2_000;
-  await ask({ op: "org.invite", role: "guest" });
-  assert.deepEqual(invited(), ["member"]);
+  await exported("png");
+  assert.deepEqual(exports(), ["pdf"]);
   env.now += 15_000;
   await ask({ op: "org.info" });
-  assert.deepEqual(invited(), ["member", "guest"]);
+  assert.deepEqual(exports(), ["pdf", "png"]);
   // Likewise through the REST API.
   env.now += 15_000;
-  await ask({ op: "org.invite", role: "member" });
+  await exported("svg");
   env.now += 2_000;
-  await ask({ op: "org.invite", role: "admin" });
-  assert.deepEqual(invited(), ["member", "guest", "member"]);
+  await exported("pptx");
+  assert.deepEqual(exports(), ["pdf", "png", "svg"]);
   env.now += 15_000;
   await restRequest(
     org,
@@ -4985,7 +5025,7 @@ test("audit events an export missed reach the SIEM through organization and API 
     "reports",
     null,
   );
-  assert.deepEqual(invited(), ["member", "guest", "member", "admin"]);
+  assert.deepEqual(exports(), ["pdf", "png", "svg", "pptx"]);
 });
 
 test("an administrator invitation promotes an existing member", async () => {
@@ -5754,10 +5794,22 @@ test("a team change or preference save during a deactivation keeps the account d
   const saved = await org.user(x);
   assert.deepEqual(saved.teams, [team.id]);
   assert.equal(saved.prefs.emailNotifications, false);
-  // Joining a team changes no access check, so it keeps the access stamp.
+  // A team can give access to the boards filed under it, so leaving one
+  // renews the access stamp, once for the whole change.
   const before = await org.kv.get("org:access");
-  await call(owner, { op: "teams.update", id: team.id, remove: [x] });
-  assert.equal(await org.kv.get("org:access"), before);
+  const set = org.kv.set,
+    stamped = [];
+  org.kv.set = (key, ...rest) => {
+    if (key === "org:access") stamped.push(key);
+    return set.call(org.kv, key, ...rest);
+  };
+  try {
+    await call(owner, { op: "teams.update", id: team.id, remove: [x] });
+  } finally {
+    org.kv.set = set;
+  }
+  assert.notEqual(await org.kv.get("org:access"), before);
+  assert.equal(stamped.length, 1);
 });
 
 test("concurrent team changes keep every member", async () => {
@@ -8945,4 +8997,612 @@ test("an invitation makes someone who came through organization sharing a member
     ).member.role,
     "editor",
   );
+});
+
+test("Sentinel calls stay under the ingestion API's 1 MB limit, so a large batch cannot block the export", async () => {
+  const { env, call, org, fetched } = setup();
+  const sizes = [];
+  const base = org.fetcher;
+  org.fetcher = async (url, options) => {
+    if (String(url).includes("/dataCollectionRules/")) {
+      const bytes = new TextEncoder().encode(options.body).length;
+      sizes.push(bytes);
+      if (bytes > 1_000_000) return new Response("{}", { status: 413 });
+    }
+    return base(url, options);
+  };
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: {
+      siem: {
+        mode: "sentinel",
+        sentinel: {
+          tenantId: "11111111-2222-3333-4444-555555555555",
+          clientId: "11111111-2222-3333-4444-666666666666",
+          endpoint: "https://wb-abc.canadacentral-1.ingest.monitor.azure.com",
+          dcrId: "dcr-0123456789abcdef0123456789abcdef",
+          stream: "Custom-WhiteboardAudit",
+        },
+      },
+    },
+    secrets: { sentinel: "entra-secret" },
+  });
+  await org.flush();
+  // A group sync whose records each list hundreds of members.
+  const members = (n) =>
+    Array.from(
+      { length: 100 },
+      (_, i) =>
+        `aaaaaaaa-bbbb-4ccc-8ddd-${String(n * 1000 + i).padStart(12, "0")}`,
+    );
+  for (let n = 0; n < 200; n++) {
+    await org.audit(
+      owner,
+      "team.updated",
+      { type: "team", id: "t" + n, name: "Team " + n },
+      { added: members(n), removed: members(n + 500) },
+    );
+    env.now += 20;
+  }
+  await org.audit(owner, "board.visibility.link", { type: "board", id: "b" });
+  org.pending.length = 0;
+  env.now += 60_000;
+  const result = await siem(org, await org.policy());
+  assert.equal(result.error, undefined);
+  assert.ok(result.sent >= 201);
+  assert.ok(sizes.length > 1 && sizes.every((b) => b <= 1_000_000), sizes);
+  const sent = fetched
+    .filter((f) => f.url.includes("/dataCollectionRules/"))
+    .flatMap((f) => JSON.parse(f.options.body).map((r) => r.Action));
+  assert.ok(sent.includes("board.visibility.link"));
+  // A record too large to send alone goes without its details.
+  const [chunk] = sentinelChunks([
+    siemRecord({
+      id: "x",
+      time: new Date(0).toISOString(),
+      action: "team.updated",
+      details: { members: "m".repeat(2_000_000) },
+    }),
+  ]);
+  const [record] = JSON.parse(chunk);
+  assert.equal(record.Action, "team.updated");
+  assert.equal(record.Details.truncated, true);
+  assert.ok(new TextEncoder().encode(chunk).length < 1_000_000);
+});
+
+test("a replaced Sentinel client secret is used at once, so a wrong one fails its test", async () => {
+  const { call, org } = setup();
+  const base = org.fetcher;
+  org.fetcher = async (url, options) =>
+    String(url).includes("login.microsoftonline.com") &&
+    options.body.get("client_secret") !== "right-secret"
+      ? Response.json({ error: "invalid_client" }, { status: 401 })
+      : base(url, options);
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  const sentinel = (secret) =>
+    call(owner, {
+      op: "org.policy.set",
+      policy: {
+        siem: {
+          mode: "sentinel",
+          sentinel: {
+            tenantId: "11111111-2222-3333-4444-555555555555",
+            clientId: "11111111-2222-3333-4444-777777777777",
+            endpoint: "https://wb-abc.canadacentral-1.ingest.monitor.azure.com",
+            dcrId: "dcr-0123456789abcdef0123456789abcdef",
+            stream: "Custom-WhiteboardAudit",
+          },
+        },
+      },
+      secrets: { sentinel: secret },
+    });
+  await sentinel("right-secret");
+  assert.equal((await call(owner, { op: "org.siem.test" })).sent >= 1, true);
+  await sentinel("wrong-secret");
+  await assert.rejects(call(owner, { op: "org.siem.test" }), /invalid_client/);
+});
+
+test("Sentinel signs in to the Azure cloud its ingestion endpoint belongs to", async () => {
+  const { call, org, fetched } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: {
+      siem: {
+        mode: "sentinel",
+        sentinel: {
+          tenantId: "11111111-2222-3333-4444-555555555555",
+          clientId: "11111111-2222-3333-4444-888888888888",
+          endpoint: "https://wb-abc.usgovvirginia-1.ingest.monitor.azure.us",
+          dcrId: "dcr-0123456789abcdef0123456789abcdef",
+          stream: "Custom-WhiteboardAudit",
+        },
+      },
+    },
+    secrets: { sentinel: "entra-secret" },
+  });
+  const base = org.fetcher;
+  org.fetcher = (url, options) =>
+    String(url).startsWith("https://login.microsoftonline.us/")
+      ? (fetched.push({ url: String(url), options }),
+        Response.json({ access_token: "gov-token", expires_in: 3600 }))
+      : base(url, options);
+  await call(owner, { op: "org.siem.test" });
+  const logins = fetched.filter((f) => f.url.includes("/oauth2/v2.0/token"));
+  assert.deepEqual(
+    logins.map((f) => [new URL(f.url).host, f.options.body.get("scope")]),
+    [["login.microsoftonline.us", "https://monitor.azure.us//.default"]],
+  );
+  assert.equal(
+    fetched.find((f) => f.url.includes("/dataCollectionRules/")).options.headers
+      .Authorization,
+    "Bearer gov-token",
+  );
+  assert.deepEqual(
+    azureCloud("https://x.chinanorth3-1.ingest.monitor.azure.cn"),
+    {
+      login: "login.chinacloudapi.cn",
+      audience: "monitor.azure.cn",
+    },
+  );
+  assert.equal(
+    azureCloud("https://x.canadacentral-1.ingest.monitor.azure.com").audience,
+    "monitor.azure.com",
+  );
+});
+
+test("a Slack channel that stops taking posts says so where it is set up, and a test post checks it", async () => {
+  const { boards, call, org, fetched } = setup();
+  const refused = new Set();
+  const base = org.fetcher;
+  org.fetcher = boards.fetcher = async (url, options) =>
+    refused.has(String(url))
+      ? (fetched.push({ url: String(url), options }),
+        new Response("channel_is_archived", { status: 410 }))
+      : base(url, options);
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await assert.rejects(call(owner, { op: "org.slack.test" }), {
+    status: 400,
+  });
+  const alerts = "https://hooks.slack.com/services/T/B/alerts";
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { integrations: { slack: { enabled: true } } },
+    secrets: { slack: alerts },
+  });
+  assert.equal((await call(owner, { op: "org.policy.get" })).slack, null);
+  await call(owner, { op: "org.slack.test" });
+  const test = fetched.filter((f) => f.url === alerts).at(-1);
+  assert.match(JSON.parse(test.options.body).text, /can post to this channel/);
+  assert.ok((await call(owner, { op: "org.policy.get" })).slack.lastSuccess);
+  refused.add(alerts);
+  await assert.rejects(call(owner, { op: "org.slack.test" }), {
+    status: 502,
+    message: "Slack refused the message (410): channel_is_archived",
+  });
+  const failed = (await call(owner, { op: "org.policy.get" })).slack;
+  assert.equal(
+    failed.lastError,
+    "Slack refused the message (410): channel_is_archived",
+  );
+  // A new address starts clean.
+  await call(owner, {
+    op: "org.policy.set",
+    policy: {},
+    secrets: { slack: "https://hooks.slack.com/services/T/B/new" },
+  });
+  assert.equal((await call(owner, { op: "org.policy.get" })).slack, null);
+  // A board's own channel: its owner sees why its mentions stopped.
+  const { input, room } = createInput();
+  await boards.call(owner, input);
+  const { token } = await boards.call(owner, {
+    op: "invite",
+    room,
+    role: "editor",
+  });
+  await join({ service: boards }, editor, { room, token });
+  const channel = "https://hooks.slack.com/services/T/B/board";
+  refused.add(channel);
+  await boards.call(owner, { op: "settings", room, slack: channel });
+  await commit(boards, editor, room, (b) => {
+    b.comments = [
+      {
+        id: "t1",
+        x: 0,
+        y: 0,
+        resolved: false,
+        messages: [
+          {
+            id: "m1",
+            authorId: editor.uuid,
+            authorName: editor.username,
+            text: "@alice please look",
+            createdAt: 1,
+          },
+        ],
+      },
+    ];
+  });
+  await org.flush();
+  assert.ok(fetched.some((f) => f.url === channel));
+  const { settings } = await boards.call(owner, { op: "settings.get", room });
+  assert.equal(
+    settings.slackError,
+    "Slack refused the message (410): channel_is_archived",
+  );
+  await boards.call(owner, {
+    op: "settings",
+    room,
+    slack: "https://hooks.slack.com/services/T/B/board-2",
+  });
+  const again = await boards.call(owner, { op: "settings.get", room });
+  assert.equal(again.settings.slackError, undefined);
+  assert.equal(again.settings.slack, true);
+});
+
+test("a refused Jira status request carries Jira's own reason", async () => {
+  const { boards, call, org } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: {
+      integrations: {
+        jira: {
+          enabled: true,
+          site: "fabrikam.atlassian.net",
+          email: "svc@fabrikam.test",
+          project: "WB",
+        },
+      },
+    },
+    secrets: { jira: "token" },
+  });
+  const { input, room } = createInput("Plan");
+  await boards.call(owner, input);
+  org.fetcher = async () =>
+    Response.json(
+      {
+        errorMessages: [
+          "The value 'WB' does not exist for the field 'project'.",
+        ],
+      },
+      { status: 400 },
+    );
+  await assert.rejects(
+    call(owner, { op: "org.jira.status", room, keys: ["WB-1"] }),
+    {
+      status: 502,
+      message: "Jira did not accept the request.",
+      detail: "The value 'WB' does not exist for the field 'project'.",
+    },
+  );
+  org.fetcher = async () => new Response("", { status: 401 });
+  await assert.rejects(
+    call(owner, { op: "org.jira.status", room, keys: ["WB-1"] }),
+    { status: 502, message: /Check its email and API token/ },
+  );
+});
+
+test("the REST board directory searches content only when asked, and pages with the cursor it documents", async () => {
+  const { boards, call, org } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  for (const title of ["Plan", "Retro", "Roadmap"]) {
+    const { input } = createInput(title, [
+      item("note", 0, 0, { text: "Budget review" }),
+    ]);
+    await boards.call(owner, input);
+  }
+  const { key } = await call(owner, {
+    op: "apikeys.create",
+    name: "Directory",
+    scopes: ["boards:read"],
+  });
+  const get = async (query) =>
+    (
+      await restRoute(
+        org,
+        boards,
+        new Request("https://w.puter.work/v1/boards?" + query, {
+          headers: { Authorization: `Bearer ${key}` },
+        }),
+        "GET",
+        "boards",
+        null,
+      )
+    ).json();
+  assert.equal((await get("query=budget&content=false")).total, 0);
+  assert.equal((await get("query=budget&content=true")).total, 3);
+  const first = await get("limit=2&sort=title");
+  assert.ok(first.next);
+  const second = await get(
+    `limit=2&sort=title&after=${encodeURIComponent(first.next)}`,
+  );
+  assert.deepEqual(
+    [...first.boards, ...second.boards].map((b) => b.title),
+    ["Plan", "Retro", "Roadmap"],
+  );
+  const spec = openAPI("https://w.puter.work");
+  const names = spec.paths["/v1/boards"].get.parameters.map((p) => p.name);
+  assert.ok(names.includes("after") && names.includes("content"));
+});
+
+test("people joining a board in a burst are exported to the SIEM together, and what waits goes with the next request", async () => {
+  const { env, boards, call, org, fetched } = setup();
+  org.now = () => env.now;
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { siem: { mode: "https", url: "https://siem.fabrikam.test/in" } },
+  });
+  const { input, room } = createInput("Workshop");
+  await boards.call(owner, input);
+  await boards.call(owner, {
+    op: "settings",
+    room,
+    visibility: "organization",
+  });
+  await org.flush();
+  const posts = () =>
+    fetched.filter((f) => f.url === "https://siem.fabrikam.test/in");
+  const exported = () =>
+    posts().flatMap((f) =>
+      JSON.parse(f.options.body).events.map((e) => e.Action),
+    );
+  env.now += 15_000;
+  const before = posts().length;
+  // Thirty members open the board within three seconds.
+  for (let n = 0; n < 30; n++) {
+    const person = {
+      uuid: `66666666-6666-4666-8666-${String(n).padStart(12, "0")}`,
+      username: "member" + n,
+    };
+    await org.saveUser({
+      ...person,
+      role: "member",
+      status: "active",
+      license: "full",
+      created: env.now,
+      teams: [],
+    });
+    await boards.call(person, { op: "join", room });
+    env.now += 100;
+  }
+  assert.ok(posts().length - before <= 1, `${posts().length - before}`);
+  const joins = () => exported().filter((a) => a === "board.joined").length;
+  assert.ok(joins() < 30);
+  // The rest go with the next request once the interval has passed, of
+  // whatever kind, such as a synchronization that audits nothing.
+  env.now += 15_000;
+  await org.flush();
+  assert.equal(joins(), 30);
+  // A change to what someone may do on a board goes at once.
+  await org.audit(owner, "board.role.changed", { type: "board", id: room });
+  await org.flush();
+  assert.equal(exported().at(-1), "board.role.changed");
+});
+
+test("requests at the same moment export each audit record to the SIEM once", async () => {
+  const { env, boards, call, org, fetched } = setup();
+  org.now = () => env.now;
+  const base = org.fetcher;
+  org.fetcher = boards.fetcher = async (url, options) => {
+    if (String(url).startsWith("https://siem.fabrikam.test"))
+      await new Promise((r) => setTimeout(r, 20));
+    return base(url, options);
+  };
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { siem: { mode: "https", url: "https://siem.fabrikam.test/in" } },
+  });
+  await org.flush();
+  env.now += 15_000;
+  await Promise.all(
+    Array.from({ length: 10 }, () =>
+      organizationRequest(org, boards, owner, {
+        op: "org.invite",
+        role: "member",
+      }),
+    ),
+  );
+  const ids = fetched
+    .filter((f) => f.url === "https://siem.fabrikam.test/in")
+    .flatMap((f) => JSON.parse(f.options.body).events)
+    .filter((e) => e.Action === "user.invited")
+    .map((e) => e.EventId);
+  assert.equal(ids.length, 10);
+  assert.equal(new Set(ids).size, 10);
+});
+
+test("while the SIEM is unreachable, urgent events wait out the export interval instead of each request waiting on it", async () => {
+  const { env, boards, call, org } = setup();
+  org.now = () => env.now;
+  let calls = 0;
+  const base = org.fetcher;
+  org.fetcher = boards.fetcher = async (url, options) => {
+    if (String(url).startsWith("https://siem.fabrikam.test")) {
+      calls++;
+      throw Object.assign(Error("timed out"), { name: "TimeoutError" });
+    }
+    return base(url, options);
+  };
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { siem: { mode: "https", url: "https://siem.fabrikam.test/in" } },
+  });
+  await org.flush();
+  const first = calls;
+  for (let n = 0; n < 3; n++) {
+    env.now += 1000;
+    await organizationRequest(org, boards, owner, {
+      op: "org.invite",
+      role: "member",
+    });
+  }
+  assert.equal(calls, first);
+  env.now += 15_000;
+  await organizationRequest(org, boards, owner, { op: "org.info" });
+  assert.equal(calls, first + 1);
+});
+
+test("only events the SIEM exports, and not AI use or provisioning, keep an export waiting or send one at once", async () => {
+  const { env, call, org, fetched } = setup();
+  org.now = () => env.now;
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { siem: { mode: "https", url: "https://siem.fabrikam.test/in" } },
+  });
+  await org.flush();
+  const posts = () =>
+    fetched.filter((f) => f.url === "https://siem.fabrikam.test/in").length;
+  env.now += 1000;
+  // Board content is not among the exported categories by default.
+  await org.audit(owner, "board.export", { type: "board", id: "b" });
+  await org.flush();
+  assert.equal(org.instance.siemBacklog, false);
+  const before = posts();
+  for (const action of ["ai.used", "scim.user.created", "user.joined"]) {
+    await org.audit(owner, action, { type: "user", id: "u" });
+    await org.flush();
+  }
+  assert.equal(posts(), before);
+  assert.equal(org.instance.siemBacklog, true);
+});
+
+test("a passing Slack failure is reported but does not tell the board's owner to set the channel up again", async () => {
+  const { boards, call, org } = setup();
+  let answer = () => new Response("ok");
+  const base = org.fetcher;
+  org.fetcher = boards.fetcher = async (url, options) =>
+    String(url).startsWith("https://hooks.slack.com/services/T/B/board")
+      ? answer()
+      : base(url, options);
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { integrations: { slack: { enabled: true } } },
+    secrets: { slack: "https://hooks.slack.com/services/T/B/board-alerts" },
+  });
+  const { input, room } = createInput();
+  await boards.call(owner, input);
+  const { token } = await boards.call(owner, {
+    op: "invite",
+    room,
+    role: "editor",
+  });
+  await join({ service: boards }, editor, { room, token });
+  await boards.call(owner, {
+    op: "settings",
+    room,
+    slack: "https://hooks.slack.com/services/T/B/board",
+  });
+  let n = 0;
+  const mention = () =>
+    commit(boards, editor, room, (b) => {
+      n++;
+      b.comments = [
+        {
+          id: "t" + n,
+          x: 0,
+          y: 0,
+          resolved: false,
+          messages: [
+            {
+              id: "m" + n,
+              authorId: editor.uuid,
+              authorName: editor.username,
+              text: `@alice look ${n}`,
+              createdAt: n,
+            },
+          ],
+        },
+      ];
+    }).then(() => org.flush());
+  const writes = [];
+  const set = org.kv.set.bind(org.kv);
+  org.kv.set = (key, ...rest) => {
+    if (String(key).startsWith("org:slackstatus:")) writes.push(key);
+    return set(key, ...rest);
+  };
+  await mention();
+  await mention();
+  // A post that went through is recorded once, not for every mention.
+  assert.equal(writes.length, 1);
+  answer = () => {
+    throw Object.assign(Error("The operation timed out."), {
+      name: "TimeoutError",
+    });
+  };
+  await mention();
+  const status = await org.kv.get("org:slackstatus:board:" + room);
+  assert.equal(status.lastError, "Could not reach Slack.");
+  let { settings } = await boards.call(owner, { op: "settings.get", room });
+  assert.equal(settings.slackError, undefined);
+  answer = () => new Response("rate_limited", { status: 429 });
+  await mention();
+  ({ settings } = await boards.call(owner, { op: "settings.get", room }));
+  assert.equal(settings.slackError, undefined);
+  answer = () => new Response("no_service", { status: 404 });
+  await mention();
+  ({ settings } = await boards.call(owner, { op: "settings.get", room }));
+  assert.equal(
+    settings.slackError,
+    "Slack refused the message (404): no_service",
+  );
+});
+
+test("a Jira status refresh leaves out issues Jira no longer has rather than failing", async () => {
+  const { boards, call, org } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: {
+      integrations: {
+        jira: {
+          enabled: true,
+          site: "fabrikam.atlassian.net",
+          email: "svc@fabrikam.test",
+          project: "WB",
+        },
+      },
+    },
+    secrets: { jira: "token" },
+  });
+  const { input, room } = createInput("Plan");
+  await boards.call(owner, input);
+  const asked = [];
+  org.fetcher = async (target) => {
+    const jql = new URL(target).searchParams.get("jql");
+    asked.push(jql);
+    // As Jira answers a search naming an issue that was deleted.
+    if (jql.includes("WB-9"))
+      return Response.json(
+        {
+          errorMessages: [
+            "An issue with key 'WB-9' does not exist for field 'key'.",
+          ],
+        },
+        { status: 400 },
+      );
+    return Response.json({
+      issues: ["WB-1", "WB-2"].map((key) => ({
+        key,
+        fields: { status: { name: "Done", statusCategory: { key: "done" } } },
+      })),
+    });
+  };
+  const { issues } = await call(owner, {
+    op: "org.jira.status",
+    room,
+    keys: ["WB-1", "WB-9", "WB-2"],
+  });
+  assert.deepEqual(
+    issues.map((i) => i.key),
+    ["WB-1", "WB-2"],
+  );
+  assert.equal(asked.length, 2);
+  assert.ok(!asked[1].includes("WB-9"));
 });

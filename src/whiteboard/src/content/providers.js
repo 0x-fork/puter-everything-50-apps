@@ -127,10 +127,15 @@ function segments(url) {
 const hashParams = (url) => new URLSearchParams(url.hash.slice(1));
 const decimal = (value) => (/^\d{1,12}$/.test(value || "") ? value : "");
 const RANGE = /^[A-Z]{1,3}[1-9]\d{0,6}(:[A-Z]{1,3}[1-9]\d{0,6})?$/;
+const RESOURCE_KEY = /^0-[\w-]{1,80}$/;
 
 function google(url) {
   if (hostIs(url, "drive.google.com")) {
     const parts = segments(url);
+    // Files shared by link before 2021 also need their resource key, which
+    // Google adds to their links; without it they show as not found.
+    const key = url.searchParams.get("resourcekey") || "";
+    const resourceKey = RESOURCE_KEY.test(key) ? key : "";
     let id = "";
     if (parts[0] === "file" && parts[1] === "d") id = parts[2];
     else if (parts[0] === "open" || parts[0] === "uc")
@@ -138,8 +143,8 @@ function google(url) {
     if (id && GOOGLE_ID.test(id))
       return {
         provider: "google-drive",
-        url: `https://drive.google.com/file/d/${id}/view`,
-        embed: `https://drive.google.com/file/d/${id}/preview`,
+        url: `https://drive.google.com/file/d/${id}/view${resourceKey ? `?resourcekey=${resourceKey}` : ""}`,
+        embed: `https://drive.google.com/file/d/${id}/preview${resourceKey ? `?resourcekey=${resourceKey}` : ""}`,
         id,
       };
     const folder =
@@ -151,8 +156,8 @@ function google(url) {
     if (folder && GOOGLE_ID.test(folder))
       return {
         provider: "google-drive",
-        url: `https://drive.google.com/drive/folders/${folder}`,
-        embed: `https://drive.google.com/embeddedfolderview?id=${folder}#grid`,
+        url: `https://drive.google.com/drive/folders/${folder}${resourceKey ? `?resourcekey=${resourceKey}` : ""}`,
+        embed: `https://drive.google.com/embeddedfolderview?id=${folder}${resourceKey ? `&resourcekey=${resourceKey}` : ""}#grid`,
         id: folder,
         folder: true,
       };
@@ -360,8 +365,13 @@ function vimeo(url) {
   } else if (hostIs(url, "vimeo.com", "www.vimeo.com")) {
     const n = parts.findIndex((p) => /^\d+$/.test(p));
     if (n < 0) return null;
-    // Only plain video pages and channel/group video pages qualify.
-    if (n > 0 && !["channels", "groups", "video"].includes(parts[0]))
+    // Only plain video pages, channel and group video pages, and the
+    // owner's video manager page qualify.
+    if (
+      n > 0 &&
+      !["channels", "groups", "video"].includes(parts[0]) &&
+      !(parts[0] === "manage" && parts[1] === "videos" && n === 2)
+    )
       return null;
     id = parts[n];
     if (parts[n + 1] && /^[a-f0-9]{6,20}$/.test(parts[n + 1]))
@@ -393,6 +403,8 @@ function microsoftForms(url) {
     return null;
   const host = url.hostname.toLowerCase();
   const parts = url.pathname.split("/").filter(Boolean);
+  // Sharing links that use /e/ stay generic web embeds, as boards already
+  // store them that way and a stored embed must keep validating.
   if (parts[0] === "r" && /^[A-Za-z0-9]{6,40}$/.test(parts[1] || "")) {
     const canonical = `https://${host}/r/${parts[1]}`;
     return {
@@ -561,6 +573,26 @@ export function normalizeEmbed(value, { generic = true } = {}) {
     const result = normalize(url);
     if (result) return result.url.length > MAX_URL ? null : result;
   }
+  // A Looker Studio report's sharing link shows the report full-page; its
+  // embed address is the same report under /embed/. A link copied while
+  // editing ends in /edit.
+  if (hostIs(url, "lookerstudio.google.com", "datastudio.google.com")) {
+    const parts = segments(url);
+    if (parts.at(-1) === "edit") parts.pop();
+    if (
+      parts[0] === "reporting" &&
+      /^[\w-]{1,100}$/.test(parts[1] || "") &&
+      (parts.length === 2 ||
+        (parts.length === 4 &&
+          parts[2] === "page" &&
+          /^[\w-]{1,100}$/.test(parts[3])))
+    )
+      return generic
+        ? web(
+            new URL(`https://lookerstudio.google.com/embed/${parts.join("/")}`),
+          )
+        : null;
+  }
   // Google pages made to be framed embed as web pages.
   if (
     (hostIs(url, "www.google.com", "google.com") &&
@@ -582,15 +614,25 @@ export function normalizeEmbed(value, { generic = true } = {}) {
   return generic ? web(url) : null;
 }
 
-// Chat, meeting, project, code and file tools whose pages refuse to be
-// framed (X-Frame-Options or a CSP frame-ancestors list), so a web embed of
-// them shows an empty frame. Their links belong on link cards. Embeds of
-// them already on a board stay valid; only new ones are steered away.
+// Chat, meeting, project, design, map, code and file tools whose pages
+// refuse to be framed (X-Frame-Options or a CSP frame-ancestors list), so a
+// web embed of them shows an empty frame. Their links belong on link cards.
+// Embeds of them already on a board stay valid; only new ones are steered
+// away. Google Maps short links (maps.app.goo.gl) lead to map pages that
+// refuse framing too; a map's embed code is on google.com/maps/embed.
 const REFUSES_FRAMING =
-  /(^|\.)(slack\.com|teams\.microsoft\.com|teams\.live\.com|notion\.so|atlassian\.net|atlassian\.com|trello\.com|asana\.com|github\.com|gitlab\.com|bitbucket\.org|dropbox\.com|linkedin\.com)\.?$/i;
+  /(^|\.)(slack\.com|teams\.microsoft\.com|teams\.live\.com|notion\.so|notion\.site|atlassian\.net|atlassian\.com|trello\.com|asana\.com|linear\.app|app\.clickup\.com|monday\.com|github\.com|gitlab\.com|bitbucket\.org|dropbox\.com|onedrive\.live\.com|1drv\.ms|sharepoint\.com|linkedin\.com|discord\.com|discord\.gg|webex\.com|canva\.com|goo\.gl)\.?$/i;
+// Pages those sites make to be framed: a Canva design's ?embed view and an
+// Office document's embedview link on SharePoint.
+const madeToFrame = (url) =>
+  (/(^|\.)canva\.com\.?$/i.test(url.hostname) &&
+    url.searchParams.has("embed")) ||
+  (/(^|\.)sharepoint\.com\.?$/i.test(url.hostname) &&
+    (url.searchParams.get("action") === "embedview" ||
+      /\/_layouts\/15\/embed\.aspx$/i.test(url.pathname)));
 export function refusesFraming(value) {
   const url = parse(value);
-  return !!url && REFUSES_FRAMING.test(url.hostname);
+  return !!url && REFUSES_FRAMING.test(url.hostname) && !madeToFrame(url);
 }
 export const providerGroup = (provider) => EMBED_PROVIDERS[provider]?.group;
 export const providerName = (provider) =>

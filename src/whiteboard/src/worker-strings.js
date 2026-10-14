@@ -64,6 +64,8 @@ addTranslations({
     "Seuls les membres de l’organisation peuvent classer des tableaux dans des espaces.",
   "Choose a space or team that exists.":
     "Choisissez un espace ou une équipe qui existe.",
+  "Choose a team for this board first.":
+    "Choisissez d’abord une équipe pour ce tableau.",
   "Member not found.": "Membre introuvable.",
   "Your organization does not let guests facilitate boards.":
     "Votre organisation ne permet pas aux invités d’animer des tableaux.",
@@ -92,6 +94,8 @@ addTranslations({
     "Seuls le propriétaire du tableau ou un administrateur peuvent en transférer la propriété.",
   "Only the board owner or an administrator can connect Slack.":
     "Seuls le propriétaire du tableau ou un administrateur peuvent connecter Slack.",
+  "Your organization has turned off Slack.":
+    "Votre organisation a désactivé Slack.",
   "Only the server owner can create boards.":
     "Seul le propriétaire du serveur peut créer des tableaux.",
   // Saving and sharing
@@ -155,6 +159,8 @@ addTranslations({
     "Trop de courriels de vérification. Réessayez dans une heure.",
   "This email address is already linked to another account.":
     "Cette adresse courriel est déjà liée à un autre compte.",
+  "Your identity provider manages your email address. Ask your administrator to change it.":
+    "Votre fournisseur d’identité gère votre adresse courriel. Demandez à votre administrateur de la modifier.",
   "The verification email could not be sent. Ask your administrator to check the organization's Puter plan.":
     "Le courriel de vérification n’a pas pu être envoyé. Demandez à votre administrateur de vérifier l’abonnement Puter de l’organisation.",
   "Use an email address in your organization's domain, or ask an administrator for an invitation.":
@@ -193,8 +199,8 @@ addTranslations({
     "Entrez l’URL d’un webhook entrant Slack.",
   "Enter your Jira Cloud site, such as team.atlassian.net.":
     "Entrez votre site Jira Cloud, comme equipe.atlassian.net.",
-  "Enter a Jira project key, such as CDS.":
-    "Entrez une clé de projet Jira, comme CDS.",
+  "Enter a Jira project key, such as OPS.":
+    "Entrez une clé de projet Jira, comme OPS.",
   "Enter the Microsoft Entra tenant ID.":
     "Entrez l’ID du locataire Microsoft Entra.",
   "Enter the application (client) ID.": "Entrez l’ID d’application (client).",
@@ -216,6 +222,7 @@ addTranslations({
   "Choose a SIEM destination to send a test event.":
     "Choisissez une destination SIEM pour envoyer un événement d’essai.",
   "The webhook test failed.": "L’essai du webhook a échoué.",
+  "Could not reach Slack.": "Impossible de joindre Slack.",
   "Puter enforces multifactor authentication at sign-in, so there is nothing to turn on here.":
     "Puter impose l’authentification multifacteur à la connexion; il n’y a donc rien à activer ici.",
   "Choose at least one scope.": "Choisissez au moins une portée.",
