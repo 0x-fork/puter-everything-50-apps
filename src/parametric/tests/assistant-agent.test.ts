@@ -135,4 +135,29 @@ describe('assistant agent', () => {
     expect(t.type === 'text' && t.text.match(/<\/attached_file>/g)).toHaveLength(1);
     expect(estimatePdfPages('1 0 obj << /Type /Pages /Kids [2 0 R 3 0 R] >> endobj 2 0 obj << /Type /Page >> endobj 3 0 obj << /Type /Page >> endobj')).toBe(2);
   });
+
+  it('keeps going past many rounds until the model answers', async () => {
+    const replies: Reply[] = Array.from({ length: 60 }, (_, i) => [{ type: 'tool', id: `c${i}`, name: 'get_model', input: {} }] as StreamPart[]);
+    replies.push([{ type: 'text', text: 'finished' }]);
+    const { agent } = scripted(replies);
+    let text = '';
+    const res = await agent.send('build it', (e) => { if (e.type === 'text') text += e.text; });
+    expect(res.steps).toHaveLength(60);
+    expect(text).toBe('finished');
+  });
+
+  it('cuts a long turn\'s earlier tool results to fit, keeping the newest round whole', () => {
+    const big = 'y'.repeat(50000);
+    const t: ChatMessage[] = [{ role: 'user', content: 'go' }];
+    for (let i = 0; i < 10; i++) {
+      t.push({ role: 'assistant', content: null, tool_calls: [{ id: `c${i}`, type: 'function', function: { name: 'get_model', arguments: '{}' } }] });
+      t.push({ role: 'tool', tool_call_id: `c${i}`, content: big });
+    }
+    const out = requestMessages(t, 'S', { budget: 200000 });
+    const tools = out.filter((m) => m.role === 'tool') as { content: string }[];
+    expect(tools).toHaveLength(10);
+    expect(tools.at(-1)!.content).toBe(big);
+    expect(tools[0].content.length).toBeLessThan(2000);
+    expect(out.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0)).toBeLessThanOrEqual(200000);
+  });
 });

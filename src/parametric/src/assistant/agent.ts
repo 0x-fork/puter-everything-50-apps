@@ -14,7 +14,6 @@ import type { ChatFn, ChatMessage, ChatPart, ChatToolCall } from '../platform/ai
 import { ATTACHMENT_TURNS, type Attachment, type AttachmentMeta, attachmentMeta, attachmentWeight, attachmentsFit, attachmentsGone, attachmentsIntro } from './attach';
 import type { ToolResult, ToolSpec } from './tools';
 
-export const MAX_ROUNDS = 40;
 export const MAX_OUTPUT_TOKENS = 16000;
 /** A tool result from an earlier message is cut to this much in later requests. */
 const OLD_RESULT_CHARS = 1500;
@@ -86,7 +85,10 @@ export function userContent(text: string, snapshot: string, attachments: Attachm
  * The transcript as sent: instructions first; earlier messages' snapshots,
  * long tool results and screenshots left out; files only with the latest few
  * messages that fit in one request (older ones are named instead); the oldest
- * turns dropped whole past the budget. The latest turn is sent as it is.
+ * turns dropped whole past the budget. The latest turn is sent as it is,
+ * unless it alone outgrows the budget (a long build has no limit on rounds):
+ * then its earlier tool results are cut, oldest first, and the newest round's
+ * results, which the model is about to answer, stay whole.
  * noShots leaves out the current screenshot too (a route that refuses images).
  */
 export function requestMessages(transcript: ChatMessage[], system: string, { budget = HISTORY_BUDGET, noShots = false } = {}): ChatMessage[] {
@@ -141,6 +143,15 @@ export function requestMessages(transcript: ChatMessage[], system: string, { bud
     for (let i = start; i < next; i++) total -= size(out[i], i);
     start = next;
   }
+  let newest = out.length;
+  while (newest > lastUser + 1 && (out[newest - 1].role === 'tool' || isUser(transcript[newest - 1]))) newest--;
+  for (let i = lastUser + 1; i < newest && total > budget; i++) {
+    const m = out[i];
+    if (m.role !== 'tool' || m.content.length <= OLD_RESULT_CHARS) continue;
+    const shorter: ChatMessage = { ...m, content: `${m.content.slice(0, OLD_RESULT_CHARS)}\n[…cut to keep the conversation within the model's limit; call the tool again if needed]` };
+    total -= size(m, i) - size(shorter, i);
+    out[i] = shorter;
+  }
   return [{ role: 'system', content: system }, ...out.slice(start)];
 }
 
@@ -158,7 +169,8 @@ export function createAgent(o: AgentOptions) {
     const steps: Step[] = [];
     let imagesRefused = false;
     try {
-      for (let round = 0; round < MAX_ROUNDS; round++) {
+      // No limit on rounds: the model works until it answers, or the user presses Stop.
+      for (let round = 0; ; round++) {
         if (round) emit({ type: 'round' });
         let text = '';
         let wasCut = false;
@@ -245,10 +257,6 @@ export function createAgent(o: AgentOptions) {
         }
         if (run.stopped) return { stopped: true, steps };
       }
-      const note = `I stopped after ${MAX_ROUNDS} rounds of tool calls. Say "continue" to let me carry on.`;
-      messages.push({ role: 'assistant', content: note });
-      emit({ type: 'text', text: `\n\n${note}` });
-      return { stopped: false, steps };
     } catch (error) {
       return { stopped: run.stopped, error: error as Error, steps };
     } finally {
