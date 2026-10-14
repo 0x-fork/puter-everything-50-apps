@@ -491,6 +491,15 @@ const pairs = {
   "Post comment": "Publier le commentaire",
   "Resolve discussion": "Résoudre la discussion",
   "Reopen discussion": "Rouvrir la discussion",
+  "Discussion resolved": "Discussion résolue",
+  "Discussion reopened": "Discussion rouverte",
+  "Comment posted": "Commentaire publié",
+  "Reply posted": "Réponse publiée",
+  "Comment saved": "Commentaire enregistré",
+  "{name} replied": "{name} a répondu",
+  "{name} mentioned you": "{name} vous a mentionné",
+  "{count} new messages in this discussion":
+    "{count} nouveaux messages dans cette discussion",
   "No comments to show.": "Aucun commentaire à afficher.",
   "{count} discussion": "{count} discussion",
   "{count} discussions": "{count} discussions",
@@ -855,6 +864,10 @@ const pairs = {
     "Connectez-vous à Puter pour rejoindre ce tableau.",
   "Paste the link you were given to open the board.":
     "Collez le lien que vous avez reçu pour ouvrir le tableau.",
+  "You were invited to a shared board. Choose Join board to open it.":
+    "Vous avez reçu une invitation à un tableau partagé. Choisissez Rejoindre le tableau pour l’ouvrir.",
+  "Choose Join board to open this shared board.":
+    "Choisissez Rejoindre le tableau pour ouvrir ce tableau partagé.",
   "Can edit": "Peut modifier",
   "Can view": "Peut consulter",
   "View only": "Lecture seule",
@@ -877,6 +890,10 @@ const pairs = {
   "Link copied.": "Lien copié.",
   "Copy the selected link.": "Copiez le lien sélectionné.",
   "This board is read-only.": "Ce tableau est en lecture seule.",
+  "This board is read-only for you. Ask the owner or a facilitator for access to edit or comment.":
+    "Ce tableau est en lecture seule pour vous. Demandez au propriétaire ou à un animateur l’accès pour le modifier ou le commenter.",
+  "This board's content is read-only for you. Choose Comment (C) to discuss it.":
+    "Le contenu de ce tableau est en lecture seule pour vous. Choisissez Commentaire (C) pour en discuter.",
   "Only the owner or a facilitator can invite new participants.":
     "Seuls le propriétaire du tableau ou un animateur peuvent inviter de nouveaux participants.",
   "Anyone signed in with this invitation can join.":
@@ -1049,8 +1066,29 @@ const pairs = {
     "Dans une liste, Tab change le retrait, Maj+Entrée continue un élément et Entrée sur un élément vide quitte la liste.",
   "Indent / outdent a list item":
     "Augmenter / diminuer le retrait d’un élément de liste",
-  "Move between the text and its formatting toolbar":
-    "Passer du texte à sa barre de mise en forme, et inversement",
+  "Move between the selection or its text and its toolbar":
+    "Passer de la sélection ou de son texte à sa barre d’outils, et inversement",
+  "Selection tools": "Outils de la sélection",
+  Undone: "Action annulée",
+  Redone: "Action rétablie",
+  "Nothing to undo": "Rien à annuler",
+  "Nothing to redo": "Rien à rétablir",
+  "Brought to front": "Mis au premier plan",
+  "Sent to back": "Mis à l’arrière-plan",
+  "Brought forward": "Avancé d’un plan",
+  "Sent backward": "Reculé d’un plan",
+  Ungrouped: "Groupe dissocié",
+  "{count} object grouped": "{count} objet groupé",
+  "{count} objects grouped": "{count} objets groupés",
+  "Out of the frame": "Hors du cadre",
+  Size: "Taille",
+  "Connects to": "Relié à",
+  "Attached to": "Attaché à",
+  "Connected from": "Relié depuis",
+  "open discussion": "discussion ouverte",
+  "open discussions": "discussions ouvertes",
+  "one|and {count} more": "et {count} autre",
+  "and {count} more": "et {count} autres",
   "Continue a list item on a new line":
     "Continuer un élément de liste sur une nouvelle ligne",
   "Tab / Shift + Tab": "Tab / Maj + Tab",
@@ -1256,6 +1294,10 @@ const pairs = {
   "Delete selection": "Supprimer la sélection",
   "Select and move · Double-click to edit · Space to pan":
     "Sélectionner et déplacer · Double-clic pour modifier · Espace pour naviguer",
+  "Select objects to read them · Space to pan":
+    "Sélectionnez des objets pour les lire · Espace pour naviguer",
+  "Select objects to read them · Comment (C) to discuss · Space to pan":
+    "Sélectionnez des objets pour les lire · Commentaire (C) pour en discuter · Espace pour naviguer",
   "Drag to move around your board":
     "Faites glisser pour vous déplacer dans le tableau",
   "Draw freely on the canvas": "Dessinez librement sur le tableau",
@@ -1701,10 +1743,19 @@ const pairs = {
   "Remove from frame": "Retirer du cadre",
   "Board edit saved": "Modification enregistrée",
   "action|Open": "Ouvrir",
+  "key|Shift": "Maj",
+  "key|Enter": "Entrée",
+  "key|Backspace": "Retour arrière",
+  "key|Delete": "Suppr",
+  "key|Minus": "Moins",
+  "key|Up": "Haut",
+  "key|Down": "Bas",
   "notification|Reply": "Réponse",
   "results|Top": "Premiers",
   "Invite people to edit, comment on, or view this board. Invitation links expire after seven days.":
     "Invitez des personnes à modifier, commenter ou consulter ce tableau. Les liens d’invitation expirent après sept jours.",
+  "Copy the board's link to send it to people who already have access to it.":
+    "Copiez le lien du tableau pour l’envoyer à des personnes qui y ont déjà accès.",
   "Creating link…": "Création du lien…",
   "Reset link": "Réinitialiser le lien",
   "The link now gives the chosen access. Links copied earlier keep the access they had.":

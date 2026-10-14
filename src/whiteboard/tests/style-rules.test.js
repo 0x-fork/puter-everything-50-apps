@@ -335,3 +335,107 @@ test("a choice's box keeps its size beside a label long enough to wrap", () => {
   assert.match(label, /min-width:\s*0/);
   assert.match(label, /overflow-wrap:\s*anywhere/);
 });
+
+test("the chosen template category's count stays readable on its tint", () => {
+  // Plain muted text on the 8% tint measured 4.44:1 in the light theme.
+  assert.match(
+    rule('#library-panel .library-chip[aria-pressed="true"] span {'),
+    /color:\s*color-mix\(in srgb, var\(--muted\) 80%, var\(--text\)\)/,
+  );
+});
+
+test("in forced colors, pressed and chosen controls show the system highlight and colour choices keep their colours", () => {
+  const at = css.indexOf("@media (forced-colors: active) {");
+  assert.ok(at >= 0);
+  const block = css.slice(at, css.indexOf("\n}\n", at));
+  for (const state of [
+    '[aria-pressed="true"]',
+    '[aria-checked="true"]',
+    '[aria-current="page"]',
+    '[role="tab"][aria-selected="true"]',
+    '[role="option"][aria-selected="true"]',
+  ])
+    assert.ok(block.includes(state), state);
+  assert.match(block, /:not\(\.swatch\)/);
+  // Their own colours, not the browser's, so it puts no plate of the page
+  // colour behind their text, where the highlight text colour can vanish;
+  // what they hold is drawn in the highlight text colour.
+  assert.match(
+    block,
+    /forced-color-adjust:\s*none;\s*background-color:\s*Highlight !important;\s*color:\s*HighlightText !important/,
+  );
+  assert.match(
+    block,
+    /:not\(\.swatch, \.fill-chip\) \{\s*color:\s*inherit !important;\s*background-color:\s*transparent !important/,
+  );
+  assert.match(
+    block,
+    /\.swatch,\s*\.fill-chip\s*\{\s*forced-color-adjust:\s*none/,
+  );
+});
+
+test("a narrow, very short window scrolls the editor instead of stacking the tool rail under the canvas tools", () => {
+  const at = css.indexOf("@media (max-width: 460px) and (max-height: 359px) {");
+  assert.ok(at >= 0);
+  assert.match(rule(".editor {", at), /height:\s*360px/);
+});
+
+test("on phones the tool row stacks above vote badges, comment pins and reactions", () => {
+  // The rail has no box there, so its own stacking never applied and a tap
+  // on Pan could cast a vote on a note scrolled under it.
+  const at = css.indexOf("so the tool\n     row stacks itself above");
+  assert.ok(at >= 0);
+  const tools = rule(".tools {", at);
+  assert.match(tools, /z-index:\s*3/);
+  assert.match(tools, /bottom:\s*77px/);
+});
+
+test("the keyboard object outline shows above the selection toolbar", () => {
+  const toolbar = Math.max(
+    ...[...css.matchAll(/\n\.selection-tools \{([^}]*)\}/g)].map((m) =>
+      Number(m[1].match(/z-index:\s*(\d+)/)?.[1] ?? 0),
+    ),
+  );
+  const outline = Number(
+    rule("#board-outline:focus-within {").match(/z-index:\s*(\d+)/)[1],
+  );
+  assert.ok(toolbar > 0);
+  assert.ok(outline > toolbar, `${outline} > ${toolbar}`);
+});
+
+test("in forced colors, floating surfaces and primary buttons keep an edge", () => {
+  const at = css.lastIndexOf("@media (forced-colors: active) {");
+  const block = css.slice(at, css.indexOf("\n}\n", at));
+  // Their shadows and fills are removed there, which would leave panels,
+  // menus and dialogs without an edge and primary buttons as plain text.
+  for (const surface of [
+    ".panel",
+    "dialog",
+    ".account-menu",
+    ".preferences-menu",
+    ".selection-menu",
+    ".selection-popover",
+    ".context-menu",
+    ".ui-tooltip",
+  ])
+    assert.ok(block.includes(surface), surface);
+  assert.match(block, /border:\s*1px solid CanvasText !important/);
+  assert.match(
+    block,
+    /button\.primary\s*\{\s*border:\s*1px solid ButtonText !important/,
+  );
+});
+
+test("a guest's access words in the board tag are never cut; on phones they show alone", () => {
+  // Wider, where the board is kept gives way to them.
+  assert.match(rule(".board-tag-place {"), /text-overflow:\s*ellipsis/);
+  assert.match(rule(".board-tag-access {"), /flex:\s*none/);
+  const phone = css.indexOf(".board-tag[data-access] {");
+  assert.ok(
+    css.lastIndexOf("@media (max-width: 760px)", phone) >
+      css.indexOf(".board-tag-access {"),
+  );
+  assert.match(rule(".board-tag[data-access] {"), /flex-shrink:\s*0/);
+  assert.match(rule(".board-tag-place {", phone), /display:\s*none/);
+  assert.match(rule(".board-tag-access {", phone), /white-space:\s*normal/);
+});

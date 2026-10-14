@@ -24,6 +24,7 @@ import {
   objectNameHTML,
 } from "../accessibility/object-content.js";
 import { canonicalLanguage } from "../accessibility/language-tag.js";
+import { say } from "../accessibility/live-region.js";
 import { appendRun, sliceTextRuns } from "../rich-text.js";
 import { counted } from "./strings.js";
 import {
@@ -165,6 +166,8 @@ export function createFacilitationUI(api) {
       : "The board is unlocked.";
   };
   const manage = () => !!board() && canManage(role()) && api.canParticipate();
+  // Viewers follow votes and polls; commenters and up take part.
+  const watching = () => !!board()?.shared && !canComment(role());
   const shared = () => !!board()?.shared;
   const now = () => Math.round(api.now());
   const settings = () => workshopSettings(board());
@@ -387,10 +390,7 @@ export function createFacilitationUI(api) {
     return true;
   }
   function announce(message, html = false) {
-    if (!live) return;
-    live.textContent = "";
-    if (html) live.innerHTML = message;
-    else live.textContent = message;
+    say(live, message, { html });
   }
   function react(target, type) {
     if (!api.canParticipate()) return api.toast("This board is read-only.");
@@ -721,7 +721,10 @@ export function createFacilitationUI(api) {
           endsAt: minutes ? stamp + minutes * 60000 : 0,
         };
       });
-      if (started) track("Workshop activity started", { kind: "vote" });
+      if (started) {
+        track("Workshop activity started", { kind: "vote" });
+        landOn();
+      }
       if (started && minutes && checked("#fac-vote-timer") && api.canEdit())
         api.setTimer(
           changeTimer(board().timer, "start", {
@@ -790,7 +793,24 @@ export function createFacilitationUI(api) {
   }
   function endSession(kind) {
     const vote = kind === "vote" && board().workshop?.vote;
-    if (change((w, b) => finish(w, b, kind)) && vote) stopVoteTimer(vote);
+    const ended = change((w, b) => finish(w, b, kind));
+    if (ended && vote) stopVoteTimer(vote);
+    if (ended) landOn();
+  }
+  // Starting, ending or clearing a vote or poll draws its section anew: the
+  // keyboard goes to the section's heading, or to the first field of a new
+  // one, with the heading in view, rather than to whichever control now
+  // sits where the pressed one was.
+  function landOn(field) {
+    const content = panel?.querySelector("#fac-tabpanel"),
+      heading = content?.querySelector("h3"),
+      active = document.activeElement;
+    if (!heading || !(panel.contains(active) || active === document.body))
+      return;
+    const target = (field && content.querySelector(field)) || heading;
+    if (target === heading) heading.tabIndex = -1;
+    heading.scrollIntoView?.({ block: "nearest" });
+    target.focus({ preventScroll: true });
   }
   // A vote ended early takes its time limit off the board timer, which
   // would otherwise ring for a vote already over; a timer started by hand,
@@ -882,7 +902,10 @@ export function createFacilitationUI(api) {
           startedAt: now(),
         };
       });
-      if (started) track("Workshop activity started", { kind: "poll" });
+      if (started) {
+        track("Workshop activity started", { kind: "poll" });
+        landOn();
+      }
     } catch (error) {
       showError(error.message);
     }
@@ -1222,6 +1245,10 @@ export function createFacilitationUI(api) {
             count: voters,
           })
     }${left ? ` ${fill("About {count} minutes left.", { count: left })}` : ""} ${t(v.anonymous ? "Votes are anonymous." : "Votes show who voted.")}</p>${
+      open && watching()
+        ? `<p class="dialog-copy">${t("With view access, you can watch this vote but not vote. To vote, ask the owner or a facilitator for comment access.")}</p>`
+        : ""
+    }${
       canVote
         ? `<p class="fac-remaining" id="fac-remaining">${fill("You have {left} of {total} votes left.", { left: v.votes - mine.length, total: v.votes })}</p><p class="dialog-copy">${t("Select Vote on a highlighted object, or use the list below.")}</p>`
         : ""
@@ -1282,6 +1309,10 @@ export function createFacilitationUI(api) {
     // choice everyone made is 100%, not its part of all the picks.
     const total = responses;
     return `<h3>${authoredTextHTML({ lang: p.questionLang, textRuns: p.questionRuns }, p.question)}</h3><p class="dialog-copy">${fill(open ? "The poll is open. {count} responses." : "The poll is closed. {count} responses.", { count: responses })} ${t(p.anonymous ? "Answers are anonymous." : "Answers show who answered.")}</p>${
+      open && watching()
+        ? `<p class="dialog-copy">${t("With view access, you can watch this poll but not answer it. To answer, ask the owner or a facilitator for comment access.")}</p>`
+        : ""
+    }${
       canAnswer
         ? `<form id="fac-answer-form"><fieldset class="fac-fieldset"><legend>${t(p.multiple ? "Choose one or more answers" : "Choose one answer")}</legend>${p.options
             .map(
@@ -1905,7 +1936,7 @@ export function createFacilitationUI(api) {
           for (const key of Object.keys(x))
             if (keyKind(key) === "v") delete x[key];
           delete x.vote;
-        }),
+        }) && landOn("#fac-vote-title"),
       "vote-top": () => {
         const n = Math.max(1, +panel.querySelector("#fac-top").value || 1);
         // Results this person cannot see are not selected for them.
@@ -1947,7 +1978,7 @@ export function createFacilitationUI(api) {
           for (const key of Object.keys(x))
             if (keyKind(key) === "a") delete x[key];
           delete x.poll;
-        }),
+        }) && landOn("#fac-poll-question"),
       "poll-csv": () => download(currentRecord("poll"), "csv"),
       "poll-json": () => download(currentRecord("poll"), "json"),
       "agenda-start": () => goToStep(0, true),
@@ -2208,17 +2239,23 @@ export function createFacilitationUI(api) {
       chips.push(["session", t("Board locked for participants")]);
     if (s.lock === "frozen") chips.push(["session", t("Board frozen")]);
     const v = w.vote;
+    // What a chip with a countdown says apart from it.
+    const steady = new Map();
     if (voteOpen(v, now())) {
       const left = v.votes - myBallot(b, v.id, me().id).length;
       const seconds = v.endsAt
         ? Math.max(0, Math.ceil((v.endsAt - now()) / 1000))
         : 0;
+      const voting = labelled(
+        t("Voting"),
+        api.canParticipate()
+          ? fill("{count} votes left", { count: left })
+          : t("in progress"),
+      );
+      steady.set("vote", voting);
       chips.push([
         "vote",
-        labelled(
-          t("Voting"),
-          `${api.canParticipate() ? fill("{count} votes left", { count: left }) : t("in progress")}${seconds ? ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : ""}`,
-        ),
+        `${voting}${seconds ? ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : ""}`,
       ]);
     } else if (v?.revealed) chips.push(["vote", t("Voting results revealed")]);
     if (pollOpen(w.poll)) chips.push(["poll", t("Poll open")]);
@@ -2238,8 +2275,23 @@ export function createFacilitationUI(api) {
             !!current[n].querySelector("small") === !!detail,
         )
       )
-        chips.forEach(([, text, detail, html, detailHTML], n) => {
-          const span = current[n].querySelector("span");
+        chips.forEach(([key, text, detail, html, detailHTML], n) => {
+          // Screen readers announce a focused control's new name, so while
+          // a chip has focus its name changes only with what it says, not
+          // with each second counted down; it gives the time again once
+          // focused anew.
+          const chip = current[n],
+            said = steady.get(key);
+          if (
+            !said ||
+            chip !== document.activeElement ||
+            chip.dataset.said !== said
+          )
+            chip.removeAttribute("aria-label");
+          else if (!chip.hasAttribute("aria-label"))
+            chip.setAttribute("aria-label", chip.textContent);
+          if (said) chip.dataset.said = said;
+          const span = chip.querySelector("span");
           if (html) span.innerHTML = html;
           else span.textContent = text;
           if (detail)
@@ -2256,6 +2308,10 @@ export function createFacilitationUI(api) {
               `<button type="button" class="workshop-chip" data-fac-open="${key}"><span data-user-content>${html || escape(text)}</span>${detail ? `<small data-user-content>${detailHTML || escape(detail)}</small>` : ""}</button>`,
           )
           .join("");
+        chips.forEach(([key], n) => {
+          if (steady.has(key))
+            content.children[n].dataset.said = steady.get(key);
+        });
         if (focused)
           content.querySelector(`[data-fac-open="${focused}"]`)?.focus();
       }

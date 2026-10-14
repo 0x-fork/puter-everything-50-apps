@@ -2516,6 +2516,10 @@ test("commenters use the Comment tool and a comment-only selection toolbar", asy
   const c = await setup(env.sdk(viewer));
   try {
     await c.click('[data-action="join-shared"]');
+    assert.equal(
+      c.doc.querySelector("dialog .dialog-copy").textContent,
+      "Paste the link you were given to open the board.",
+    );
     c.doc.querySelector("#join-link").value =
       `https://whiteboard.test/#server=https%3A%2F%2Fwhiteboard-test.puter.work&board=${initial.id}&invite=${token}`;
     c.doc
@@ -2550,6 +2554,52 @@ test("commenters use the Comment tool and a comment-only selection toolbar", asy
       ),
       ["add-comment", "copy-image"],
     );
+  } finally {
+    await c.close();
+  }
+});
+
+test("joining from an invitation link the page opened with puts the keyboard on the board", async () => {
+  const env = environment();
+  const initial = {
+    version: 1,
+    id: crypto.randomUUID(),
+    title: "Team canvas",
+    items: [item("note", 30, 30, { text: "Shared thought" })],
+  };
+  const seed = new SharedDocument();
+  seed.commit(initial);
+  await env.service.call(owner, {
+    op: "create",
+    room: initial.id,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const { token } = await env.service.call(owner, {
+    op: "invite",
+    room: initial.id,
+    role: "viewer",
+  });
+  const c = await setup(env.sdk(viewer), {
+    url: `https://whiteboard.test/#server=https%3A%2F%2Fwhiteboard-test.puter.work&board=${initial.id}&invite=${token}`,
+  });
+  try {
+    for (let n = 0; n < 200 && !c.doc.querySelector("#join-link"); n++)
+      await c.tick();
+    const form = c.doc.querySelector("#join-link").closest("form");
+    // The link is filled in, so the dialog says what it is for.
+    assert.equal(
+      form.querySelector(".dialog-copy").textContent,
+      "You were invited to a shared board. Choose Join board to open it.",
+    );
+    form.dispatchEvent(
+      new c.w.Event("submit", { bubbles: true, cancelable: true }),
+    );
+    for (let n = 0; n < 200 && c.doc.querySelector("#join-link"); n++)
+      await c.tick();
+    await c.tick();
+    assert.ok(c.doc.querySelector(".editor.shared-viewer"));
+    assert.equal(c.doc.activeElement.id, "canvas");
   } finally {
     await c.close();
   }
@@ -3464,10 +3514,21 @@ test("adding, deleting and reordering objects writes only their buttons in the o
     assert.equal(after.length, 35);
     assert.equal(after[3].textContent, "Sticky note: Held 2");
     assert.equal(after.filter((b) => !before.includes(b)).length, 2);
-    // Brought to the front, an object moves to the end of the list alone.
+    // Moved below the others, an object moves to the end of the list alone
+    // (one held key, so one step to undo).
     before = after;
     await click(`#board-outline [data-id="${named("Loose 3").dataset.id}"]`);
-    await click('[data-action="front"]');
+    for (let n = 0; n < 120; n++)
+      doc.querySelector("#canvas").dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key: "ArrowDown",
+          shiftKey: true,
+          repeat: n > 0,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    await tick();
     after = buttons();
     assert.equal(after.at(-1).textContent, "Sticky note: Loose 3");
     assert.equal(after.at(-1).getAttribute("aria-pressed"), "true");
@@ -4397,6 +4458,10 @@ test("table-editing fields retain the table's authored language through row chan
       );
     };
     check();
+    assert.equal(
+      doc.querySelector("dialog[open] [type=submit]").textContent,
+      "Save changes",
+    );
     const field = doc.querySelector('[data-row="0"][data-col="0"]');
     const label = doc.getElementById(field.getAttribute("aria-labelledby"));
     assert.equal(label.textContent, "Row 1, Column 1");
@@ -4435,7 +4500,18 @@ test("table-editing fields retain the table's authored language through row chan
       doc.querySelector('[data-table="row"]').textContent,
       /Ajouter une ligne/,
     );
+    assert.equal(
+      doc.querySelector("dialog[open] [type=submit]").textContent,
+      "Enregistrer les modifications",
+    );
     doc.querySelector("dialog").close();
+    await click('[data-action="more-tools"]');
+    await click('[data-feature="table"]');
+    assert.equal(
+      doc.querySelector("dialog[open] [type=submit]").textContent,
+      "Ajouter un tableau de données",
+    );
+    doc.querySelector("dialog[open]").close();
   } finally {
     await app.close();
   }
@@ -5028,6 +5104,60 @@ test("the command palette goes to a frame by its name, as a step Back undoes", a
       .dispatchEvent(
         new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       );
+  } finally {
+    await app.close();
+  }
+});
+
+test("keyboard changes the canvas shows are said to screen readers", async () => {
+  const app = await setup();
+  const { doc } = app;
+  try {
+    const { selected, key } = await rotationFixture(app, [
+      item("frame", 0, 0, { w: 400, h: 300, text: "Plan", order: 0 }),
+      item("note", 50, 50, { w: 100, h: 100, text: "Inside" }),
+      item("note", 600, 50, { w: 100, h: 100, text: "Outside" }),
+    ]);
+    const said = async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      return doc.querySelector("#board-announcer").textContent;
+    };
+    const choose = async (text) => {
+      key("Escape");
+      doc
+        .querySelector(
+          `#board-outline [data-id="${selected.find((i) => i.text === text).id}"]`,
+        )
+        .click();
+      await new Promise((r) => setTimeout(r, 350));
+    };
+    await choose("Inside");
+    // Crossing the frame's edge is said once, not each step.
+    for (let n = 0; n < 60; n++) key("ArrowRight", { shiftKey: true });
+    assert.equal(await said(), "Out of the frame");
+    for (let n = 0; n < 60; n++) key("ArrowLeft", { shiftKey: true });
+    assert.equal(await said(), "In frame: Frame: Plan");
+    key("ArrowLeft");
+    doc.querySelector("#board-announcer").textContent = "";
+    assert.equal(await said(), "");
+    key("=", { ctrlKey: true, altKey: true, shiftKey: true });
+    assert.match(await said(), /^Size: \d+ × \d+$/);
+    await choose("Outside");
+    key("PageDown");
+    assert.equal(await said(), "Sent to back");
+    key("PageUp");
+    assert.equal(await said(), "Brought to front");
+    key("a", { ctrlKey: true });
+    key("g", { ctrlKey: true });
+    assert.equal(await said(), "3 objects grouped");
+    key("g", { ctrlKey: true, shiftKey: true });
+    assert.equal(await said(), "Ungrouped");
+    key("z", { ctrlKey: true });
+    assert.equal(await said(), "Undone");
+    key("z", { ctrlKey: true, shiftKey: true });
+    assert.equal(await said(), "Redone");
+    key("z", { ctrlKey: true, shiftKey: true });
+    assert.equal(await said(), "Nothing to redo");
   } finally {
     await app.close();
   }
@@ -11363,6 +11493,11 @@ test("the tool rail's Add content button offers tables, links, files and other c
     assert.equal(dialog.open, false);
     assert.equal(
       doc.querySelector("dialog[open]").getAttribute("aria-label"),
+      "Add table",
+    );
+    // A new table is added, as a new link is, not saved as changes.
+    assert.equal(
+      doc.querySelector("dialog[open] [type=submit]").textContent,
       "Add table",
     );
     doc.querySelector("dialog[open]").close();
@@ -17720,7 +17855,8 @@ test("built timer retains countdown across navigation, preserves drawing undo, a
     await click("#timer-start");
     await new Promise((r) => setTimeout(r, 1300));
     assert.equal(doc.querySelector("#timer-state").textContent, "Time’s up.");
-    assert.equal(doc.querySelector("#toast").textContent, "Time’s up.");
+    // The open panel's status says it; a notification would say it twice.
+    assert.notEqual(doc.querySelector("#toast").textContent, "Time’s up.");
     await click('[data-action="export"]');
     doc.querySelector("#export-format").value = "json";
     doc
@@ -23481,6 +23617,7 @@ test("a change of this person's role is told once and a restricted role stays sh
   const [, b] = shared.apps;
   const toastEl = b.doc.querySelector("#toast");
   const tag = () => b.doc.querySelector(".board-tag").textContent;
+  const hint = () => b.doc.querySelector("#tool-hint").textContent;
   const setRole = async (role) => {
     toastEl.classList.remove("visible");
     await shared.env.service.call(owner, {
@@ -23503,6 +23640,17 @@ test("a change of this person's role is told once and a restricted role stays sh
     assert.ok(toastEl.classList.contains("visible"));
     assert.equal(toastEl.textContent, "You can now only view this board.");
     assert.equal(tag(), "Shared board · View only");
+    // The screen reader's tool hint does not offer editing.
+    assert.equal(hint(), "Select objects to read them · Space to pan");
+    // The access words sit apart, so a short row never cuts them.
+    assert.equal(
+      b.doc.querySelector(".board-tag .board-tag-access").textContent,
+      "View only",
+    );
+    assert.equal(
+      b.doc.querySelector(".board-tag").title,
+      "Shared board · View only",
+    );
     // Told once, not again with each later check-in.
     toastEl.classList.remove("visible");
     b.w.dispatchEvent(new b.w.Event("online"));
@@ -23518,6 +23666,10 @@ test("a change of this person's role is told once and a restricted role stays sh
       "You can now comment on this board, but not change its content.",
     );
     assert.equal(tag(), "Shared board · Comment only");
+    assert.equal(
+      hint(),
+      "Select objects to read them · Comment (C) to discuss · Space to pan",
+    );
     await setRole("editor");
     await shared.until(
       () => !b.doc.querySelector(".editor.shared-viewer"),
@@ -23525,6 +23677,10 @@ test("a change of this person's role is told once and a restricted role stays sh
     );
     assert.equal(toastEl.textContent, "You can now edit this board.");
     assert.equal(tag(), "Shared board");
+    assert.equal(
+      hint(),
+      "Select and move · Double-click to edit · Space to pan",
+    );
     // Becoming a facilitator, and ceasing to be one, are told too.
     await setRole("facilitator");
     await shared.until(
@@ -23563,7 +23719,7 @@ test("screen readers hear who joins, leaves and is editing an object", async () 
     // A check-in brings the roster with the person who joined.
     a.w.dispatchEvent(new a.w.Event("online"));
     await shared.until(() => said() === "Bob joined", "The join is said");
-    assert.equal(described(), "");
+    assert.equal(described(), "Butter color.");
     await b.click(`#board-outline [data-id="${note.id}"]`);
     b.doc.querySelector("#canvas").dispatchEvent(
       new b.w.KeyboardEvent("keydown", {
@@ -23573,13 +23729,52 @@ test("screen readers hear who joins, leaves and is editing an object", async () 
       }),
     );
     await shared.until(
-      () => described() === "Being edited by Bob",
+      () => described() === "Being edited by Bob. Butter color.",
       "The outline says who is editing the note",
     );
     await b.click('[data-action="home"]');
-    await shared.until(() => described() === "", "Editing ends");
+    await shared.until(() => described() === "Butter color.", "Editing ends");
     a.w.dispatchEvent(new a.w.Event("online"));
     await shared.until(() => said() === "Bob left", "The departure is said");
+  } finally {
+    await shared.close();
+  }
+});
+
+test("what is said behind an open modal dialog is said inside it as well", async () => {
+  const frame = item("frame", 0, 0, { w: 400, h: 300, title: "Agenda" });
+  const shared = await sharedEditors("presence-behind-dialog", [frame]);
+  const [a, b] = shared.apps;
+  // jsdom does not track the top layer: an open dialog stands in for a
+  // modal one, as showModal is the only way the board opens them.
+  const matches = a.w.Element.prototype.matches;
+  a.w.HTMLDialogElement.prototype.matches = function (selector) {
+    return selector === ":modal" ? this.open : matches.call(this, selector);
+  };
+  const mirrored = (id) =>
+    a.doc.querySelector(`dialog[open] > .dialog-announcer[data-for="${id}"]`)
+      ?.textContent;
+  try {
+    a.w.dispatchEvent(new a.w.Event("online"));
+    await shared.until(
+      () =>
+        a.doc.querySelector("#board-announcer").textContent === "Bob joined",
+      "The join is said",
+    );
+    await a.click('[data-action="present"]');
+    await a.click("#start-presentation");
+    assert.ok(a.doc.querySelector("dialog[open]"), "Presenting");
+    await b.click('[data-action="home"]');
+    a.w.dispatchEvent(new a.w.Event("online"));
+    // The page's region is inert behind the dialog, so the dialog says it.
+    await shared.until(
+      () => mirrored("board-announcer") === "Bob left",
+      "The departure is said inside the presentation",
+    );
+    assert.equal(
+      a.doc.querySelector("#board-announcer").textContent,
+      "Bob left",
+    );
   } finally {
     await shared.close();
   }
@@ -26741,6 +26936,24 @@ test("French shortcut help, palette categories and result counts are translated"
       doc.querySelector("#commands-prev").textContent,
       "Résultats précédents",
     );
+    // Shortcuts name keys as the French tooltips and shortcuts list do,
+    // and the French name of a tool finds it.
+    const results = async (query) => {
+      paletteQuery(app, query);
+      await app.tick();
+      return [...doc.querySelectorAll("#command-results .command-option")].map(
+        (o) => [o.dataset.command, o.querySelector("kbd")?.textContent || ""],
+      );
+    };
+    const redo = (await results("Rétablir")).find(([id]) => id === "redo");
+    assert.equal(redo[1], "Ctrl/Cmd+Maj+Z");
+    assert.ok(
+      (await results("supprimer")).some(([, k]) => k === "Suppr"),
+      "Delete reads Suppr",
+    );
+    const connector = (await results("connecteur")).map(([id]) => id);
+    assert.ok(connector.includes("tool-arrow"), connector.join());
+    assert.ok(connector.includes("arrange:connect"), connector.join());
   } finally {
     await app.close();
   }
@@ -28875,6 +29088,43 @@ test("the library offers renaming a shared board only to people who can edit it"
   }
 });
 
+test("the tour offered while a shared board reconnects follows the person's role", async () => {
+  const shared = await sharedEditors("tour-while-connecting", [
+    item("note", 0, 0, { text: "A" }),
+  ]);
+  const [, b] = shared.apps;
+  try {
+    await b.click('[data-action="home"]');
+    await shared.until(() => b.doc.querySelector("[data-open]"), "Library");
+    b.w.localStorage.removeItem("whiteboard-tour-v1");
+    // The board opens from this device while the server has not yet
+    // answered, so the role is the one it last gave.
+    const exec = b.w.puter.workers.exec;
+    const held = [];
+    b.w.puter.workers.exec = (url, options) =>
+      new Promise((resolve) => held.push(() => resolve(exec(url, options))));
+    await b.click("[data-open]");
+    await shared.until(() => b.doc.querySelector("#canvas"), "Board opened");
+    assert.equal(
+      b.doc.querySelector('[data-action="tool-note"]').disabled,
+      true,
+      "Tools wait for the connection",
+    );
+    await b.click('#tour-offer [data-action="tour"]');
+    const titles = [];
+    for (let n = 0; n < 12 && b.doc.querySelector(".tour-bubble"); n++) {
+      titles.push(b.doc.querySelector("#tour-title").textContent);
+      b.doc.querySelector("#tour-next").click();
+    }
+    assert.equal(titles.length, 8, titles.join(" / "));
+    b.w.puter.workers.exec = exec;
+    for (const release of held) release();
+    await new Promise((r) => setTimeout(r, 300));
+  } finally {
+    await shared.close();
+  }
+});
+
 test("the comments panel follows a change between viewer and commenter access", async () => {
   const room = "viewer-to-commenter";
   const shared = await sharedEditors(room, [item("note", 0, 0, { text: "A" })]);
@@ -29239,6 +29489,15 @@ test("participants who cannot invite see the board link without invitation contr
       "The Share dialog opens",
     );
     assert.equal(b.doc.querySelector("#share-role").disabled, true);
+    // No link access to choose, and the dialog says what their link does.
+    assert.equal(
+      b.doc.querySelector("#share-role").closest("label").hidden,
+      true,
+    );
+    assert.equal(
+      b.doc.querySelector("#share-intro").textContent,
+      "Copy the board's link to send it to people who already have access to it.",
+    );
     assert.equal(b.doc.querySelector("#revoke-invites").hidden, true);
     assert.equal(
       b.doc.querySelector("#share-message").textContent,
@@ -29261,6 +29520,14 @@ test("participants who cannot invite see the board link without invitation contr
       "The promotion enables invitations",
     );
     assert.equal(b.doc.querySelector("#revoke-invites").hidden, false);
+    assert.equal(
+      b.doc.querySelector("#share-role").closest("label").hidden,
+      false,
+    );
+    assert.match(
+      b.doc.querySelector("#share-intro").textContent,
+      /^Invite people to edit, comment on, or view this board/,
+    );
     // A manager's link is an invitation, made without any press.
     await shared.until(
       () => /invite=/.test(b.doc.querySelector("#share-link").value),
@@ -29675,6 +29942,147 @@ test("viewers see no drop target and cannot drop content onto a shared board", a
   } finally {
     await shared.close();
   }
+});
+
+test("viewers are refused as insert tools open, not after filling them in", async () => {
+  const room = "viewer-insert-refusals";
+  const shared = await sharedEditors(room, [item("note", 0, 0, { text: "A" })]);
+  const [, b] = shared.apps;
+  try {
+    await shared.env.service.call(owner, {
+      op: "role",
+      room,
+      uuid: collaborator.uuid,
+      role: "viewer",
+    });
+    b.w.dispatchEvent(new b.w.Event("online"));
+    await shared.until(
+      () => b.doc.querySelector(".editor").classList.contains("shared-viewer"),
+      "Bob becomes a viewer",
+    );
+    let picked = 0;
+    const nativeClick = b.w.HTMLInputElement.prototype.click;
+    b.w.HTMLInputElement.prototype.click = function () {
+      if (this.type === "file") picked++;
+      else nativeClick.call(this);
+    };
+    for (const feature of ["link", "table", "components", "icons", "file"]) {
+      b.doc.querySelector("#toast").textContent = "";
+      await b.click('[data-action="more-tools"]');
+      await b.click(`dialog[open] [data-feature="${feature}"]`);
+      assert.equal(b.doc.querySelector("dialog[open]"), null, feature);
+      assert.match(b.doc.querySelector("#toast").textContent, /read-only/);
+    }
+    assert.equal(picked, 0, "no file picker opens");
+    // Add image in the tool rail is unavailable, like the other insert tools.
+    const image = b.doc.querySelector('.left-rail [data-action="image"]');
+    assert.equal(image.disabled, true);
+    image.disabled = false;
+    await b.click('.left-rail [data-action="image"]');
+    assert.equal(picked, 0, "Add image refuses before the file picker");
+    // Ideas are not generated when they could not be added.
+    b.doc.querySelector("#toast").textContent = "";
+    await b.click('[data-action="ai"]');
+    b.doc.querySelector('[data-ai="generate"]').disabled = false;
+    await b.click('[data-ai="generate"]');
+    assert.equal(b.doc.querySelector("#ai-generate"), null);
+    assert.match(b.doc.querySelector("#toast").textContent, /read-only/);
+    await new Promise((r) => setTimeout(r, 500));
+  } finally {
+    await shared.close();
+  }
+});
+
+test("refusals tell viewers and commenters why and what they can do instead", async () => {
+  const note = item("note", 100, 100, { w: 200, h: 200, text: "A" });
+  const viewerReason =
+    "This board is read-only for you. Ask the owner or a facilitator for access to edit or comment.";
+  const commenterReason =
+    "This board's content is read-only for you. Choose Comment (C) to discuss it.";
+  // Each role is given once, on a board of its own.
+  const as = async (role, className, check) => {
+    const room = `role-aware-refusals-${role}`;
+    const shared = await sharedEditors(room, [note]);
+    const [, b] = shared.apps;
+    try {
+      await shared.env.service.call(owner, {
+        op: "role",
+        room,
+        uuid: collaborator.uuid,
+        role,
+      });
+      b.w.dispatchEvent(new b.w.Event("online"));
+      await shared.until(
+        () => b.doc.querySelector(`.editor.${className}`),
+        `Bob becomes a ${role}`,
+      );
+      const toast = () => b.doc.querySelector("#toast").textContent;
+      const press = async (key) => {
+        b.doc.querySelector("#toast").textContent = "";
+        b.doc
+          .querySelector("#canvas")
+          .dispatchEvent(
+            new b.w.KeyboardEvent("keydown", { key, bubbles: true }),
+          );
+        await b.tick();
+        return toast();
+      };
+      await check(b, press, toast);
+      await new Promise((r) => setTimeout(r, 500));
+    } finally {
+      await shared.close();
+    }
+  };
+  await as("viewer", "shared-viewer", async (b, press, toast) => {
+    // A tool key that cannot be used says why rather than nothing.
+    assert.equal(await press("n"), viewerReason);
+    assert.equal(await press("c"), viewerReason);
+    // So does trying to drag an object.
+    b.doc.querySelector("#toast").textContent = "";
+    const v = renderedView(b);
+    const at = (x, y) => [v.x + x * v.z, v.y + y * v.z];
+    for (const [type, x] of [
+      ["pointerdown", 200],
+      ["pointermove", 240],
+      ["pointerup", 240],
+    ])
+      canvasPointer(b, type, 1, ...at(x, x), { pointerType: "mouse" });
+    await b.tick();
+    assert.equal(toast(), viewerReason);
+    // Unavailable tools carry the reason for their tooltips.
+    const noteTool = b.doc.querySelector('[data-action="tool-note"]');
+    assert.equal(noteTool.disabled, true);
+    assert.equal(noteTool.dataset.disabledReason, viewerReason);
+    const over = new b.w.MouseEvent("pointerover", { bubbles: true });
+    Object.defineProperty(over, "pointerType", { value: "mouse" });
+    noteTool.dispatchEvent(over);
+    await new Promise((r) => setTimeout(r, 350));
+    const tip = b.doc.querySelector(".ui-tooltip");
+    assert.equal(tip.hidden, false);
+    assert.equal(
+      tip.querySelector("span").textContent,
+      `Sticky note. ${viewerReason}`,
+    );
+    assert.equal(tip.querySelector("kbd").hidden, true);
+    // Comments say why there is no New comment.
+    await b.click('[data-action="comments"]');
+    const access = b.doc.querySelector("#comment-access");
+    assert.equal(b.doc.querySelector("#comment-new").disabled, true);
+    assert.equal(access.hidden, false);
+    assert.equal(access.textContent, viewerReason);
+  });
+  await as("commenter", "shared-commenter", async (b, press) => {
+    const noteTool = b.doc.querySelector('[data-action="tool-note"]');
+    assert.equal(noteTool.dataset.disabledReason, commenterReason);
+    assert.equal(
+      b.doc.querySelector('[data-action="tool-comment"]').dataset
+        .disabledReason,
+      undefined,
+    );
+    assert.equal(await press("n"), commenterReason);
+    await b.click('[data-action="comments"]');
+    assert.equal(b.doc.querySelector("#comment-access").hidden, true);
+  });
 });
 
 test("moving many drawings at once shows the move live to others", async () => {
@@ -40512,6 +40920,13 @@ test("fill colours and text style open in popovers that stay open across a redra
     assert.equal(selectedClipboard(app)[0].color, color);
     const reopened = doc.querySelector("#fill-popover");
     assert.equal(reopened.hidden, false, "Still open after the redraw");
+    // The current colour is the pressed one, for screen readers too.
+    assert.deepEqual(
+      [...reopened.querySelectorAll("[aria-pressed=true]")].map(
+        (b) => b.dataset.color,
+      ),
+      [color],
+    );
     assert.equal(
       doc.querySelector("#fill-options").style.getPropertyValue("--swatch"),
       color,
@@ -45743,6 +46158,77 @@ test("Shift with a tool letter is not the tool's shortcut", async () => {
   }
 });
 
+test("a creation tool chosen from the keyboard adds its object, as its letter does", async () => {
+  const a = await setup();
+  try {
+    await a.click('[data-action="new"]');
+    const { doc, w } = a;
+    const count = () => doc.querySelectorAll("#board-outline [data-id]").length;
+    const press = (selector, key, up = key === " ") => {
+      const button = doc.querySelector(selector);
+      button.focus();
+      button.dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      if (!up) button.click();
+      button.dispatchEvent(
+        new w.KeyboardEvent("keyup", { key, bubbles: true, cancelable: true }),
+      );
+      if (up) button.click();
+    };
+    // A mouse click arms the tool for a click on the board.
+    await a.click('[data-action="tool-note"]');
+    assert.equal(count(), 0);
+    assert.equal(
+      doc
+        .querySelector('[data-action="tool-note"]')
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    // Enter on Sticky note adds one and opens it for typing.
+    press('[data-action="tool-note"]', "Enter");
+    await a.tick();
+    assert.equal(count(), 1);
+    assert.equal(doc.activeElement, doc.querySelector("#canvas-text-editor"));
+    doc.querySelector("#canvas").focus();
+    await a.tick();
+    // Space on Rectangle adds one, selected, with the board focused so the
+    // arrow keys move it.
+    press('[data-action="tool-rect"]', " ");
+    await a.tick();
+    assert.equal(count(), 2);
+    assert.equal(doc.activeElement, doc.querySelector("#canvas"));
+    assert.equal(
+      doc
+        .querySelector('[data-action="tool-select"]')
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    // Tools that draw between points are only chosen.
+    press('[data-action="tool-arrow"]', "Enter");
+    await a.tick();
+    assert.equal(count(), 2);
+    assert.equal(
+      doc
+        .querySelector('[data-action="tool-arrow"]')
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    // A key pressed elsewhere does not make a later click the keyboard's.
+    press('[data-action="tool-select"]', "Enter");
+    await a.tick();
+    doc.querySelector('[data-action="tool-ellipse"]').click();
+    await a.tick();
+    assert.equal(count(), 2);
+  } finally {
+    await a.close();
+  }
+});
+
 // A board with one note, a measured canvas, and pointer helpers for
 // gesture tests. The view starts at (110, 85) at 100%.
 async function gestureBoard(a) {
@@ -46294,19 +46780,21 @@ test("Page Up and Page Down change layer order and L picks the connection line",
       item("note", 0, 0, { text: "Bottom" }),
       item("note", 40, 40, { text: "Top" }),
     ]);
-    const order = () =>
-      [...doc.querySelectorAll("#board-outline [data-id]")].map((b) =>
-        b.textContent.replace(/^.*: /, ""),
-      );
-    const before = order();
+    // The outline reads the board's layout, not its layers; the change of
+    // layer is said instead.
+    const said = async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      return doc.querySelector("#board-announcer").textContent;
+    };
     [...doc.querySelectorAll("#board-outline [data-id]")]
       .find((b) => b.textContent.endsWith("Bottom"))
       .click();
+    // The selection is said first.
+    await new Promise((r) => setTimeout(r, 350));
     key("PageUp", { cancelable: true });
-    const raised = order();
-    assert.notDeepEqual(raised, before);
+    assert.equal(await said(), "Brought to front");
     key("PageDown", { cancelable: true });
-    assert.deepEqual(order(), before);
+    assert.equal(await said(), "Sent to back");
     key("Escape");
     key("l");
     assert.equal(
@@ -46539,6 +47027,18 @@ test("a second comment added to an object gets a pin of its own beside the first
     assert.equal(pins.length, 2);
     const [[x1, y1], [x2, y2]] = pins;
     assert.ok(Math.hypot(x1 - x2, y1 - y2) >= 24, JSON.stringify(pins));
+    // Pins and the list both say which object a discussion is on.
+    for (const pin of doc.querySelectorAll(".comment-pin"))
+      assert.match(
+        pin.textContent,
+        /^Comment: (First|Second) thought · Attached to: Sticky note: Discussed$/,
+      );
+    await click('[data-action="comments"]');
+    for (const entry of doc.querySelectorAll(".comment-summary"))
+      assert.match(
+        entry.querySelector(".sr-only").textContent,
+        /^\. Attached to: Sticky note: Discussed$/,
+      );
   } finally {
     await app.close();
   }
@@ -47673,6 +48173,40 @@ test("a presentation starts at the selected frame, turns with Space and arrows, 
   }
 });
 
+test("the slide count is said again only when it changes, not when the timer starts", async () => {
+  const app = await setup();
+  const { doc, w, click } = app;
+  try {
+    await rotationFixture(app, [
+      item("frame", 0, 0, { w: 400, h: 300, text: "One", order: 0 }),
+      item("frame", 600, 0, { w: 400, h: 300, text: "Two", order: 1 }),
+    ]);
+    await click('[data-action="present"]');
+    await click("#start-presentation");
+    const status = doc.querySelector("#slide-count");
+    assert.equal(status.getAttribute("role"), "status");
+    const writes = [];
+    new w.MutationObserver((records) => writes.push(...records)).observe(
+      status,
+      { childList: true, subtree: true, characterData: true },
+    );
+    await click(".presentation-timer-access");
+    await click("#timer-start");
+    // The slide is drawn again on the next look at the board, and when the
+    // window is resized.
+    await new Promise((r) => setTimeout(r, 700));
+    await click('[data-timer-command="pause"]');
+    w.dispatchEvent(new w.Event("resize"));
+    await new Promise((r) => setTimeout(r, 700));
+    assert.equal(writes.length, 0, "the timer does not rewrite the status");
+    await click("#slide-next");
+    assert.match(status.textContent, /^2 \/ 2/);
+    assert.ok(writes.length > 0);
+  } finally {
+    await app.close();
+  }
+});
+
 test("a swipe across a presented slide turns it on a touch screen", async () => {
   const app = await setup();
   const { doc, w, click } = app;
@@ -48679,12 +49213,43 @@ test("Alt+F10 moves between the text being edited and its formatting toolbar", a
     assert.ok(doc.querySelector("#canvas-text-editor"), "Still editing");
     altF10(control);
     assert.equal(doc.activeElement, doc.querySelector("#canvas-text-editor"));
+    // From the board, the same keys reach the selection's toolbar, named
+    // as one, and come back to the board.
+    text.dispatchEvent(
+      new w.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    const canvas = doc.querySelector("#canvas");
+    canvas.focus();
+    assert.equal(doc.querySelector("#canvas-text-editor"), null);
+    const tools = doc.querySelector("#selection-tools");
+    assert.equal(tools.hidden, false);
+    assert.equal(tools.getAttribute("role"), "toolbar");
+    assert.equal(tools.getAttribute("aria-label"), "Selection tools");
+    altF10(canvas);
+    assert.ok(tools.contains(doc.activeElement));
+    altF10(doc.activeElement);
+    assert.equal(doc.activeElement, canvas);
+    // With nothing selected there is no toolbar to go to.
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.equal(tools.hidden, true);
+    altF10(canvas);
+    assert.equal(doc.activeElement, canvas);
     // The shortcut is listed.
     await click('[data-action="home"]');
     await click('[data-action="help"]');
     assert.match(
       doc.querySelector("dialog[open]").textContent,
-      /Move between the text and its formatting toolbar\s*Alt \+ F10/,
+      /Move between the selection or its text and its toolbar\s*Alt \+ F10/,
     );
   } finally {
     await app.close();

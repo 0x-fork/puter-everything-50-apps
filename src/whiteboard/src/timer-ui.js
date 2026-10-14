@@ -239,7 +239,9 @@ export function createTimerUI(api) {
       ready
     ) {
       alerted = key;
-      api.toast("Time’s up.");
+      // The open panel says so itself, in its status; a notification too
+      // would have it said twice.
+      if (!expanded || covered()) api.toast("Time’s up.");
       chime();
     }
     // A finish seen while the board was busy is told of at the next tick.
@@ -253,6 +255,7 @@ export function createTimerUI(api) {
     if (root.hidden !== !expanded) {
       root.hidden = !expanded;
       api.layout?.();
+      place();
     }
     const label = t(
       {
@@ -386,6 +389,7 @@ export function createTimerUI(api) {
     button.onclick = open;
     dialog.append(button, root);
     presentation = { dialog, button };
+    place();
     dialog.addEventListener(
       "close",
       () => {
@@ -394,11 +398,54 @@ export function createTimerUI(api) {
           host.append(root);
           presentation = null;
           render();
+          place();
         }
       },
       { once: true },
     );
     render();
   }
-  return { bind, detach, render, open, present };
+  // On a phone the selection toolbar docks under the header, with the
+  // workshop banner below it. The timer opens below both rather than over
+  // them, and ends above the tool rows, or over them when the screen is too
+  // short to leave it room there.
+  function place() {
+    if (!root) return;
+    let top = "",
+      maxHeight = "";
+    // In a presentation it keeps its place there.
+    if (
+      !root.hidden &&
+      host &&
+      root.parentNode === host &&
+      host.ownerDocument.defaultView.matchMedia?.("(max-width: 760px)").matches
+    ) {
+      const box = host.getBoundingClientRect();
+      const docked = [
+        ...host.querySelectorAll(
+          ":scope > #selection-tools:not(.is-floating), :scope > #workshop-banner",
+        ),
+      ]
+        .filter((el) => !el.hidden)
+        .map((el) => el.getBoundingClientRect())
+        .filter((r) => r.height);
+      if (docked.length) {
+        const from = Math.max(...docked.map((r) => r.bottom)) + 8;
+        const rows = [
+          ...host.querySelectorAll(
+            ":scope > .left-rail > .panel, :scope > .canvas-bottom > .panel",
+          ),
+        ]
+          .map((el) => el.getBoundingClientRect())
+          .filter((r) => r.height && r.top > from)
+          .map((r) => r.top);
+        const above = Math.min(box.bottom, ...rows) - 8 - from;
+        top = `${Math.round(from - box.top)}px`;
+        maxHeight = `${Math.round(above >= 180 ? above : box.bottom - 12 - from)}px`;
+      }
+    }
+    if (root.style.top !== top) root.style.top = top;
+    if (root.style.maxHeight !== maxHeight) root.style.maxHeight = maxHeight;
+  }
+  return { bind, detach, render, open, present, place };
 }

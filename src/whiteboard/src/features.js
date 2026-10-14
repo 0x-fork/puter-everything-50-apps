@@ -473,7 +473,7 @@ export function createFeatures(api) {
     let cellLanguages = clone(i?.cellLanguages || {});
     api.modal(
       i ? "Edit table" : "Add table",
-      `<form aria-describedby="table-conflict-error table-paste-error table-size-error"><div class="table-actions"><button type="button" data-table="row">Add row</button><button type="button" data-table="col">Add column</button><button type="button" data-table="remove-row">Remove last row</button><button type="button" data-table="remove-col">Remove last column</button></div><div id="cell-editor" class="cell-editor" aria-describedby="table-conflict-error table-paste-error table-size-error"></div><p id="table-conflict-error" class="dialog-copy" role="alert" tabindex="-1" hidden></p><p id="table-paste-error" class="dialog-copy" role="alert" hidden></p><p id="table-size-error" class="dialog-copy" role="alert" tabindex="-1" hidden></p><div class="dialog-footer"><button class="primary" type="submit">Save changes</button></div></form>`,
+      `<form aria-describedby="table-conflict-error table-paste-error table-size-error"><div class="table-actions"><button type="button" data-table="row">Add row</button><button type="button" data-table="col">Add column</button><button type="button" data-table="remove-row">Remove last row</button><button type="button" data-table="remove-col">Remove last column</button></div><div id="cell-editor" class="cell-editor" aria-describedby="table-conflict-error table-paste-error table-size-error"></div><p id="table-conflict-error" class="dialog-copy" role="alert" tabindex="-1" hidden></p><p id="table-paste-error" class="dialog-copy" role="alert" hidden></p><p id="table-size-error" class="dialog-copy" role="alert" tabindex="-1" hidden></p><div class="dialog-footer"><button class="primary" type="submit">${i ? "Save changes" : "Add table"}</button></div></form>`,
       (d) => {
         const form = d.querySelector("form"),
           conflictError = d.querySelector("#table-conflict-error"),
@@ -1150,8 +1150,15 @@ export function createFeatures(api) {
           // brought along would find covered.
           const hidden =
             region.frameId && api.hiddenFromParticipants?.(region.frameId);
-          d.querySelector("#slide-count").innerHTML =
-            `${index + 1} / ${regions.length} · <span id="slide-title">${name}</span>${hidden ? ` <span class="badge slide-hidden">${t("Hidden from participants")}</span>` : ""}`;
+          // The count is a status, read whenever it is written, so it is
+          // written only when it says something new, not when the board
+          // redraws the slide for a timer or someone else's change.
+          const count = `${index + 1} / ${regions.length} · <span id="slide-title">${name}</span>${hidden ? ` <span class="badge slide-hidden">${t("Hidden from participants")}</span>` : ""}`;
+          const status = d.querySelector("#slide-count");
+          if (status.dataset.shown !== count) {
+            status.innerHTML = count;
+            status.dataset.shown = count;
+          }
           const prev = d.querySelector("#slide-prev"),
             next = d.querySelector("#slide-next");
           prev.disabled = index === 0;
@@ -3808,15 +3815,18 @@ export function createFeatures(api) {
       },
     );
   }
+  // Adding content is refused as these open, with the reason, rather than
+  // after someone has filled them in or picked a file.
+  const adding = (open) => () => api.canEdit(new Set()) && open();
   const actions = {
     commands: () => api.commands(),
     "mind-map": () => api.mindMap(),
     shapes: () => shapeLibrary(),
     "change-shape": () => shapeLibrary(true),
-    link: () => linkDialog(),
-    table: () => tableDialog(),
+    link: adding(() => linkDialog()),
+    table: adding(() => tableDialog()),
     "bulk-notes": () => api.bulkNotes(),
-    file: () => attachFile(),
+    file: adding(() => attachFile()),
     organize,
     "filter-selection": () => openSelectionFilter(api),
     cluster: () => openClusters(api),
@@ -3836,9 +3846,11 @@ export function createFeatures(api) {
     dimensions: () => api.dimensions(),
     present: presentationSetup,
     history: versions,
-    templates: () => templateLibrary("templates"),
-    components: () => templateLibrary("components"),
-    icons: () => templateLibrary("icons"),
+    // Away from a board, templates only start new boards.
+    templates: () =>
+      (!api.board() || api.canEdit(new Set())) && templateLibrary("templates"),
+    components: adding(() => templateLibrary("components")),
+    icons: adding(() => templateLibrary("icons")),
     "save-snippet": saveSnippet,
     "more-tools": more,
     "add-content": addContent,

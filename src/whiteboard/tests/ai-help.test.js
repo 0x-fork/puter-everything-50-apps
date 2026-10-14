@@ -341,6 +341,46 @@ test("help guides are bilingual, role-filtered, and searchable without accents",
     searchGuides("presentation", "all", "fr").length >= 1,
     "accents are ignored",
   );
+  // Guides are found by the language they are shown in, so each one found
+  // shows what was typed: "table" is not found in "tableau", nor "lien" in
+  // English at all.
+  for (const [query, lang] of [
+    ["table", "en"],
+    ["tag", "en"],
+    ["lien", "en"],
+    ["minimap", "fr"],
+    ["mini-carte", "fr"],
+    ["note", "fr"],
+  ])
+    for (const g of searchGuides(query, "all", lang))
+      assert.match(
+        `${g.title} ${g.body}`.toLowerCase(),
+        new RegExp(query),
+        `${lang} "${query}": ${g.title}`,
+      );
+  assert.equal(searchGuides("lien", "all", "en").length, 0);
+  // Participants learn to vote, react and raise a hand, in either language.
+  for (const [query, lang, title] of [
+    ["vote", "en", "Vote, react, and raise your hand"],
+    ["hand", "en", "Vote, react, and raise your hand"],
+    ["main levée", "fr", "Voter, réagir et lever la main"],
+    ["réaction", "fr", "Voter, réagir et lever la main"],
+  ])
+    assert.ok(
+      searchGuides(query, "participant", lang).some((g) => g.title === title),
+      `${lang} "${query}"`,
+    );
+  // Viewers do more than follow along, and the French guide names the
+  // Votes section as the panel does.
+  assert.match(
+    searchGuides("viewers", "participant", "en")[0].body,
+    /viewers follow along, send live reactions, and raise their hand/,
+  );
+  assert.match(
+    searchGuides("vote par points", "facilitator", "fr")[0].body,
+    /Ouvrez Animation, puis Votes\./,
+  );
+  assert.ok(searchGuides("mini-carte", "all", "fr").length >= 1);
   assert.ok(
     searchGuides("", "facilitator").every((g) => g.role === "facilitator"),
   );
@@ -1426,4 +1466,53 @@ test("viewers and commenters take a tour of what they can do", () => {
     "Run workshops",
     "Find any command",
   ]);
+  // While a shared board connects its controls are disabled; the tour
+  // still follows the person's role rather than shrinking to two steps.
+  for (const s of EDITOR_TOUR.filter((s) => s.edits || s.comments))
+    doc.querySelector(s.target).disabled = true;
+  assert.deepEqual(
+    titles({ canEdit: true, canComment: true }),
+    EDITOR_TOUR.map((s) => s.title),
+  );
+  assert.deepEqual(titles({ canEdit: false, canComment: true }), [
+    "Navigate large boards",
+    "Discuss asynchronously",
+    "Find any command",
+  ]);
+});
+
+test("on touch screens the tour says to tap rather than press keys or hover", () => {
+  const dom = new JSDOM(
+    `<div class="tools"><button data-action="tool-select">V</button><button data-action="tool-note">N</button><button data-action="tool-frame">F</button></div><button data-action="frames">Frames</button><button data-action="comments">Comments</button><button data-action="share">Share</button><button data-timer-access>Timer</button><button data-action="commands">Commands</button><canvas id="canvas" tabindex="0"></canvas>`,
+    { pretendToBeVisual: true },
+  );
+  const doc = dom.window.document;
+  const texts = (coarse) => {
+    dom.window.matchMedia = (query) => ({
+      matches: coarse && query === "(pointer: coarse)",
+    });
+    const tour = createOnboarding({
+      root: () => doc,
+      storage: { getItem: () => null, setItem() {} },
+    });
+    tour.start();
+    const seen = [];
+    for (let n = 0; n < 20 && doc.querySelector(".tour-bubble"); n++) {
+      seen.push(doc.querySelector("#tour-text").textContent);
+      doc.querySelector("#tour-next").click();
+    }
+    return seen;
+  };
+  const mouse = texts(false);
+  assert.equal(mouse.length, EDITOR_TOUR.length);
+  assert.match(mouse.join(" "), /Press N|Hover|Ctrl\/Cmd/);
+  const touch = texts(true);
+  assert.equal(touch.length, EDITOR_TOUR.length);
+  for (const text of touch)
+    assert.doesNotMatch(
+      text,
+      /\bPress\b|\bHover|\bclick|Ctrl\/Cmd|\(M\)/,
+      text,
+    );
+  assert.match(touch.at(-1), /More tools/);
 });

@@ -450,6 +450,7 @@ import { CollaborationSession } from "./collaboration/session.js";
 import { SharedDocument, rebase } from "./collaboration/document.js";
 import {
   ASSET,
+  canComment,
   canEditContent,
   canManage,
   encode,
@@ -553,6 +554,7 @@ import { createImageClipboard } from "./image-clipboard.js";
 import { createContentTools } from "./content/content.js";
 import { loadPdfjs } from "./content/pdf-loader.js";
 import { busy } from "./accessibility/busy.js";
+import { say, watchDialogs } from "./accessibility/live-region.js";
 import "./content/content.css";
 import {
   canClearContent,
@@ -1243,6 +1245,7 @@ const comments = createCommentsUI({
       : { id: commentIdentity, name: "Local author" },
   }),
   canvas: () => document.querySelector("#canvas"),
+  readOnlyReason: sharedReadOnlyReason,
   now: () => collaboration?.now() ?? Date.now(),
   icon,
   draw,
@@ -1553,15 +1556,30 @@ const helpCenter = createHelpCenter({
   org: organization,
   toast,
 });
+// A tour asked for before a shared board says what this person may do on
+// it starts once it does.
+let tourWaiting = null;
 function startTour() {
   document.querySelector("#tour-offer")?.remove();
-  if (current)
-    // By role, not by whether the board is still connecting.
-    onboarding.start(undefined, {
-      canEdit: !collaboration?.readOnly && !collaboration?.contentReadOnly,
-      canComment: !collaboration?.readOnly,
+  tourWaiting = null;
+  if (!current) return toast("Open a board to take the tour.");
+  // By role, not by whether the board is still connecting: until the
+  // board answers, the role it last gave this person stands.
+  if (collaboration && !collaboration.role) {
+    const role = current.shared?.role;
+    if (!role) {
+      tourWaiting = current;
+      return toast("The tour starts once the board connects.");
+    }
+    return onboarding.start(undefined, {
+      canEdit: canEditContent(role),
+      canComment: canComment(role),
     });
-  else toast("Open a board to take the tour.");
+  }
+  onboarding.start(undefined, {
+    canEdit: !collaboration?.readOnly && !collaboration?.contentReadOnly,
+    canComment: !collaboration?.readOnly,
+  });
 }
 const planning = createPlanning({
   board: () => current,
@@ -2275,6 +2293,17 @@ const contextMenu = createContextMenu({
 // What a right-click without a drag, the context menu key or Shift+F10
 // opens. A press on an object selects it first, as a left click would; a
 // press on the empty board drops the selection.
+// The first control the selection toolbar offers, where Alt+F10 goes.
+function selectionToolbarControl() {
+  const tools = document.querySelector("#selection-tools");
+  if (!tools || tools.hidden) return null;
+  return (
+    [...tools.querySelectorAll("button, select, input")].find(
+      (c) => !c.disabled && !c.closest("[hidden]"),
+    ) || null
+  );
+}
+
 function openContextMenu(e, keyboard = false) {
   // A right-click elsewhere on the board ends a text edit, keeping what was
   // typed, as a left click does, and opens the menu for what it is on.
@@ -2611,12 +2640,18 @@ function isSharedReadOnly() {
     (!!current?.shared && !collaboration)
   );
 }
-// Why the board takes no content edits right now.
+// Why the board takes no content edits right now, and for someone whose
+// role is the reason, what they can do instead.
 function sharedReadOnlyReason() {
-  return collaborationBusy
-    ? "Still connecting to the shared board. Try again in a moment."
-    : reconnecting && reconnecting === current
-      ? "Cannot reach the shared board. It is view only until it reconnects."
+  if (collaborationBusy)
+    return "Still connecting to the shared board. Try again in a moment.";
+  if (reconnecting && reconnecting === current)
+    return "Cannot reach the shared board. It is view only until it reconnects.";
+  if (collaboration?.archived) return "This board is archived and read-only.";
+  return collaboration?.access === "view"
+    ? "This board is read-only for you. Ask the owner or a facilitator for access to edit or comment."
+    : collaboration?.access === "comment"
+      ? "This board's content is read-only for you. Choose Comment (C) to discuss it."
       : "This board is read-only.";
 }
 // Commenters cannot change content but can still discuss it.
@@ -2911,6 +2946,7 @@ function iconsRefresh() {
 // A modal dialog covers the page and makes it inert, so show toasts inside
 // the topmost open dialog and return them to the page when it closes.
 const toastElement = document.querySelector("#toast");
+watchDialogs(["board-announcer", "facilitation-live"]);
 document.addEventListener(
   "close",
   (e) => {
@@ -4007,6 +4043,12 @@ const tools = [
   ["frame", "scan", "Frame", "F"],
   ["comment", "message-square", "Comment", "C"],
 ];
+// Tools that put one object down where the board is clicked. Chosen from
+// the keyboard, which has no board to click, they add it in the middle of
+// the view instead, as their letters do.
+const PLACING_TOOLS = ["note", "text", "rect", "ellipse", "frame"];
+// The tool button Enter or Space was pressed on, until its click.
+let keyedTool = null;
 const TOOL_HINTS = {
   select: "Select and move · Double-click to edit · Space to pan",
   hand: "Drag to move around your board",
@@ -4047,8 +4089,12 @@ function observeChrome() {
     // The tag counts at its full length, which does not change with the
     // layout, so the row cannot flap between the two.
     const label = tag?.querySelector(":scope > span");
+    const cut = (el) => el.scrollWidth - el.clientWidth;
     const tagWidth = tag
-      ? tag.offsetWidth + (label ? label.scrollWidth - label.clientWidth : 0)
+      ? tag.offsetWidth +
+        (label
+          ? cut(label) + [...label.children].reduce((w, c) => w + cut(c), 0)
+          : 0)
       : 0;
     const needed =
       shown.reduce((sum, b) => sum + b.offsetWidth, 0) +
@@ -4112,7 +4158,7 @@ function editor() {
   // controls in the order they are laid out: header, top row, rail, then the
   // zoom controls at the bottom. Comment pins and link badges, which can
   // number hundreds, come after all of them.
-  app.innerHTML = `<main class="editor"><h1 id="board-heading" class="sr-only" data-user-content>${escape(current.title)}</h1><p id="board-announcer" class="sr-only" role="status" aria-live="polite"></p><header class="editor-header"><div class="editor-heading">${button("arrow-left", "Back to boards", "home")}<span class="mini-brand">${brandImage}</span><div><input id="board-title" aria-label="Board name" maxlength="200" value="${escape(current.title)}"><span id="save-state" role="status" aria-live="polite" title="${saveState}"${saveTone ? ` data-tone="${saveTone}"` : ""}>${saveState}</span></div></div><div class="editor-actions">${button("command", "Command palette (Ctrl/Cmd K)", "commands")}<details class="preferences"><summary class="icon-btn" aria-label="${t("Preferences")}" title="${t("Preferences")}">${icon("settings-2")}</summary><div class="preferences-menu" role="group" aria-label="${t("Preferences")}">${themeControl(true)}${current.shared ? `<label class="preferences-check"><input type="checkbox" id="show-authors" ${showAuthors ? "checked" : ""}><span>${t("Show sticky note authors")}</span></label>` : ""}</div></details>${button(boardStorage(current) === "cloud" ? "cloud-check" : "cloud-upload", cloudSaveLabel(current), "cloud-save", `data-storage="${boardStorage(current)}"`)}${button("history", "Version history (Ctrl/Cmd Alt/Option Shift H)", "history")}${button("download", "Export board", "export")}${button("ellipsis", "More tools", "more-tools")}<button class="primary share-button" data-action="share" aria-label="Share board">${icon("users")}<span>Share</span></button>${account.markup()}</div></header><div class="canvas-wrap"><canvas id="canvas" role="img" aria-label="Whiteboard canvas. Use Board objects to select and edit objects with the keyboard." tabindex="0"></canvas><div id="hover-outline" class="hover-outline" aria-hidden="true" hidden></div><div id="board-outline" class="sr-only" role="group" aria-label="Canvas objects" aria-describedby="board-outline-hint"></div><p id="board-outline-hint" class="sr-only">Arrow keys, Home and End move between objects. Page Down and Page Up move to the next or previous frame.</p><div class="canvas-top"><span class="board-tag" data-storage="${boardStorage(current)}" title="${escape(storageLabel(current))}">${storageTag(current)}</span><button class="participants" data-action="participants" hidden></button><div class="canvas-navigation"><button type="button" class="icon-btn live-access" data-action="live" aria-label="${t("Live reactions and raise hand")}" title="${t("Live reactions and raise hand")}" aria-haspopup="dialog" aria-controls="live-popover" aria-expanded="false" hidden>${icon("smile-plus")}</button>${button("tags", "Tags", "tags", 'id="tag-access" hidden')}${button("columns-3", "Table cells", "table-cells", 'id="table-cell-access" hidden')}${button("arrow-up-right", "Object link", "object-link", 'id="object-link-access" hidden')}${button("link", "Text links", "text-links", 'id="text-link-access" hidden')}<button type="button" class="icon-btn timer-access" data-action="timer" data-timer-access aria-label="${t("Timer")}" title="${t("Timer")}" aria-controls="workshop-timer" aria-expanded="false">${icon("timer")}<span class="timer-badge" hidden></span></button><button type="button" class="icon-btn facilitation-access" data-action="facilitation" aria-label="${t("Facilitation")}" title="${t("Facilitation")}" aria-controls="facilitation-panel" aria-expanded="false">${icon("vote")}</button>${button("sparkles", "AI assistant", "ai")}${button("message-square", "Comments", "comments", 'aria-expanded="false" aria-controls="comments-panel"')}${button("search", "Find on board (Ctrl/Cmd F)", "board-search", 'aria-expanded="false" aria-controls="board-search"')}${button("map", "Minimap (M)", "minimap", 'aria-controls="minimap" aria-expanded="false" aria-pressed="false"')}${button("scan", "Frames and navigation", "frames", 'aria-expanded="false" aria-controls="frames-panel"')}${button("list", "Board objects", "objects")}${button("presentation", "Presentation", "present")}</div></div><div class="left-rail"><div class="tools panel" role="toolbar" aria-label="Drawing tools">${tools.map(([key, ic, label, shortcut]) => button(ic, `${label} (${shortcut})`, `tool-${key}`, `aria-pressed="${tool === key}"`)).join("")}<span class="tool-divider"></span>${button("layout-template", "Templates", "templates")}${button("shapes", "Shapes (S)", "shapes")}${button("image-plus", "Add image", "image")}${button("circle-plus", "Add content", "add-content", 'aria-haspopup="dialog"')}</div><div class="panel history-tools">${button("undo-2", "Undo (Ctrl/Cmd Z)", "undo")}${button("redo-2", "Redo (Ctrl/Cmd Shift Z)", "redo")}${button("magnet", "Snap to objects", "toggle-snapping", `aria-pressed="${snapping}"`)}</div></div><div class="drop-hint" aria-hidden="true"><strong>Drop content here</strong><span>Images, files, text, and links</span></div><div id="selection-tools" class="selection-tools panel" hidden></div><div id="quick-ports" role="group" hidden></div><section id="minimap" class="minimap panel" hidden></section><div class="canvas-bottom"><span id="tool-hint" class="tool-hint">Select and move · Double-click to edit · Space to pan</span><div class="panel zoom-tools">${button("maximize", "Fit board to screen", "fit")}<span class="tool-divider"></span>${button("minus", "Zoom out", "zoom-out")}<button class="zoom-label" data-action="reset-zoom" title="Reset zoom to 100 percent">100%</button>${button("plus", "Zoom in", "zoom-in")}<span class="tool-divider"></span>${button("circle-help", "Help and training", "help-center")}</div></div><div id="object-link-badges" class="object-link-badges" role="group" aria-label="Object links"></div><div id="comment-pins" class="comment-pins" role="group" aria-label="Board comments"></div></div></main>`;
+  app.innerHTML = `<main class="editor"><h1 id="board-heading" class="sr-only" data-user-content>${escape(current.title)}</h1><p id="board-announcer" class="sr-only" role="status" aria-live="polite"></p><header class="editor-header"><div class="editor-heading">${button("arrow-left", "Back to boards", "home")}<span class="mini-brand">${brandImage}</span><div><input id="board-title" aria-label="Board name" maxlength="200" value="${escape(current.title)}"><span id="save-state" role="status" aria-live="polite" title="${saveState}"${saveTone ? ` data-tone="${saveTone}"` : ""}>${saveState}</span></div></div><div class="editor-actions">${button("command", "Command palette (Ctrl/Cmd K)", "commands")}<details class="preferences"><summary class="icon-btn" aria-label="${t("Preferences")}" title="${t("Preferences")}">${icon("settings-2")}</summary><div class="preferences-menu" role="group" aria-label="${t("Preferences")}">${themeControl(true)}${current.shared ? `<label class="preferences-check"><input type="checkbox" id="show-authors" ${showAuthors ? "checked" : ""}><span>${t("Show sticky note authors")}</span></label>` : ""}</div></details>${button(boardStorage(current) === "cloud" ? "cloud-check" : "cloud-upload", cloudSaveLabel(current), "cloud-save", `data-storage="${boardStorage(current)}"`)}${button("history", "Version history (Ctrl/Cmd Alt/Option Shift H)", "history")}${button("download", "Export board", "export")}${button("ellipsis", "More tools", "more-tools")}<button class="primary share-button" data-action="share" aria-label="Share board">${icon("users")}<span>Share</span></button>${account.markup()}</div></header><div class="canvas-wrap"><canvas id="canvas" role="img" aria-label="Whiteboard canvas. Use Board objects to select and edit objects with the keyboard." tabindex="0"></canvas><div id="hover-outline" class="hover-outline" aria-hidden="true" hidden></div><div id="board-outline" class="sr-only" role="group" aria-label="Canvas objects" aria-describedby="board-outline-hint"></div><p id="board-outline-hint" class="sr-only">Arrow keys, Home and End move between objects. Page Down and Page Up move to the next or previous frame.</p><div class="canvas-top"><span class="board-tag" data-storage="${boardStorage(current)}" title="${escape(storageLabel(current))}">${storageTag(current)}</span><button class="participants" data-action="participants" hidden></button><div class="canvas-navigation"><button type="button" class="icon-btn live-access" data-action="live" aria-label="${t("Live reactions and raise hand")}" title="${t("Live reactions and raise hand")}" aria-haspopup="dialog" aria-controls="live-popover" aria-expanded="false" hidden>${icon("smile-plus")}</button>${button("tags", "Tags", "tags", 'id="tag-access" hidden')}${button("columns-3", "Table cells", "table-cells", 'id="table-cell-access" hidden')}${button("arrow-up-right", "Object link", "object-link", 'id="object-link-access" hidden')}${button("link", "Text links", "text-links", 'id="text-link-access" hidden')}<button type="button" class="icon-btn timer-access" data-action="timer" data-timer-access aria-label="${t("Timer")}" title="${t("Timer")}" aria-controls="workshop-timer" aria-expanded="false">${icon("timer")}<span class="timer-badge" hidden></span></button><button type="button" class="icon-btn facilitation-access" data-action="facilitation" aria-label="${t("Facilitation")}" title="${t("Facilitation")}" aria-controls="facilitation-panel" aria-expanded="false">${icon("vote")}</button>${button("sparkles", "AI assistant", "ai")}${button("message-square", "Comments", "comments", 'aria-expanded="false" aria-controls="comments-panel"')}${button("search", "Find on board (Ctrl/Cmd F)", "board-search", 'aria-expanded="false" aria-controls="board-search"')}${button("map", "Minimap (M)", "minimap", 'aria-controls="minimap" aria-expanded="false" aria-pressed="false"')}${button("scan", "Frames and navigation", "frames", 'aria-expanded="false" aria-controls="frames-panel"')}${button("list", "Board objects", "objects")}${button("presentation", "Presentation", "present")}</div></div><div class="left-rail"><div class="tools panel" role="toolbar" aria-label="Drawing tools">${tools.map(([key, ic, label, shortcut]) => button(ic, `${label} (${shortcut})`, `tool-${key}`, `aria-pressed="${tool === key}"`)).join("")}<span class="tool-divider"></span>${button("layout-template", "Templates", "templates")}${button("shapes", "Shapes (S)", "shapes")}${button("image-plus", "Add image", "image")}${button("circle-plus", "Add content", "add-content", 'aria-haspopup="dialog"')}</div><div class="panel history-tools">${button("undo-2", "Undo (Ctrl/Cmd Z)", "undo")}${button("redo-2", "Redo (Ctrl/Cmd Shift Z)", "redo")}${button("magnet", "Snap to objects", "toggle-snapping", `aria-pressed="${snapping}"`)}</div></div><div class="drop-hint" aria-hidden="true"><strong>Drop content here</strong><span>Images, files, text, and links</span></div><div id="selection-tools" class="selection-tools panel" role="toolbar" aria-label="${t("Selection tools")}" hidden></div><div id="quick-ports" role="group" hidden></div><section id="minimap" class="minimap panel" hidden></section><div class="canvas-bottom"><span id="tool-hint" class="tool-hint">Select and move · Double-click to edit · Space to pan</span><div class="panel zoom-tools">${button("maximize", "Fit board to screen", "fit")}<span class="tool-divider"></span>${button("minus", "Zoom out", "zoom-out")}<button class="zoom-label" data-action="reset-zoom" title="Reset zoom to 100 percent">100%</button>${button("plus", "Zoom in", "zoom-in")}<span class="tool-divider"></span>${button("circle-help", "Help and training", "help-center")}</div></div><div id="object-link-badges" class="object-link-badges" role="group" aria-label="Object links"></div><div id="comment-pins" class="comment-pins" role="group" aria-label="Board comments"></div></div></main>`;
   bindShared();
   account.bind();
   workshopTimer.bind();
@@ -4153,14 +4199,26 @@ function editor() {
   document
     .querySelector("#selection-tools")
     .addEventListener("keydown", (e) => {
-      if (e.key !== "F10" || !e.altKey || e.ctrlKey || e.metaKey || !editing)
-        return;
-      const text = document.querySelector("#canvas-text-editor");
-      if (!text) return;
+      if (e.key !== "F10" || !e.altKey || e.ctrlKey || e.metaKey) return;
+      // Back to the text being edited, or to the board the selection is on.
+      const back = editing
+        ? document.querySelector("#canvas-text-editor")
+        : document.querySelector("#canvas");
+      if (!back) return;
       e.preventDefault();
       e.stopPropagation();
-      text.focus({ preventScroll: true });
+      back.focus({ preventScroll: true });
     });
+  const rail = document.querySelector(".tools");
+  rail.addEventListener("keydown", (e) => {
+    keyedTool =
+      (e.key === "Enter" || e.key === " ") && !e.repeat
+        ? e.target.closest('[data-action^="tool-"]')
+        : null;
+  });
+  // Enter clicks on its keydown and Space on its keyup, so the mark lasts
+  // until both have had their turn.
+  rail.addEventListener("keyup", () => setTimeout(() => (keyedTool = null)));
   document.querySelector("#board-title").onchange = (e) => {
     checkpoint();
     // The field's maxlength counts what the browser counts, which may be
@@ -4317,12 +4375,8 @@ function previewsInView(people, now) {
 const announced = { key: "", timer: null, id: null, message: "" };
 function announce(message) {
   const region = document.querySelector("#board-announcer");
-  if (!region) return;
   // Emptied first, so the same words said twice are read twice.
-  region.textContent = "";
-  setTimeout(() => {
-    if (region.isConnected) region.textContent = message;
-  }, 50);
+  say(region, message, { delay: 50 });
 }
 // What an object selected alone is announced as, from the board as this
 // person sees it: hidden objects are left out and face-down notes stay so.
@@ -4671,6 +4725,7 @@ function draw() {
   comments.render();
   objectLinks.render();
   facilitation.render();
+  workshopTimer.place();
   contentTools.render();
   tags.render();
   hideAccess(
@@ -4745,13 +4800,18 @@ function buildOutline(outline) {
     language,
     contentVersion,
     editedByOthers.key,
+    current.tags,
+    current.comments,
   ];
   if (outline.key?.every((value, n) => value === key[n])) return;
   outline.key = key;
   return writeOutline(outline, outlineOrder(outlined));
 }
 function writeOutline(outline, outlined) {
-  const relationships = objectRelationships(outlined);
+  const relationships = objectRelationships(outlined, {
+    tags: facilitation.masked(current).tags,
+    comments: current.comments,
+  });
   if (
     !outline.renderedParts &&
     outlined.length > OUTLINE_LATER &&
@@ -5732,7 +5792,7 @@ function renderSelectionTools(locked, resizeBox, anchor) {
             // Text, frames and images have no fill to colour. The swatches
             // open from one button showing the current colour.
             chosen.some(paintsColor)
-              ? `<button id="fill-options" class="icon-btn fill-options" type="button" aria-label="Fill color" title="Fill color" aria-expanded="false" aria-controls="fill-popover" data-popover="fill-popover" style="--swatch:${chosen.find(paintsColor).color || COLORS[0]}"><span class="fill-chip" aria-hidden="true"></span></button><div id="fill-popover" class="selection-popover fill-popover" role="group" aria-label="Fill color" hidden>${COLORS.map((c, n) => `<button class="swatch" style="--swatch:${c}" data-color="${c}" aria-label="${["Butter", "Sage", "Blue", "Lilac", "Peach", "White"][n]} color"></button>`).join("")}<label class="color-control" title="Custom color"><span class="sr-only">Custom color</span><input id="fill-color" type="color" value="${chosen.find(paintsColor).color || COLORS[0]}"></label></div>`
+              ? `<button id="fill-options" class="icon-btn fill-options" type="button" aria-label="Fill color" title="Fill color" aria-expanded="false" aria-controls="fill-popover" data-popover="fill-popover" style="--swatch:${chosen.find(paintsColor).color || COLORS[0]}"><span class="fill-chip" aria-hidden="true"></span></button><div id="fill-popover" class="selection-popover fill-popover" role="group" aria-label="Fill color" hidden>${COLORS.map((c, n) => `<button class="swatch" style="--swatch:${c}" data-color="${c}" aria-label="${["Butter", "Sage", "Blue", "Lilac", "Peach", "White"][n]} color" aria-pressed="${chosen.filter(paintsColor).every((i) => (i.color || COLORS[0]) === c)}"></button>`).join("")}<label class="color-control" title="Custom color"><span class="sr-only">Custom color</span><input id="fill-color" type="color" value="${chosen.find(paintsColor).color || COLORS[0]}"></label></div>`
               : ""
           }${
             // A shape's border can be dashed or dotted, as for a boundary,
@@ -6840,11 +6900,7 @@ function beginTextEdit(i, { inheritLanguage = true, point } = {}) {
     } else if (e.key === "F10" && e.altKey && !e.ctrlKey && !e.metaKey) {
       // Alt+F10 goes to the formatting toolbar, as in other text editors;
       // the same keys there come back to the text.
-      const control = [
-        ...document.querySelectorAll(
-          "#selection-tools button, #selection-tools select, #selection-tools input",
-        ),
-      ].find((c) => !c.disabled && !c.closest("[hidden]"));
+      const control = selectionToolbarControl();
       if (control) {
         e.preventDefault();
         e.stopPropagation();
@@ -7172,7 +7228,7 @@ function setTool(value) {
     // Commenters discuss content they cannot change.
     !(value === "comment" && !isCommentReadOnly())
   )
-    return;
+    return toast(sharedReadOnlyReason());
   canvasNavigation.finish();
   pointerUp();
   tool = value;
@@ -7191,13 +7247,29 @@ function showTool() {
       b.setAttribute("aria-pressed", b.dataset.action === "tool-" + tool),
     );
   document.querySelector("#canvas").style.cursor = toolCursor();
-  document.querySelector("#tool-hint").textContent = t(
-    armedShape
-      ? "Click to add the shape · Drag to draw it at a size"
-      : TOOL_HINTS[tool] || "",
-  );
+  showToolHint();
   renderNoteColors();
   renderFrameFormats();
+}
+// Someone who may only view or comment is not told to edit by double-click.
+const READ_HINTS = {
+  view: "Select objects to read them · Space to pan",
+  comment:
+    "Select objects to read them · Comment (C) to discuss · Space to pan",
+};
+function showToolHint() {
+  const hint = document.querySelector("#tool-hint");
+  if (!hint) return;
+  const text = t(
+    armedShape
+      ? "Click to add the shape · Drag to draw it at a size"
+      : (tool === "select" &&
+          current?.shared &&
+          READ_HINTS[collaboration?.access]) ||
+          TOOL_HINTS[tool] ||
+          "",
+  );
+  if (hint.textContent !== text) hint.textContent = text;
 }
 // While the sticky note tool is on, its colours stand beside the tool rail;
 // the one chosen is the colour new sticky notes take.
@@ -7409,7 +7481,7 @@ function reframeResized(plan, skip = facilitation.concealedIds()) {
   );
 }
 function addObject(type, p, extra = {}, event, after) {
-  if (isSharedReadOnly()) return toast("This board is read-only.");
+  if (isSharedReadOnly()) return toast(sharedReadOnlyReason());
   if (current.items.length >= MAX_OBJECTS)
     return toast("A board can contain at most 5,000 objects.");
   p ??= openSpot(
@@ -8073,16 +8145,21 @@ function pointerDown(
       if (hasLocked(current.items, selection) || isSharedReadOnly()) {
         // Nothing here can be dragged, so the editor opens at once.
         if (editOnRelease) return editObject(linkedItem, false, p);
-        drag = link
-          ? {
-              kind: "link",
-              id,
-              link,
-              linkText: linkedItem.text,
-              linkRuns: linkedItem.textRuns,
-              start: p,
-            }
-          : null;
+        // A press is held as a link's is, so trying to drag on a board
+        // this person cannot change says why rather than doing nothing.
+        const refused = isSharedReadOnly();
+        drag =
+          link || refused
+            ? {
+                kind: "link",
+                id,
+                link,
+                linkText: linkedItem.text,
+                linkRuns: linkedItem.textRuns,
+                start: p,
+                refused,
+              }
+            : null;
         draw();
         return;
       }
@@ -8461,8 +8538,10 @@ function pointerMove(e) {
   }
   const p = canvasPoint(e);
   if (drag.kind === "link") {
-    if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) * view.z > 3)
+    if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) * view.z > 3) {
+      if (drag.refused && !drag.active) toast(sharedReadOnlyReason());
       drag.active = true;
+    }
     return;
   }
   if (drag.kind === "pan") {
@@ -9116,8 +9195,10 @@ function modal(title, content, onReady) {
       document.activeElement === document.body ||
       d.contains(document.activeElement);
     d.remove();
+    // A dialog that opened with the page, as an invitation's Join dialog
+    // does, had nothing focused before it, so the canvas takes focus.
     if (restoreFocus) {
-      if (previous?.isConnected) previous.focus();
+      if (previous?.isConnected && previous !== document.body) previous.focus();
       else document.querySelector("#canvas")?.focus();
     }
   });
@@ -9531,6 +9612,9 @@ function resizeBy(factor, e) {
       });
       reframeResized(plan);
     });
+    announce(
+      labelled(t("Size"), `${Math.round(size.w)} × ${Math.round(size.h)}`),
+    );
   } catch (error) {
     toast(error.message);
   }
@@ -10132,9 +10216,16 @@ function storageLabel(b) {
     : `${t("Personal board")} · ${label}`;
 }
 // The words sit in their own element so a narrow row cuts them with an
-// ellipsis; the tag's title still names them in full.
+// ellipsis; the tag's title still names them in full. The access words are
+// never cut, as they are all that says what this person may do: where
+// the row is short, where the board is kept gives way first.
 function storageTag(b) {
-  return `${icon(STORAGE_TAGS[boardStorage(b)][0])}<span>${storageLabel(b)}</span>`;
+  const access = restrictedAccess(b);
+  return `${icon(STORAGE_TAGS[boardStorage(b)][0])}<span>${
+    access
+      ? `<span class="board-tag-place">${t(STORAGE_TAGS[boardStorage(b)][1])} · </span><span class="board-tag-access">${t(access)}</span>`
+      : storageLabel(b)
+  }</span>`;
 }
 // The status a board shows when it opens, before any save of this visit.
 function savedStatus(b) {
@@ -10267,6 +10358,7 @@ function followAccess() {
   // The library offers what this role may do with the board, such as
   // renaming it, even before any content arrives with the change.
   if (collaboration.role) current.shared.role = collaboration.role;
+  if (tourWaiting === current) startTour();
   const seen = accessSeen.board === current;
   if (seen && accessSeen.access === access) return;
   if (seen)
@@ -10397,15 +10489,21 @@ function renderParticipants() {
   }
   editor?.classList.toggle("shared-viewer", readOnly);
   editor?.classList.toggle("shared-commenter", readOnly && canComment);
+  showToolHint();
   const title = document.querySelector("#board-title");
   if (title) title.disabled = readOnly;
   for (const button of document.querySelectorAll(
-    '[data-action^="tool-"], [data-action="shapes"], .left-rail [data-action="templates"], .left-rail [data-action="add-content"]',
-  ))
+    '[data-action^="tool-"], [data-action="shapes"], .left-rail [data-action="templates"], .left-rail [data-action="image"], .left-rail [data-action="add-content"]',
+  )) {
     button.disabled =
       readOnly &&
       !["tool-select", "tool-hand"].includes(button.dataset.action) &&
       !(button.dataset.action === "tool-comment" && canComment);
+    // Its tooltip says why it is unavailable.
+    if (button.disabled)
+      button.dataset.disabledReason = t(sharedReadOnlyReason());
+    else delete button.dataset.disabledReason;
+  }
 }
 // The board's members, offered for @mentions. Fetched on joining and again
 // whenever comments open, so people who joined since can be mentioned; a
@@ -11046,7 +11144,7 @@ async function shareBoard() {
       return toast("Sharing is ready. Select Share board to invite people.");
     modal(
       "Share board",
-      `<p class="dialog-copy">${t("Invite people to edit, comment on, or view this board. Invitation links expire after seven days.")}</p><label class="field">${t("Link access")}<select id="share-role">${boardAccess.roleOptions(collaboration.role === "facilitator" ? "facilitator" : "owner")}</select></label>${boardAccess.shareControls()}<div class="share-link-row"><label class="field">${t("Board link")}<input id="share-link" readonly aria-label="${t("Board link")}"></label><button class="primary" id="copy-share">${icon("link")}${t("Copy link")}</button></div><p id="share-message" class="dialog-status" role="status"></p><div class="dialog-footer"><button class="secondary" id="board-settings-open">${icon("settings")}${t("Board settings")}</button><button class="text-btn" id="revoke-invites">${icon("refresh-cw")}${t("Reset link")}</button></div>`,
+      `<p class="dialog-copy" id="share-intro"></p><label class="field">${t("Link access")}<select id="share-role">${boardAccess.roleOptions(collaboration.role === "facilitator" ? "facilitator" : "owner")}</select></label>${boardAccess.shareControls()}<div class="share-link-row"><label class="field">${t("Board link")}<input id="share-link" readonly aria-label="${t("Board link")}"></label><button class="primary" id="copy-share">${icon("link")}${t("Copy link")}</button></div><p id="share-message" class="dialog-status" role="status"></p><div class="dialog-footer"><button class="secondary" id="board-settings-open">${icon("settings")}${t("Board settings")}</button><button class="text-btn" id="revoke-invites">${icon("refresh-cw")}${t("Reset link")}</button></div>`,
       (d) => {
         const field = d.querySelector("#share-link"),
           message = d.querySelector("#share-message"),
@@ -11147,10 +11245,19 @@ async function shareBoard() {
           if ([...role.options].some((o) => o.value === chosen))
             role.value = chosen;
           d.querySelector("#board-settings-open").hidden = !manager;
+          // Others are not offered the access a link gives, which only an
+          // invitation sets; they are told what the board's link does.
+          d.querySelector("#share-intro").textContent = t(
+            manager
+              ? "Invite people to edit, comment on, or view this board. Invitation links expire after seven days."
+              : "Copy the board's link to send it to people who already have access to it.",
+          );
           for (const control of d.querySelectorAll(
             "#share-role, #share-members",
-          ))
+          )) {
             control.disabled = !manager;
+            control.closest("label").hidden = !manager;
+          }
           d.querySelector("#revoke-invites").hidden = !manager;
           const refused = t(
             "Only the owner or a facilitator can invite new participants.",
@@ -11407,9 +11514,19 @@ async function fetchSharedMedia(copy, source, missing) {
     );
 }
 function joinDialog(link = "") {
+  // A link that opened the app is already filled in, so the dialog says
+  // what it is rather than asking for it.
+  const invited = /[#&]invite=[^&]/.test(link);
+  const guidance = !window.puter?.auth?.isSignedIn?.()
+    ? "Sign in with Puter to join this board."
+    : invited
+      ? "You were invited to a shared board. Choose Join board to open it."
+      : link
+        ? "Choose Join board to open this shared board."
+        : "Paste the link you were given to open the board.";
   modal(
     "Join shared board",
-    `<form><label class="field">${t("Board link")}<input id="join-link" type="url" required value="${escape(link)}" placeholder="https://…" aria-label="${t("Board link")}"></label><p class="dialog-copy">${t(window.puter?.auth?.isSignedIn?.() ? "Paste the link you were given to open the board." : "Sign in with Puter to join this board.")}</p><p id="join-error" class="dialog-status" role="status"></p><div class="dialog-footer"><button class="primary" type="submit">${t("Join board")}</button></div></form>`,
+    `<form><label class="field">${t("Board link")}<input id="join-link" type="url" required value="${escape(link)}" placeholder="https://…" aria-label="${t("Board link")}"></label><p class="dialog-copy">${t(guidance)}</p><p id="join-error" class="dialog-status" role="status"></p><div class="dialog-footer"><button class="primary" type="submit">${t("Join board")}</button></div></form>`,
     (d) => {
       d.querySelector("form").onsubmit = async (event) => {
         event.preventDefault();
@@ -12625,7 +12742,7 @@ function help() {
       ["Enter", "Select a group member or edit the focused object"],
       ["Ctrl/Cmd + Shift + Down / Up", "Select a group member / whole group"],
       ["Tab / Shift + Tab", "Indent / outdent a list item"],
-      ["Alt + F10", "Move between the text and its formatting toolbar"],
+      ["Alt + F10", "Move between the selection or its text and its toolbar"],
       ["Shift + Enter", "Continue a list item on a new line"],
       ["Ctrl/Cmd + B / I / U", "Bold, italic, or underline while typing"],
       ["Ctrl/Cmd + Alt/Option + K", "Insert or edit text link"],
@@ -12821,12 +12938,22 @@ function objectsDialog() {
         // The board as this person sees it: hidden objects are left out and
         // others' private notes stay face down.
         const query = fold(d.querySelector("input").value),
-          items = facilitation.masked(current).items;
-        if (related?.items !== items)
+          shown = facilitation.masked(current),
+          items = shown.items;
+        if (
+          related?.items !== items ||
+          related.tags !== shown.tags ||
+          related.comments !== current.comments
+        )
           related = {
             items,
+            tags: shown.tags,
+            comments: current.comments,
             ordered: outlineOrder(items),
-            map: objectRelationships(items),
+            map: objectRelationships(items, {
+              tags: shown.tags,
+              comments: current.comments,
+            }),
           };
         // Each frame is listed with what it holds, as in the outline, and a
         // frame found by its name brings what it holds with it.
@@ -12916,7 +13043,7 @@ function objectsDialog() {
 }
 function duplicate(direction) {
   if (!selection.size) return;
-  if (isSharedReadOnly()) return toast("This board is read-only.");
+  if (isSharedReadOnly()) return toast(sharedReadOnlyReason());
   // A copy would show hidden content to everyone.
   const hidden = facilitation.concealedIds();
   if ([...selection].some((id) => hidden.has(id)))
@@ -12958,7 +13085,8 @@ function sharedStep(step) {
   if (session.readOnly || session.contentReadOnly) return;
   const { shared } = session,
     manager = shared.undo;
-  if (!(step === "undo" ? manager.canUndo() : manager.canRedo())) return;
+  if (!(step === "undo" ? manager.canUndo() : manager.canRedo()))
+    return announce(t(step === "undo" ? "Nothing to undo" : "Nothing to redo"));
   // Every step changes content, which a frozen board refuses; the shared
   // document is left untouched so the step waits for the board to open.
   const frozen = facilitation.frozen();
@@ -12987,6 +13115,7 @@ function sharedStep(step) {
     manager[step === "undo" ? "redo" : "undo"]();
     return toast(reason);
   }
+  announce(t(step === "undo" ? "Undone" : "Redone"));
   session.publish().catch((e) => toast(e.message));
 }
 // Buttons over the board that open a panel or a dialog, change a setting
@@ -13034,7 +13163,17 @@ async function action(a) {
   finishTextEdit();
   if (features.actions[a]) return features.actions[a]();
   if (planning.actions[a]) return planning.actions[a]();
-  if (a.startsWith("tool-")) return setTool(a.slice(5));
+  if (a.startsWith("tool-")) {
+    const keyed = keyedTool?.dataset.action === a;
+    keyedTool = null;
+    if (!keyed || !PLACING_TOOLS.includes(a.slice(5)))
+      return setTool(a.slice(5));
+    const made = addObject(a.slice(5));
+    // Notes and text open for typing; a shape or frame is moved and
+    // edited from the board.
+    if (made && !editing) document.querySelector("#canvas").focus();
+    return;
+  }
   switch (a) {
     case "toggle-authors":
       showAuthors = !showAuthors;
@@ -13108,6 +13247,7 @@ async function action(a) {
     case "import":
       return fileInput(".json", importBoard);
     case "image":
+      if (isSharedReadOnly()) return toast(sharedReadOnlyReason());
       return imageInput();
     case "crop-image":
       if (selection.size !== 1 || !canEditSelection()) return;
@@ -13220,7 +13360,19 @@ async function action(a) {
         a,
         selectionOptions(),
       );
-      if (next !== current.items) mutate(() => (current.items = next));
+      if (next === current.items) return;
+      mutate(() => (current.items = next));
+      // The canvas shows the new order; a screen reader hears it.
+      announce(
+        t(
+          {
+            front: "Brought to front",
+            back: "Sent to back",
+            forward: "Brought forward",
+            backward: "Sent backward",
+          }[a],
+        ),
+      );
       return;
     }
     case "share":
@@ -13236,23 +13388,25 @@ async function action(a) {
       if (collaboration) return sharedStep("undo");
       // Key repeat must not replace recovery versions with unchanged copies.
       if (isSharedReadOnly()) return toast("This board is read-only.");
-      if (!history.past.length) return;
+      if (!history.past.length) return announce(t("Nothing to undo"));
       checkpoint();
       restoreUndoState(history.undo(undoStateFor(history.past.at(-1))));
       selection.clear();
       draw();
       save({ outlined: true });
+      announce(t("Undone"));
       return;
     case "redo":
       dropEditToast();
       if (collaboration) return sharedStep("redo");
       if (isSharedReadOnly()) return toast("This board is read-only.");
-      if (!history.future.length) return;
+      if (!history.future.length) return announce(t("Nothing to redo"));
       checkpoint();
       restoreUndoState(history.redo(undoStateFor(history.future.at(-1))));
       selection.clear();
       draw();
       save({ outlined: true });
+      announce(t("Redone"));
       return;
     case "minimap":
       return minimap.toggle();
@@ -13435,6 +13589,24 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     openContextMenu(null, true);
     return;
+  }
+  // Alt+F10 goes from the board to the selection's toolbar, as it does
+  // from text being edited, rather than tabbing past every other tool.
+  if (
+    e.key === "F10" &&
+    e.altKey &&
+    !e.shiftKey &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    e.target.id === "canvas" &&
+    !drag
+  ) {
+    const control = selectionToolbarControl();
+    if (control) {
+      e.preventDefault();
+      control.focus();
+      return;
+    }
   }
   if (!drag && mindMap.keydown(e)) return;
   if (
@@ -13658,6 +13830,15 @@ document.addEventListener("keydown", (e) => {
         focusedGroup = null;
       }
     });
+    announce(
+      e.shiftKey
+        ? t("Ungrouped")
+        : plural(
+            selection.size,
+            "{count} object grouped",
+            "{count} objects grouped",
+          ),
+    );
     return;
   }
   if (mod && shortcutLetter(e) === "z") {
@@ -13764,6 +13945,8 @@ document.addEventListener("keydown", (e) => {
       )
     )
       return;
+    const moved = current.items.find((i) => reach.has(i.id) && !isConnector(i)),
+      frameBefore = moved.parentId;
     heldKeyChange(e, "move", () => {
       moveItems(current.items, selection, dx, dy, selectionOptions());
       // Like dragging, moving objects into or out of a frame updates which
@@ -13772,6 +13955,21 @@ document.addEventListener("keydown", (e) => {
         skip: facilitation.concealedIds(),
       });
     });
+    // Crossing a frame's edge is the step a screen reader needs to hear;
+    // each step of the move would only be noise.
+    const after = current.items.find((i) => i.id === moved.id);
+    if (after && after.parentId !== frameBefore) {
+      const frame = after.parentId
+        ? facilitation
+            .masked(current)
+            .items.find((i) => i.id === after.parentId)
+        : null;
+      announce(
+        frame
+          ? labelled(t("In frame"), objectName(frame))
+          : t("Out of the frame"),
+      );
+    }
     return;
   }
   if (
@@ -13798,8 +13996,7 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       // A held key adds one object, not a stack of them on each repeat.
       if (e.repeat) return;
-      if (["note", "text", "rect", "ellipse", "frame"].includes(t[0]))
-        addObject(t[0]);
+      if (PLACING_TOOLS.includes(t[0])) addObject(t[0]);
       else setTool(t[0]);
     }
     if (e.key === "?") help();

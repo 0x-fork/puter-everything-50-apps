@@ -5002,6 +5002,26 @@ test("the workshop banner keeps keyboard focus while its countdown changes", () 
     assert.equal(ui.doc.querySelector('[data-fac-open="vote"]'), chip);
     assert.match(chip.textContent, /4:59/);
     assert.equal(ui.doc.activeElement, chip);
+    // Screen readers announce a focused control's new name, so the name
+    // keeps the time it had when focused rather than changing each second.
+    const name = () => chip.getAttribute("aria-label") ?? chip.textContent;
+    assert.equal(name(), "Voting: 2 votes left · 5:00");
+    b.workshop = { ...b.workshop, vote: vote({ endsAt: 10000 + 298_000 }) };
+    ui.api.render();
+    assert.match(chip.textContent, /4:58/);
+    assert.equal(name(), "Voting: 2 votes left · 5:00");
+    // What it says otherwise is news and is said, with the time.
+    b.workshop = {
+      vote: vote({ endsAt: 10000 + 297_000 }),
+      ...Object.fromEntries([ballot(editor, ["a"])]),
+    };
+    ui.api.render();
+    assert.equal(name(), "Voting: 1 vote left · 4:57");
+    // Focused anew, it gives the time again.
+    chip.blur();
+    b.workshop = { ...b.workshop, vote: vote({ endsAt: 10000 + 296_000 }) };
+    ui.api.render();
+    assert.equal(name(), "Voting: 1 vote left · 4:56");
   } finally {
     ui.close();
   }
@@ -5169,6 +5189,51 @@ test("starting the agenda starts a session without earlier attendance", () => {
       Object.keys(b.workshop).filter((k) => k.startsWith("p:")),
       [],
     );
+  } finally {
+    ui.close();
+  }
+});
+
+test("starting, ending and clearing a vote or poll moves focus to its heading or first field", () => {
+  const b = { ...newBoard("Workshop"), items: notes() };
+  const ui = stubUI(b, { role: "owner", me: owner });
+  const submit = (form) => {
+    form.querySelector('[type="submit"]').focus();
+    form.dispatchEvent(
+      new ui.doc.defaultView.Event("submit", { cancelable: true }),
+    );
+  };
+  const press = (action) => {
+    const button = ui.doc.querySelector(`[data-fac="${action}"]`);
+    button.focus();
+    button.click();
+  };
+  const focused = () => ui.doc.activeElement;
+  try {
+    ui.api.open("vote");
+    submit(ui.doc.querySelector("#fac-vote-form"));
+    assert.equal(b.workshop.vote.state, "active");
+    // The new vote's heading, above how many votes are left, rather than
+    // the control drawn where the start button was.
+    assert.equal(focused().tagName, "H3");
+    assert.equal(focused().textContent, "Dot vote");
+    assert.equal(focused().tabIndex, -1);
+    press("vote-end");
+    assert.equal(b.workshop.vote.state, "ended");
+    assert.equal(focused().tagName, "H3");
+    press("vote-clear");
+    assert.equal(focused().id, "fac-vote-title", "a new vote starts at Title");
+    ui.api.open("poll");
+    ui.doc.querySelector("#fac-poll-question").value = "Keep the format?";
+    ui.doc.querySelector("#fac-poll-options").value = "Yes\nNo";
+    submit(ui.doc.querySelector("#fac-poll-form"));
+    assert.equal(b.workshop.poll.state, "open");
+    assert.equal(focused().tagName, "H3");
+    assert.equal(focused().textContent, "Keep the format?");
+    press("poll-close");
+    assert.equal(focused().tagName, "H3");
+    press("poll-clear");
+    assert.equal(focused().id, "fac-poll-question");
   } finally {
     ui.close();
   }
@@ -10540,5 +10605,47 @@ test("a selection holding hidden content says the facilitator controls it", () =
     assert.equal(ui.api.lockReason(new Set([table.id])), null);
   } finally {
     ui.close();
+  }
+});
+
+test("a viewer is told why they can watch a vote or poll but not take part", () => {
+  const b = { ...newBoard("Workshop"), shared: { server: "x", room: "r" } };
+  b.items = notes();
+  b.workshop = {
+    vote: vote(),
+    poll: {
+      id: "p1",
+      question: "Lunch?",
+      options: [
+        { id: "o1", text: "Pizza" },
+        { id: "o2", text: "Salad" },
+      ],
+      multiple: false,
+      anonymous: true,
+      hidden: false,
+      state: "open",
+      revealed: false,
+      startedAt: 1,
+    },
+  };
+  const why = {
+    vote: "With view access, you can watch this vote but not vote. To vote, ask the owner or a facilitator for comment access.",
+    poll: "With view access, you can watch this poll but not answer it. To answer, ask the owner or a facilitator for comment access.",
+  };
+  for (const [role, me] of [
+    ["viewer", viewer],
+    ["commenter", editor],
+  ]) {
+    const ui = stubUI(b, { role, me });
+    try {
+      ui.api.render();
+      for (const tab of ["vote", "poll"]) {
+        ui.api.open(tab);
+        const panel = ui.doc.querySelector("#fac-tabpanel").textContent;
+        assert.equal(panel.includes(why[tab]), role === "viewer", role);
+      }
+    } finally {
+      ui.close();
+    }
   }
 });
