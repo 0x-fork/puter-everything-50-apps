@@ -115,12 +115,15 @@ export function createCanvasChrome({ title, status, account, local, controls: c,
   }
   c.fontFamily.classList.add('ribbon-font');
   c.fontSize.classList.add('ribbon-size');
+  c.fontSizeMenu.className = 'ribbon-split-arrow ribbon-size-arrow';
+  c.fontSizeMenu.replaceChildren(el('span.ribbon-caret', { 'aria-hidden': 'true' }));
+  const fontSizeSplit = el('span.ribbon-split.ribbon-size-split', {}, c.fontSize, c.fontSizeMenu);
   const textEffects = menuButton('Text Effects', 'textEffects', () => w.textEffectItems?.() || [], { size: 'small', text: null });
   when(textEffects, () => engineReady() && !!w.textEffectItems);
   const fontLauncher = command('Font Settings', 'fontDialog', () => (w.fontDialog ? w.fontDialog() : setExpanded(true)), { shortcut: `${MOD_KEY}+D` });
   when(fontLauncher, engineReady);
   const fontGroup = [rows(
-    [c.fontFamily, c.fontSize, grow, shrink, divider(), changeCase, divider(), c.clearTextFormatting],
+    [c.fontFamily, fontSizeSplit, grow, shrink, divider(), changeCase, divider(), c.clearTextFormatting],
     [c.bold, c.italic, underlineSplit, c.strike, c.subscript, c.superscript, divider(), textEffects, c.highlight, c.textColor, divider(), fontLauncher])];
 
   small(c.bullets, { icon: 'bullets' }); small(c.numbers, { icon: 'numbers' });

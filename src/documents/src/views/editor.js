@@ -35,7 +35,7 @@ import { findReplacePanel } from './find-replace.js';
 import { openParagraphGeometry } from './paragraph-geometry.js';
 import { iconEl } from '../ui/icons.js';
 import { openPageSetup } from './page-setup.js';
-import { el, isComposing, fieldId, MOD_KEY } from '../ui/dom.js';
+import { el, isComposing, MOD_KEY } from '../ui/dom.js';
 import { createCanvasChrome } from '../ui/canvas-chrome.js';
 import { documentFontAvailable, displayedFont } from '../engine/font-availability.js';
 import { openFontPicker } from './font-picker.js';
@@ -417,9 +417,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     fontSize.value = engine?.model.runFormatting.fontSize ?? '';
     engine?.focus(); update();
   }
-  // The usual sizes as suggestions, like a word processor's size box; any size can still be typed.
-  const fontSizes = el('datalist', { id: fieldId('canvas-font-sizes') }, ...FALLBACK_SIZES.map(size => el('option', { value: size })));
-  const fontSize = el('input.canvas-spacing', { type: 'number', min: 1, max: MAX_FONT_SIZE, step: 0.5, disabled: true, 'aria-label': 'Font size (pt)', placeholder: 'Mixed', list: fontSizes.id, onchange: applyFontSize,
+  const fontSize = el('input.canvas-spacing', { type: 'number', min: 1, max: MAX_FONT_SIZE, step: 0.5, disabled: true, 'aria-label': 'Font size (pt)', placeholder: 'Mixed', onchange: applyFontSize,
     oninput: () => { fontSizeDraftCancelled = false; },
     onkeydown: e => {
       if (isComposing(e)) return;
@@ -430,6 +428,15 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     // size field focused. Its keyup still cancels the draft.
     onkeyup: e => { if (e.key === 'Escape' && !isComposing(e) && document.activeElement === fontSize) cancelFontSizeDraft(e); },
   });
+  // The usual sizes in a list beside the box, like a word processor's size box; any size can still be typed.
+  // (A datalist filtered its suggestions by the box's value, so it offered only the current size.)
+  const fontSizeMenu = tool('Font sizes', 'chevD', () => {
+    if (!engine) return; engine.finishComposition();
+    const current = engine.model.runFormatting.fontSize;
+    openMenu({ anchor: fontSizeMenu, align: 'end', label: 'Font size', minWidth: fontSize.offsetWidth + fontSizeMenu.offsetWidth, items: FALLBACK_SIZES.map(size => ({
+      label: size, radio: true, checked: Number(size) === current, onSelect: () => { engine?.setFontSize(Number(size)); update(); },
+    })) });
+  }, { 'aria-haspopup': 'menu' });
   const paragraphStyle = el('select.canvas-style-select', { disabled: true, 'aria-label': 'Paragraph style', onchange: () => engine?.setParagraphStyle(paragraphStyle.value) });
   const clearParagraphFormatting = tool('Clear direct paragraph formatting', 'eraser', () => engine?.clearDirectParagraphFormatting(), { title: 'Clear direct paragraph formatting, including numbering. Keep text formatting and styles.' });
   const outlinePanel = createNavigationPane({ navigate: id => engine?.goToParagraph(id), close: () => toggleOutline(false), focusEditor: () => engine?.focus(),
@@ -999,7 +1006,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   editorCommands.extendMenu = (id, kit) => [...(collabExtendMenu?.(id, kit) || []), ...collab.extendMenu(id, kit), ...assistant.extendMenu(id, kit)];
   const chrome = createCanvasChrome({ title, status, account, local, focusEditor: () => engine?.focus(), commands: editorCommands,
     controls: { undo, redo, find, paragraphStyle, editStyle, newStyle, clearParagraphFormatting, outline, outlineLevel,
-      characterStyle, editCharacterStyle, newCharacterStyle, clearTextFormatting, fontFamily, fontSize, bold, italic, underline,
+      characterStyle, editCharacterStyle, newCharacterStyle, clearTextFormatting, fontFamily, fontSize, fontSizeMenu, bold, italic, underline,
       underlineOptions, caps, smallCaps, strike, doubleStrike, superscript, subscript, baselineShift, characterSpacing,
       textWidth, kerning, textColor, highlight, alignmentButtons, lineSpacing, lineSpacingOptions, lineSpacingMenu, spaceBefore, spaceAfter,
       bullets, numbers, restart, hyperlink, unlink, bookmarks, insertImage, imageProperties, insertTable, tableActions,
@@ -1088,7 +1095,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     message, collab.banner, el('div.canvas-editor-body', {}, chrome.navigation,
       el('div.canvas-editor-content', {}, outlinePanel.node, finder.node, surface, versionHistory.previewNode, review.pane, formatArea.pane.node, proofing.pane, mailings.pane, references.lookupPane, ...reviewTools.panes, pictures.pane, versionHistory.pane.node, assistant.pane.node, chrome.inspector, assistant.fab)),
     statusBar.el, backstage.el,
-    openInput, imageInput, ...pictures.inputs, ...insert.inputs, fontSizes);
+    openInput, imageInput, ...pictures.inputs, ...insert.inputs);
   chrome.attach(root);
   // Who is here, beside Share in the title bar.
   const titleActions = chrome.header.querySelector('.canvas-title-actions');
@@ -1315,7 +1322,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       indicator.classList.toggle('is-mixed', value === null);
       indicator.classList.toggle('is-none', control === highlight && value === 'none');
     }
-    fontSize.disabled = fontFamily.disabled = false;
+    fontSize.disabled = fontSizeMenu.disabled = fontFamily.disabled = false;
     const family = run.fontAscii === run.fontHAnsi ? run.fontAscii : null;
     const substituted = family && documentFontAvailable(family, engine.model.styles.fontAlternatives) === false;
     const replacement = substituted ? displayedFont({ fontFamily: family }, engine.model.styles.fontAlternatives) : family;

@@ -180,12 +180,12 @@
 .ribbon-card input.canvas-spacing, .ribbon-flyout input.canvas-spacing {
   height: 26px; padding: 3px 6px; border: 1px solid var(--ed-field); border-radius: 4px; background: var(--ed-card); color: var(--ed-ink); font-size: 12.5px;
 }
-/* Wide enough for the "Mixed" placeholder beside the size list's arrow. */
-:is(.ribbon-card, .ribbon-flyout) input.ribbon-size { width: 66px; padding-right: 3px; }
-/* The size box's preset list opens from a chevron drawn like the font box's, not the browser's black triangle. */
-:is(.ribbon-card, .ribbon-flyout) input.ribbon-size::-webkit-calendar-picker-indicator {
-  opacity: 1; width: 12px; height: 12px; margin: 0 -1px 0 2px; padding: 0; color: transparent; background: var(--select-chevron) no-repeat center / 12px 12px;
+/* Wide enough for the "Mixed" placeholder; the preset sizes open from the arrow joined to its right edge. */
+:is(.ribbon-card, .ribbon-flyout) input.ribbon-size { width: 52px; padding-right: 3px; border-top-right-radius: 0; border-bottom-right-radius: 0; }
+:is(.ribbon-card, .ribbon-flyout) .ribbon-size-split > button.ribbon-split-arrow {
+  height: 26px; margin-left: -1px; border: 1px solid var(--ed-field); border-radius: 0 4px 4px 0; background: var(--ed-card);
 }
+:is(.ribbon-card, .ribbon-flyout) .ribbon-size-split > button.ribbon-split-arrow:hover:not(:disabled) { border-color: var(--ed-ink-3); }
 .ribbon-card input.ribbon-number, .ribbon-flyout input.ribbon-number { width: 62px; }
 :is(.ribbon-card, .ribbon-flyout) input.canvas-spacing:hover, :is(.ribbon-card, .ribbon-flyout) .canvas-font-label.ribbon-font:hover { border-color: var(--ed-ink-3); background-color: var(--ed-card); }
 :is(.ribbon-card, .ribbon-flyout) input.canvas-spacing:focus, :is(.ribbon-card, .ribbon-flyout) .canvas-font-label.ribbon-font:focus-visible { border-color: var(--ed-accent); outline: 1px solid var(--ed-accent); outline-offset: -2px; }

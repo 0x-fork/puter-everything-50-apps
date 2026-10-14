@@ -73,11 +73,9 @@
 .canvas-toolbar-shell select:focus, .canvas-toolbar-shell .canvas-spacing:focus { border-color: var(--control-border); }
 .canvas-toolbar .canvas-style-select { width: 142px; }
 .canvas-toolbar .canvas-spacing { width: 54px; border-color: var(--hairline-strong); }
-/* The size box offers its presets from a list, as a word processor's does; the spin arrows would leave no room for the number beside the list's arrow. */
-.canvas-spacing[list] { appearance: textfield; -moz-appearance: textfield; }
-.canvas-spacing[list]::-webkit-inner-spin-button, .canvas-spacing[list]::-webkit-outer-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
-/* Wide enough for "Mixed" beside the space the browser keeps for the size list's picker. */
-.canvas-toolbar .canvas-spacing[list] { width: 66px; padding-right: 3px; }
+/* The size box offers its presets from the arrow beside it, as a word processor's does; spin arrows would leave no room for the number. */
+.canvas-spacing.ribbon-size { appearance: textfield; -moz-appearance: textfield; }
+.canvas-spacing.ribbon-size::-webkit-inner-spin-button, .canvas-spacing.ribbon-size::-webkit-outer-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
 .canvas-advanced {
   display: flex; flex-wrap: wrap; gap: 12px 22px; padding: 12px 14px;
   max-height: 30vh; overflow: auto; overscroll-behavior: contain;

@@ -118,11 +118,25 @@ test('a selection of mixed sizes shows the whole "Mixed" placeholder', async ({ 
   await size.fill('20'); await size.press('Enter');
   await input.evaluate(el => { el.setSelectionRange(0, 13); el.dispatchEvent(new Event('select')); });
   await expect(size).toHaveValue(''); await expect(size).toHaveAttribute('placeholder', 'Mixed');
-  // The text box beside the browser's size-list picker must hold the placeholder.
+  // The text box beside the size list's arrow must hold the placeholder.
   const room = await size.evaluate(el => {
     const style = getComputedStyle(el), context = document.createElement('canvas').getContext('2d');
     context.font = `${style.fontSize} ${style.fontFamily}`;
-    return el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 16 - context.measureText(el.placeholder).width;
+    return el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - context.measureText(el.placeholder).width;
   });
   expect(room).toBeGreaterThanOrEqual(0);
+});
+
+test('the size list offers every preset size, marks the current one and applies a choice', async ({ page }) => {
+  await open(page); await text(page).fill('Pick a size'); await text(page).press('ControlOrMeta+a');
+  await expect(size(page)).toHaveValue('12');
+  await page.getByRole('button', { name: 'Font sizes', exact: true }).click();
+  const menu = page.getByRole('menu', { name: 'Font size', exact: true });
+  await expect(menu.getByRole('menuitemradio')).toHaveText(['8', '9', '10', '11', '12', '14', '16', '18', '20', '24', '28', '32', '36', '48', '72']);
+  await expect(menu.getByRole('menuitemradio', { name: '12', exact: true })).toHaveAttribute('aria-checked', 'true');
+  await menu.getByRole('menuitemradio', { name: '24', exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  await expect(text(page)).toBeFocused(); await expect(size(page)).toHaveValue('24');
+  expect(await text(page).evaluate(el => [el.selectionStart, el.selectionEnd])).toEqual([0, 11]);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click(); await expect(size(page)).toHaveValue('12');
 });
