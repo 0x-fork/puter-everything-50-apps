@@ -44,7 +44,7 @@ export class TaskPane {
     this.app.viewport.resize();
   }
 
-  open(id: PaneId) {
+  open(id: PaneId, focus = true) {
     this.current = id;
     const p = this.app.shell.tpPanel;
     p.hidden = false;
@@ -55,7 +55,7 @@ export class TaskPane {
     p.classList.toggle('wide', id === 'assistant');
     if (id === 'assistant') {
       p.replaceChildren(head, this.assistant.el);
-      this.assistant.focus();
+      if (focus) this.assistant.focus();
       this.sync();
       this.app.viewport.resize();
       return;

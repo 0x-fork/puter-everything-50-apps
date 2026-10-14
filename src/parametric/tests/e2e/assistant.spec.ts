@@ -34,7 +34,7 @@ test('the assistant builds a part with tools, shows its steps and undoes it in o
   await scriptModel(page);
   const errors = await openApp(page);
   await page.getByRole('button', { name: /New part/ }).click();
-  await page.getByRole('button', { name: 'Assistant', exact: true }).first().click();
+  // The assistant is open from the start on desktop.
   const box = page.getByRole('textbox', { name: 'Message the assistant' });
   await box.fill('Make a mounting plate');
   await box.press('Enter');
@@ -83,7 +83,6 @@ test('files go with a message: picked, pasted or dropped, and refused when the a
   });
   await openApp(page);
   await page.getByRole('button', { name: /New part/ }).click();
-  await page.getByRole('button', { name: 'Assistant', exact: true }).first().click();
 
   // Picked with the paperclip.
   const chooser = page.waitForEvent('filechooser');
@@ -159,4 +158,15 @@ test('a large photo is fitted to what the model takes', async ({ page }) => {
   expect(Math.max(r.w, r.h)).toBeLessThanOrEqual(1568);
   expect(r.type).toBe('image/jpeg');
   expect(r.thumb).toBe(true);
+});
+
+test('the assistant starts open without taking focus, and the tab closes it', async ({ page }) => {
+  await openApp(page);
+  await page.getByRole('button', { name: /New part/ }).click();
+  const box = page.getByRole('textbox', { name: 'Message the assistant' });
+  await expect(box).toBeVisible();
+  await expect(box).not.toBeFocused();
+  await expect(page.locator('.tp-strip [data-pane="assistant"]')).toHaveAttribute('aria-selected', 'true');
+  await page.locator('.tp-strip [data-pane="assistant"]').click();
+  await expect(box).toBeHidden();
 });
