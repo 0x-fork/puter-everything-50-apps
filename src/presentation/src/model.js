@@ -24,6 +24,8 @@ import {
   relsPartNameFor,
   resolveTarget,
 } from "../lib/pptx/src/internal/opc/index.ts";
+import { LEGACY_IDS, paletteEntries } from "./themes/catalog.js";
+import { applyTheme as applyCatalogTheme } from "./themes/engine.js";
 const measureText = createTextMeasurer();
 export { P };
 export const MIME =
@@ -62,8 +64,14 @@ export const THEMES = {
     panel: "#2c3b45",
   },
 };
+// The themes beyond the original four join them, each with the palette of
+// its first variant, so every theme can start a deck.
+Object.assign(THEMES, paletteEntries());
 export const sectionTextColor = (theme) =>
-  theme === "midnight" ? "#18222b" : "#ffffff";
+  THEMES[theme]?.onAccent ?? (theme === "midnight" ? "#18222b" : "#ffffff");
+// A theme with a master of its own design (not one of the original four):
+// its starter slides show the master's background and use its fonts.
+const designedTheme = (theme) => !!THEMES[theme] && !LEGACY_IDS.has(theme);
 export const cleanName = (
   name,
   { stripExtension = true, maxLength = 180 } = {},
@@ -82,6 +90,8 @@ const box = (x, y, w, h) => ({
   w: P.inches(w),
   h: P.inches(h),
 });
+// The face starter text is set in: Arial, or a theme's heading or body font.
+let textFont = "Arial";
 export function text(
   slide,
   value,
@@ -94,7 +104,7 @@ export function text(
   bold = false,
 ) {
   const s = P.addSlideTextBox(slide, { ...box(x, y, w, h), text: value });
-  P.setShapeTextFormat(s, { font: "Arial", size, color, bold });
+  P.setShapeTextFormat(s, { font: textFont, size, color, bold });
   P.setShapeTextMargins(s, { left: 0, right: 0, top: 0, bottom: 0 });
   P.setShapeTextAutoFit(s, "none");
   return s;
@@ -177,16 +187,74 @@ export const hasArrowhead = (obj) =>
       return false;
     }
   });
+// The layout each designed slide of the starter decks sits on.
+const DESIGN_LAYOUTS = {
+  title: "title",
+  content: "obj",
+  columns: "titleOnly",
+  section: "secHead",
+  blank: "blank",
+};
+// A designed slide on the layout its design follows (`onLayout`), or on the
+// Blank layout. Its text is its own: the layout's placeholders are left off.
+function designedSlideBase(pres, layout, onLayout) {
+  const target =
+    onLayout &&
+    P.findSlideLayoutByType(pres, DESIGN_LAYOUTS[layout] || "blank");
+  if (!target) return P.addBlankSlide(pres);
+  const slide = P.addSlide(pres, { layout: target });
+  for (const shape of [...P.getSlideShapes(slide)].reverse())
+    if (P.isShapePlaceholder(shape)) P.removeShape(shape);
+  return slide;
+}
+// A starter deck's master takes its palette, so the slides people add to it
+// match the designed ones: the background, and the title and text styles.
+export function stylePaletteMaster(pres, theme = "studio") {
+  const t = THEMES[theme] || THEMES.studio;
+  for (const master of P.getSlideMasters(pres)) {
+    const view = P.getTemplateSlide(pres, master.partName);
+    P.setSlideBackground(view, t.bg);
+    for (const shape of P.getSlideShapes(view)) {
+      const type = P.getShapePlaceholderType(shape);
+      if (!type || !P.hasShapeText(shape)) continue;
+      P.setShapeTextFormat(
+        shape,
+        type === "title"
+          ? { font: "Arial", color: t.ink, bold: true }
+          : type === "body"
+            ? { font: "Arial", color: t.muted }
+            : { font: "Arial", color: t.muted },
+      );
+    }
+    P.syncPlaceholderListStyles(view);
+  }
+}
 export function addDesignedSlide(
   pres,
   layout = "title",
   theme = "studio",
   content = {},
+  { onLayout = false } = {},
 ) {
   const t = THEMES[theme] || THEMES.studio;
-  const slide = P.addBlankSlide(pres);
-  P.setSlideBackground(slide, t.bg);
+  const slide = designedSlideBase(pres, layout, onLayout);
+  const designed = designedTheme(theme);
+  if (!designed) P.setSlideBackground(slide, t.bg);
   if (layout === "blank") return slide;
+  textFont = designed ? "+mn-lt" : "Arial";
+  try {
+    return dressDesignedSlide(pres, slide, layout, theme, content, t, designed);
+  } finally {
+    textFont = "Arial";
+  }
+}
+function dressDesignedSlide(pres, slide, layout, theme, content, t, designed) {
+  // Titles take the heading font of a designed theme.
+  const heading = (...args) => {
+    const s = text(...args);
+    if (designed) P.setShapeTextFormat(s, { font: "+mj-lt" });
+    return s;
+  };
   text(
     slide,
     content.kicker || "YOUR NEXT CHAPTER",
@@ -199,7 +267,7 @@ export function addDesignedSlide(
     true,
   );
   if (layout === "title") {
-    text(
+    heading(
       slide,
       content.title || "Make room for\nbig ideas.",
       0.8,
@@ -227,7 +295,7 @@ export function addDesignedSlide(
     P.setSlideBackground(slide, t.accent);
     const contrast = sectionTextColor(theme);
     P.setShapeTextFormat(P.getSlideShapes(slide)[0], { color: contrast });
-    text(
+    heading(
       slide,
       content.title || "A fresh\nperspective.",
       0.8,
@@ -249,7 +317,7 @@ export function addDesignedSlide(
       contrast,
     );
   } else if (layout === "columns") {
-    text(
+    heading(
       slide,
       content.title || "See the bigger picture.",
       0.8,
@@ -275,7 +343,7 @@ export function addDesignedSlide(
       text(slide, body, x + 0.25, 4, 3.1, 1.35, 18, t.ink);
     });
   } else {
-    text(
+    heading(
       slide,
       content.title || "Start with what matters.",
       0.8,
@@ -342,15 +410,34 @@ export function addDesignedSlide(
   }
   return slide;
 }
+// A new presentation opens on its master's Title Slide layout, with the
+// title and subtitle placeholders waiting to be typed into.
+export function addLayoutSlide(pres, type = "title") {
+  const layout =
+    P.findSlideLayoutByType(pres, type) || P.getSlideLayouts(pres)[0];
+  return P.addSlide(pres, { layout });
+}
+// "title" is a new presentation: one slide on the Title Slide layout.
+// "blank" is a single empty slide in the palette's background; "story" and
+// "pitch" are the designed starter decks.
 export function createDeck(template = "blank", theme = "studio") {
   const pres = P.createPresentation();
-  if (template === "blank") addDesignedSlide(pres, "blank", theme);
+  // A designed theme brings its own master; the original four style the
+  // built-in one in their palette.
+  if (designedTheme(theme)) applyCatalogTheme(pres, theme);
+  if (template === "title") addLayoutSlide(pres, "title");
+  else if (template === "blank") addDesignedSlide(pres, "blank", theme);
   else {
+    if (!designedTheme(theme)) stylePaletteMaster(pres, theme);
+    const designed = (layout, content) =>
+      // A designed theme's layouts bring artwork of their own; its starter
+      // compositions sit on the Blank layout, over the master's artwork.
+      addDesignedSlide(pres, layout, theme, content, {
+        onLayout: !designedTheme(theme),
+      });
     const pitch = template === "pitch";
-    addDesignedSlide(
-      pres,
+    designed(
       "title",
-      theme,
       pitch
         ? {
             kicker: "THE PITCH",
@@ -359,20 +446,20 @@ export function createDeck(template = "blank", theme = "studio") {
           }
         : {},
     );
-    addDesignedSlide(pres, "content", theme, {
+    designed("content", {
       kicker: pitch ? "01 / THE OPPORTUNITY" : "01 / THE CONTEXT",
       title: pitch ? "A problem worth solving." : "Where we are today.",
       body: pitch
         ? "Describe the problem in one clear sentence.\n\nWho experiences it?\nWhy does it matter now?"
         : "Share the context behind your idea.\n\nWhat have you learned?\nWhat could be different?",
     });
-    addDesignedSlide(pres, "columns", theme, { kicker: "02 / THE APPROACH" });
-    addDesignedSlide(pres, "content", theme, {
+    designed("columns", { kicker: "02 / THE APPROACH" });
+    designed("content", {
       kicker: "03 / THE PLAN",
       title: "From idea to impact.",
       body: "Set a direction people can follow.\n\n1. Start with the essentials\n2. Make the first step tangible\n3. Learn, refine, and keep moving",
     });
-    addDesignedSlide(pres, "section", theme, {
+    designed("section", {
       kicker: "LET’S MAKE IT HAPPEN",
       title: "The next chapter\nstarts here.",
       body: "Thank you. Let’s talk about what comes next.",
@@ -625,12 +712,23 @@ export function setSlideBounds(
   let local = bounds;
   for (const group of enclosingGroups(shape, parents))
     local = intoGroup(local, group);
+  const diagram = P.isDiagramShape(shape);
+  const before = diagram ? P.getShapeBounds(shape) : null;
   P.setShapeBounds(
     shape,
     Object.fromEntries(
       Object.entries(local).map(([key, value]) => [key, Math.round(value)]),
     ),
   );
+  // A SmartArt graphic's saved drawing is laid out for its frame's size; a
+  // new size lays it out again (graphics in layouts this editor draws).
+  if (diagram) {
+    const after = P.getShapeBounds(shape);
+    if (before && after && (before.w !== after.w || before.h !== after.h))
+      try {
+        P.relayoutSmartArt?.(shape);
+      } catch {}
+  }
 }
 // Any shape can hold text, but a shape drawn without any
 // has no text body to type into. Give it the body a new shape would have:
@@ -1217,7 +1315,14 @@ const SHAPE_LOCAL_NAMES = new Set([
   "cxnSp",
   "graphicFrame",
 ]);
+// Removing a shape also removes its animations, which would otherwise point
+// at a shape the file no longer has.
 export function removeAnyShape(slide, shape) {
+  const removed = removeShapeFromSlide(slide, shape);
+  if (removed) P.pruneSlideAnimations(slide);
+  return removed;
+}
+function removeShapeFromSlide(slide, shape) {
   const parents = groupParents(slide);
   const group = parents.get(P.getShapeId(shape));
   if (!group) {
@@ -1585,10 +1690,21 @@ export function relativePartName(from, target) {
 }
 const diagramDataXml = new WeakMap();
 const diagramDataRels = new WeakMap();
-// SmartArt text/cache state lives outside the slide XML. Compare its exact
-// data XML across history restores so unchanged slides can keep their SVGs.
-// Relationships may be reused by several frames or use nonstandard names;
-// discover data parts by their relationship type, without parsing their XML.
+// Parts outside the slide XML that change how it draws: a SmartArt graphic's
+// data, layout, style, colors and saved drawing, and a chart's definition.
+const RENDERED_PART_RELS = new Set([
+  REL_TYPES.diagramData,
+  REL_TYPES.diagramLayout,
+  REL_TYPES.diagramQuickStyle,
+  REL_TYPES.diagramColors,
+  REL_TYPES.diagramDrawing,
+  REL_TYPES.chart,
+]);
+// SmartArt and chart state lives outside the slide XML. Compare those parts'
+// exact XML across edits and history restores so unchanged slides can keep
+// their SVGs. Relationships may be reused by several frames or use
+// nonstandard names; discover parts by their relationship type, without
+// parsing their XML.
 export function slideDiagramDataStamp(pres, slide) {
   const pkg = P._internalPackageOf(pres),
     owner = P.getSlidePartName(slide);
@@ -1600,7 +1716,7 @@ export function slideDiagramDataStamp(pres, slide) {
       bytes: partRels.data,
       items: (pkg.getRels(owner)?.items ?? []).filter(
         (rel) =>
-          rel.type === REL_TYPES.diagramData && rel.targetMode === "Internal",
+          RENDERED_PART_RELS.has(rel.type) && rel.targetMode === "Internal",
       ),
     };
     diagramDataRels.set(partRels, relationships);
@@ -1628,7 +1744,54 @@ export function slideDiagramDataStamp(pres, slide) {
   }
   return JSON.stringify(values);
 }
-export function preview(pres, slide) {
+// The parts a slide inherits from (its layout, master and theme) by the
+// buffers that hold them: an edit in a master view replaces a buffer, so a
+// render cached under the old stamp is drawn again.
+// A part's stamp follows its bytes, not the buffer holding them: undo and
+// redo load the deck afresh, and slides whose layout, master and theme read
+// the same keep their thumbnails. Each buffer is hashed once.
+const bufferIds = new WeakMap();
+const bufferId = (part) => {
+  const data = part?.data;
+  if (!data) return 0;
+  if (typeof data !== "object") return contentStamp(data);
+  let id = bufferIds.get(data);
+  if (!id) bufferIds.set(data, (id = contentStamp(data)));
+  return id;
+};
+// FNV-1a over the bytes (or characters), with the length.
+function contentStamp(data) {
+  let h = 0x811c9dc5;
+  const n = data.length;
+  for (let i = 0; i < n; i++) {
+    h ^= typeof data === "string" ? data.charCodeAt(i) : data[i];
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${n.toString(36)}.${(h >>> 0).toString(36)}`;
+}
+export function templateStamp(pres, slide) {
+  const pkg = P._internalPackageOf(pres);
+  const layout = P.getSlideLayout(slide);
+  const ids = [];
+  if (layout) {
+    const name = P.getSlideLayoutPartName(layout);
+    ids.push(bufferId(pkg.getPart(name)));
+    const master = P.getLayoutMasterPartName(pres, name);
+    if (master) {
+      ids.push(bufferId(pkg.getPart(master)));
+      const rel = pkg
+        .getRels(master)
+        ?.items.find((r) => r.type === REL_TYPES.theme);
+      if (rel)
+        ids.push(bufferId(pkg.getPart(resolveTarget(master, rel.target))));
+    }
+  }
+  return ids.join(":");
+}
+// `layer`, when given, draws only part of the slide (see the renderer's
+// RenderSlideOptions.layer); animations play such layers. `prompts` draws
+// empty placeholders with their prompt text, for the editor's canvas only.
+export function preview(pres, slide, layer = null, { prompts = false } = {}) {
   // SVG is used only as an image, never inserted into the document as markup.
   const embedFonts = hasFontResources(pres);
   const resolved = new Map(),
@@ -1652,8 +1815,10 @@ export function preview(pres, slide) {
     preserveAspectRatio: "none",
     textLayout: "svg",
     stableDefinitionIds: true,
+    ...(layer ? { layer } : {}),
     resolveFontKerning,
     gradientRendering: "css",
+    placeholderPrompts: prompts,
     measureText: !embedFonts
       ? measureText
       : (value, spec) => {

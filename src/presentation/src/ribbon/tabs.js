@@ -196,6 +196,19 @@ export function buildTabs(api) {
                 run: () => api.clearFormatting(),
                 ...keep,
               },
+              {
+                type: "small",
+                id: "font-dialog",
+                label: "Font Settings",
+                showLabel: false,
+                icon: "fontDialog",
+                title: `Font… (${api.modKey === "⌘" ? "⌘+T" : "Ctrl+Shift+F"})`,
+                description:
+                  "All the font settings at once: style, underline, effects and character spacing.",
+                visible: () => !!api.fontDialog,
+                enabled: () => !!text(),
+                run: () => api.fontDialog(),
+              },
             ],
           },
           {
@@ -393,6 +406,19 @@ export function buildTabs(api) {
                 description: "Split your text into two or more columns.",
                 enabled: () => api.canColumns(),
                 menu: () => api.columnsMenu(),
+              },
+              {
+                type: "small",
+                id: "paragraph-dialog",
+                label: "Paragraph Settings",
+                showLabel: false,
+                icon: "paragraph",
+                title: `Paragraph… (${api.modKey === "⌘" ? "⌥⌘M" : "Ctrl+Alt+M"})`,
+                description:
+                  "Alignment, indentation, spacing and tab stops for the paragraphs.",
+                visible: () => !!api.paragraphDialog,
+                enabled: () => api.canList(),
+                run: () => api.paragraphDialog(),
               },
             ],
           },
@@ -625,6 +651,17 @@ export function buildTabs(api) {
         visible: () => api.hasAssistant(),
         run: () => api.designIdeas(),
       },
+      {
+        type: "large",
+        id: "new-slide-prompt",
+        label: "Slide from\nPrompt",
+        icon: "newSlidePrompt",
+        title: "New Slide from Prompt",
+        description:
+          "Describe a slide and the AI assistant drafts it after the current one.",
+        visible: () => api.hasAssistant(),
+        run: () => api.newSlideFromPrompt(),
+      },
     ],
   };
 
@@ -701,6 +738,20 @@ export function buildTabs(api) {
           },
           {
             type: "large",
+            id: "screenshot",
+            label: "Screenshot",
+            icon: "screenshot",
+            title: "Screenshot",
+            description:
+              "Insert a picture of a window or screen, or of a part of it.",
+            visible: () => !!api.screenshot,
+            split: true,
+            run: () => api.screenshot?.(),
+            menu: () => api.screenshotMenu?.() ?? [],
+            menuLabel: "Screenshot options",
+          },
+          {
+            type: "large",
             id: "photo-album",
             label: "Photo\nAlbum",
             icon: "photoAlbum",
@@ -766,6 +817,17 @@ export function buildTabs(api) {
         items: [
           {
             type: "large",
+            id: "insert-zoom",
+            label: "Zoom",
+            icon: "zoomSlide",
+            title: "Zoom",
+            description:
+              "Jump to a slide or section in a slide show, and back.",
+            visible: () => !!api.insertZoomMenu,
+            menu: () => api.insertZoomMenu?.() ?? [],
+          },
+          {
+            type: "large",
             id: "link",
             label: "Link",
             icon: "link",
@@ -783,7 +845,17 @@ export function buildTabs(api) {
             description:
               "Make the selected object go to a slide or web page when clicked in a slide show.",
             enabled: () => api.canLink(),
-            menu: () => api.actionMenu(),
+            split: !!api.actionSettings,
+            run: () => api.actionSettings?.(),
+            menu: () => [
+              ...api.actionMenu(),
+              ...(api.actionButtonsMenu
+                ? [
+                    { separator: true },
+                    { label: "Action Buttons", items: api.actionButtonsMenu() },
+                  ]
+                : []),
+            ],
           },
         ],
       },
@@ -797,7 +869,7 @@ export function buildTabs(api) {
             id: "insert-comment",
             label: "Comment",
             icon: "newComment",
-            title: `New Comment (${M(api)}+Alt+M)`,
+            title: `New Comment (${M(api)}+Shift+M)`,
             visible: () => !!api.newComment,
             run: () => api.newComment?.(),
           },
@@ -863,6 +935,16 @@ export function buildTabs(api) {
               },
             ],
           },
+          {
+            type: "large",
+            id: "object",
+            label: "Object",
+            icon: "object",
+            title: "Object",
+            description: "Embed a file in the presentation, shown as an icon.",
+            visible: () => !!api.insertObject,
+            run: () => api.insertObject?.(),
+          },
         ],
       },
       {
@@ -876,8 +958,12 @@ export function buildTabs(api) {
             label: "Equation",
             icon: "equation",
             title: "Equation",
+            description: "Write a math equation, or insert a common one.",
             visible: () => !!api.insertEquation,
+            split: true,
             run: () => api.insertEquation?.(),
+            menu: () => api.equationMenu?.() ?? [],
+            menuLabel: "Equations",
           },
           {
             type: "large",
@@ -903,7 +989,11 @@ export function buildTabs(api) {
             label: "Video",
             icon: "video",
             title: "Video",
+            description: "Insert a video from your device.",
+            split: true,
             run: () => api.insertVideo?.(),
+            menu: () => api.videoMenu?.() ?? [],
+            menuLabel: "Video sources",
           },
           {
             type: "large",
@@ -911,7 +1001,11 @@ export function buildTabs(api) {
             label: "Audio",
             icon: "audio",
             title: "Audio",
+            description: "Insert sound from your device, or record it.",
+            split: true,
             run: () => api.insertAudio?.(),
+            menu: () => api.audioMenu?.() ?? [],
+            menuLabel: "Audio sources",
           },
         ],
       },
@@ -926,19 +1020,25 @@ export function buildTabs(api) {
         id: "themes",
         label: "Themes",
         icon: "themes",
-        collapsible: false,
+        // The gallery narrows first and folds last, on the narrowest screens.
+        priority: 10,
         items: [
           {
             type: "gallery",
             id: "themes",
             label: "Themes",
             columns: 7,
+            minColumns: 2,
             panelColumns: 4,
             itemClass: "theme-thumb",
             showLabels: false,
             items: () => api.themeChoices(),
+            sections: (choices) =>
+              api.themeSections?.(choices) ?? [{ label: null, items: choices }],
             selected: () => api.currentTheme(),
-            choose: (choice) => api.applyTheme(choice.id),
+            choose: (choice) =>
+              api.chooseTheme?.(choice.id) ?? api.applyTheme(choice.id),
+            contextMenu: (choice) => api.themeContextMenu?.(choice) ?? [],
             footer: () => api.themeGalleryFooter(),
           },
         ],
@@ -954,12 +1054,72 @@ export function buildTabs(api) {
             id: "variants",
             label: "Variants",
             columns: 4,
+            minColumns: 2,
             itemClass: "variant-thumb",
             showLabels: false,
             items: () => api.variantChoices(),
             selected: () => api.currentVariant(),
             choose: (choice) => api.applyVariant(choice.id),
             footer: () => api.variantFooter(),
+          },
+        ],
+      },
+      {
+        id: "theme-parts",
+        label: "Theme",
+        icon: "colors",
+        visible: () => !!api.themeColorsMenu,
+        items: [
+          {
+            type: "stack",
+            items: [
+              {
+                type: "small",
+                id: "theme-colors",
+                label: "Colors",
+                showLabel: true,
+                icon: "colors",
+                title: "Colors",
+                description:
+                  "Change the theme's colors, or make your own color scheme.",
+                menu: () => api.themeColorsMenu(),
+                menuLabel: "Theme colors",
+              },
+              {
+                type: "small",
+                id: "theme-fonts",
+                label: "Fonts",
+                showLabel: true,
+                icon: "fonts",
+                title: "Fonts",
+                description: "Change the heading and body fonts of the theme.",
+                menu: () => api.themeFontsMenu(),
+                menuLabel: "Theme fonts",
+              },
+              {
+                type: "small",
+                id: "theme-effects",
+                label: "Effects",
+                showLabel: true,
+                icon: "effects",
+                title: "Effects",
+                description:
+                  "Change how shapes that follow the theme are shaded and outlined.",
+                menu: () => api.themeEffectsMenu(),
+                menuLabel: "Theme effects",
+              },
+            ],
+          },
+          {
+            type: "large",
+            id: "background-styles",
+            label: "Background\nStyles",
+            icon: "backgroundStyles",
+            title: "Background Styles",
+            description:
+              "Choose a background from the theme for every slide, or right-click one for the selected slides.",
+            menu: () => api.backgroundStylesMenu(),
+            menuLabel: "Background styles",
           },
         ],
       },
@@ -985,6 +1145,14 @@ export function buildTabs(api) {
             title: "Format Background",
             description: "Adjust the background of the slide.",
             run: () => api.formatBackground(),
+          },
+          {
+            type: "check",
+            id: "hide-background-graphics-design",
+            label: "Hide Background Graphics",
+            visible: () => !!api.backgroundGraphicsHidden,
+            checked: () => api.backgroundGraphicsHidden(),
+            commit: (on) => api.setBackgroundGraphicsHidden(on),
           },
         ],
       },
@@ -1075,7 +1243,11 @@ export function buildTabs(api) {
                 label: "Sound",
                 icon: "transitionSound",
                 title: "Transition Sound",
+                description:
+                  "Play a sound as the slide arrives, or stop the one playing.",
                 visible: () => !!api.transitionSoundMenu,
+                dynamicLabel: () => api.transitionSoundLabel?.() || "Sound",
+                menuWidth: 220,
                 menu: () => api.transitionSoundMenu?.(),
               },
               {
@@ -1100,6 +1272,7 @@ export function buildTabs(api) {
                 title: "Apply To All",
                 description:
                   "Use this slide's transition and timing for every slide.",
+                enabled: () => api.canApplyTransitionToAll?.() ?? true,
                 run: () => api.applyTransitionToAll(),
               },
             ],
@@ -1164,17 +1337,19 @@ export function buildTabs(api) {
           {
             type: "large",
             id: "play-from-start",
-            label: "From\nBeginning",
+            label: "Play from\nStart",
             icon: "playFromStart",
             title: "Play from Start (F5)",
+            description: "Start the slide show with the first slide.",
             run: () => api.present({ from: "beginning" }),
           },
           {
             type: "large",
             id: "play-from-current",
-            label: "From Current\nSlide",
+            label: "Play from\nCurrent Slide",
             icon: "playFromCurrent",
             title: "Play from Current Slide (Shift+F5)",
+            description: "Start the slide show with the slide you are on.",
             run: () => api.present({ from: "current" }),
           },
           {
@@ -1184,16 +1359,18 @@ export function buildTabs(api) {
             icon: "presenterView",
             title: "Presenter View (Alt+F5)",
             description:
-              "Present with your notes, the next slide, and a timer on your screen.",
+              "Present with your notes, the next slide, a timer and tools on your screen while the audience sees only the slide.",
             visible: () => !!api.presenterView,
             run: () => api.presenterView?.(),
           },
           {
             type: "large",
             id: "custom-show",
-            label: "Custom\nSlide Show",
+            label: "Custom\nShow",
             icon: "customShow",
             title: "Custom Slide Show",
+            description:
+              "Play a named selection of slides, or make and change custom shows.",
             visible: () => !!api.customShowMenu,
             menu: () => api.customShowMenu?.(),
           },
@@ -1210,6 +1387,8 @@ export function buildTabs(api) {
             label: "Set Up\nSlide Show",
             icon: "setUpShow",
             title: "Set Up Slide Show",
+            description:
+              "Choose how the show runs: presented, in a window or at a kiosk, which slides, and how it advances.",
             visible: () => !!api.setUpShow,
             run: () => api.setUpShow?.(),
           },
@@ -1230,12 +1409,36 @@ export function buildTabs(api) {
             label: "Rehearse\nTimings",
             icon: "rehearse",
             title: "Rehearse Timings",
+            description:
+              "Practise the show while a timer records how long you spend on each slide.",
             visible: () => !!api.rehearse,
             run: () => api.rehearse?.(),
           },
           {
+            type: "large",
+            id: "record-show",
+            label: "Record",
+            icon: "recordShow",
+            title: "Record Slide Show",
+            description:
+              "Record your narration, camera and ink as you present. Choose where to start, clear recordings, or export a video.",
+            visible: () => !!api.recordShowMenu,
+            split: true,
+            menuLabel: "Record options",
+            run: () => api.recordFromCurrent?.(),
+            menu: () => api.recordShowMenu?.(),
+          },
+          {
             type: "stack",
             items: [
+              {
+                type: "check",
+                id: "play-narrations",
+                label: "Play Narrations",
+                visible: () => !!api.setPlayNarrations,
+                checked: () => api.playNarrations?.() ?? true,
+                commit: (on) => api.setPlayNarrations?.(on),
+              },
               {
                 type: "check",
                 id: "use-timings",
@@ -1243,6 +1446,45 @@ export function buildTabs(api) {
                 visible: () => !!api.setUseTimings,
                 checked: () => api.useTimings?.() ?? true,
                 commit: (on) => api.setUseTimings?.(on),
+              },
+              {
+                type: "check",
+                id: "show-media-controls",
+                label: "Show Media Controls",
+                visible: () => !!api.setShowMediaControls,
+                checked: () => api.showMediaControls?.() ?? true,
+                commit: (on) => api.setShowMediaControls?.(on),
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: "captions",
+        label: "Captions & Subtitles",
+        icon: "subtitles",
+        items: [
+          {
+            type: "stack",
+            items: [
+              {
+                type: "check",
+                id: "always-subtitles",
+                label: "Always Use Subtitles",
+                visible: () => !!api.setAlwaysSubtitles,
+                checked: () => api.alwaysSubtitles?.() ?? false,
+                commit: (on) => api.setAlwaysSubtitles?.(on),
+              },
+              {
+                type: "small",
+                id: "subtitle-settings",
+                label: "Subtitle Settings",
+                icon: "subtitleSettings",
+                title: "Subtitle Settings",
+                description:
+                  "Choose the language you speak and where live subtitles appear.",
+                visible: () => !!api.subtitleSettingsMenu,
+                menu: () => api.subtitleSettingsMenu?.(),
               },
             ],
           },
@@ -1407,7 +1649,28 @@ export function buildTabs(api) {
             label: "Slide\nMaster",
             icon: "slideMaster",
             title: "Slide Master",
+            description:
+              "Edit the slide master and its layouts, which every slide takes its look from.",
             run: () => api.masterView?.("slide"),
+          },
+          {
+            type: "large",
+            id: "handout-master",
+            label: "Handout\nMaster",
+            icon: "handoutMaster",
+            title: "Handout Master",
+            description:
+              "Edit the header, footer and layout of printed handouts.",
+            run: () => api.masterView?.("handout"),
+          },
+          {
+            type: "large",
+            id: "notes-master",
+            label: "Notes\nMaster",
+            icon: "notesMaster",
+            title: "Notes Master",
+            description: "Edit how notes pages look when they are printed.",
+            run: () => api.masterView?.("notes"),
           },
         ],
       },
@@ -1451,6 +1714,18 @@ export function buildTabs(api) {
             description: "Show or hide the notes pane under the slide.",
             pressed: () => api.showing("notes"),
             run: () => api.show("notes", !api.showing("notes")),
+          },
+          {
+            type: "small",
+            id: "grid-settings",
+            label: "Grid Settings",
+            icon: "gridlines",
+            showLabel: true,
+            title: "Grid and Guides",
+            description:
+              "Set the grid spacing, snapping, and which guides show.",
+            visible: () => !!api.gridDialog,
+            run: () => api.gridDialog(),
           },
         ],
       },
@@ -1687,7 +1962,12 @@ export function buildTabs(api) {
     id: "shape-format",
     label: "Shape Format",
     contextual: true,
-    visible: () => shapeSel() || (some() && !pictureSel() && !tableSel()),
+    visible: () =>
+      shapeSel() ||
+      (some() &&
+        !pictureSel() &&
+        !tableSel() &&
+        !["chart", "smartart"].includes(api.selectionKind())),
     groups: [
       {
         id: "insert-shapes",
@@ -1720,6 +2000,18 @@ export function buildTabs(api) {
               },
               {
                 type: "small",
+                id: "merge-shapes",
+                label: "Merge Shapes",
+                icon: "mergeShapes",
+                title: "Merge Shapes",
+                description:
+                  "Combine the selected shapes into new ones: union, combine, fragment, intersect or subtract.",
+                visible: () => !!api.mergeShapesMenu,
+                enabled: () => !!api.canMergeShapes?.(),
+                menu: () => api.mergeShapesMenu(),
+              },
+              {
+                type: "small",
                 id: "format-text-box",
                 label: "Text Box",
                 icon: "textBox",
@@ -1746,6 +2038,10 @@ export function buildTabs(api) {
             showLabels: false,
             enabled: () => api.canStyleShape(),
             items: () => api.shapeStyleChoices(),
+            sections: (choices) =>
+              api.shapeStyleSections?.(choices) ?? [
+                { label: null, items: choices },
+              ],
             choose: (choice) => api.applyShapeStyle(choice.id),
           },
           {
@@ -1790,6 +2086,18 @@ export function buildTabs(api) {
         label: "WordArt Styles",
         icon: "wordArt",
         items: [
+          {
+            type: "gallery",
+            id: "wordart-gallery",
+            label: "WordArt Styles",
+            columns: 4,
+            panelColumns: 6,
+            itemClass: "style-thumb",
+            showLabels: false,
+            enabled: () => !!text(),
+            items: () => api.wordArtStyleChoices?.() ?? [],
+            choose: (choice) => api.applyWordArtStyle(choice.id),
+          },
           {
             type: "stack",
             items: [
@@ -1880,6 +2188,30 @@ export function buildTabs(api) {
             menu: () => api.transparencyMenu(),
           },
           {
+            type: "large",
+            id: "picture-color",
+            label: "Color",
+            icon: "pictureColor",
+            title: "Color",
+            description:
+              "Change the picture's saturation and tone, or recolor it.",
+            visible: () => !!api.pictureColorMenu,
+            menu: () => api.pictureColorMenu(),
+            menuWidth: 420,
+          },
+          {
+            type: "large",
+            id: "artistic-effects",
+            label: "Artistic\nEffects",
+            icon: "artisticEffects",
+            title: "Artistic Effects",
+            description:
+              "Make the picture look like a sketch, a painting and more.",
+            visible: () => !!api.artisticEffectsMenu,
+            menu: () => api.artisticEffectsMenu(),
+            menuWidth: 300,
+          },
+          {
             type: "stack",
             items: [
               {
@@ -1911,6 +2243,17 @@ export function buildTabs(api) {
         label: "Picture Styles",
         icon: "pictureEffects",
         items: [
+          {
+            type: "gallery",
+            id: "picture-style-gallery",
+            label: "Picture Styles",
+            columns: 4,
+            panelColumns: 4,
+            itemClass: "style-thumb",
+            showLabels: false,
+            items: () => api.pictureStyleChoices?.() ?? [],
+            choose: (choice) => api.applyPictureStyle(choice.id),
+          },
           {
             type: "stack",
             items: [
@@ -2197,7 +2540,17 @@ export function buildTabs(api) {
   // Tabs from other modules join after the tab they name, or with the
   // contextual tabs at the end.
   const extra = api.extraTabs ? api.extraTabs() : [];
-  const tabs = [home, insert, design, transitions, slideShow, review, viewTab];
+  // The Review tab comes from the review module when the editor has one.
+  const reviewTab = api.reviewTab ? api.reviewTab(api) : review;
+  const tabs = [
+    home,
+    insert,
+    design,
+    transitions,
+    slideShow,
+    reviewTab,
+    viewTab,
+  ];
   for (const t of extra.filter((t) => !t.contextual)) {
     const at = tabs.findIndex((x) => x.id === t.after);
     tabs.splice(at >= 0 ? at + 1 : tabs.length, 0, t);

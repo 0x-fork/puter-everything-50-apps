@@ -58,6 +58,7 @@ import {
   getSlideLayouts,
   getSlideLayoutPlaceholders,
 } from "./layouts.ts";
+import { pruneCustomShowReferences } from "./slide-show-setup.ts";
 import { getSlides } from "./slide-query.ts";
 import { readSlideEntries, requireUniqueSlideEntries } from "./slide-list.ts";
 import { setSlideBody, setSlideTitle } from "./embedded.ts";
@@ -78,6 +79,7 @@ import {
   isDiagramRelationship,
 } from "./diagram-copy.ts";
 import { copyChartRelationships } from "./chart-copy.ts";
+import { detachCopiedSlideComments } from "./comment-threads.ts";
 import { withPackageTransaction } from "../../internal/parts/package-transaction.ts";
 import { copyPartGraph } from "../../internal/parts/copy-graph.ts";
 
@@ -370,20 +372,24 @@ export const removeSlide = (pres: PresentationData, slide: SlideData): void => {
   const { element, rel, part } = entryForSlide(context, slide);
   // Validate everything above before changing either relationship or slide data.
   list!.children = list!.children.filter((c) => c !== element);
+  const removedRels = new Set<string>();
   presRels.items = presRels.items.filter((r) => {
-    if (r.id === rel.id) return false;
+    if (r.id === rel.id) return !removedRels.add(r.id);
     if (r.type !== REL_TYPES.slide || r.targetMode === "External") return true;
     // Also remove unused aliases to this part, so deleting the slide does not
     // leave new dangling presentation relationships.
     try {
-      return (
+      const kept =
         resolveTarget(PRES_PART_NAME, r.target).toLowerCase() !==
-        part.name.toLowerCase()
-      );
+        part.name.toLowerCase();
+      if (!kept) removedRels.add(r.id);
+      return kept;
     } catch {
       return true; // Unrelated, unreferenced malformed relationships stay intact.
     }
   });
+  // Custom shows name slides by these relationships too.
+  pruneCustomShowReferences(presDoc.root, removedRels);
   presPart.data = encode(serializeXml(presDoc));
   pkg.setRels(PRES_PART_NAME, presRels);
   pkg.removePart(relsPartNameFor(part.name));
@@ -602,6 +608,8 @@ const duplicateSlideUnchecked = (
   const slides = getSlides(pres);
   const dup = slides[slides.length - 1];
   if (!dup) throw new Error("duplicateSlide: post-condition failed");
+  // A copy starts without comments, and never shares its source's part.
+  detachCopiedSlideComments(dup);
   return dup;
 };
 
@@ -942,6 +950,8 @@ const importSlideUnchecked = (
   const slides = getSlides(targetPres);
   const last = slides[slides.length - 1];
   if (!last) throw new Error("importSlide: post-condition failed");
+  // Comments stay with the source; drop the pointer at them.
+  detachCopiedSlideComments(last);
   return last;
 };
 

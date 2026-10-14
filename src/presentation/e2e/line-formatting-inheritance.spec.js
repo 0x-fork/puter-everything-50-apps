@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { paneSection } from "./editor-commands.js";
 import { readFile } from "node:fs/promises";
 import { P, parseDeck, MIME } from "../src/model.js";
 import {
@@ -68,14 +69,11 @@ test("inherited line decorations match before and after clipboard transfer, edit
   };
   expect(await outline(page)).toEqual([expected]);
   await page.locator(".object-hit").click();
-  const showFormat = async () => {
-    const toggle = page.getByRole("button", { name: "Toggle format panel" });
-    if ((await toggle.getAttribute("aria-expanded")) !== "true")
-      await toggle.click();
-  };
+  // The dash is set in the Format pane's Line section.
+  const showFormat = () => paneSection(page, "line");
   await showFormat();
   const style = page.getByRole("combobox", {
-    name: "Border style",
+    name: "Dash type",
     exact: true,
   });
   await expect(style).toHaveValue("custom");
