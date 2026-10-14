@@ -1817,7 +1817,11 @@ export function createGrid(opts) {
     fillViewport(s);
     const chartSheet = s.kind === 'chart';
     const defaultBg = wb.nativeDefaultCellFormat?.style.bg;
-    root.style.setProperty('--cell-default-bg', fillColorCss(defaultBg) || 'var(--surface)');
+    // Without a default fill the cells' own fallback, var(--surface), applies: a var() set here would be
+    // resolved on the grid, in the app's theme, and paint spilling and merged cells dark on the light sheet.
+    const defaultFill = fillColorCss(defaultBg);
+    if (defaultFill) root.style.setProperty('--cell-default-bg', defaultFill);
+    else root.style.removeProperty('--cell-default-bg');
     for (const layer of [viewport, frzRows.el, frzCols.el, frzCorner.el]) layer.style.backgroundColor = chartSheet ? '' : fillColorCss(defaultBg);
     paintBackground(s);
     // In a sheet view of one's own (View ▸ Sheet View) the headings take a tint, so it is plain which view is on show.
