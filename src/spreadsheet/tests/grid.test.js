@@ -758,6 +758,36 @@ describe('formula point mode', () => {
     expect(grid.editing).toBe(false);
     expect(grid.active).toEqual({ r: 2, c: 1 });
   });
+
+  // Moving back through a typed formula to fix it switched to picking cells as soon as the caret
+  // passed a "+", writing B4, C4… into the middle of the formula.
+  it('moves the caret once it has been put into the formula, until F2 switches back', async () => {
+    const { grid } = setup();
+    await flush();
+    grid.setSelection({ active: { r: 3, c: 0 }, anchor: { r: 3, c: 0 }, focus: { r: 3, c: 0 } });
+    grid.beginEdit({ text: '=A3+A2)', mode: 'type' });
+    const editor = grid.el.querySelector('.grid-editor');
+    editor.setSelectionRange(7, 7);
+    key(editor, 'ArrowLeft');
+    expect(grid.editState.mode).toBe('inplace');
+    editor.setSelectionRange(4, 4); // just after the "+"
+    key(editor, 'ArrowLeft');
+    key(editor, 'ArrowRight');
+    expect(grid.editState.text).toBe('=A3+A2)');
+    expect(grid.editing).toBe(true);
+    // A click into the text is Edit mode too.
+    grid.cancelEdit();
+    grid.beginEdit({ text: '=A3+A2)', mode: 'type' });
+    editor.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0 }));
+    editor.setSelectionRange(4, 4);
+    key(editor, 'ArrowRight');
+    expect(grid.editState.text).toBe('=A3+A2)');
+    // F2 goes back to Enter mode, where the arrows pick a reference again.
+    key(editor, 'F2');
+    key(editor, 'ArrowRight');
+    expect(grid.editState.text).toBe('=A3+B4A2)');
+    grid.cancelEdit();
+  });
 });
 
 describe('outline groups', () => {

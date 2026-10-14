@@ -3550,6 +3550,13 @@ export function createGrid(opts) {
     opts.onEdit?.({ editing: false });
   }
 
+  /** Enter mode ('type': the arrows leave the cell or pick a reference) or Edit mode ('inplace': they move the caret). */
+  function setEditMode(mode) {
+    if (!edit || edit.mode === mode) return;
+    edit.mode = mode;
+    opts.onEdit?.({ editing: true, text: edit.text, r: edit.r, c: edit.c });
+  }
+
   /** While typing a formula, can a click insert a reference here? */
   function acceptsRef() {
     if (!edit || !edit.text.startsWith('=')) return false;
@@ -5115,8 +5122,7 @@ export function createGrid(opts) {
     // F2 switches between Enter mode (the arrows leave the cell) and Edit mode (they move the caret), as in Excel.
     if (key === 'F2' && !e.shiftKey && !e.altKey && !isMod(e)) {
       e.preventDefault();
-      edit.mode = edit.mode === 'type' ? 'inplace' : 'type';
-      opts.onEdit?.({ editing: true, text: edit.text, r: edit.r, c: edit.c });
+      setEditMode(edit.mode === 'type' ? 'inplace' : 'type');
       return;
     }
     if (key === 'F4' && edit.text.startsWith('=')) { e.preventDefault(); cycleRefAnchors(); return; }
@@ -5127,13 +5133,17 @@ export function createGrid(opts) {
     if (isMod(e) && (key === "'" || key === '"')) { e.preventDefault(); opts.onCommand?.('copyAbove', key === '"' || e.shiftKey ? 'value' : 'formula'); return; }
     if (e.altKey && !isMod(e) && (key === '=' || key === '+' || e.code === 'Equal')) { e.preventDefault(); opts.onCommand?.('autosum'); return; }
     const dir = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' }[key];
-    // Point mode: where a formula expects a reference, the arrows pick one (Shift extends it to a
-    // range, Ctrl or ⌘ runs to the edge of the data), the way Excel and Sheets do.
-    if (dir && edit.text.startsWith('=') && (edit.refInsert || acceptsRef())) { e.preventDefault(); pointRef(dir, e.shiftKey, isMod(e)); return; }
+    // Point mode: where a formula being typed expects a reference, the arrows pick one (Shift extends
+    // it to a range, Ctrl or ⌘ runs to the edge of the data), the way Excel and Sheets do. Once the
+    // caret has been put into the text (Edit mode) they move it instead, until a click picks a reference.
+    if (dir && edit.text.startsWith('=') && (edit.refInsert || (edit.mode === 'type' && acceptsRef()))) { e.preventDefault(); pointRef(dir, e.shiftKey, isMod(e)); return; }
     // In "type" mode the arrows leave the cell, as in every spreadsheet's
     // enter mode; after F2 or a double-click they move the caret.
     if (dir && input === editor && edit.mode === 'type' && !edit.text.startsWith('=')) { e.preventDefault(); commitEdit({ move: dir }); return; }
     if ((key === 'ArrowUp' || key === 'ArrowDown') && input === editor && edit.mode === 'type') { e.preventDefault(); commitEdit({ move: dir }); return; }
+    // Left or Right through a formula moves the caret into its text: that is editing it, so a later
+    // "+" the caret passes does not turn the arrows back into picking cells.
+    if (dir && edit.mode === 'type') setEditMode('inplace');
     if (isMod(e) && key.toLowerCase() === 's') { e.preventDefault(); if (commitEdit()) opts.onCommand?.('save'); }
   }
 
@@ -5282,6 +5292,8 @@ export function createGrid(opts) {
     updateHints();
   }
   editor.addEventListener('keyup', (e) => { if (!isComposing(e) && /^Arrow|^Home$|^End$/.test(e.key)) caretMoved(); });
+  // Clicking into the text being typed puts the caret there to edit it, as in Excel: Edit mode.
+  editor.addEventListener('pointerdown', () => setEditMode('inplace'));
   editor.addEventListener('click', caretMoved);
   editor.addEventListener('blur', () => {
     // Clicking a toolbar button while editing should keep the edit alive;
