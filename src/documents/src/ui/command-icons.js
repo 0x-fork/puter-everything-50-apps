@@ -14,6 +14,9 @@
  */
 
 import { ICON_GLYPHS } from './icon-glyphs.js';
+import { designIcons } from './icons/design-icons.js';
+import { layoutIcons } from './icons/layout-icons.js';
+import { textFlowIcons } from './icons/text-flow-icons.js';
 
 const p = (d, c = 'o') => `<path class="${c}" d="${d}"/>`;
 /** Outlined rectangles (frames, sheets, tiles) get softly rounded corners unless `rx` says otherwise; fills laid inside a frame stay square. */
@@ -135,6 +138,12 @@ export const COMMAND_ICONS = {
   rename: r(2.5, 6.5, 15, 7, 'of') + t(7.5, 12.3, 'ab', 6.5) + p('M13.5 8.3v3.4M12.6 8.3h1.8M12.6 11.7h1.8', 'b'),
   template: page(4.5, 2.5, 11, 15) + r(6.5, 6, 6, 3.5, 'bs', 0.8) + lines(6.5, 12, 7, 3, 2),
   info: ci(10, 10, 7.5, 'bs') + p('M10 9v5', 'wh thick') + ci(10, 6.4, 1, 'txw'),
+  // Three bars: the menus, folded into one button.
+  menus: p('M3.5 5.5h13M3.5 10h13M3.5 14.5h13', 'o thick'),
+  // A clock face with an arrow turning back around it: earlier versions of the file.
+  history: ci(10.5, 10.5, 6.5, 'bf') + p('M10.5 6.8v4l2.6 1.6', 'o thick') + p('M3.2 7.5A7.4 7.4 0 0 1 10.5 3M3.2 4.2v3.3h3.3', 'b thick'),
+  // Three sliders, each with its knob: settings that apply everywhere.
+  preferences: p('M3 5.5h14M3 10h14M3 14.5h14', 'o') + ci(7, 5.5, 1.9, 'bs') + ci(13, 10, 1.9, 'bs') + ci(9, 14.5, 1.9, 'bs'),
   keyboard: r(2.5, 5.5, 15, 9, 'of', 2) + p('M5 8.5h1M8 8.5h1M11 8.5h1M14 8.5h1M5 11.5h1M14 11.5h1', 'o thick') + r(7.5, 10.7, 5, 1.6, 'bs', 0.8),
   pdf: page(4.5, 2.5, 11, 15) + r(2.5, 10.5, 10, 5, 'rs', 1) + t(7.5, 14.5, 'PDF', 4.6, { weight: 700, c: 'txw' }),
 
@@ -214,6 +223,10 @@ export const COMMAND_ICONS = {
 
   /* Styles and editing */
   stylesPane: r(3, 3, 12, 14, 'of') + lines(5, 6, 7, 2, 2.5) + brush(1, 0),
+  // A microphone: soft capsule, the cradle arc and its stand.
+  dictate: r(7.5, 2.5, 5, 9.5, 'bf', 2.5) + p('M8.5 5.5h1.5M8.5 7.5h1.5', 'o ln') + p('M4.8 9.5a5.2 5.2 0 0 0 10.4 0', 'o') + p('M10 14.7v2.8M7 17.5h6', 'o'),
+  // Formatting revealed: a letter under a magnifier.
+  revealFormatting: t(7.5, 14, 'A', 12, { weight: 600 }) + magnifier(13.2, 11.8, 3.4),
   styleGallery: r(2.5, 2.5, 15, 4.2, 'bs', 1.4) + p('M4.7 4.6h5', 'wh') + r(2.5, 7.9, 15, 4.2, 'gf', 1.4) + p('M4.7 10h5', 'g') + r(2.5, 13.3, 15, 4.2, 'of', 1.4) + p('M4.7 15.4h5', 'o ln'),
   newStyle: t(7, 14, 'A', 12) + badge(14.5, 14.5, 'plus'),
   editStyle: t(7, 14, 'A', 12) + pencil(2, 2),
@@ -259,6 +272,12 @@ export const COMMAND_ICONS = {
   symbol: t(10, 15.5, 'Ω', 14),
   equation: t(10, 15.5, 'π', 15),
   object: r(2.5, 2.5, 13, 13, 'of', 2) + r(7, 7, 10.5, 10.5, 'bs glassy', 2) + ci(10, 10, 1.1, 'glint'),
+  // Screenshot: a screen with a captured region marked by blue corner brackets.
+  screenshot: r(2.5, 3.5, 15, 10.5, 'of', 1.4) + p('M7.5 17h5M10 14v3', 'o') + p('M5.5 8.5v-2h2.5M14.5 8.5v-2H12M5.5 9.5v2h2.5M14.5 9.5v2H12', 'b thick'),
+  // Quick Parts: reusable building blocks stacked over a page.
+  quickParts: page(3.5, 2.5, 10, 13, 2.5) + r(8.5, 9, 8.5, 4, 'bs', 1) + r(6.5, 13.5, 8.5, 4, 'gs', 1) + ci(10, 10.6, 0.8, 'glint'),
+  // Signature line: an X and a pen stroke on a rule.
+  signatureLine: p('M2.5 15.5h15', 'o') + p('M3.5 10.5l3 3M6.5 10.5l-3 3', 'o') + p('M9 13c1.2-3.5 2.4-4.6 3-3.4s-.8 3.2.4 3.1 2.1-2.2 3.1-1.9', 'b thick'),
 
   /* Design */
   themes: t(7.5, 9.5, 'Aa', 8.5, { serif: true }) + r(3, 12, 3.2, 4, 'bs') + r(7, 12, 3.2, 4, 'gs') + r(11, 12, 3.2, 4, 'ns') + r(15, 12, 2.5, 4, 'rs'),
@@ -291,11 +310,79 @@ export const COMMAND_ICONS = {
   pageSetup: page(4.5, 2.5, 11, 15) + lines(6.5, 6.5, 5, 3, 2) + ci(14, 14, 3.9, 'knock') + ci(14, 14, 3, 'ns') + ci(14, 14, 1, 'knock'),
   rotate: p('M15.5 10a5.5 5.5 0 1 1-1.6-3.9', 'o thick') + p('M14.5 3.5v3h-3', 'b thick'),
   crop: p('M6 2.5v11.5h11.5', 'o thick') + p('M2.5 6H14v11.5', 'b thick'),
+  // Picture Format, Shape Format and Arrange (views/pictures.js).
+  wrapTight: p('M3 4h14M3 16h14', 'o ln') + p('M10 6.5l3.5 3.5-3.5 3.5-3.5-3.5z', 'bs') + p('M3 7h4.5M3 10h2.5M3 13h4.5M12.5 7H17M14.5 10H17M12.5 13H17', 'o ln'),
+  wrapThrough: p('M3 4h14M3 16h14M3 10h14', 'o ln') + p('M10 6.5l3.5 3.5-3.5 3.5-3.5-3.5z', 'bs glassy') + p('M3 7h5M12 7h5M3 13h5M12 13h5', 'o ln'),
+  bringToFront: r(2.5, 2.5, 7, 7, 'of') + r(10.5, 10.5, 7, 7, 'of') + r(5.5, 5.5, 9, 9, 'bs', 1.6),
+  sendToBack: r(5.5, 5.5, 9, 9, 'bs', 1.6) + r(2.5, 2.5, 7, 7, 'of glassy') + r(10.5, 10.5, 7, 7, 'of glassy'),
+  selectionPane: r(2.5, 2.5, 15, 15, 'of', 2) + p('M2.5 6.5h15', 'o') + r(4.5, 9, 3, 2.5, 'bs', 0.6) + p('M9 10.2h6', 'o ln') + r(4.5, 13, 3, 2.5, 'gs', 0.6) + p('M9 14.2h6', 'o ln'),
+  objAlignLeft: p('M3 2.5v15', 'b thick') + r(5, 4.5, 11, 4, 'bf', 1) + r(5, 11.5, 7, 4, 'bf', 1),
+  objAlignCenter: p('M10 2.5v15', 'b thick') + r(4, 4.5, 12, 4, 'bf glassy', 1) + r(6, 11.5, 8, 4, 'bf glassy', 1),
+  objAlignRight: p('M17 2.5v15', 'b thick') + r(4, 4.5, 11, 4, 'bf', 1) + r(8, 11.5, 7, 4, 'bf', 1),
+  objAlignTop: p('M2.5 3h15', 'b thick') + r(4.5, 5, 4, 11, 'bf', 1) + r(11.5, 5, 4, 7, 'bf', 1),
+  objAlignMiddle: p('M2.5 10h15', 'b thick') + r(4.5, 4, 4, 12, 'bf glassy', 1) + r(11.5, 6, 4, 8, 'bf glassy', 1),
+  objAlignBottom: p('M2.5 17h15', 'b thick') + r(4.5, 4, 4, 11, 'bf', 1) + r(11.5, 8, 4, 7, 'bf', 1),
+  distributeH: p('M2.5 3v14M17.5 3v14', 'o') + r(4.5, 6, 3, 8, 'bf', 0.8) + r(8.5, 6, 3, 8, 'bf', 0.8) + r(12.5, 6, 3, 8, 'bf', 0.8),
+  distributeV: p('M3 2.5h14M3 17.5h14', 'o') + r(6, 4.5, 8, 3, 'bf', 0.8) + r(6, 8.5, 8, 3, 'bf', 0.8) + r(6, 12.5, 8, 3, 'bf', 0.8),
+  groupObjects: p('M2.5 2.5h15v15h-15z', 'b dash') + r(4.5, 4.5, 6, 6, 'bs', 1.2) + ci(12.5, 12.5, 3.2, 'gs'),
+  ungroupObjects: r(2.5, 2.5, 7, 7, 'bs', 1.2) + ci(13.5, 13.5, 3.5, 'gs') + p('M11 4.5l4.5 4.5M15.5 4.5 11 9', 'r thick'),
+  rotateRight: p('M4.5 10a5.5 5.5 0 1 0 1.6-3.9', 'o thick') + p('M5.5 3.5v3h3', 'b thick'),
+  rotateLeft: p('M15.5 10a5.5 5.5 0 1 1-1.6-3.9', 'o thick') + p('M14.5 3.5v3h-3', 'b thick'),
+  flipVertical: p('M3 10h14', 'o dash') + p('M5 8.5l5-5.5 5 5.5z', 'bs') + p('M5 11.5l5 5.5 5-5.5z', 'bf'),
+  flipHorizontal: p('M10 3v14', 'o dash') + p('M8.5 5 3 10l5.5 5z', 'bs') + p('M11.5 5l5.5 5-5.5 5z', 'bf'),
+  removeBackground: r(2.5, 3.5, 15, 13, 'rf', 2) + ci(10, 9, 3, 'ys') + p('M5.5 16.5c.6-2.6 2.3-4.2 4.5-4.2s3.9 1.6 4.5 4.2z', 'gs') + p('M2.5 6.5l3-3M2.5 11l7.5-7.5M13.5 3.5l4 4M15.5 3.5l2 2', 'r ln'),
+  corrections: picture(2.5, 3.5, 12, 10) + ci(15, 14.5, 3.5, 'knock') + ci(15, 14.5, 2.6, 'ys') + p('M15 9.6v1.2M15 18.2v1M10.1 14.5h1.2M18.7 14.5h1', 'y thick'),
+  pictureColor: ci(7.5, 7.5, 4.5, 'rf glassy') + ci(12.5, 7.5, 4.5, 'gf glassy') + ci(10, 12, 4.5, 'bf glassy'),
+  artisticEffects: picture(2.5, 3.5, 12, 10) + p('M17.5 8.5 11 15', 'o thick') + p('M10.4 14.4l1.4 1.4c-.8 1.6-2.2 2.2-3.9 2 .5-1.5 1.3-2.7 2.5-3.4z', 'ps'),
+  transparency: r(2.5, 2.5, 9, 9, 'bs', 1.6) + r(8.5, 8.5, 9, 9, 'of glassy', 1.6) + p('M10 12h6M10 15h6M12 10v7.5M15 10v7.5', 'o ln dash'),
+  compressPictures: picture(4.5, 5, 11, 9) + p('M2 2l3.5 3.5M18 2l-3.5 3.5M2 18l3.5-3.5M18 18l-3.5-3.5', 'b thick'),
+  changePicture: picture(2.5, 3.5, 11, 9) + refresh,
+  resetPicture: picture(2.5, 3.5, 12, 10) + p('M17.5 13a3.2 3.2 0 1 1-1-2.3', 'b thick') + p('M17 9.5v1.7h-1.7', 'b thick'),
+  pictureBorder: r(3, 3, 14, 14, 'of', 1.4) + r(5.5, 5.5, 9, 9, 'bf', 1) + p('M3 17.5h14', 'b thick'),
+  pictureEffects: picture(2.5, 2.5, 11, 9) + r(5, 13.5, 11, 3, 'bw glassy') + p('M17 3.5l.6 1.3 1.3.6-1.3.6-.6 1.3-.6-1.3-1.3-.6 1.3-.6z', 'ys'),
+  shapeEffects: ci(8.5, 9.5, 5.5, 'bs') + ci(11, 12, 5.5, 'of glassy') + p('M16.5 3l.6 1.3 1.3.6-1.3.6-.6 1.3-.6-1.3-1.3-.6 1.3-.6z', 'ys'),
+  editShape: p('M3.5 15.5l3-11 9 3-2 8z', 'bf') + r(2.3, 14.3, 2.4, 2.4, 'bs', 0.4) + r(5.3, 3.3, 2.4, 2.4, 'bs', 0.4) + r(14.3, 6.3, 2.4, 2.4, 'bs', 0.4) + r(12.3, 14.3, 2.4, 2.4, 'bs', 0.4),
+  textOutline: t(10, 14.5, 'A', 15, { weight: 700, c: 'txfx' }) + p('M4.5 17.2h11', 'b thick'),
+  shadowEffect: r(5, 5, 11, 11, 'nw', 1.6) + r(3, 3, 11, 11, 'bf', 1.6),
+  reflectionEffect: r(4, 2.5, 12, 7.5, 'bs', 1.2) + r(4, 11, 12, 6, 'bw glassy', 1.2) + p('M3 10.5h14', 'o ln dash'),
+  glowEffect: ci(10, 10, 7.5, 'yf glassy') + ci(10, 10, 4.5, 'bs'),
+  softEdges: ci(10, 10, 7, 'bw glassy') + ci(10, 10, 5, 'bf glassy') + ci(10, 10, 3, 'bs'),
+  bevelEffect: r(3, 3, 14, 14, 'bs', 1.6) + p('M3 3l3.5 3.5h7L17 3M3 17l3.5-3.5h7L17 17M6.5 6.5v7M13.5 6.5v7', 'wh'),
+  rotate3d: p('M4 6l6-3 6 3v8l-6 3-6-3z', 'bf') + p('M4 6l6 3 6-3M10 9v8', 'b') + p('M2.5 12.5c2 3 13 3 15 0', 'o thick') + p('M16 11l1.5 1.5L16 14', 'o thick'),
+  transparentColor: picture(2.5, 3.5, 11, 9) + p('M16.5 9.5l1.5 1.5-5.5 5.5-2.2.7.7-2.2z', 'ns'),
+  gradientFill: r(3, 3, 14, 14, 'of', 1.6) + r(4.5, 4.5, 11, 11, 'bw', 1) + r(10, 4.5, 5.5, 11, 'bs glassy', 1),
+  patternFill: r(3, 3, 14, 14, 'of', 1.6) + p('M3 7l4-4M3 11l8-8M3 15l12-12M5 17l12-12M9 17l8-8M13 17l4-4', 'b ln'),
+  layoutOptions: r(7, 6.5, 6, 6, 'bs', 1.2) + p('M3 4h14M3 7h2.5M3 10h2.5M3 13h2.5M14.5 7H17M14.5 10H17M14.5 13H17M3 16h14', 'o ln'),
   // Delete a selected picture or shape: the object with a red badge.
   deletePicture: picture(2.5, 3.5, 12, 10) + badge(15, 15, 'x', 'r'),
   deleteShape: ci(6.5, 6.5, 4, 'bs') + r(6.5, 6.5, 7, 7, 'nf glassy', 1.4) + badge(15, 15, 'x', 'r'),
   altText: r(2.5, 4.5, 9, 8, 'bw') + r(2.5, 4.5, 9, 8, 'o') + p('M3.5 11.5l2.6-3 2 2 1.4-1.4 1.5 2.4', 'g') + ci(8.6, 7, 0.9, 'yf') + lines(13.5, 6, 4, 3, 2.5),
   drawingText: r(2.5, 3.5, 15, 13, 'ns', 2.4) + t(10, 13.4, 'T', 9, { c: 'txw' }),
+
+  /* Draw */
+  // Back to typing: a solid pointer over a text cursor.
+  drawSelect: p('M12.5 4.5h3M12.5 15.5h3M14 4.5v11', 'o') + p('M3.5 3l8 6.6-3.7.5 2.3 4.4-1.8.8-2.3-4.4-2.5 2.7z', 's'),
+  // A dashed loop with its trailing rope.
+  lassoSelect: p('M10.5 3.5c3.9 0 7 1.9 7 4.4s-3.1 4.4-7 4.4-7-1.9-7-4.4 3.1-4.4 7-4.4z', 'b dash') + p('M6.2 11.6c-1.2 1.3-1 2.8.3 3.4 1.2.6 1.3 1.7.3 2.6', 'o'),
+  // A tilted eraser block, its rubber end red, over the line it cleans.
+  inkEraser: p('M12.2 3.3l4.6 4.6-7.4 7.4-4.6-4.6z', 'bf') + p('M4.8 10.7l4.6 4.6-1.6 1.6H5.6l-2.4-2.4v-2.2z', 'rs') + p('M10.5 17h7', 'o'),
+  // A fountain-pen nib and the line it draws.
+  inkPen: p('M13.8 2.6l3.6 3.6-8.3 8.3-4.6 1 1-4.6z', 'bs') + p('M7.9 12.1l1.5 1.5', 'wh') + p('M2.5 17.5c2.2-1.6 4.4-.4 6.6-1.4', 'o'),
+  addPen: p('M12.3 2.6l3.1 3.1-7.2 7.2-4 .9.9-4z', 'bs') + p('M2.5 17c2-1.4 3.8-.4 5.6-1.2', 'o') + badge(15, 14.8, 'plus'),
+  // A fingertip drawing a wave.
+  drawTouch: p('M9.5 11V4.6a1.5 1.5 0 0 1 3 0v4.3l3.2.7c.9.2 1.5 1.1 1.3 2l-.8 4.4h-6l-2.6-3.3a1.2 1.2 0 0 1 1.9-1.5z', 'bf') + p('M2.5 8c1.3-2 2.6-2 3.9 0', 'b thick'),
+  // A ruler laid at an angle, with its graduations.
+  inkRuler: p('M2.8 13.6L13.6 2.8l3.6 3.6L6.4 17.2z', 'yf') + p('M5.6 10.8l1.6 1.6M7.6 8.8l1 1M9.6 6.8l1.6 1.6M11.6 4.8l1 1', 'o'),
+  // A hand-drawn loop turned into a clean square.
+  inkToShape: p('M3.5 9.5c-.6-3 2.8-5.1 5-3.5 2 1.4.8 4.6-1.8 5-1.6.3-2.9-.4-3.2-1.5z', 'o') + arrowRight(9.5, 13.5, 3.5, 'b') + r(12, 5, 5.5, 5.5, 'bf', 0.8),
+  // A handwritten x and an equals sign.
+  inkToMath: p('M2.8 6.2c2.1-.4 3.2 1.4 4 3.8s1.8 4.2 3.4 4M3.2 14c1.6-.6 3.2-2.8 4-4.4s1.7-3.4 2.9-3.6', 'o thick') + p('M12 8.6h5.5M12 11.8h5.5', 'b thick'),
+  // Play, over the curve being redrawn.
+  inkReplay: p('M2.5 15.5c2.5-4 4.8 1.2 7.2-2.2s4.1 1.4 7.8-1.8', 'o') + ci(10, 7.5, 5, 'bf') + p('M8.6 5l4.2 2.5-4.2 2.5z', 'bs'),
+  // A framed drawing area with a stroke inside it.
+  drawingCanvas: r(2.5, 3.5, 15, 13, 'of') + corners(4.5, 5.5, 11, 9, 1.8) + p('M5.5 12.5c1.6-3.2 3.2 1.6 4.8-1.6s2.6.8 4.2-.8', 'b thick'),
+  // Ink struck through: hidden.
+  hideInk: p('M2.5 12.5c2-4 4 1.6 6-1.6s4 1.6 9-2.4', 'b thick') + p('M4 4l12 12', 'r thick'),
 
   /* References */
   toc: sheet(3.5, 2.5, 13, 15) + p('M5.5 6h5', 'b thick') + p('M5.5 9.5h6M7 13h5', 'o') + p('M12.5 9.5h1M13 13h.5', 'o dash') + p('M14.5 6h0M14.5 9.5h0M14.5 13h0', 'o thick'),
@@ -312,6 +399,18 @@ export const COMMAND_ICONS = {
   tableOfFigures: picture(2.5, 2.5, 7, 5.5) + p('M11.5 4.5h6M11.5 7h4M2.5 10.5h15M2.5 13.5h15M2.5 16.5h9', 'o'),
   markEntry: p('M3.5 5.5h13M3.5 9.5h13', 'o') + r(3.5, 12, 8, 5, 'ys', 1.2) + p('M5.5 14.5h4', 'o'),
   index: r(4.5, 2.5, 11, 15, 'of') + t(10, 9.5, 'A', 5, { weight: 700, c: 'txb' }) + lines(7, 12, 6, 3, 2),
+  // A note page with the corner arrow the dialog launchers draw.
+  noteSettings: r(2.5, 2.5, 11, 13, 'of') + lines(4.5, 6, 7, 2, 2.5) + p('M4.5 12h4', 'b') + r(10.5, 10.5, 7, 7, 'bf') + p('M12.8 12.8l2.8 2.8M15.6 13.2v2.4h-2.4', 'b'),
+  // A magnifier with a small spark: look something up.
+  smartLookup: magnifier(8.5, 9, 5) + p('M15 2.5l.9 1.9 1.9.9-1.9.9-.9 1.9-.9-1.9-1.9-.9 1.9-.9z', 'ys'),
+  // Two source cards, the front one ruled.
+  manageSources: r(2.5, 2.5, 10, 12, 'of') + r(6.5, 5.5, 11, 12, 'bf') + lines(8.5, 9.5, 7, 3, 2.5),
+  // Marked text with a quotation tag.
+  markCitation: p('M3.5 4.5h13M3.5 8.5h13', 'o') + r(3.5, 11, 10, 6.5, 'gs', 1.4) + t(8.5, 18.3, '“”', 9, { c: 'txw' }),
+  // A page of entries grouped under a green category line.
+  tableOfAuthorities: sheet(3.5, 2.5, 13, 15) + p('M5.5 6h6', 'g thick') + p('M5.5 9.5h7M5.5 13h5', 'o') + p('M13.5 9.5h1M11.5 13h3', 'o dash'),
+  updateIndex: r(3.5, 2.5, 10, 13, 'of') + t(8.5, 8.6, 'A', 4.5, { weight: 700, c: 'txb' }) + lines(5.5, 11, 5, 2, 2) + refresh,
+  updateAuthorities: sheet(3.5, 2.5, 10, 13) + p('M5.5 6h4', 'g thick') + lines(5.5, 9, 6, 2, 2.5) + refresh,
 
   /* Review */
   spelling: t(8.5, 10, 'abc', 8.5) + p('M7 14l2.5 2.5 6-6', 'g thick'),
@@ -342,6 +441,18 @@ export const COMMAND_ICONS = {
   compare: r(2.5, 3.5, 7.5, 11, 'of') + lines(4, 6.5, 4.5, 3, 2) + r(10, 5.5, 7.5, 11, 'bf glassy') + lines(11.5, 8.5, 4.5, 3, 2, 'b'),
   protect: page(2.5, 2.5, 10, 14) + lines(4.5, 7, 6, 2, 2) + lock(9.5, 11.5),
   readOnly: page(2.5, 2.5, 10, 14) + lock(9.5, 11.5),
+  // Translate: a sheet with a capital A, and a glass card in front with a lowercase a.
+  translate: r(2.5, 2.5, 10, 10, 'of') + t(7.5, 10.4, 'A', 7.5, { weight: 700 }) + r(8.5, 8.5, 9, 9, 'bf glassy') + t(13, 15.6, 'a', 8, { serif: true, c: 'txb' }),
+  // Combine: two pages meeting in one.
+  combine: r(2.5, 2.5, 5.5, 7.5, 'of') + r(12, 2.5, 5.5, 7.5, 'of') + p('M5.25 10v2.3h3.2M14.75 10v2.3h-3.2', 'b') + r(6.5, 11, 7, 6.5, 'bf') + p('M8.3 14.2h3.4', 'b'),
+  // Show Markup: a marked-up page with a filter.
+  showMarkup: page(2.5, 2.5, 10.5, 15) + p('M4.5 7h6', 'r') + p('M4.5 10h6', 'b') + p('M4.5 13h3.5', 'o ln') + p('M10.5 11.5h7l-2.7 3.2v2.6l-1.6.9v-3.5z', 'pf'),
+  // Tracking Options: a marked-up page with a dial.
+  trackingOptions: page(2.5, 2.5, 10.5, 15) + p('M4.5 7h6', 'r') + p('M4.5 10h5', 'b') + ci(14.5, 14.5, 4.2, 'knock') + ci(14.5, 14.5, 3.2, 'nf') + ci(14.5, 14.5, 1.1, 'o') + p('M14.5 10.6v1.2M14.5 17.2v1.2M10.6 14.5h1.2M17.2 14.5h1.2', 'o'),
+  // Lock Tracking: the tracked page, locked.
+  lockTracking: page(2.5, 2.5, 10.5, 15) + p('M4.5 7h4.5', 'o') + p('M4.5 10h6', 'r') + p('M4.5 13h4', 'b') + lock(10, 12),
+  // Hide Ink: a pen stroke, struck through.
+  hideInk: p('M2.5 13.5c1.6-3.4 3.4-3.4 4.4 0s2.8 3.4 4.4 0 2.8-3.4 4.2-1.2', 'b thick') + p('M3.5 3.5l13 13', 'o thick'),
 
   /* View */
   readMode: p('M2.5 4.5c3-1 5.5-1 7.5.5v12c-2-1.5-4.5-1.5-7.5-.5zM17.5 4.5c-3-1-5.5-1-7.5.5v12c2-1.5 4.5-1.5 7.5-.5z', 'of') + lines(4.5, 7.5, 3.5, 2, 2.5, 'b') + lines(12, 7.5, 3.5, 2, 2.5, 'b'),
@@ -400,7 +511,114 @@ export const COMMAND_ICONS = {
   paragraphBefore: p('M3.5 3.5h8M3.5 6h5', 'o') + cells(3.5, 9, 13, 8.5, 3, 2) + badge(15.5, 4.5, 'plus', 'g', 3),
   paragraphAfter: cells(3.5, 2.5, 13, 8.5, 3, 2) + p('M3.5 14h8M3.5 16.5h5', 'o') + badge(15.5, 15.5, 'plus', 'g', 3),
   insertTab: p('M3.5 10h11M11.5 7l3 3-3 3', 'b thick') + p('M16.5 5v10', 'o'),
+  // Insert ▸ Table and drawing tools: a ready table with a spark, a table drawn with a pencil, an eraser over a line.
+  quickTable: tableWith(2.5, 4.5, 12, 12, 3, 3, r(2.5, 4.5, 12, 4, 'bw')) + p('M15.8 1.8 13 7h2.6l-1.2 4.5 4-6h-2.7l1.4-3.7z', 'ys'),
+  drawTable: cells(2.5, 6.5, 11, 11, 2, 2, { frame: 'o' }) + pencil(2.5, -3),
+  tableEraser: cells(2.5, 3.5, 12, 11, 2, 2, { frame: 'o' }) + p('M9.5 17.5l5-5a1 1 0 0 1 1.4 0l1.6 1.6a1 1 0 0 1 0 1.4l-3.5 3.5h-3z', 'pf') + p('M12.2 14.8l2.6 2.6', 'o'),
+  convertToTable: lines(2.5, 5, 5.5, 4, 3) + arrowRight(8.5, 9.5, 3.5) + cells(13, 4.5, 5, 10.5, 1, 3),
+  convertToText: cells(2.5, 4.5, 5, 10.5, 1, 3) + arrowRight(8.5, 9.5, 3.5) + lines(13, 5, 5, 4, 3),
+  // Borders group: pens and the painter.
+  borderStyles: p('M3 5h14', 'b thick') + p('M3 9.5h14M3 11.5h14', 'o') + p('M3 15.5h14', 'n dash thick'),
+  lineStyle: p('M3 4.5h14', 'o thick') + p('M3 9h14', 'o dash') + p('M3 13.5h14M3 15.5h14', 'o'),
+  penColor: pencil(1.5, -2.5) + r(3, 16, 14, 2.5, 'rs', 0.6),
+  borderPainter: borderIcon(['left', 'bottom']).replace(/o dash ln/g, 'o dash ln') + brush(0, -2),
+  borderInsideH: borderIcon(['h']),
+  borderDiagonalDown: borderIcon([]) + p('M3.5 3.5l13 13', 'b thick'),
+  borderDiagonalUp: borderIcon([]) + p('M16.5 3.5l-13 13', 'b thick'),
+  borderInsideV: borderIcon(['v']),
+  // Select: the selected part of a table under a blue wash.
+  selectTable: tableWith(2.5, 3.5, 15, 13, 3, 3, r(2.5, 3.5, 15, 13, 'bw')),
+  selectRow: tableWith(2.5, 3.5, 15, 13, 3, 3, r(2.5, 7.83, 15, 4.33, 'bw')) + r(2.5, 7.83, 15, 4.33, 'b'),
+  selectColumn: tableWith(2.5, 3.5, 15, 13, 3, 3, r(7.5, 3.5, 5, 13, 'bw')) + r(7.5, 3.5, 5, 13, 'b'),
+  selectCell: cells(2.5, 3.5, 15, 13, 3, 3, { frame: 'o' }) + r(7.5, 7.83, 5, 4.33, 'b thick'),
+  insertCells: tableWith(2.5, 3.5, 13, 12, 3, 3, r(6.83, 7.5, 4.33, 4, 'gw')) + badge(15.5, 15.5, 'plus'),
+  deleteCells: tableWith(2.5, 3.5, 13, 12, 3, 3, r(6.83, 7.5, 4.33, 4, 'rw')) + badge(15.5, 15.5, 'minus', 'r'),
+  splitTable: cells(2.5, 2.5, 15, 5.5, 3, 2, { frame: 'o' }) + cells(2.5, 12, 15, 5.5, 3, 2, { frame: 'o' }) + p('M1.5 10h17', 'b dash'),
+  fitWindow: cells(5, 5.5, 10, 9, 3, 2) + p('M1.5 3.5v13M18.5 3.5v13', 'o') + p('M2.5 10h2M15.5 10h2', 'b thick'),
+  distributeRows: cells(6, 3, 11.5, 14, 2, 3, { frame: 'o' }) + p('M3 3.5v13M1.5 5 3 3.5 4.5 5M1.5 15 3 16.5 4.5 15M1.8 8.2h2.4M1.8 11.8h2.4', 'b'),
+  distributeColumns: cells(3, 6, 14, 11.5, 3, 2, { frame: 'o' }) + p('M3.5 3h13M5 1.5 3.5 3 5 4.5M15 1.5 16.5 3 15 4.5M8.2 1.8v2.4M11.8 1.8v2.4', 'b'),
+  // Alignment grid: two lines placed in the cell as the command aligns them.
+  cellAlignTopLeft: r(2.5, 2.5, 15, 15, 'of') + p('M5 5.5h7M5 8.0h4.5', 'b thick'),
+  cellAlignTopCenter: r(2.5, 2.5, 15, 15, 'of') + p('M6.5 5.5h7M7.75 8.0h4.5', 'b thick'),
+  cellAlignTopRight: r(2.5, 2.5, 15, 15, 'of') + p('M8 5.5h7M10.5 8.0h4.5', 'b thick'),
+  cellAlignCenterLeft: r(2.5, 2.5, 15, 15, 'of') + p('M5 8.75h7M5 11.25h4.5', 'b thick'),
+  cellAlignCenterCenter: r(2.5, 2.5, 15, 15, 'of') + p('M6.5 8.75h7M7.75 11.25h4.5', 'b thick'),
+  cellAlignCenterRight: r(2.5, 2.5, 15, 15, 'of') + p('M8 8.75h7M10.5 11.25h4.5', 'b thick'),
+  cellAlignBottomLeft: r(2.5, 2.5, 15, 15, 'of') + p('M5 12h7M5 14.5h4.5', 'b thick'),
+  cellAlignBottomCenter: r(2.5, 2.5, 15, 15, 'of') + p('M6.5 12h7M7.75 14.5h4.5', 'b thick'),
+  cellAlignBottomRight: r(2.5, 2.5, 15, 15, 'of') + p('M8 12h7M10.5 14.5h4.5', 'b thick'),
+  textDirection: `<g transform="rotate(-90 8 10)">${t(8, 14, 'A', 11)}</g>` + arrowUp(15.5, 3.5, 12, 'b thick'),
+  sortTable: cells(2.5, 3.5, 9, 13, 1, 4, { head: 'bf' }) + cells(2.5, 3.5, 9, 13, 1, 4, { frame: 'o' }) + arrowDown(15, 3.5, 13),
+  // Formula: an equals sign and a pair of parentheses in a cell.
+  formula: r(2.5, 3.5, 15, 13, 'of') + p('M5 8.5h4.5M5 11.5h4.5', 'b thick') + p('M13 6.5c-1.6 1.2-1.6 5.8 0 7M15 6.5c1.6 1.2 1.6 5.8 0 7', 'o'),
 };
+
+/* ---- Mailings: envelopes, labels and mail merge ---- */
+const envelopeShape = (x, y, w, h, c = 'of') => r(x, y, w, h, c, 1.4) + p(`M${x + 0.4} ${y + 0.6}l${n(w / 2 - 0.4)} ${n(h * 0.5)} ${n(w / 2 - 0.4)}-${n(h * 0.5)}`, 'o');
+const person = (cx, cy, c = 'bf') => ci(cx, cy - 3.2, 2.3, c) + p(`M${cx - 4.2} ${cy + 4.5}c0-2.6 1.9-4.4 4.2-4.4s4.2 1.8 4.2 4.4z`, c);
+const chevrons = (x, y, c = 'b thick') => p(`M${x + 2} ${y - 2}l-2 2 2 2M${x + 4.5} ${y - 2}l-2 2 2 2M${x + 8} ${y - 2}l2 2-2 2M${x + 10.5} ${y - 2}l2 2-2 2`, c);
+const recordArrow = (dir, bar) => (dir < 0 ? p('M14.5 5 7.5 10l7 5z', 'bs') : p('M5.5 5l7 5-7 5z', 'bs')) + (bar ? p(dir < 0 ? 'M5 5v10' : 'M15 5v10', 'o thick') : '');
+Object.assign(COMMAND_ICONS, {
+  envelope: envelopeShape(2.5, 4.5, 15, 11) + r(13, 6, 3, 3.6, 'rs', 0.5),
+  labels: r(3.5, 2.5, 13, 15, 'of') + [0, 1, 2].map(i => r(5, 4 + i * 4.5, 4.4, 3.4, 'bf', 1) + r(10.6, 4 + i * 4.5, 4.4, 3.4, 'bf', 1)).join(''),
+  startMerge: page(2.5, 2.5, 10, 13) + lines(4.5, 8, 6, 2, 2.5) + envelopeShape(9, 10.5, 8.5, 6.5, 'bf'),
+  selectRecipients: person(13, 9.5, 'o') + person(8, 10.5, 'bf'),
+  editRecipients: cells(2.5, 3.5, 12, 13, 2, 4) + pencil(3, 2),
+  highlightFields: r(2.5, 6, 15, 8, 'yf', 2) + chevrons(3.7, 10, 'o thick'),
+  addressBlock: r(2.5, 4, 15, 12, 'of', 1.6) + p('M5 7.5h7', 'b thick') + lines(5, 10.5, 9, 2, 2.5),
+  greetingLine: bubble(2.5, 3, 15, 11) + p('M5.5 7.5h6', 'b thick') + p('M5.5 10.3h9', 'o'),
+  mergeField: r(2.5, 6, 15, 8, 'bf', 2) + chevrons(3.7, 10),
+  rules: p('M3 10h4.5l4-5h3M7.5 10l4 5h3', 'o') + p('M13.5 3l2.5 2-2.5 2M13.5 13l2.5 2-2.5 2', 'b thick') + ci(4, 10, 1.4, 'bs'),
+  matchFields: r(2.5, 3.5, 5, 13, 'of', 1) + r(12.5, 3.5, 5, 13, 'of', 1) + p('M7.5 6.5l5 7M7.5 10h5M7.5 13.5l5-7', 'b'),
+  updateLabels: r(2.5, 2.5, 11, 13, 'of') + r(4, 4, 3.5, 2.8, 'bf', 0.8) + r(8.5, 4, 3.5, 2.8, 'bf', 0.8) + r(4, 8, 3.5, 2.8, 'bf', 0.8) + refresh,
+  previewResults: page(2.5, 2.5, 11, 15) + chevrons(3.6, 8, 'b') + magnifier(13, 13, 3),
+  firstRecord: recordArrow(-1, true),
+  previousRecord: recordArrow(-1, false),
+  nextRecord: recordArrow(1, false),
+  lastRecord: recordArrow(1, true),
+  findRecipient: person(8, 10.5, 'bf') + magnifier(13.5, 12.5, 2.8),
+  checkErrors: page(3.5, 2.5, 11, 15) + lines(5.5, 7.5, 7, 3, 2.5) + badge(14.5, 14.5, 'check', 'g'),
+  finishMerge: page(6.5, 2.5, 10, 12, 2.5) + page(3.5, 5.5, 10, 12, 2.5) + arrowRight(9, 12, 9, 'g thick'),
+  mergeWizard: page(3.5, 2.5, 13, 15) + numberedLines(6.3, 6, ['1', '2', '3'], 4) + lines(8.5, 6, 5, 3, 4),
+});
+/* Feature areas draw their own icons in src/ui/icons/, with the same helpers and classes. */
+const HELPERS = { p, r, ci, t, cells, page, lines, arrowDown, arrowRight, arrowUp, arrowLeft, badge, n, sheet, tintedPage, headBand, footBand, rows, pencil, settingsBadge, corners, picture, ROUND };
+for (const icons of [designIcons, layoutIcons, textFlowIcons]) Object.assign(COMMAND_ICONS, icons(HELPERS));
+
+/* ---- Co-editing and the writing assistant ---- */
+// A four-pointed spark with a smaller one beside it: help from the writing assistant.
+const spark = (cx, cy, k, c) => p(`M${cx} ${cy - k}C${cx + k * 0.18} ${cy - k * 0.28} ${cx + k * 0.28} ${cy - k * 0.18} ${cx + k} ${cy}C${cx + k * 0.28} ${cy + k * 0.18} ${cx + k * 0.18} ${cy + k * 0.28} ${cx} ${cy + k}C${cx - k * 0.18} ${cy + k * 0.28} ${cx - k * 0.28} ${cy + k * 0.18} ${cx - k} ${cy}C${cx - k * 0.28} ${cy - k * 0.18} ${cx - k * 0.18} ${cy - k * 0.28} ${cx} ${cy - k}z`, c);
+Object.assign(COMMAND_ICONS, {
+  assistant: spark(8.5, 11, 6.5, 'ps') + spark(15, 4.8, 2.8, 'bs') + ci(7, 9.4, 0.9, 'glint'),
+  // Two people, one in front of the other: who is editing with you.
+  coauthors: person(13, 9.5, 'nf') + ci(7.5, 7.3, 3.6, 'knock') + p('M1.8 17.5c0-3.4 2.5-5.6 5.7-5.6s5.7 2.2 5.7 5.6z', 'knock') + person(7.5, 11, 'bf'),
+  // A person with a plus badge: invite someone.
+  invitePeople: person(8, 10.5, 'bf') + badge(14.5, 13.5, 'plus', 'b'),
+  // Two pages with a clock face on the front one: compare with an earlier version.
+  compareVersion: page(6.5, 2.5, 10, 12, 2.5) + page(3.5, 5.5, 10, 12, 2.5) + ci(8.5, 12.5, 3.2, 'bf') + p('M8.5 10.8v1.9l1.3.8', 'o'),
+});
+
+/* ---- View: page movement, windows, reading tools and the Outlining tab ---- */
+Object.assign(COMMAND_ICONS, {
+  verticalMovement: sheet(3.5, 2, 9, 7) + sheet(3.5, 11, 9, 7, 'bf glassy') + arrowDown(16, 3.5, 13),
+  sideToSide: sheet(2, 3, 7, 9.5) + sheet(11, 3, 7, 9.5, 'bf glassy') + arrowRight(3, 16, 14),
+  thumbnails: [[2.5, 3], [11, 3], [2.5, 11], [11, 11]].map(([x, y], i) => sheet(x, y, 6.5, 6, i === 1 ? 'bf' : 'of')).join(''),
+  newWindow: r(2.5, 3.5, 13, 11, 'of', 1.6) + headBand(2.5, 3.5, 13, 2.8, 'bs', 1.6) + lines(4.5, 9, 9, 2, 2.5) + badge(15, 15, 'plus'),
+  split: r(2.5, 2.5, 15, 15, 'of') + lines(4.5, 5.5, 11, 2, 2.2) + p('M2.5 10h15', 'b thick') + lines(4.5, 13, 11, 2, 2.2),
+  promote: arrowLeft(3, 5.5, 9, 'g thick') + lines(7.5, 10.5, 10, 3, 2.7),
+  demote: arrowRight(3, 5.5, 9, 'b thick') + lines(7.5, 10.5, 10, 3, 2.7),
+  promoteHeading1: p('M8.5 2.5 5 5.5l3.5 3M13 2.5l-3.5 3 3.5 3', 'g thick') + t(15.5, 9, '1', 7, { weight: 700, c: 'txb' }) + lines(3.5, 12.5, 13, 3, 2.5),
+  demoteBody: p('M4.5 2.5 8 5.5l-3.5 3M9 2.5l3.5 3-3.5 3', 'b thick') + lines(3.5, 12.5, 13, 3, 2.5) + ci(16, 5.5, 1.3, 'bs'),
+  moveUp: arrowUp(15, 3, 13) + lines(3, 5.5, 8, 4, 3),
+  moveDown: arrowDown(15, 3, 13) + lines(3, 5.5, 8, 4, 3),
+  expand: ci(10, 10, 7, 'of') + plusMark(10, 10, 3.5, 'g thick'),
+  collapse: ci(10, 10, 7, 'of') + p('M6.5 10h7', 'r thick'),
+  showLevel: rows([[2.5, 12], [5.5, 9], [8.5, 6]], 5, 4.5, 'o') + p('M17 3v13M15 14l2 2 2-2', 'b'),
+  closeView: page(3.5, 2.5, 11, 14) + lines(5.5, 7.5, 6, 3, 2.5) + badge(14.5, 14.5, 'x', 'r'),
+  lineFocus: r(2.5, 3.5, 15, 13, 'of') + lines(4.5, 6, 11, 1) + r(2.5, 8.2, 15, 3.6, 'bs', 0) + p('M4.5 10h11', 'wh') + lines(4.5, 14, 11, 1),
+  textSpacing: t(10, 11.5, 'ab', 9) + p('M2.5 16h15M4.5 14l-2 2 2 2M15.5 14l2 2-2 2', 'b'),
+  styleArea: r(2.5, 3.5, 15, 13, 'of') + paneLeft(2.5, 3.5, 5.5, 13) + p('M8 3.5v13', 'o ln') + p('M3.8 6.5h3M3.8 11h3', 'b') + lines(10, 6.5, 5.5, 4, 2.5),
+});
 
 /** Aliases: the editor's existing control icon names that map onto a drawing above. */
 const ALIASES = {

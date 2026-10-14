@@ -36,9 +36,9 @@ test('the ribbon reopens a folded group once there is room for it again', async 
         // Try each folded group open: none may fit without the strip overflowing.
         for (const group of panel.querySelectorAll('.ribbon-group.is-collapsed')) {
           const body = group.querySelector('.ribbon-group-body'), button = group.querySelector('.ribbon-collapsed');
-          body.hidden = false; button.hidden = true;
+          body.hidden = false; button.hidden = true; group.classList.remove('is-collapsed');
           if (panel.scrollWidth <= panel.clientWidth + 1) fits.push(group.dataset.group);
-          body.hidden = true; button.hidden = false;
+          body.hidden = true; button.hidden = false; group.classList.add('is-collapsed');
         }
         return { overflow, fits };
       });
@@ -210,7 +210,7 @@ test('the Shapes gallery\'s lines stand out from a dark menu', async ({ page }) 
 test('a ribbon menu the mouse opens starts with no item chosen; one the keyboard opens starts on its first item', async ({ page }) => {
   await openEditor(page);
   const focusedItem = () => page.evaluate(() => document.activeElement.closest('.menu') && document.activeElement !== document.activeElement.closest('.menu') ? document.activeElement.textContent.trim() : null);
-  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('menubar', { name: 'Menu bar' }).getByRole('menuitem', { name: 'File', exact: true }).click();
   await expect(page.getByRole('menu', { name: 'File' })).toBeVisible();
   expect(await focusedItem()).toBeNull();
   await page.keyboard.press('ArrowDown');
@@ -244,6 +244,7 @@ test('commands that sit together on a tab draw different icons', async ({ page }
   expect(await icon('references', 'Update Fields')).not.toBe(await icon('references', 'Update Table'));
   await tab(page, 'Insert').click();
   await page.locator('#ribbon-panel-insert').getByRole('button', { name: 'Header', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Edit Header' }).click();
   await expect(tab(page, 'Header & Footer')).toHaveAttribute('aria-selected', 'true');
   expect(await icon('headerFooter', 'Go to Header')).not.toBe(await icon('headerFooter', 'Header'));
   expect(await icon('headerFooter', 'Go to Footer')).not.toBe(await icon('headerFooter', 'Footer'));
@@ -331,7 +332,7 @@ test('Replace starts in Find when there is nothing to find yet, and in Replace w
 
 test('the Navigation Pane is a full-width sheet on phones and a side pane on wider screens', async ({ page }) => {
   await openEditor(page, 600);
-  await page.getByRole('button', { name: 'Search in document' }).click();
+  await page.locator('#ribbon-panel-home').getByRole('button', { name: 'Find', exact: true }).click();
   const pane = page.locator('.nav-pane');
   await expect(pane).toBeVisible();
   expect(Math.round((await pane.boundingBox()).width)).toBeGreaterThanOrEqual(598);

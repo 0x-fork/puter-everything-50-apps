@@ -19,6 +19,7 @@ import { cloudGeometry } from './cloud-geometry.js';
 import { ribbonGeometry } from './ribbon-geometry.js';
 import { readShapeExtensions } from './docx-shape-extensions.js';
 import { readPictureShadow } from './docx-picture-shadow.js';
+import { readDrawingEffects } from './docx-drawing-effects.js';
 const A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const PIC = 'http://schemas.openxmlformats.org/drawingml/2006/picture';
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -489,7 +490,10 @@ export function readShapeGeometry(props, t, options = {}) {
         geometry = definition.build(t.width, t.height, resolve);
       } catch (error) { fail(error.message); }
       const [left, top, right, bottom] = geometry.text;
-      return { paths: [{ width: t.width, height: t.height, points: geometry.points, fill: true, stroke: true }],
+      // Multi-path presets carry per-path fill/stroke flags, fill modes and optional fixed grids.
+      const paths = geometry.paths ? geometry.paths.map(p => ({ width: p.width ?? t.width, height: p.height ?? t.height, points: p.points, fill: p.fill !== false, stroke: p.stroke !== false, ...(p.fillMode ? { fillMode: p.fillMode } : {}) }))
+        : [{ width: t.width, height: t.height, points: geometry.points, fill: true, stroke: true }];
+      return { paths,
         textRect: { left: t.width ? left / t.width : 0, top: t.height ? top / t.height : 0, right: t.width ? right / t.width : 1, bottom: t.height ? bottom / t.height : 1 } };
     }
     if (children(child(preset, A, 'avLst')).length || !['rect', 'ellipse', 'line', 'straightConnector1', 'flowChartOffpageConnector'].includes(kind)) fail('unsupported preset geometry');
@@ -628,9 +632,10 @@ export function textBox(shape, readParagraph, defaults, readTextBlocks) {
   if (!paragraphs.length || paragraphs.some(p => p.list || p.runs.some(r => r.image?.anchor || r.link) || p.bookmarks || p.sectionEnd || p.runs.some(r => /[\f\u000e]/.test(r.text)))) fail('complex text box contents');
   for (const p of paragraphs) {
     // Positional tab stops have no effect until a tab character uses them.
-    // The paragraph reader still validates their types and values (including
-    // rejecting bar tabs); preserve dormant declarations in the source XML.
-    const activeTabs = p.format.tabs.length && p.runs.some(r => r.text.includes('\t'));
+    // The paragraph reader still validates their types and values; preserve
+    // dormant declarations in the source XML.
+    // Bar tabs draw a rule without any tab character; the shape painter does not draw them.
+    const activeTabs = p.format.tabs.some(t => t.alignment === 'bar') || p.format.tabs.length && p.runs.some(r => r.text.includes('\t'));
     if (p.format.paragraphShading !== 'auto' || Object.values(p.format.paragraphBorders).some(b => !['nil', 'none'].includes(b.style)) || activeTabs) fail('decorated text box paragraphs');
     // Script, position and width transforms share body text's measurement and
     // glyph painter. Decorations still need their own retained-shape painter.
@@ -709,7 +714,8 @@ export function readShapeScene(root, readPicture, readParagraph, readPictureFill
     }
     if (node.namespaceURI === PIC && node.localName === 'pic') {
       const props = child(node, PIC, 'spPr'), t = transform(props, false, true);
-      const clipped = child(props, A, 'custGeom') || child(props, A, 'prstGeom')?.getAttribute('prst') === 'ellipse';
+      const preset = child(props, A, 'prstGeom')?.getAttribute('prst');
+      const clipped = child(props, A, 'custGeom') || preset && preset !== 'rect';
       const clipPaths = clipped ? readShapeGeometry(props, t, options).paths : null;
       const pen = readDrawingOutline(props, readSchemeColor, options);
       const backingFill = readPictureBackingFill(props, readSchemeColor);
@@ -743,7 +749,9 @@ export function readShapeScene(root, readPicture, readParagraph, readPictureFill
     readShapeExtensions(props);
     validateGroupFill(props);
     props = styledProperties(node, props, readDrawingStyle, readSchemeColor);
-    const shadow = readPictureShadow(props, readSchemeColor);
+    // A standalone shape may also glow, soften its edges or show a reflection; grouped shapes may not yet.
+    const shadow = readPictureShadow(props, readSchemeColor, depth === 0);
+    const effects = depth === 0 ? readDrawingEffects(props, readSchemeColor) : null;
     if (shadow) {
       if (shadow.scaleX !== undefined || shadow.obscured) fail('scaled or obscured shape shadows');
       const effect = child(child(props, A, 'effectLst'), A, 'outerShdw');
@@ -782,7 +790,7 @@ export function readShapeScene(root, readPicture, readParagraph, readPictureFill
       if (width) text.outlineWidth = width;
     }
     if (pen?.compound && (pen.headEnd || pen.tailEnd) && geometry.paths.some(p => p.stroke && !closedOutlinePath(p))) fail('line-end markers on open compound paths');
-    return { type: 'shape', ...t, ...(shadow ? { shadow } : {}), ...(ellipse ? { textRect: { left: inset, top: inset, right: 1 - inset, bottom: 1 - inset } } : {}), ...geometry, fill: pictureFill ? readPictureFill(pictureFill, t) : child(props, A, 'grpFill') ? groupFill : fill(props, readSchemeColor), outline: pen, text };
+    return { type: 'shape', ...t, ...(shadow ? { shadow } : {}), ...(effects ? { effects } : {}), ...(ellipse ? { textRect: { left: inset, top: inset, right: 1 - inset, bottom: 1 - inset } } : {}), ...geometry, fill: pictureFill ? readPictureFill(pictureFill, t) : child(props, A, 'grpFill') ? groupFill : fill(props, readSchemeColor), outline: pen, text };
   };
   return read(root);
 }

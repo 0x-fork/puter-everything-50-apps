@@ -31,7 +31,7 @@ import { LineBuilder } from './line-builder.js';
 import { bidiCharacters, bidiLineCharacters, bidiRtlSpace } from './bidi-text.js';
 import { createParagraphPaginator } from './pagination.js';
 import { paragraphText, paragraphFormat, runFormat } from './model.js';
-import { revisionView, revisionDisplay, revisionColor } from './revisions.js';
+import { revisionView, runRevisionDisplay } from './revisions.js';
 import { inlineSegments, EMU_PER_PX, drawingOffsetPixels, imageExtents, inlineImageExtents, inlineImagePaintFrame, normalizedRotation, isPositionedImage, isSideWrappedImage } from './images.js';
 import { squareFlowHints, squareFlowSignature, squareRow, joinSquareLine, clearingBreakTarget } from './square-wrap.js';
 import { positionedImageFrame, positionedImageContains, positionedImageBounds, isCellRelativePosition, isPageBasedCellPosition } from './positioned-images.js';
@@ -40,7 +40,8 @@ import { floatingParagraph } from './floating-images.js';
 import { exactRowHeight, rowPadding } from './row-height.js';
 import { blockMinimumHeight } from './block-layout.js';
 import { sectionStoryBounds } from './story-clearance.js';
-import { footnotePlan, layoutWithFootnotes } from './footnote-layout.js';
+import { spacedFormat } from './document-views.js';
+import { footnotePlan, endnotePlan, layoutWithFootnotes, pageRestartedNumbers, placeEndnotes } from './footnote-layout.js';
 import { numberedParagraphs } from './footnotes.js';
 import { pageBounds } from './page-bounds.js';
 import { alignPageBody } from './page-vertical-alignment.js';
@@ -49,6 +50,8 @@ import { floatingTableInset, floatingFragmentBounds, UnsupportedFloatingTableFlo
 import { avoidTableOverlap, shiftTableItem } from './table-overlap.js';
 import { nestedFloatingTableX } from './nested-floating-tables.js';
 import { paragraphFrameGroups, measureParagraphFrame, placeParagraphFrames, UnsupportedParagraphFrameError } from './paragraph-frames.js';
+import { autoHyphenationBreak, hyphenCharacter } from './hyphenation-layout.js';
+import { hyphenationOf } from './hyphenation-settings.js';
 
 export const PAGE = Object.freeze({ width: 816, height: 1056, margin: 96, gap: 24, lineHeight: 26, paragraphGap: 12, fontSize: 16 });
 export const MAX_PAGES = 200;
@@ -121,12 +124,20 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
   paragraphs = fittedDrawingParagraphs(resolveEmptyTextFills(paragraphs), storyOptions.drawingLayouts);
   const totals = Object.values(pageStories?.stories || {}).some(s => s.paragraphs.some(p => p.runs.some(r => ['NUMPAGES', 'SECTIONPAGES'].includes(r.field?.type))));
   let counts = { pageCount: 1, sectionCounts: [] }, placed;
-  const notes = footnotePlan(pageStories, paragraphs);
-  if (notes) paragraphs = numberedParagraphs(paragraphs, notes.numbers);
+  const notes = footnotePlan(pageStories, paragraphs), endnotes = endnotePlan(pageStories, paragraphs), source = paragraphs;
+  const numberNotes = () => numberedParagraphs(source, { footnote: notes?.numbers || new Map(), endnote: endnotes?.numbers || new Map() });
+  if (notes || endnotes) paragraphs = numberNotes();
   for (let attempt = 0; attempt < MAX_PAGES; attempt++) {
-    placed = notes
+    const flow = () => notes
       ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, noteReserve }), measureBase, numbering, storyOptions)
       : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts });
+    placed = flow();
+    // Footnotes numbered per page (§17.11.19 eachPage) need their pages first; renumber once and lay out again.
+    if (notes?.restart === 'eachPage') {
+      const renumbered = pageRestartedNumbers(notes, source, placed);
+      if ([...renumbered].some(([id, display]) => notes.numbers.get(id) !== display)) { notes.numbers = renumbered; paragraphs = numberNotes(); placed = flow(); }
+    }
+    if (endnotes) placed = placeEndnotes(endnotes, placed, measureBase, numbering, storyOptions);
     const aligned = () => {
       const result = alignPageBody(placed, paragraphs, tables);
       return finishRotatedCells(result === placed ? placed : { ...result, paragraphBorders: layoutParagraphBorders(result), tableBorders: layoutTableBorders(result.cells) });
@@ -155,8 +166,12 @@ function layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageSt
 }
 
 function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStories, wrapHints, storyOptions) {
+  const mirroredIndents = new Map(paragraphs.filter(p => p.format?.mirrorIndents && !p.cellId && (p.format.indentRight ?? 0) !== (p.format.indentLeft ?? 0)).map(p => [p.id, ((p.format.indentRight ?? 0) - (p.format.indentLeft ?? 0)) / 15]));
   const paginateParagraphs = createParagraphPaginator();
   const measure = (text, style) => measureTextGeometry(text, style, measureBase);
+  // A screen view (web, draft, read) lays every section out on its own display geometry.
+  const viewPage = storyOptions.viewGeometry || (geometry => geometry);
+  page = viewPage(page);
   page = { ...page, allowOversizedLines: !!storyOptions.bestEffort, left: page.left ?? page.margin, right: page.right ?? page.margin, top: page.top ?? page.margin, bottom: page.bottom ?? page.margin };
   const markers = listMarkers(paragraphs, numbering);
   // The initial recto/verso side is retained through later numbering restarts.
@@ -166,7 +181,7 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
   const finalPage = page, sectionPages = new Map(); let sectionPage = page;
   for (let i = paragraphs.length - 1; i >= 0; i--) {
     if (paragraphs[i].sectionEnd && paragraphs[i].cellId) throw new Error('Section breaks inside tables are not supported.');
-    if (paragraphs[i].sectionEnd) sectionPage = { ...pageGeometry(paragraphs[i].sectionEnd), background: finalPage.background, backgroundPicture: finalPage.backgroundPicture, allowOversizedLines: !!storyOptions.bestEffort };
+    if (paragraphs[i].sectionEnd) sectionPage = { ...viewPage(pageGeometry(paragraphs[i].sectionEnd)), background: finalPage.background, backgroundPicture: finalPage.backgroundPicture, ...hyphenationOf(finalPage), allowOversizedLines: !!storyOptions.bestEffort };
     sectionPages.set(paragraphs[i].id, sectionPage);
   }
   // A drawing in a different section does not participate in column flow.
@@ -542,6 +557,13 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
     if (sectionIndex && pageStories?.evenAndOdd && start !== undefined && start % 2 !== nextPageNumber % 2) {
       placed.pages.push(placed.pages.at(-1)); placed.pageSections.push(null); placed.pageCount++;
     }
+    // An odd- or even-page section starts on the next page of that parity (§17.18.77); an empty page
+    // between them takes the number in between unless the section restarts its numbering.
+    const parity = { oddPage: 1, evenPage: 0 }[section.sourcePage.sectionType];
+    if (sectionIndex && parity !== undefined && placed.pageCount && (start ?? nextPageNumber) % 2 !== parity) {
+      placed.pages.push(placed.pages.at(-1)); placed.pageSections.push(null); placed.pageCount++;
+      if (start === undefined) nextPageNumber++;
+    }
     if (placed.pageCount >= MAX_PAGES) throw new Error(`This preview supports up to ${MAX_PAGES} pages.`);
     section.firstNumber = start ?? nextPageNumber;
     const balance = continues(section, sections[sectionIndex + 1]);
@@ -609,8 +631,13 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
     }
     for (const key of ['lines', 'cells', 'repeatedLines']) placed[key].push(...result[key].map(item => {
       const base = section.sourcePage || section.page;
-      const dx = readingPageGeometry(base, section.firstNumber + item.page - 1).left - base.left;
-      return { ...shiftTableItem(item, dx, 0), ...(base.bookFold ? { pageMarginShift: dx } : {}), page: offset + item.page, region: regionIds[item.page] };
+      const marginShift = readingPageGeometry(base, section.firstNumber + item.page - 1).left - base.left;
+      let dx = marginShift;
+      // Mirrored indents (§17.3.1.18): on even pages the left indent becomes the inside (right) one.
+      // Text width is unchanged, so the line only moves sideways.
+      const mirror = key === 'lines' && item.paragraphId && mirroredIndents.get(item.paragraphId);
+      if (mirror && (offset + item.page) % 2 === 1) dx += mirror;
+      return { ...shiftTableItem(item, dx, 0), ...(base.bookFold || base.mirror ? { pageMarginShift: marginShift } : {}), page: offset + item.page, region: regionIds[item.page] };
     }));
     placed.endY = result.endY;
     for (const frame of result.floatingTables || []) placed.floatingTables.push({ ...frame, page: offset + frame.page });
@@ -625,7 +652,7 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
     const y = floatingTableY(floating.table.floating, geometry, natural.endY, anchor);
     let result = floating.probe?.y === y ? floating.probe.result : paginateParagraphs(floating.blocks, { ...floating.page, pageBounds: undefined, top: Math.min(0,y), bottom: 0 }, MAX_PAGES, y);
     if (result.pageCount !== 1) throw new Error('Multi-page floating tables are not supported yet.');
-    if (floating.page.bookFold) {
+    if (floating.page.bookFold || floating.page.mirror) {
       const width = floating.alignmentWidth;
       const measuredPage = floating.measuredPageIndex;
       const dx = floatingTableX(floating.table.floating, geometry, width, anchor.page + firstPageSideOffset) - floatingTableX(floating.table.floating, floating.page, width, measuredPage);
@@ -692,7 +719,7 @@ function mergedRowGroups(rows) {
 }
 
 function measureParagraph(p, documentOffset, measure, page, listMarker, numbering, cellBounds, wrapHints, keepBoundaryLine = false) {
-  const lines = [], format = paragraphFormat(p, numbering), text = paragraphText(p);
+  const lines = [], format = spacedFormat(paragraphFormat(p, numbering), page.textSpacing), text = paragraphText(p);
   if (p.list) format.autoSpacingListId = numbering.instances[p.list.numId].abstractId;
   if (page.doNotUseHTMLParagraphAutoSpacing) format.addParagraphSpacing = true;
   for (const side of ['Before', 'After']) if (format['autoSpace' + side]) {
@@ -743,13 +770,13 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
     // grapheme, including one that crosses a source run boundary.
     if (styleIndex !== runIndex) {
       runStyle = bodySymbolStyle(p.runs[runIndex], runFormat(p.runs[runIndex]));
+      if (page.textSpacing?.character) runStyle.characterSpacing = (runStyle.characterSpacing || 0) + page.textSpacing.character;
       if (p.runs[runIndex]?.noteMark) runStyle.noteMark = true;
-      const revision = p.runs[runIndex]?.revision;
       runHidden = !!p.runs[runIndex]?.vanish && !revisionView.showHidden;
-      if (revision) {
-        const display = revisionDisplay(revision, revisionView.mode, revisionColor(revision.author, revisionView.authors));
-        if (display?.hidden) runHidden = true; else Object.assign(runStyle, display);
-      }
+      // Shown hidden text carries a dotted underline so it reads as hidden; the run itself is unchanged.
+      if (p.runs[runIndex]?.vanish && revisionView.showHidden && (!runStyle.underlineStyle || runStyle.underlineStyle === 'none')) Object.assign(runStyle, { underline: true, underlineStyle: 'dotted', underlineColor: 'auto' });
+      const display = runRevisionDisplay(p.runs[runIndex]);
+      if (display?.hidden) runHidden = true; else if (display) Object.assign(runStyle, display);
       styleIndex = runIndex;
     }
     // Inline page/column breaks in cell XML are retained but have no
@@ -768,7 +795,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
   let firstIndentedStart = 0;
   if (!listMarker) while (['\f','\u000e'].includes(chars[firstIndentedStart]?.text)) firstIndentedStart++;
   const contractionSpace = format.alignment === 'both' && (page.compatibilityMode ?? 12) >= 15 ? contractionMetrics(measure) : null;
-  let start = 0, row = null, pieceIndex = 0, pieces = [], clearance = null, drawingSegmentStart;
+  let start = 0, row = null, pieceIndex = 0, pieces = [], clearance = null, drawingSegmentStart, hyphenatedLines = 0;
   const columnPage = page;
   do {
     if (columnPage.columnWidthAt && !cellBounds) page = { ...columnPage, right: columnPage.width-columnPage.left-columnPage.columnWidthAt(chars[start]?.start ?? documentOffset+text.length) };
@@ -840,10 +867,19 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
       }
       if (word.end <= maximum) { pieceIndex++; continue; }
     }
+    // Automatic hyphenation splits the word that overflows the line when the line would otherwise
+    // end further from the margin than the hyphenation zone (hyphenation-layout.js).
+    const autoHyphen = page.autoHyphenation && !format.suppressAutoHyphens && !oversizedInline && !contraction && end < chars.length && !['\v', '\f', '\u000e'].includes(chars[end].text)
+      ? autoHyphenationBreak(chars, start, end, lastBreak, { right, zone: page.hyphenationZone, caps: !page.doNotHyphenateCaps, limitReached: page.consecutiveHyphenLimit > 0 && hyphenatedLines >= page.consecutiveHyphenLimit,
+        lineEnd: (to, hyphen) => { const probe = new LineBuilder(left, right, format, page, measure, chars[start].start); for (let i = start; i < to; i++) probe.add(chars[i]); if (hyphen) probe.add(hyphenCharacter(chars[to - 1])); return hyphen ? probe.end : probe.field.origin + probe.field.contentWidth; } })
+      : null;
+    if (autoHyphen !== null) end = lastBreak = autoHyphen;
     if (end < chars.length && !['\v', '\f', '\u000e'].includes(chars[end].text) && lastBreak > start) end = lastBreak;
     const softBreak = !oversizedInline && end < chars.length && !['\v', '\f', '\u000e'].includes(chars[end].text) && chars[end - 1]?.text === '\u00ad' && end === lastBreak;
     let span = chars.slice(start, end);
     if (softBreak) span[span.length - 1] = { ...span.at(-1), text: '-', discretionaryHyphen: true };
+    if (autoHyphen !== null) span.push(hyphenCharacter(chars[end - 1]));
+    hyphenatedLines = softBreak || autoHyphen !== null ? hyphenatedLines + 1 : 0;
     span = bidiLineCharacters(span);
     // A terminal break normally keeps the paragraph mark on the old page. Give
     // its following insertion position a caret, without consuming a line/gap.
@@ -966,7 +1002,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
       // run backgrounds and inline pictures. Empty section boundaries stay hidden.
       clipText: emptySectionBoundary || !exact,
       start: span[0]?.start ?? offset, end: span.at(-1)?.end ?? offset,
-      paragraphEnd: end === chars.length, hardBreak, virtual, emptySectionBoundary,
+      paragraphEnd: end === chars.length, hardBreak, virtual, emptySectionBoundary, ...(autoHyphen !== null ? { autoHyphen: true } : {}),
       ...(drawingSegmentStart === undefined ? {} : { drawingSegmentStart }),
       ...(emptySectionBoundary && keepBoundaryLine ? { continuousBoundaryLine: true } : {}), ...measured,
       ...(hardBreak === 'page' && end === chars.length - 1 && !page.splitPgBreakAndParaMark ? { pageBreakWithMark: true } : {}),
@@ -994,13 +1030,13 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
     // A paragraph-relative square float must fit with its anchor on the page.
     // This reserves placement capacity, not text advancement or paragraph
     // height. Pagination discounts the anchor's own before-spacing.
-    const sideFrames = (page.compatibilityMode ?? 12) >= 15 ? positioned.filter(({ image }) => isSideWrappedImage(image) && image.anchor.vertical === 'paragraph' && image.anchor.y >= 0) : [];
+    const sideFrames = (page.compatibilityMode ?? 12) >= 15 ? positioned.filter(({ image }) => isSideWrappedImage(image) && !image.hidden && image.anchor.vertical === 'paragraph' && image.anchor.y >= 0) : [];
     const sideHeights = sideFrames.map(({ image }) => drawingOffsetPixels(image.anchor.y) + imageExtents(image).height / EMU_PER_PX)
       .filter(height => height <= page.height - page.top - page.bottom + 1e-6);
     if (sideHeights.length) lines[0].floatingFitHeight = Math.max(...sideHeights);
     // wrapNone does not reserve paragraph or row height, or force keepLines.
     // Its extent is considered separately when vertically aligning a cell.
-    const bands = positioned.filter(r => r.image.anchor.wrap === 'topAndBottom').map(({ image }) => {
+    const bands = positioned.filter(r => r.image.anchor.wrap === 'topAndBottom' && !r.image.hidden).map(({ image }) => {
       if (image.anchor.y < 0) throw new Error('Top-and-bottom drawings with negative paragraph offsets are not supported yet.');
       const top = drawingOffsetPixels(image.anchor.y);
       return [top, top + image.height / EMU_PER_PX];
@@ -1029,6 +1065,12 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
       if (format.paragraphShading !== 'auto') line.paragraphBackground = { value: format.paragraphShading, x: paintLeft, width: paintRight - paintLeft, before: 0, after: 0 };
       if (bordered) line.paragraphFrame = { borders: format.paragraphBorders, x: paintLeft, right: paintRight, spaceAfter: format.spaceAfter * 4 / 3, contextualSpacing: format.contextualSpacing, styleId: p.resolvedStyleId ?? p.styleId ?? null };
     }
+  }
+  // Bar tabs draw a vertical rule beside every line of the paragraph, measured from the text margin.
+  const bars = format.tabs.filter(t => t.alignment === 'bar');
+  if (bars.length) for (const line of lines) if (!line.virtual) {
+    const geometry = line.columnMeasureWidth === undefined ? page : columnPage;
+    line.bars = bars.map(t => ({ x: geometry.left + t.position / 15 }));
   }
   return { lines, format, styleId: 'resolvedStyleId' in p ? p.resolvedStyleId : p.styleId ?? null, leadingFlowBreaks: /^[\f\u000e]+/.exec(text)?.[0].length || 0 };
 }
@@ -1172,7 +1214,7 @@ export function nearestStop(line, x, y) {
 export function imageAtPoint(layout, page, x, y, { includeBehindText = false } = {}) {
   let behind = null;
   for (const f of [...(layout.floatingObjects || [])].reverse()) {
-    if (f.page !== page || !cellClipContains(f.cellClip, x, y) || !((f.image.flatLine || f.image.flatGroup) ? flatLineContains(f.image,f.x,f.y,f.width,f.height,x,y) : positionedImageContains(f, x, y))) continue;
+    if (f.page !== page || f.image?.hidden || !cellClipContains(f.cellClip, x, y) || !((f.image.flatLine || f.image.flatGroup) ? flatLineContains(f.image,f.x,f.y,f.width,f.height,x,y) : positionedImageContains(f, x, y))) continue;
     if (!f.image.anchor?.behind) return f;
     behind ||= f;
   }
@@ -1187,7 +1229,7 @@ export function imageAtPoint(layout, page, x, y, { includeBehindText = false } =
     }
     if (line.oversizedInlineHeight && (x < 0 || x >= physicalWidth(layout, page) || y < 0 || y >= (layout.pages?.[page] || layout.page).height)) continue;
     const image = line.fragments.find(f => {
-      if (!f.image || isPositionedImage(f.image)) return false;
+      if (!f.image || f.image.hidden || isPositionedImage(f.image)) return false;
       if (f.uprightImage) {
         const frame = f.uprightImage;
         if ((line.clip || normalizedRotation(f.image.rotation)) && (x < line.x || x > line.x + line.width)) return false;

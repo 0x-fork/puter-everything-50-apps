@@ -25,6 +25,7 @@ import { checkedRowHeight, rowHeight } from './row-height.js';
 import { checkedLineSpacing } from './line-spacing.js';
 import { hasDirectRunFormatting, clearedRun, hasDirectMarkFormatting, clearMark, hasDirectParagraphFormatting, clearParagraph } from './direct-formatting.js';
 import { findText, checkedSearchText, replacedRuns, replacedBookmarks } from './search.js';
+import { advancedFind, replaceAdvanced } from './advanced-search.js';
 import { checkedHyperlinkDestination, hyperlinkLabel, hyperlinkId, hyperlinkAt, hyperlinkRanges, hyperlinkBoundaryChanges } from './hyperlinks.js';
 import { bookmarkEntries, checkedBookmarkName, newBookmarkMarkers, replaceBookmarkMarkers, bookmarkStructureState, repairStructuralBookmarks, normalizeBlockBookmarkScopes } from './bookmarks.js';
 import { checkedUnderline, underlineDeclaration } from './underlines.js';
@@ -38,20 +39,21 @@ import { checkedHighlight, checkedShading, cellShadingFill } from './backgrounds
 import { checkedVerticalAlign, checkedBaselineShift } from './vertical-align.js';
 import { normalizeColor } from './colors.js';
 import { cellContext, tableCells, editableCells, verticalMerges, headerRowCount, tableId, fixedColumnWidths, documentBlocks, cellSpan, rowGrid, spanWidth } from './tables.js';
+import { normalizeCellBlock, cellBlockPlacements } from './table-selection.js';
 import { emptyStyles, resolveStyledParagraph, effectiveStyleId, editedStyle, resolveCharacterRun, paragraphRunStyle } from './styles.js';
 import { emptyNumbering, levelFor, listKind, listGeometry, listMarkers, newList, restartList } from './numbering.js';
 import { INDENT_KEYS, validateIndent, normalizeTabStops, sameValue } from './paragraph-geometry.js';
-import { validatePageSettings } from './page-settings.js';
+import { validatePageSettings, DOCUMENT_PAGE_KEYS, SECTION_TYPES } from './page-settings.js';
 import { OBJECT, inlineSegments, validateImage, normalizeCrop, normalizedRotation, rotationOutsets, imageExtents, CROP_SIDES, isPositionedImage } from './images.js';
 import { outlineEntries, builtinOutlineLevel } from './outline.js';
 import { refreshConditionalTable } from './conditional-table-formatting.js';
-import { eachRevisionTarget, revisionRanges, runFormatChange, paragraphFormatChange, acceptFormatChange } from './revisions.js';
+import { eachRevisionTarget, revisionRanges, runFormatChange, paragraphFormatChange, acceptFormatChange, rejectFormatChange } from './revisions.js';
 import { footnoteReferenceRun } from './footnotes.js';
 import { commentAnchors, nextCommentId, addCommentMarkers, removeCommentMarkers, commentThread, checkedCommentText, initialsFor } from './comments.js';
 /** Original canvas engine. Positions are UTF-16 offsets in paragraphs joined by '\n'. */
 let nextId = 0;
 export { PAGINATION_DEFAULTS, PARAGRAPH_FORMAT, RUN_FORMAT, runFormat } from './formatting.js';
-import { PAGINATION_DEFAULTS, PARAGRAPH_FORMAT, RUN_FORMAT, runFormat, clearAutomaticSpacing } from './formatting.js';
+import { PAGINATION_DEFAULTS, PARAGRAPH_FORMAT, PARAGRAPH_FLAGS, RUN_FORMAT, runFormat, clearAutomaticSpacing } from './formatting.js';
 
 function commandRunFormat(run) {
   const format = runFormat(run);
@@ -231,6 +233,8 @@ export class TextDocument {
     documentBlocks(this.paragraphs, this.tables);
     this.hasColumnBookmarks = bookmarkEntries(this.paragraphs, this.tables).some(entry => entry.columnRange);
     this.pageSettings = validatePageSettings(pageSettings);
+    // Section breaks inserted later copy the source section they split (see insertSectionBreakAt).
+    this.sourceSectionCount = this.paragraphs.filter(p => p.sectionEnd).length + 1;
     this.selection = { anchor: 0, focus: 0 };
     // Null means the source has no managed comments part (page stories, plain imports).
     this.comments = comments ? copy(comments) : null;
@@ -351,11 +355,14 @@ export class TextDocument {
     this.didChange(); return true;
   }
   setParagraphFormat(patch) {
+    const pass = this.blockCellPass(() => this.setParagraphFormat(patch));
+    if (pass !== undefined) return pass;
     if (!Object.keys(patch).length) return false;
     patch = { ...patch };
     if ('underlineColor' in patch && !('underline' in patch)) throw new Error('Set underline and its color together.');
     for (const [key, value] of Object.entries(patch)) {
-      if (!(key in PARAGRAPH_FORMAT)) throw new Error('Unknown paragraph property.');
+      // suppressAutoHyphens (§17.3.1.34) is optional: absent means hyphenation is allowed.
+      if (!(key in PARAGRAPH_FORMAT) && key !== 'suppressAutoHyphens') throw new Error('Unknown paragraph property.');
       if (key === 'paragraphBorders') {
         patch.paragraphBorders = checkedParagraphBorders(value);
       } else if (key === 'paragraphShading') {
@@ -366,7 +373,7 @@ export class TextDocument {
         patch.tabs = normalizeTabStops(value);
       } else if (INDENT_KEYS.includes(key)) {
         validateIndent(value);
-      } else if (Object.hasOwn(PAGINATION_DEFAULTS, key) || key === 'contextualSpacing') {
+      } else if (Object.hasOwn(PAGINATION_DEFAULTS, key) || Object.hasOwn(PARAGRAPH_FLAGS, key) || key === 'contextualSpacing') {
         if (typeof value !== 'boolean') throw new Error('Paragraph pagination must be on or off.');
       } else if (key === 'alignment') {
         if (!['left', 'center', 'right', 'both'].includes(value)) throw new Error('Choose left, center, right or justified alignment.');
@@ -522,20 +529,166 @@ export class TextDocument {
     }
     return changed;
   }
-  setPageSettings(patch) {
-    for (const key of ['bookFoldPrinting', 'bookFoldRevPrinting']) if (key in patch && patch[key] !== this.pageSettings[key]) throw new Error('Booklet print settings are retained from the document.');
-    if ('sectionType' in patch && patch.sectionType !== this.pageSettings.sectionType) throw new Error('Section type is retained from the document.');
-    if (this.paragraphs.some(p => p.sectionEnd)) throw new Error('Page settings for documents with multiple sections are retained from the source.');
-    for (const key of ['compatibilityMode', 'gutterAtTop', 'splitPgBreakAndParaMark', 'suppressSpBfAfterPgBrk', 'noTabHangInd', 'forgetLastTabAlignment', 'allowSpaceOfSameStyleInTable', 'wrapTrailSpaces', 'ulTrailSpace', 'doNotExpandShiftReturn', 'doNotUseHTMLParagraphAutoSpacing']) if (key in patch && patch[key] !== this.pageSettings[key]) throw new Error('Page compatibility settings are retained from the document.');
+  /** The number of sections: one per section break, plus the final section. */
+  get sectionCount() { return this.paragraphs.reduce((n, p) => n + (p.sectionEnd ? 1 : 0), 1); }
+  /** The index of the section holding a text position; a section break belongs to the section it ends. */
+  sectionIndexAt(position = this.range[0]) {
+    const at = locate(this.paragraphs, position).index;
+    let index = 0;
+    for (let i = 0; i < at; i++) if (this.paragraphs[i].sectionEnd) index++;
+    return index;
+  }
+  /** Every section's page settings, in document order; the final section's are the document's own. */
+  get sectionSettings() { return [...this.paragraphs.filter(p => p.sectionEnd).map(p => p.sectionEnd), this.pageSettings]; }
+  /**
+   * Change page settings. Section settings apply by `scope`: 'document' (every section), 'section' (the
+   * caret's section, or `section`), 'forward' (from the caret on: a section break of `breakType` starts
+   * a new section there unless the caret already starts one) or 'selection' (the selected text becomes
+   * its own section between two breaks). Document-wide settings always apply to every section. With one
+   * section the default scope is the document; with several, the caret's section.
+   */
+  setPageSettings(patch, { scope, section, breakType = 'nextPage' } = {}) {
+    for (const key of ['compatibilityMode', 'splitPgBreakAndParaMark', 'suppressSpBfAfterPgBrk', 'noTabHangInd', 'forgetLastTabAlignment', 'allowSpaceOfSameStyleInTable', 'wrapTrailSpaces', 'ulTrailSpace', 'doNotExpandShiftReturn', 'doNotUseHTMLParagraphAutoSpacing']) if (key in patch && patch[key] !== this.pageSettings[key]) throw new Error('Page compatibility settings are retained from the document.');
     if ('backgroundPicture' in patch && patch.backgroundPicture !== null && JSON.stringify(patch.backgroundPicture) !== JSON.stringify(this.pageSettings.backgroundPicture)) throw new Error('Creating a picture page background is not supported.');
-    const next = validatePageSettings({ ...this.pageSettings, ...patch, ...('background' in patch && patch.background !== this.pageSettings.background ? { backgroundPicture: null } : {}) });
-    if (Object.keys(next).every(key => next[key] === this.pageSettings[key])) return false;
-    this.checkpoint(); this.pageSettings = next; this.didChange(); return true;
+    scope ??= this.sectionCount > 1 ? 'section' : 'document';
+    if (!['document', 'section', 'forward', 'selection'].includes(scope)) throw new Error('Unknown page settings scope.');
+    const documentPatch = Object.fromEntries(Object.entries(patch).filter(([key]) => DOCUMENT_PAGE_KEYS.includes(key)));
+    if ('background' in patch && patch.background !== this.pageSettings.background) documentPatch.backgroundPicture = null;
+    const sectionPatch = Object.fromEntries(Object.entries(patch).filter(([key]) => !DOCUMENT_PAGE_KEYS.includes(key)));
+    const plan = (first, last) => this.sectionSettings.map((settings, i) => validatePageSettings({ ...settings, ...documentPatch, ...(i >= first && i <= last ? sectionPatch : {}) }));
+    const apply = next => {
+      const ends = this.paragraphs.filter(p => p.sectionEnd);
+      next.forEach((settings, i) => { if (i < ends.length) ends[i].sectionEnd = settings; else this.pageSettings = settings; });
+    };
+    const changed = next => next.some((settings, i) => Object.keys(settings).some(key => JSON.stringify(settings[key]) !== JSON.stringify(this.sectionSettings[i][key])));
+    if (scope === 'document' || scope === 'section') {
+      const at = scope === 'document' ? 0 : section ?? this.sectionIndexAt(this.range[0]);
+      if (!Number.isInteger(at) || at < 0 || at >= this.sectionCount) throw new Error('There is no such section.');
+      const next = plan(at, scope === 'document' ? this.sectionCount - 1 : at);
+      if (!changed(next)) return false;
+      this.checkpoint(); apply(next); this.didChange(); return true;
+    }
+    // A new section: validate the result before changing anything, so a failure leaves the document as it was.
+    const [start, end] = this.range;
+    if (scope === 'selection' && start === end) throw new Error('Select the text to give its own settings.');
+    this.checkpoint();
+    let caret = start;
+    if (scope === 'selection' && !this.startsSection(end)) this.insertSectionBreakAt(end, breakType);
+    if (!this.startsSection(start)) { this.insertSectionBreakAt(start, breakType); caret = start + 1; }
+    const first = this.sectionIndexAt(caret);
+    // A selection that already crossed section breaks gives its settings to every section it covers.
+    const last = scope === 'selection' ? this.sectionIndexAt(Math.max(caret, end - 1 + (caret - start))) : this.sectionCount - 1;
+    apply(plan(first, last));
+    if (scope === 'selection') this.select(this.sectionRange(first).start, Math.max(this.sectionRange(first).start, this.sectionRange(last).end - 1));
+    this.didChange(); return true;
+  }
+  /** Whether a position is the first in its section (the document start or just after a section break). */
+  startsSection(position) {
+    const at = locate(this.paragraphs, position);
+    return at.offset === 0 && (at.index === 0 || !!this.paragraphs[at.index - 1].sectionEnd);
+  }
+  /** The text range of a section: from its first position to its section mark. */
+  sectionRange(index) {
+    let start = 0, at = 0, section = 0;
+    for (const p of this.paragraphs) {
+      const length = paragraphText(p).length;
+      if (section === index && p.sectionEnd) return { start, end: at + length + 1 };
+      at += length + 1;
+      if (p.sectionEnd) { section++; if (section === index) start = at; }
+    }
+    return { start, end: this.text.length };
+  }
+  /**
+   * Insert a section break (§17.6.17) at the caret, or replacing the selection: the text before it ends a
+   * section with a copy of the current section's settings, and the section after it starts by `type`.
+   */
+  insertSectionBreak(type = 'nextPage') {
+    const [start, end] = this.range;
+    this.checkpoint();
+    if (start !== end) { this.replace(''); }
+    this.insertSectionBreakAt(this.range[0], type);
+    this.didChange(); return true;
+  }
+  insertSectionBreakAt(position, type) {
+    if (!SECTION_TYPES.includes(type)) throw new Error('Choose a next page, continuous, even page or odd page section break.');
+    const at = locate(this.paragraphs, position);
+    if (this.paragraphs[at.index].cellId) throw new Error('Section breaks cannot be inserted in a table.');
+    const index = this.sectionIndexAt(position);
+    const owner = this.paragraphs.filter(p => p.sectionEnd)[index];
+    const settings = owner ? owner.sectionEnd : this.pageSettings;
+    this.select(position);
+    this.replace('\n');
+    const mark = this.paragraphs[at.index];
+    mark.sectionEnd = copy(settings);
+    mark.sectionProperties = owner ? owner.sectionProperties : null;
+    mark.sectionSourceIndex = owner ? owner.sectionSourceIndex ?? index : this.sourceSectionCount - 1;
+    const following = this.paragraphs.filter(p => p.sectionEnd)[index + 1];
+    if (following) following.sectionEnd = validatePageSettings({ ...following.sectionEnd, sectionType: type });
+    else this.pageSettings = validatePageSettings({ ...this.pageSettings, sectionType: type });
   }
   insertPageBreak() { return this.replace('\f'); }
+  /**
+   * A text-wrapping break (§17.3.3.1 br with clear): the line ends here and the text continues below
+   * any floating objects beside it (clear 'all'), or a plain line break with clear 'none'.
+   */
+  insertTextWrappingBreak(clear = 'all') {
+    if (!['none', 'left', 'right', 'all'].includes(clear)) throw new Error('Invalid text-wrapping break.');
+    const start = this.range[0];
+    if (!this.replace('\v')) return false;
+    const at = locate(this.paragraphs, start), p = this.paragraphs[at.index];
+    let offset = 0;
+    const run = p.runs.find(r => { const inside = at.offset >= offset && at.offset < offset + r.text.length; offset += r.text.length; return inside; });
+    if (!run || run.text[at.offset - (offset - run.text.length)] !== '\v' || run.image || run.contentControl) return true;
+    p.runs = [...sliceRuns(p.runs, 0, at.offset), { ...run, text: '\v', breakClear: clear }, ...sliceRuns(p.runs, at.offset + 1)];
+    this.didChange(); return true;
+  }
   insertColumnBreak() { return this.replace('\u000e'); }
   get tableContext() { return cellContext(this.tables, this.paragraphs[locate(this.paragraphs, this.selection.focus).index].cellId); }
+  /** A rectangular cell selection (Select Column, a drag across cells), or null. It is not part of the document. */
+  get activeCellBlock() {
+    const block = this.cellBlock, table = block && this.tables.find(t => t.id === block.tableId);
+    if (!table) return null;
+    let normalized; try { normalized = normalizeCellBlock(table, block); } catch { return null; }
+    return normalized && normalized.top === block.top && normalized.bottom === block.bottom && normalized.left === block.left && normalized.right === block.right ? { ...block, table } : null;
+  }
+  setCellBlock(block) {
+    const table = block && this.tables.find(t => t.id === block.tableId);
+    const normalized = table ? normalizeCellBlock(table, block) : null;
+    const placements = normalized ? cellBlockPlacements(table, normalized) : [], first = placements[0];
+    if (!first) { this.cellBlock = null; return false; }
+    // Whole rows are one stretch of text, so text commands reach all of them. Any other block's text
+    // selection covers its first cell: typing replaces that cell's text, as with any selection.
+    const whole = normalized.left === 0 && normalized.right === table.grid.length, lastCell = whole ? placements.at(-1).cell : first.cell;
+    const index = this.paragraphs.findIndex(p => p.cellId === first.cell.id);
+    const last = this.paragraphs.findLastIndex(p => p.cellId === lastCell.id);
+    this.select(this.paragraphOffset(index), this.paragraphOffset(last) + paragraphText(this.paragraphs[last]).length);
+    this.cellBlock = { tableId: table.id, top: normalized.top, bottom: normalized.bottom, left: normalized.left, right: normalized.right };
+    return true;
+  }
+  /**
+   * A rectangular cell selection that is not whole rows formats each of its cells in turn: the text
+   * range through them would also reach the cells between. Returns undefined when there is no such block.
+   */
+  blockCellPass(fn) {
+    if (!this.cellBlock || this.inBlockCellPass) return undefined;
+    const block = this.activeCellBlock;
+    if (!block || block.left === 0 && block.right === block.table.grid.length) return undefined;
+    const selection = { ...this.selection }, saved = this.cellBlock;
+    let changed = false;
+    this.inBlockCellPass = true;
+    try {
+      for (const { cell } of cellBlockPlacements(block.table, block)) {
+        const first = this.paragraphs.findIndex(p => p.cellId === cell.id), last = this.paragraphs.findLastIndex(p => p.cellId === cell.id);
+        if (first < 0) continue;
+        this.select(this.paragraphOffset(first), this.paragraphOffset(last) + paragraphText(this.paragraphs[last]).length);
+        if (fn()) changed = true;
+      }
+    } finally { this.inBlockCellPass = false; this.selection = selection; this.cellBlock = saved; }
+    return changed;
+  }
   get selectedTableCells() {
+    const block = this.activeCellBlock;
+    if (block) return cellBlockPlacements(block.table, block).map(p => p.cell);
     const ids = new Set(this.selectedParagraphs.map(p => p.cellId).filter(Boolean));
     return this.tables.flatMap(table => editableCells(table).filter(cell => ids.has(cell.id)));
   }
@@ -766,6 +919,8 @@ export class TextDocument {
     refreshTableStyles(this, table); this.didChange(); return true;
   }
   get selectedTableRows() {
+    const block = this.activeCellBlock;
+    if (block) return block.table.rows.slice(block.top, block.bottom + 1);
     const rows = new Map();
     for (const table of this.tables) for (const [id, owner] of verticalMerges(table)) if (id === owner.cell.id) rows.set(id, table.rows.slice(owner.rowIndex, owner.endRow + 1));
     return [...new Set(this.selectedParagraphs.flatMap(p => rows.get(p.cellId) || []))];
@@ -825,7 +980,7 @@ export class TextDocument {
     if(this.hasBodyFields && bodyFieldRanges(this.paragraphs).some(r=>r.start<=this.range[0]&&this.range[0]<=r.end))throw new Error('Tables inside body fields are not supported yet.');
     if (this.hasPersistentBlockControls && blockControlGroups(this.paragraphs).some(g => g.control.persistent && g.start <= this.range[0] && this.range[0] <= g.end)) throw new Error('Tables inside persistent content controls are not supported yet.');
     const parent = this.tableContext;
-    if (!Number.isInteger(rows) || rows < 1 || rows > 100 || !Number.isInteger(columns) || columns < 1 || columns > 16) throw new Error('Choose 1–100 rows and 1–16 columns.');
+    if (!Number.isInteger(rows) || rows < 1 || rows > 500 || !Number.isInteger(columns) || columns < 1 || columns > 32) throw new Error('Choose 1–500 rows and 1–32 columns.');
     if (this.text.length + rows * columns + 1 > MAX_DOCUMENT_CHARACTERS) throw new Error(DOCUMENT_CHARACTER_LIMIT_MESSAGE);
     const borderSize = 4; // Eighth-points; the generated table uses single borders.
     const page = this.sectionPageSettings;
@@ -973,6 +1128,7 @@ export class TextDocument {
   }
   snapshot() { return copy({ comments: this.comments, tables: this.tables, styles: this.styles, stylesEnabled: this.stylesEnabled, numbering: this.numbering, pageSettings: this.pageSettings, paragraphs: this.paragraphs, selection: this.selection, typingFormat: this.typingFormat, typingStyle: this.typingStyle, typingDirectCleared: this.typingDirectCleared }); }
   restore(state) {
+    this.cellBlock = null;
     if (state.comments !== undefined) this.comments = copy(state.comments);
     this.tables = copy(state.tables || []);
     this.styles = copy(state.styles || emptyStyles()); this.stylesEnabled = !!state.stylesEnabled;
@@ -989,6 +1145,7 @@ export class TextDocument {
     this.future = [];
   }
   select(anchor, focus = anchor, controlCaret, controlSelection) {
+    this.cellBlock = null;
     const text = this.text, points = boundaries(text);
     const clamp = value => {
       const n = Math.max(0, Math.min(Number.isFinite(value) ? value : 0, text.length));
@@ -1435,6 +1592,8 @@ export class TextDocument {
   }
   setFontSize(fontSize) { return this.setRunFormat({ fontSize, fontSizeCs: fontSize }); }
   setRunFormat(patch) {
+    const pass = this.blockCellPass(() => this.setRunFormat(patch));
+    if (pass !== undefined) return pass;
     if (patch.cs || patch.rtl) throw new Error('Active complex-script and RTL editing is not supported yet.');
     const legacyUnderline = 'underline' in patch && !('underlineStyle' in patch);
     patch = { ...underlineDeclaration(patch) };
@@ -1513,8 +1672,17 @@ export class TextDocument {
     this.didChange();
     return true;
   }
-  findMatches(query, options) { return findText(this.paragraphs, query, options); }
+  findMatches(query, options) {
+    // Advanced options (special characters, wildcards, formatting) use the advanced matcher.
+    if (options?.advanced) return advancedFind(this.paragraphs, query, options, { styles: this.styles, numbering: this.numbering });
+    return findText(this.paragraphs, query, options);
+  }
   replaceMatches(query, text, options = {}, all = false) {
+    if (options.advanced) {
+      const [start, end] = this.range;
+      const matches = this.findMatches(query, options).filter(m => all || m.start === start && m.end === end);
+      return replaceAdvanced(this, matches, text, { wildcards: !!options.wildcards, format: options.replaceFormat || null });
+    }
     checkedSearchText(text);
     const [start, end] = this.range;
     const promptFields=this.hasMacroButtons?bodyFieldRanges(this.paragraphs):null;
@@ -1629,7 +1797,7 @@ export class TextDocument {
     if (checkpoint) this.checkpoint();
     const before = JSON.stringify(this.paragraphs);
     this.trackingInternal = true;
-    let caret;
+    let caret, deletionRevision = null;
     try {
       let removed = 0;
       if (start < end) {
@@ -1638,7 +1806,7 @@ export class TextDocument {
         const me = this.revisionAuthor || 'Author';
         const removals = revisionRanges(this.paragraphs).filter(r => r.type === 'ins' && r.author === me && r.start < end && r.end > start)
           .map(r => [Math.max(start, r.start), Math.min(end, r.end)]);
-        const deletion = this.newRevision('del');
+        const deletion = deletionRevision = this.newRevision('del');
         // A paragraph mark that ends a table cell (or sits before or after a table) cannot be deleted.
         const boundaries = new Set(this.paragraphs.filter((p, i) => (p.cellId || '') !== (this.paragraphs[i + 1]?.cellId || '')).map(p => p.id));
         const mark = revision => !revision ? { ...deletion } : revision.type === 'ins' && revision.author !== me ? { ...deletion, inserted: { author: revision.author, date: revision.date } } : revision;
@@ -1655,14 +1823,31 @@ export class TextDocument {
       const insertAt = end - removed;
       if (text) {
         this.selection = { anchor: insertAt, focus: insertAt };
+        // Typing that continues the author's own insertion from moments ago extends it, so one burst of
+        // typing is one change even when it crosses a clock second.
+        const me = this.revisionAuthor || 'Author', now = Date.now();
+        const continued = revisionRanges(this.paragraphs).find(r => r.type === 'ins' && !r.move && r.author === me && r.end === insertAt && now - Date.parse(r.date) < 60000);
         const length = this.text.length;
         this.replaceUntracked(text, { ...rest, checkpoint: false });
         const inserted = this.text.length - length, insertion = this.newRevision('ins');
+        // Text deleted by this author and put back elsewhere is a move (§17.13.5.21/.25).
+        const moved = this.trackMoves !== false && this.lastTrackedDeletion?.text === text && /\p{L}/u.test(text) && text.trim().length >= 3 ? this.lastTrackedDeletion : null;
+        if (moved) {
+          const name = `move${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+          const source = revisionRanges(this.paragraphs).find(r => r.type === 'del' && !r.move && r.author === moved.author && r.date === moved.date && documentText(this.paragraphs).slice(r.start, r.end) === text);
+          if (source) {
+            eachRevisionTarget(this.paragraphs, source.start, source.end, ({ paragraph, run, mark }) => { const target = mark ? paragraph : run, key = mark ? 'markRevision' : 'revision'; if (target[key]?.type === 'del') target[key] = { ...target[key], move: true, moveName: name }; });
+            Object.assign(insertion, { move: true, moveName: name });
+          }
+        }
+        if (continued && !insertion.move) insertion.date = continued.date;
         eachRevisionTarget(this.paragraphs, insertAt, insertAt + inserted, ({ paragraph, run, mark }) => {
-          if (mark) paragraph.markRevision = { ...insertion }; else run.revision = { ...insertion };
+          if (mark) paragraph.markRevision = { ...insertion }; else { run.revision = { ...insertion }; delete run.formatRevision; }
         });
+        this.lastTrackedDeletion = null;
         caret = insertAt + inserted;
       } else caret = backward ? start : insertAt;
+      if (!text && deletionRevision) this.lastTrackedDeletion = { text: documentText(this.paragraphs).slice(start, end - removed), author: deletionRevision.author, date: deletionRevision.date };
     } finally { this.trackingInternal = false; }
     if (JSON.stringify(this.paragraphs) === before) {
       if (checkpoint) this.history.pop();
@@ -1686,11 +1871,25 @@ export class TextDocument {
     this.selection = { anchor: at + 1, focus: at + 1 };
     this.didChange(); return true;
   }
-  /** Insert a footnote reference mark for note `id` at the caret (after any selection). */
-  insertFootnoteReference(id) {
+  /** Insert an Office Math object ({ xml, text }) as one object character at the caret, replacing a selection. */
+  insertMathRun(math) {
+    if (!math?.xml || typeof math.text !== 'string') throw new Error('An equation needs its Office Math XML.');
+    const [start, end] = this.range;
+    if (start !== end) { this.checkpoint(); this.replaceUntracked('', { checkpoint: false }); }
+    else this.checkpoint();
+    const at = this.range[0], location = locate(this.paragraphs, at), p = this.paragraphs[location.index];
+    const run = { text: OBJECT, math: { xml: math.xml, text: math.text }, styleId: null, directFormat: {}, hasDirectProperties: false, styleManaged: true, properties: '', overrides: {} };
+    p.runs = normalize([...sliceRuns(p.runs, 0, location.offset), run, ...sliceRuns(p.runs, location.offset)]);
+    for (const marker of [...(p.bookmarks || []), ...(p.fieldMarkers || [])]) if (marker.offset > location.offset) marker.offset++;
+    this.selection = { anchor: at + 1, focus: at + 1 };
+    this.didChange(); return true;
+  }
+  /** Insert a footnote (or endnote) reference mark for note `id` at the caret (after any selection); `custom` marks follow as text. */
+  insertFootnoteReference(id, kind = 'footnote', { custom = false } = {}) {
     this.checkpoint();
     const at = this.range[1], location = locate(this.paragraphs, at), p = this.paragraphs[location.index];
-    const run = footnoteReferenceRun(this.typingRun(at), id);
+    const run = footnoteReferenceRun(this.typingRun(at), id, kind);
+    if (custom) run.noteMark.custom = true;
     p.runs = normalize([...sliceRuns(p.runs, 0, location.offset), run, ...sliceRuns(p.runs, location.offset)]);
     for (const marker of [...(p.bookmarks || []), ...(p.fieldMarkers || [])]) if (marker.offset > location.offset || marker.offset === location.offset && marker.edge === 'end' && marker.comment) marker.offset++;
     this.hasNoteMarks = true;
@@ -1705,6 +1904,8 @@ export class TextDocument {
   /** Accept or reject the changes overlapping [start, end] (the whole document by default). */
   resolveRevisions(accept, start = 0, end = this.text.length + 1) {
     this.formatRejectSkipped = false;
+    // Resolving changes is not itself a tracked formatting change.
+    this.formatTrackingSuppressed = true;
     const targets = (start === end ? this.revisionsAt(start, end) : revisionRanges(this.paragraphs).filter(r => r.start < end && r.end > start))
       .map(r => ({ ...r, start: start === end ? r.start : Math.max(start, r.start), end: start === end ? r.end : Math.min(end, r.end) }));
     if (!targets.length) return false;
@@ -1714,14 +1915,16 @@ export class TextDocument {
     try {
       for (const r of targets.reverse()) {
         if (r.type === 'format') {
-          // Rejecting needs the recorded formatting re-applied, which is not supported yet.
-          if (!accept) { this.formatRejectSkipped = true; continue; }
+          // Rejecting re-applies the recorded former formatting; a change recorded without it is kept.
+          const resolve = (target, kind) => { if (accept) acceptFormatChange(target, kind); else if (!rejectFormatChange(target)) this.formatRejectSkipped = true; else if (kind === 'run') acceptFormatChange(target, 'run'); };
           let at = 0;
           for (const p of this.paragraphs) {
             const size = p.runs.reduce((n, run) => n + run.text.length, 0);
             if (at + size + 1 > r.start && at < r.end) {
-              if (paragraphFormatChange(p) && at >= r.start && at + size + 1 <= r.end + 1) acceptFormatChange(p, 'paragraph');
-              eachRevisionTarget(this.paragraphs, Math.max(r.start, at), Math.min(r.end, at + size), ({ run, mark }) => { if (!mark && runFormatChange(run)) acceptFormatChange(run, 'run'); });
+              let touched = false;
+              if (paragraphFormatChange(p) && at >= r.start && at + size + 1 <= r.end + 1) { resolve(p, 'paragraph'); touched = true; }
+              eachRevisionTarget(this.paragraphs, Math.max(r.start, at), Math.min(r.end, at + size), ({ run, mark }) => { if (!mark && runFormatChange(run)) { resolve(run, 'run'); touched = true; } });
+              if (touched && !accept && this.stylesEnabled) resolveStyledParagraph(p, this.styles, this.numbering);
             }
             at += size + 1;
             if (at > r.end) break;
@@ -2052,3 +2255,6 @@ export class TextDocument {
     return true;
   }
 }
+
+// Table commands outside this file (table-editing.js) share the structural helpers above.
+export const tableModelInternals = Object.freeze({ tableContent, applyTableContent, blankCellParagraph, clearMerge, setCellWidths, refreshTableStyles, reparentCellContent, removeOrphanedTables });

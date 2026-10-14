@@ -22882,3 +22882,1081 @@ browser prototype regresses two formerly exact page samples and is rejected.
 The native owned picture retains source alpha exactly; this does not establish
 the native reference's shadow preparation. ECMA-376 Part 1 §20.1.8.45 remains the relevant
 property definition, not a prescribed filter algorithm. No production change.
+
+### Layout tab: section breaks, per-section page setup, columns and page arrangement (2026-10-13)
+
+Clauses: ECMA-376 Part 1 §17.6.17–18 `sectPr`, §17.6.22 `type`, §17.6.13 `pgSz`,
+§17.6.11 `pgMar`, §17.6.3–4 `col`/`cols`, §17.6.23 `vAlign`, §17.6.19 `titlePg`,
+§17.3.3.1 `br` (`clear`), and the document settings of §17.15.1: `mirrorMargins`
+(§17.15.1.57), `gutterAtTop`, `printTwoOnOne`, `bookFoldPrinting`/`bookFoldRevPrinting`
+(§17.15.1.11–13) and `evenAndOddHeaders`.
+
+Supported subset:
+
+| Feature | Behavior |
+| --- | --- |
+| Insert section break | Next page, continuous, even page and odd page. The text before the caret ends a section whose `sectPr` copies the split section's properties (including header/footer references); the following section keeps the original `sectPr` and takes the chosen `type`. One undo step. Not allowed in tables or headers/footers. |
+| Section types on open | `nextPage`, `continuous`, `evenPage` and `oddPage` sections now open for editing. Odd/even sections start on the next page of that parity: an empty page is laid out between, numbered unless the section restarts numbering. `nextColumn` sections still open read-only. |
+| Page settings scope | Whole document, this section, this point forward (a new next-page or, for columns, continuous section starts at the caret unless it already starts one) and selected text (continuous breaks before and after). Only changed properties are applied; document-wide settings always reach every section. Each section's changes are written over its own source `sectPr`, leaving other children untouched. |
+| Page Setup dialog | Paper size and custom width/height, orientation, top/bottom/left/right (inside/outside when mirrored) margins, gutter and gutter position, multiple pages (normal, mirror margins, two pages per sheet, book fold, reverse book fold), section start, different first page and odd/even headers, header/footer distances, vertical alignment, a live preview and Set As Default (stored on this device for new documents). |
+| Mirror margins | Read, edited and written (`w:mirrorMargins` in settings). Even pages swap left and right margins; the gutter stays inside. Headers and footers follow the reading page's margins. |
+| Two pages per sheet | `w:printTwoOnOne` is read, edited and written. Display approximation: each reading page is the sheet halved across its longer side; print imposition is not performed. |
+| Columns | Presets (one, two, three, left, right), a dialog for 1–12 columns with per-column widths/spacing, equal widths and a line between; selected text gets its own continuous section. |
+| Text-wrapping break | Inserted as `w:br w:clear="all"`; the plain Shift+Enter line break is unchanged. |
+| Section marks | Show/Hide ¶ labels each break with its kind. |
+
+Gaps: header/footer option changes (first page, odd/even) are applied when chosen and
+are not part of undo; `nextColumn` breaks are not created or edited; vertical alignment
+combined with columns or continuous sections remains a read-only approximation (an
+edit that needs it is rolled back with a message); booklet and two-per-sheet printing
+show reading pages, not imposed sheets; paper source and printer settings are retained
+but not editable. Sources of evidence: `tests/section-setup.test.js`, the
+independently generated `public/fixtures/section-layout.docx`
+(`tools/section_layout_fixture.py`, which also checks browser exports) and
+`tests/browser/page-layout.spec.js`; exports validate against the transitional schemas.
+This is schema and behavioral conformance for the subset above, not layout fidelity.
+### Section line numbering and paragraph suppression (2026-10-13)
+
+Clauses: ECMA-376 Part 1 §17.6.8 `lnNumType` (section line numbering) and
+§17.3.1.34 `suppressLineNumbers` (paragraph property, `ST_OnOff`), with the
+section-property order of §17.6.17 and the `pPr` order of §17.3.1.26.
+
+Supported subset:
+
+- `lnNumType` is read per section into the `lineNumbers` page setting
+  `{ countBy, start, distance, restart }`. `countBy` 1–100, `start` 0–32766,
+  `distance` as `ST_TwipsMeasure` (absent = automatic), `restart`
+  `newPage` (default), `newSection` or `continuous`. A declaration without a
+  positive `countBy` shows no numbers and stays in the retained section XML; an
+  out-of-range declaration does the same in previews and is recorded as an issue.
+- Editing writes `w:lnNumType` after `pgBorders`/before `pgNumType` with
+  `countBy`, `restart` and only non-default `start`/`distance`; choosing None
+  removes the element. Untouched sections keep their source bytes.
+- `start` is treated as the offset stored by common desktop producers: the first
+  number after a restart is `start + 1` (the dialog's "Start at" shows that
+  number). The clause names it the starting value; this compatibility reading is
+  a declared discrepancy.
+- Body text lines of numbered sections are counted in reading order (page,
+  section region, column, then top to bottom). Every `countBy`-th count is
+  labeled. `newPage` resets on each page, `newSection` at each section start,
+  `continuous` carries the count across pages and into following continuous
+  sections; sections without numbering are skipped without resetting it.
+- Empty paragraphs count as one line. Lines in table cells (including repeated
+  header rows), framed paragraphs, headers, footers, footnotes, text boxes and
+  virtual section-boundary lines are neither labeled nor counted — the usual
+  convention for numbered drafts and a declared choice where the clause is silent.
+- Labels are right-aligned at `distance` left of the line's column (automatic:
+  0.25 in; in multi-column sections at most half the column gap, minimum
+  0.0625 in), on the line's baseline, in the "line number" character style over
+  the default paragraph style (else the document defaults). They paint on screen,
+  in print and in the rasterized PDF pages.
+- `suppressLineNumbers` is resolved through paragraph styles and direct
+  formatting (an explicit off restores numbering), exposed as a paragraph format
+  key, written in `pPr` order, and cleared by Clear direct paragraph formatting.
+
+Fixture: `public/fixtures/line-numbers.docx`, written from scratch by
+`tools/line_numbers_fixture.py` (standard library only) with two sections
+(restart per page; two columns counting by five restarting at 10), direct and
+style suppression, an explicit unsuppression and a table. Tests:
+`tests/line-numbers.test.js`, `tests/browser/line-numbers.spec.js`; exports pass
+`tools/check-docx-schema.py`.
+
+Gaps: the label style's font metrics do not affect line height; right-to-left
+sections place numbers on the left; the PDF text layer omits line numbers; bidi
+and vertical sections, `docGrid` interactions and native label placement within
+column gaps are not verified against a native reference. The HWP converter still
+writes its own margin text boxes instead of `lnNumType`.
+### Hyphenation: automatic, manual and options (2026-10-13)
+
+Clauses (ECMA-376 Part 1): §17.15.1.10 `autoHyphenation`, §17.15.1.22
+`consecutiveHyphenLimit`, §17.15.1.37 `doNotHyphenateCaps`, §17.15.1
+`hyphenationZone` (settings part), §17.3.1.34 `suppressAutoHyphens` (paragraph and
+paragraph-style properties), §17.3.3.29 `softHyphen` and §17.3.3.18 `noBreakHyphen`.
+
+Supported subset:
+- The four settings are read with the specification's defaults for omitted
+  elements (off, off, 360 twips, no limit). `hyphenationZone` accepts plain twips
+  and universal measures. Malformed values fall back to the default; the element
+  is only rewritten when that setting is changed. Changes are written in
+  CT_Settings order (after `defaultTabStop`), switched-off on/off settings are
+  removed, and a missing settings part is created with its relationship and
+  content type. Every other part, including the rest of settings.xml, is
+  unchanged; a settings-only edit leaves document.xml byte-identical. The
+  settings are document-wide, so they can change in multi-section documents
+  whose section geometry is otherwise retained.
+- `suppressAutoHyphens` is read from direct and style paragraph properties
+  (on/off values) and written as `w:val="1"`/`"0"` when set from the editor.
+- Layout (original implementation, `src/engine/hyphenation*.js`): when a line
+  overflows inside a plain word, the word is split at the last break point whose
+  first part and a hyphen fit. The hyphen is display-only: the text, carets,
+  copy and export are unchanged, and the break's caret sits before the hyphen.
+  Interpretation of the zone: the word is split only when ending the line before
+  it would leave more than the zone free at the trailing margin; a word that
+  starts the line is always eligible. The consecutive limit counts lines ending
+  in an automatic or manual (soft) hyphen within a paragraph; only automatic
+  breaks are suppressed when it is reached. Words written entirely in capitals
+  are skipped with `doNotHyphenateCaps`. Text whose `w:lang` is not English, words
+  with digits, symbols, inner punctuation (URLs, addresses), mixed case after the
+  first letter, or existing soft/explicit hyphens are never split.
+- Break points come from an original rule-based English syllabifier (vowel
+  nuclei, consonant-cluster division with maximal permissible onsets, common
+  prefixes/suffixes, silent final e, and a short hand-written exception list).
+  No third-party hyphenation patterns or dictionaries are used. Two letters must
+  precede and three follow a break.
+- Manual hyphenation proposes, word by word, the break automatic hyphenation
+  would use; an accepted break is inserted as a soft hyphen (`w:softHyphen`), one
+  undo step per hyphen. Soft and nonbreaking hyphens keep their existing
+  rendering and round trip.
+
+Independent fixture: `public/fixtures/hyphenation.docx`, written by
+`tools/hyphenation_fixture.py` from the clauses above (schema-valid). Tests:
+`tests/hyphenation.test.js`, `tests/browser/hyphenation.spec.js`.
+
+Gaps: break points are a heuristic, not a dictionary; ambiguous English
+divisions (stress-dependent single consonants) may differ from desktop word
+processors, and only English is hyphenated. Table AutoFit minimum widths ignore
+automatic break points. Line positions of hyphenated text are not claimed to match
+any other renderer. The East Asian `w:kinsoku`-style line rules and
+`w:hyphenationZone` interaction with justification compression are not
+modeled.
+## Design tab: themes, style sets, watermarks and page fill effects (2026-10-13)
+
+**Clauses.** ECMA-376 Part 1 §20.1.6 (theme part: `theme`, `themeElements`,
+`objectDefaults`, `extraClrSchemeLst`), §20.1.4.1 (`clrScheme` and its twelve
+slots, `fontScheme` with `majorFont`/`minorFont` `latin`/`ea`/`cs`, `fmtScheme`
+with `fillStyleLst`, `lnStyleLst`, `effectStyleLst`, `bgFillStyleLst`);
+WordprocessingML §17.3.2.6 (`color` with `themeColor`/`themeTint`/`themeShade`),
+§17.3.2.26 (`rFonts` `asciiTheme`/`hAnsiTheme`), §17.7.4.17 (`style`),
+§17.7.5 (`docDefaults`), §17.10.1 (`evenAndOddHeaders`), §17.10.5
+(`headerReference`), §17.10.6 (`titlePg`), §20.4.2.3 (`anchor`, `behindDoc`,
+`wrapNone`, `positionH`/`positionV` with `align`), §17.2.1 (`background`), §17.15.1
+(`displayBackgroundShape`), Part 4 VML `background`/`fill` (the representation
+§17.2.1 permits for fill effects). Text watermarks use the WordprocessingML shape
+(`wps:wsp` with `wps:txbx`) from MS-ODRAWXML, already read by the engine.
+
+**Supported subset.**
+- Themes rewrite only the theme part. A theme, color scheme, font scheme or
+  effect scheme replaces `clrScheme` (twelve `srgbClr` slots), the Latin typefaces
+  of `fontScheme` (supplemental script fonts and other font attributes are kept) or
+  `fmtScheme`; `objectDefaults`, extension lists and every other part stay byte-
+  for-byte unchanged. A document without a theme part gets `word/theme/theme1.xml`,
+  a main-document relationship and a content-type override. `.thmx` packages and
+  `.xml` theme files must have an `a:theme` root with all three schemes.
+- Theme-referenced fonts and colors are resolved when the package is read, so a
+  theme change reopens the changed package in place. Display therefore follows
+  exactly what other readers see. The `w:val` beside a `themeColor` in the styles
+  part is refreshed to the new resolved value (readers prefer the theme reference).
+- A new app document (body text in the app default font and no theme part) is
+  linked to the theme on its first theme or style-set change: `docDefaults`
+  `rFonts` becomes `minorHAnsi` and the Default style set is applied. Documents that
+  name explicit fonts keep them; only theme references follow the theme.
+- Style sets manage `pBdr`, `spacing`, `ind`, `jc` and `rFonts`, `b`, `bCs`, `i`,
+  `iCs`, `caps`, `color`, `spacing`, `sz`, `szCs` of Normal, Title, Subtitle,
+  Heading 1–3 and Quote; other properties of those styles are left alone. Missing
+  built-in styles are created with their conventional names (`heading 1`…),
+  `basedOn`/`next` Normal, `qFormat`, and for headings `keepNext`/`keepLines` and
+  `outlineLvl`. Fonts are written as theme references and colors as theme colors.
+- Watermarks are behind-text anchored drawings in the header parts that every
+  page shows: each section's default header, plus first-page headers when
+  `titlePg` is on and even-page headers with `evenAndOddHeaders`. A kind the first
+  section lacks gets a new header part (with relationship and content-type
+  override); later sections inherit missing kinds as §17.10.5 describes. The drawing
+  is centered on the margins (`positionH`/`positionV` `align="center"` relative to
+  `margin`), `wrapNone`, `behindDoc="1"`. Text uses a rotated (315°) or horizontal
+  text box with no fill or line; pictures use `pic:pic` with an optional `a:lum`
+  washout (bright 70%, contrast −70%). The drawing's `docPr` is named
+  `Document Watermark`, and its `descr` records the settings for the dialog.
+- Fill effects are written as `w:background` with a VML `background`/`fill
+  type="tile"` referencing a PNG part, and `displayBackgroundShape` is turned on.
+  Gradients, textures and patterns are rendered to that PNG (the gradient as one
+  page-sized tile at a quarter of the resolution, declared by its `pHYs` chunk);
+  pictures are stored as chosen.
+
+**Undo.** A package change records the bytes before and after it. Undo past the
+editor's own history reopens the earlier package; Redo reopens the later one.
+New edits after an undone change clear its redo. Typing history from before a
+package change is not kept across it.
+
+**Validation.** `tests/design-themes.test.js` checks theme creation, partial
+scheme changes, untouched parts, explicit-font preservation, every style set,
+saved style sets, effect schemes on theme-styled shapes, watermarks on default,
+first and even headers with replacement and removal, picture watermarks, fill
+effects and `.thmx` import, and the independently authored fixture
+`public/fixtures/design-theme.docx` (`tools/design_theme_fixture.py`, Python
+standard library only). `tests/browser/design-themes.spec.js` exports schema-valid
+documents (ECMA-376 transitional XSD and the supported MS-ODRAWXML schemas, via
+`tools/check-docx-schema.py`).
+
+**Gaps.** Gradient, texture and pattern fills are stored as pictures, not as VML
+gradient or pattern fills, and a picture fill tiles at its own resolution (no
+stretched single-picture mode). Semitransparent text watermarks use a color blended
+halfway to white rather than an alpha channel. Watermarks written by other
+producers as VML text paths are not recognized or removed. Hover previews of themes
+and style sets are not shown; choices apply on click and undo in one step. Colors
+outside theme references (direct RGB text colors, app table designs, inserted
+shapes with explicit colors) do not follow the theme. Theme `clrScheme` slots
+are written as `srgbClr` only; imported `sysClr` slots are replaced when colors change.
+### Table tools: structure, table styles and formulas (2026-10-13)
+
+Scope: Insert → Table (size grid, Insert Table, Draw Table, Convert Text to Table,
+Quick Tables), the Table Design and Table Layout tabs, the Table menu, table
+context-menu items and pointer tools. Engine code: `table-editing.js`,
+`table-selection.js`, `table-styles.js`, `docx-table-styles.js`,
+`table-formula.js`, `quick-tables.js`; serialization stays in `docx-tables.js`
+and `docx.js` (styles part). Regressions: `tests/table-editing.test.js`,
+`tests/table-styles.test.js`, `tests/table-formula.test.js`,
+`tests/table-tools-fixture.test.js`, `tests/table-export-fixture.test.js`,
+`tests/browser/table-tools.spec.js`, `tests/browser/table-pointer.spec.js`,
+`tests/browser/table-designs.spec.js`.
+
+**ECMA-376 Part 1 §17.4 (tables).** Structural commands edit `w:tbl`/`w:tr`/`w:tc`
+and rewrite only changed declarations; untouched rows and cells keep their source
+shells. Supported authoring subset:
+
+- Grid and spans: `w:tblGrid`/`w:gridCol` (§17.4.48/§17.4.16) are rewritten
+  after insert/delete/split of columns, cell splits and Draw Table lines;
+  `w:gridSpan` (§17.4.17) and `w:vMerge` restart/continue (§17.4.84) for
+  rectangular merges, splits into rows × columns, split table and Draw/Eraser.
+  Merging keeps each non-empty cell's paragraphs in reading order.
+- Rows that end early: Delete Cells → Shift cells left and Insert Cells → Shift
+  cells right write `w:gridAfter` (§17.4.14) with an automatic `w:wAfter`
+  (§17.4.85–86); shifting up/down moves cell content within unmerged columns.
+  Every structural edit is checked against the merge invariants afterwards and
+  refused (undo-safe) when a vertical merge would no longer line up.
+- Table properties: `w:tblW`, `w:jc`, `w:tblInd`, `w:tblLayout` (existing
+  subset), plus `w:tblCellMar` default margins (§17.4.42), `w:tblCaption` and
+  `w:tblDescription` alternative text (Transitional `CT_TblPr` children), and Text wrapping: creating/removing `w:tblpPr` (§17.4.57) with
+  text-relative anchors and 180-twip left/right distances (Around), or removing
+  it (None). Positioning rewrites `w:tblpPr` whole: `w:tblpX`/`w:tblpXSpec`,
+  `w:tblpY`/`w:tblpYSpec`, `w:horzAnchor`/`w:vertAnchor` (margin, page, text)
+  and the four `*FromText` distances, plus `w:tblOverlap` (§17.4.56).
+- Rows: `w:trHeight` atLeast/exact (§17.4.80) from the Height spinner, row-border
+  dragging (at least) and Distribute Rows; `w:cantSplit` (§17.4.6, Allow row
+  to break) and `w:tblHeader` (§17.4.49, Repeat Header Rows).
+- Cells: `w:tcW` preferred widths (§17.4.71, auto/dxa/pct), `w:tcBorders`
+  (§17.4.66) from the Borders drop-down presets, the Border Painter and the
+  pen (style, `w:sz` in eighth-points, color), `w:shd` (§17.4.32) from Shading,
+  `w:vAlign` (§17.4.83) with paragraph `w:jc` from the 3 × 3 alignment grid,
+  `w:noWrap` (§17.4.29, written explicitly as on or `w:val="0"`), and
+  `w:textDirection` (§17.4.72) `lrTb`/`tbRl`/`btLr`, written only
+  when not horizontal.
+- Column resizing (border drags, Width spinner, Distribute Columns, Fixed
+  Column Width, the resize handle) writes a fixed `w:tblLayout` with matching
+  grid and `w:tcW` values; AutoFit Contents/Window writes `w:tblLayout`
+  autofit, `w:tblW` auto or 5000 pct, and automatic cell widths.
+
+Diagonal cell borders (`w:tl2br`/`w:tr2bl` in `w:tcBorders`, §17.4.66) are now
+imported, painted corner to corner inside each laid-out cell (screen and print),
+and written by Diagonal Down/Up; they take no part in edge conflict resolution.
+
+Not implemented: nonzero `w:tblCellSpacing`, `w:bidiVisual`, row/cell revision marks,
+`w:hidden` rows, `w:tcFitText`, converting tables that contain nested tables to
+text, and moving floating tables.
+
+**ECMA-376 Part 1 §17.7.6 (table styles) and §17.4.55 (`w:tblLook`).** The
+library styles and New/Modify Table Style write a `w:style w:type="table"`
+(customStyle) whose formatting is regenerated from its description:
+`w:pPr` (spacing after 0, single line), optional whole-table `w:rPr`,
+`w:tblPr` with `w:tblStyleRowBandSize`/`w:tblStyleColBandSize` of 1 (§17.7.6.7,
+§17.7.6.5), `w:tblBorders`, `w:tblCellMar` (0/108/0/108 twips), optional
+whole-table `w:tcPr/w:shd`, and `w:tblStylePr` (§17.7.6.6) for `firstRow`,
+`lastRow`, `firstCol`, `lastCol`, `band1Horz` and `band1Vert` with `w:rPr`
+(bold, italic, color) and `w:tcPr` (`w:tcBorders`, `w:shd`). Applying a style
+writes `w:tblStyle`, removes the table's direct `w:tblBorders` and, unless
+"keep formatting" is chosen (Alt+click), removes direct cell borders and
+shading. Clear removes `w:tblStyle`. Table Style Options write `w:tblLook`
+with both the explicit attributes and the equivalent hexadecimal `w:val`, so
+readers that use either agree; Header Row/Total Row/First Column/Last Column map
+to `firstRow`/`lastRow`/`firstColumn`/`lastColumn` and Banded Rows/Columns to the
+inverse of `noHBand`/`noVBand`. Rows with their own `w:tblPrEx/w:tblLook` (§17.4.60) follow
+the table's new choice: the row exception is removed from the saved row, and an
+emptied `w:tblPrEx` is dropped.
+
+Imported table styles remain readable and keep their regions; Modify is not
+offered for them (it would rewrite rules outside the authored subset). New Table
+Style can start from an approximation of an imported style's resolved look. Style region subsets beyond the six authored regions
+(`band2*`, corner cells) are read on import but not authored.
+
+**ECMA-376 Part 1 §17.16 (fields): the `=` formula field (formula syntax §17.16.3, numeric pictures §17.16.4.2).**
+Formula inserts a field whose instruction is `= <formula> [\# "<picture>"]` and
+whose cached result is computed at insertion; Update Fields (F9) recomputes it
+with the SEQ/REF refresh. Supported: numbers, `+ - * / ^ %`, comparisons
+(`= < > <= >= <>`), parentheses, cell references (`A1`, `R1C1`, ranges `A1:C3`,
+by grid column and row), bookmark names holding a number, the directions `ABOVE`/`BELOW`/`LEFT`/`RIGHT` (the run of numeric
+cells next to the field's cell, stopping at the first cell without a leading
+number), and `SUM`, `AVERAGE`, `COUNT`, `MAX`, `MIN`, `PRODUCT`, `ABS`, `INT`,
+`MOD`, `ROUND`, `SIGN`, `IF`, `AND`, `OR`, `NOT`, `DEFINED`, `TRUE`, `FALSE`.
+Numeric pictures support `0`, `#`, `,` grouping, `.` decimals, literal text and
+`positive;negative;zero` sections; without a picture, results round to two
+decimals. Errors produce `!Syntax Error`, `!Zero Divide` or `!Undefined Bookmark` as the
+cached result.
+Imported `=` fields are now recognized (previously an unsupported instruction)
+and keep their instruction and envelope. Not implemented: `\*` general formats on formula results, and list separators
+other than comma/semicolon.
+
+**Validation.** `test-results/table-features.docx` (generated by
+`tests/table-export-fixture.test.js`, covering every authored property above)
+and the handwritten `tests/fixtures/table-tools/table-tools.docx`
+(`tools/table_tools_fixture.py`, stdlib only) pass the ECMA-376 Transitional XSD
+check for `document.xml` and `styles.xml`. Browser exports from
+`table-designs.spec.js` are validated the same way. Schema validity is not a
+claim of layout fidelity with other word processors.
+## Review: protection, permissions, formatting revisions, moves, proofing languages and comparison (2026-10-13)
+
+Clauses: ECMA-376 Part 1 §17.15.1.29 `documentProtection` (`edit`, `formatting`, `enforcement` and
+the password verifier attributes `algorithmName`, `hashValue`, `saltValue`, `spinCount`; the
+transitional `cryptAlgorithmSid`, `cryptSpinCount`, `hash` and `salt` are read for verification),
+§17.15.1 `writeProtection` (`recommended`), `hideSpellingErrors` (§17.15.1.52),
+`hideGrammaticalErrors`, `revisionView`, `doNotTrackMoves`, `doNotTrackFormatting`; §17.13.7 range
+permissions (`permStart` with `ed`/`edGrp`, `permEnd`); §17.13.5.29 `pPrChange`, §17.13.5.30
+`rPrChange`; §17.13.5.21/.25 `moveFrom`/`moveTo` and §17.13.5.22–.27 move range markers;
+§17.3.2.20 `lang`, §17.3.2.21 `noProof`; §17.7.5.1 `docDefaults` (`rPrDefault/rPr/lang`) and the
+style `locked` element (§17.7.4).
+
+Supported subset:
+
+- Documents with `documentProtection` now open for editing instead of read-only. Enforced
+  protection is applied by an editing guard on every transaction (typing, commands, undo and redo):
+  `readOnly` and `comments` allow changes only inside permission ranges that name everyone or the
+  current user (by name or e-mail, case-insensitive), `comments` also allows comments,
+  `trackedChanges` requires every text change to be a tracked revision (the text with insertions
+  removed and deletions kept must not change) and refuses accepting or rejecting, `forms` allows
+  edits only inside content controls and permission ranges. `formatting` refuses new direct
+  formatting, style edits and applying a `locked` style. Page setup and table structure are
+  protected under every restriction. Headers, footers and notes stay protected under `readOnly`,
+  `comments` and `forms`.
+- Start/Stop protection writes `documentProtection` with `enforcement` 1/0, keeping the chosen
+  restriction when stopped. A password writes `algorithmName="SHA-512"`, a 16-byte random
+  `saltValue` and `spinCount="100000"`. The hash input is the legacy-compatible 32-bit key derived
+  from the password (the specification's high-order/low-order word construction, at most 15
+  characters, each UTF-16 unit's low byte or else its high byte), written as eight hexadecimal
+  digits of its little-endian bytes and encoded as UTF-16LE; then H0 = H(salt ‖ input) and
+  H(n+1) = H(Hn ‖ n as a 32-bit little-endian integer). Verification accepts this and the
+  direct-password form, and SHA-1/256/384/512. The SHA implementations are original
+  (FIPS 180-4, constants derived at load) and checked against Node's crypto.
+- `permStart`/`permEnd` inside paragraphs and between blocks are read as zero-width markers that
+  move with edits (text typed at either edge of a range joins it); a range opening between blocks
+  starts at the next paragraph. Unchanged paragraphs keep their source XML; a paragraph that adopted
+  block-level comment or permission markers is rewritten so the markers are not lost. Range
+  permissions between table rows/cells (`colFirst`/`colLast`) still open read-only.
+- With Track Changes on, run and paragraph formatting changes record the formatting they replaced
+  (`rPrChange`/`pPrChange`, the former properties written with the same writer as current ones);
+  changing them back by hand drops the record; editing style definitions is not tracked.
+  Imported changes keep their former properties for rejection, so Reject restores formatting for
+  imported and new changes (formatting changes on the paragraph mark alone are still kept when
+  rejected).
+- Text cut and pasted while tracking becomes a move: `moveFrom`/`moveTo` wrappers with
+  `moveFromRangeStart/End` and `moveToRangeStart/End` named pairs per paragraph. Imported moves keep
+  their range names. Moves display in green with double strikethrough/underline and accept or reject
+  as deletions/insertions.
+- `revisionView` `insDel`/`formatting` are written from Show Markup; `doNotTrackMoves` and
+  `doNotTrackFormatting` from Tracking Options and honored while editing. `hideSpellingErrors` and
+  `hideGrammaticalErrors` are written from the Spelling menu. `writeProtection recommended="1"` is
+  written by Always Open Read-Only and offers a read-only session on opening (not saved).
+- Language marks selected runs with `lang` and `noProof`; Set As Default writes the docDefaults
+  `lang`. Spelling skips runs whose language is not English and, with detection on, words in
+  non-Latin scripts.
+- Compare/Combine produce a new package from the base document (revised for Compare, original for
+  Combine) with `ins`/`del` and `rPrChange`/`pPrChange` revisions authored by the chosen label.
+
+Validation: `tests/document-protection.test.js`, `tests/tracked-formatting.test.js`,
+`tests/compare-documents.test.js`, `tests/review-fixtures.test.js` (fixtures written by
+`tools/review_fixture.py`, independently of the editor, including a protection hash computed with
+Python's hashlib) and `tests/browser/review-tools.spec.js`, whose exports pass
+`tools/check-docx-schema.py` (ECMA-376 transitional XSD).
+
+Gaps: interoperability of the password verifier with desktop applications was not checked against
+one (the algorithm follows the specification text; a file whose verifier this editor cannot
+reproduce simply cannot be unprotected here); table row/cell revisions (`trPrChange`, `cellIns`,
+etc.) and revisions in headers, footers and drawing text still open read-only; moves are detected
+only for cut-and-paste of the same text by the same author; section property changes are not
+tracked; Compare ignores headers, footers, notes and text boxes, flattens tables removed from the
+original into deleted paragraphs, does not detect moves, and copies text but not pictures or
+fields from the other document; locked styles are written for formatting restrictions but the style
+gallery is not filtered; `forms` protection treats content controls as the editable fields
+(legacy form fields are not supported). A schema pass is not full OOXML conformance.
+## Document properties, proofing language and the view-only lock (2026-10-13)
+
+**Core properties (ECMA-376 Part 2 §11, OPC core properties; §9.3 package relationships).**
+File > Info reads `dc:title`, `dc:subject`, `dc:creator`, `cp:keywords`, `dc:description`,
+`cp:category`, `cp:contentStatus`, `cp:lastModifiedBy`, `cp:revision`, `dcterms:created` and
+`dcterms:modified` from the part named by the package relationship of type
+`…/package/2006/relationships/metadata/core-properties` (usually `docProps/core.xml`). A missing or
+unreadable part reads as empty properties and never fails the document.
+
+Supported subset and behaviour:
+- Editing a property writes only the changed elements; every other element, attribute and namespace
+  declaration of the part is kept. An emptied property removes its element. Values are stripped of
+  XML-invalid control characters and capped at 4,096 characters.
+- With any property edited, `dcterms:modified` is stamped (W3CDTF to the second, with
+  `xsi:type="dcterms:W3CDTF"` per §11.1) and `cp:lastModifiedBy` is set to the signed-in user when
+  known. A package without a core part gets one (`docProps/core.xml`), with its relationship in
+  `_rels/.rels` and an Override content type `application/vnd.openxmlformats-package.core-properties+xml`;
+  `dcterms:created` and `dc:creator` are then filled too.
+- Content edits alone do **not** touch the core part, so unedited and undone documents keep it byte
+  for byte. Consequently `dcterms:modified` and `cp:revision` are not advanced by ordinary saves (a
+  deliberate deviation from desktop word processors, which stamp every save). The extended
+  properties part (`docProps/app.xml`: page/word counts, company) is preserved unchanged and is not
+  recomputed.
+- Property edits are document metadata, not text edits: they are not undo steps.
+
+Tests: `tests/core-properties.test.js` with the independently written fixture
+`tests/fixtures/core-properties/properties.docx` (`tools/core_properties_fixture.py`), and the browser
+round trip in `tests/browser/app-chrome.spec.js`.
+
+**Proofing language (§17.3.2.20 `w:lang`, §17.3.2.23 `w:noProof`).** The status bar's language
+picker applies `w:lang/@w:val` (a BCP 47 tag) and optionally `w:noProof` to the selection through the
+engine's run formatting, so it is one undo step and round-trips. East Asian and complex-script
+language attributes (`w:eastAsia`, `w:bidi`) are preserved but not offered in the picker. The spelling
+checker itself checks English; other languages are marked for other editors.
+
+**Viewing (no OOXML representation).** The Editing / Reviewing / Viewing switch is an editor state.
+Reviewing toggles `w:trackRevisions` (§17.15.1.90) through the existing Track Changes command.
+Viewing blocks every edit path in the editor (`CanvasEditor.setViewOnly`) without changing the
+package, layout or read-only status; it is not written to the file (it is not `w:documentProtection`).
+
+**Exports.** Web page, Markdown and plain-text exports are readable approximations of the body
+(headings, paragraphs, lists, tables, links, bold/italic/underline/strike/super/subscript); headers,
+footers, notes, comments, pictures and page layout are omitted. They are not OOXML output.
+### Mailings: envelopes, labels and mail merge (2026-10-13)
+
+The Mailings tab stores mail merge as WordprocessingML that other word
+processors read, and keeps its recipient list inside the document.
+
+- **Merge fields** (Part 1 §17.16.5): MERGEFIELD (.35), ADDRESSBLOCK (.1),
+  GREETINGLINE (.24) and the rules ASK (.3), FILLIN (.19), IF (.26), MERGEREC
+  (.36), MERGESEQ (.37), NEXT (.38), NEXTIF (.39), SET (.57) and SKIPIF (.58)
+  are inserted as complex fields (§17.16.18 `fldChar`, §17.16.23 `instrText`)
+  whose cached result is the field's display text («City», «AddressBlock»,
+  «Next Record») or, while previewing, the current recipient's values. Rule
+  operands are nested MERGEFIELDs inside the outer instruction; the body reader
+  now accepts fields nested in an instruction and keeps them verbatim in the
+  outer envelope, so such documents stay editable and round-trip.
+- **Evaluation subset** (merge-fields.js): general switches `\*` Upper, Lower,
+  FirstCap, Caps, Ordinal and Arabic/roman/alphabetic (§17.16.4.3), `\#` numeric
+  pictures with digits, grouping, decimals, literal text and sections, and `\@`
+  date pictures with the common day/month/year/hour/minute/AM-PM tokens; MERGEFIELD
+  `\b`/`\f`; ADDRESSBLOCK `\f` group format, `\c`, `\e`; GREETINGLINE `\f`
+  with `_BEFORE_`/`_AFTER_` text and `\e`. IF/NEXTIF/SKIPIF compare numbers
+  numerically, text exactly, and `=`/`<>` with `*`/`?` wildcards. ADDRESSBLOCK
+  `\d` (country-specific layouts), `\l`, MERGEFIELD `\m`/`\v`, `\@` era/locale
+  tokens and IF formula operands are retained but not evaluated.
+- **Settings** (§17.14, CT_MailMerge in Part 4 wml.xsd): `w:mailMerge` carries
+  `mainDocumentType` (formLetters, email, envelopes, mailingLabels, catalog),
+  `dataType` (written as `native` for new main documents), `addressFieldName`,
+  `mailSubject`, `viewMergedData` and `activeRecord`, in schema order. Existing
+  `linkToQuery`, `connectString`, `query`, `dataSource`, `odso` and other
+  children are preserved unchanged when the type or preview state changes; the
+  settings part's relationships are untouched. Choosing Normal Document removes
+  the element. External data sources are never opened.
+- **Embedded recipient list**: a custom XML data storage part (Part 1 §15.2,
+  relationship `…/customXml` from the main document, with a `customXmlProps`
+  properties part and `ds:datastoreItem`) in namespace
+  `urn:puter-documents:mail-merge:1` holds columns, records (with
+  included/excluded flags), sort keys, filters, field matching and email
+  options. It is an application-defined part: other consumers keep it but do
+  not use it, and they will report the merge's data source as unavailable.
+- **Merged output**: Edit Individual Documents copies the saved body once per
+  output document, replaces every merge field (and its nested fields) with
+  plain result runs (line breaks as `w:br`), separates copies with next-page
+  section breaks cloned from the final `w:sectPr` (a directory runs copies
+  together), removes later copies' bookmarks and comment anchors, renumbers
+  `wp:docPr` ids, and drops `w:mailMerge` and the recipient part.
+- **Envelopes and labels**: an envelope is its own section with a page size
+  of the envelope (§17.6.13 `pgSz`, landscape `orient`), placed first, or the
+  whole page setup of an empty document. Label sheets are fixed-layout tables
+  (`tblLayout` fixed) with exact row heights (§17.4.80 `trHeight`), spacer
+  columns/rows for gaps, nil table borders and page margins from the sheet
+  measurements.
+
+Evidence: tests/merge-fields.test.js, tests/mail-merge-docx.test.js,
+tests/recipient-files.test.js and tests/browser/mail-merge.spec.js, with
+fixtures generated by tools/mail_merge_fixture.py (letter and label main
+documents written by hand from the specification, a workbook and a CSV). Merged
+documents, label sheets, envelopes and edited main documents pass
+tools/check-docx-schema.py; a schema pass is not merge-fidelity evidence.
+Gaps: fields in headers, footers and text boxes are not merged; per-record ASK
+prompts, country-aware address layouts, external data sources and fax output
+are not implemented.
+## References tab: notes, fields, citations and generated tables (2026-10-13)
+
+Commands on the References tab, the Insert menu (Bookmark, Cross-reference,
+Footnote, Caption, Index and Tables) and the document menu. Evidence:
+[endnotes.test.js](../tests/endnotes.test.js),
+[toc-options.test.js](../tests/toc-options.test.js),
+[citation-styles.test.js](../tests/citation-styles.test.js),
+[bibliography-fields.test.js](../tests/bibliography-fields.test.js),
+[index-authorities.test.js](../tests/index-authorities.test.js),
+[references-fixture.test.js](../tests/references-fixture.test.js) over the
+hand-written [references fixture](../tests/fixtures/references/references.docx)
+(from [references_fixture.py](../tools/references_fixture.py)) and
+[references.spec.js](../tests/browser/references.spec.js). Browser exports and
+the refreshed fixture pass `check-docx-schema.py`, which now also validates
+bibliography custom XML items against `shared-bibliography.xsd` and item
+properties against `shared-customXmlDataProperties.xsd`.
+
+### Footnotes and endnotes (Part 1 §17.11)
+
+| Clause | Supported subset |
+| --- | --- |
+| §17.11.4 `endnote`, §17.11.6 `endnotePr`, §17.11.7 `endnoteRef`, §17.11.8 `endnoteReference`, §17.11.15 `endnotes` | Body endnote references import as atomic note marks; referenced normal endnotes are editable stories; new documents get an endnotes part with separator and continuation separator notes and its relationship and content type. Unreferenced endnotes are pruned on save as footnotes are. |
+| §17.11.14 `@customMarkFollows` | Custom-marked footnote and endnote references import, edit and save; they show no number and take none, the following run holds the mark. |
+| §17.11.17 `numFmt` | decimal, lower/upper letter, lower/upper Roman and `chicago` (\*, †, ‡, §, doubled after four) for both kinds. Other formats keep the read-only decimal approximation. |
+| §17.11.19 `numRestart` | `continuous`, `eachSect` and (footnotes) `eachPage`. Page restarts renumber after the notes' pages are known and lay out once more. |
+| §17.11.20 `numStart` | Digits only, for both kinds. |
+| §17.11.21 `pos` | Footnotes: `pageBottom` and `beneathText` (the area starts after the page's last body line). Endnotes: `docEnd`; `sectEnd` is stored and saved but endnotes are still shown after the last section. |
+| §17.11.11/§17.11.12 settings | The Footnote and Endnote dialog writes `pos`, `numFmt`, `numStart` and `numRestart` in CT_FtnDocProps/CT_EdnDocProps order, referencing the part's separator notes when the element is new. Section-level `footnotePr`/`endnotePr` are not written ("whole document" only). |
+
+Endnotes lay out after the last body line, behind a short separator, and
+continue on added pages; each note stays whole on one page and authored
+separator or continuation-notice content is not drawn. Convert swaps reference
+kinds and moves note text to the other part (the reference keeps its place).
+Note setting changes apply immediately and are saved, but are not part of undo.
+
+### Fields (Part 1 §17.16)
+
+| Field | Clause | Supported subset |
+| --- | --- | --- |
+| `TOC` | §17.16.5.68 | Generated from `\o` ranges and `\u` outline levels, `\t` style-to-level lists, `\c`/`\a` caption sequences (tables of figures) and `\f`/`\l` TC entries, scoped by `\b`. `\h` links entries, `\n` omits page numbers (all or a level range), `\p` replaces the tab, `\z` is kept. Unknown switches are retained on rebuild. Leaders and right alignment are paragraph tab stops (§17.3.1.37). Only whole-paragraph results rebuild; others refresh page numbers only. |
+| `TC` | §17.16.5.63 | Hidden entry (no separator, no result); text, `\f`, `\l`, `\n` are read for tables of contents. |
+| `PAGEREF` | §17.16.5.45 | As before; Update Table can scope the refresh to one table's references. |
+| `SEQ` | §17.16.5.56 | Captions write `\* ARABIC|alphabetic|ALPHABETIC|roman|ROMAN`; labels with spaces use underscores in the identifier. Chapter numbers (`\s`) are not evaluated. |
+| `REF` | §17.16.5.51 | Cross-references to headings, bookmarks, whole captions, label and number, or caption text, optionally followed by a `\p` above/below reference. |
+| `NOTEREF` | §17.16.5.40 | New: evaluates the note number of the note reference inside its bookmark (`\h`, `\f`, `\p`). The formatted variant is inserted as superscript text. |
+| `CITATION` | §17.16.5.8 | Inline result generated from the bibliography part: tag, `\m` extra sources, `\p` pages, `\f` prefix, `\s` suffix, `\v` volume, `\n`/`\y`/`\t` suppression, `\l` kept. Style change refreshes every citation. |
+| `BIBLIOGRAPHY` | §17.16.5.7 | Block result listing the document's sources (placeholders omitted) in the chosen style, with a hanging indent; `\l` kept. Other switches are not evaluated. |
+| `XE` | §17.16.5.72 | Mark Entry writes main/sub/third levels (escaped colons), `\t` cross-references, `\r` page-range bookmarks, `\b`, `\i`, `\f`; new entries are written without a separator. |
+| `INDEX` | §17.16.5.29 | Generated with collation, three levels, indented or `\r` run-in, `\h` letter headings, `\e` (tab with right-aligned leader), `\l`, `\g`, `\k`, `\f`, `\b`, `\p`, `\z`; `\c` columns is stored but shown in one column (no section columns are created). |
+| `TA` | §17.16.5.62 | Mark Citation writes `\l`, `\s`, `\c` on the first mark and `\s` on later ones, `\b`, `\i`. |
+| `TOA` | §17.16.5.67 | One category per field with `\h` heading, `\p` passim (five or more pages), `\f`, `\e`, `\l`; "All" inserts one field per category in use. |
+
+Entry fields (XE, TA, TC) are hidden text: while formatting marks are shown,
+their codes are painted above the line without changing layout (an approximation
+of hidden-text display, which would reflow the line). Generated results are
+written untracked and as one undo step. Index and table-of-authorities page
+numbers come from the current layout and settle over up to four passes.
+
+### Bibliography sources (Part 1 §22.6, §22.5)
+
+Sources live in a custom XML item (`b:Sources`) found through the main
+document's `customXml` relationship; a new item gets `itemProps` (§22.5.2.1)
+with a schema reference to the bibliography namespace. `SelectedStyle` and
+`StyleName` record this editor's style identifier and name (no style sheet is
+referenced). Source types are all of ST_SourceType; the dialog edits the name
+roles and text fields listed in `bibliography.js`. Sources not edited are written
+back byte-for-byte; an edited source keeps elements this editor does not edit.
+DOI is entered as a URL (the schema has no DOI element). The master list is the
+account's own (device storage and Puter KV), not part of the document.
+
+Citation styles are original formatters of the public APA 7, MLA 9, Chicago
+author-date, IEEE and Harvard rules for the common source types; style manuals'
+long tail (translators in every style, series, multiple editions, legal
+citation forms beyond the basic case entry, non-English conventions) is not
+covered. A schema pass is not a check of citation correctness.
+## Insert tab (2026-10-13)
+
+The Insert tab writes ordinary WordprocessingML and DrawingML that this editor reads back through the
+same readers it uses for opened documents. Each feature is covered by unit round trips
+(`tests/cover-pages.test.js`, `field-results`, `header-footer-designs`, `text-designs`,
+`picture-insert`, `diagram-builder`, `chart-builder`, `insert-chart`, `insert-math`, `math-linear`,
+`drop-caps`, `preset-geometries-more`, `icon-library`), by the independently written fixture
+`tests/fixtures/insert-features/insert-features.docx` (generator and provenance beside it; it opens
+editable and exports byte-identical when unchanged) and by `tests/browser/insert-tab.spec.js`, whose
+browser exports (`test-results/insert-exports/*.docx`) pass `tools/check-docx-schema.py` against the
+ECMA-376 transitional schemas and the supported MS-ODRAWXML extension schemas. A schema pass is not a
+claim of full OOXML conformance or of layout fidelity with other consumers.
+
+### Pages
+
+- **Cover pages**: Normal-style paragraphs with direct formatting (§17.3.1 paragraph properties,
+  §17.3.2 run properties, `w:pBdr` §17.3.1.24, `w:shd` §17.3.1.31) ended by a page break
+  (`w:br w:type="page"`, §17.3.3.1). The cover is marked with the hidden bookmark `_CoverPage`
+  (§17.13.6.2; names starting with an underscore are hidden), so it can be replaced or removed after
+  reopening. Removal deletes the cover's whole paragraphs; a cover containing tables, sections,
+  fields or other bookmarks falls back to deleting its text range.
+- **Blank Page / Page Break**: page breaks as above.
+
+### Drawings inserted by the editor (§20.4 WordprocessingML drawing, §20.1 DrawingML)
+
+- New drawings are built as a `w:drawing` with `wp:inline` or `wp:anchor` (§20.4.2.8, §20.4.2.3),
+  read through the package reader in a minimal package, and inserted as retained drawings. Parts a
+  drawing references (media, chart parts) travel with its asset and are written with their
+  relationships and content-type overrides only while the drawing is in the story, so undoing an
+  insertion leaves no orphan parts. Insertions in the body only, except pictures.
+- **Pictures**: PNG/JPEG/TIFF as before; GIF, WebP and BMP are stored as PNG; SVG files and icons are
+  written as a PNG `a:blip` with an `asvg:svgBlip` companion (MS-ODRAWXML §2.3.7, extension URI
+  `{96DAC541-7B7A-43D3-8B79-37D633B846F1}`) and `a:picLocks noChangeAspect`. Screenshots use
+  `getDisplayMedia` and are inserted as PNG.
+- **Shapes** (`wps:wsp`, `a:prstGeom` §20.1.9.18 with ST_ShapeType §20.1.10.56): 133 presets in eight
+  categories. 121 presets were added to the geometry reader (`preset-geometries-more.js`) from the
+  standard's preset definitions: rectangles with snipped/rounded corners, basic shapes, block arrows,
+  equation shapes, all flowchart shapes, stars, seals, ribbons, waves, scrolls and callouts. Arcs are
+  approximated by cubic Béziers of at most 45°. Shaded faces (`lighten`, `lightenLess`, `darken`)
+  paint as plain fills; only `darkenLess` is honoured. Inserted at the caret (keyboard) or drawn by
+  click/drag on the page, anchored `relativeFrom="page"` to the paragraph under the pointer.
+  Adjustments (`a:avLst`) are read but not editable from the ribbon.
+- **Text boxes, WordArt and signature lines**: `wps:wsp` with `wps:txbx` / `w:txbxContent` and
+  `wps:bodyPr` (§20.1.2.1.1). Drawing text cannot carry paragraph borders, shading, tab stops or
+  underlines in this engine, so designs avoid them. WordArt is a no-fill, no-line text box whose runs
+  carry the w14 extensions `textOutline`, `textFill` and `shadow` (MS-DOCX §2.6), declared ignorable
+  with `mc:Ignorable="w14"` on the drawing (ECMA-376 Part 3 §10.2.1); warped text (`a:prstTxWarp`
+  other than `textNoShape`) is not produced. The signature line is a text box (an X over a rule of
+  low lines, signer, title, date line) with the instructions as alternative text; it is not a
+  digital-signature object.
+- **Diagrams**: an original approach rather than a diagram-definition (`dgm`) part. Eleven layouts
+  (list, process, timeline, cycle, hierarchy, Venn, radial, matrix, pyramid) are generated as one
+  `wpg:wgp` group (§20.4) of preset shapes with shape text, alpha fills (`a:alpha` §20.1.2.3.1) for
+  Venn circles and rotated arrows (`a:xfrm rot`). The outline that generated the diagram is stored as
+  the drawing's alternative text (`wp:docPr descr`, §20.4.2.5) in the form
+  `Diagram: <layout> (<colors>)` followed by the indented outline; Edit Diagram reads it back and
+  replaces the group in one undo step. Diagrams edited in another application keep their XML but
+  regenerate from their description when edited here.
+- **Charts** (§21.2 DrawingML charts): `c:chartSpace` parts with literal data (`c:strLit`,
+  `c:numLit`), explicit text properties and no external workbook. Column and bar
+  (`c:barChart`, `c:barDir` `col`/`bar`; clustered, stacked, percentStacked), line with or without
+  circle markers (`c:lineChart`, `c:marker`), area (standard, stacked), pie (`c:pieChart`), doughnut
+  (`c:doughnutChart`) and scatter (`c:scatterChart`, `c:crossBetween val="midCat"`) are written,
+  read and painted. Charts are inline and in the body only. Data labels, axis titles, secondary axes,
+  combined plots and non-Latin labels are not supported (the reader keeps such charts read-only);
+  without an embedded workbook other applications show the chart but cannot edit its data.
+
+### Header, footer and page numbers (§17.10)
+
+- Gallery designs are written into the section's header or footer story (created when missing) as
+  paragraphs with direct formatting, center/right tab stops (`w:tabs`, §17.3.1.37) and PAGE /
+  NUMPAGES fields (§17.16.5.44, §17.16.5.42) as page-field runs. Page Number → Top/Bottom appends a
+  paragraph; Current Position inserts field runs in a story or body fields in the body.
+- **Format Page Numbers** writes `w:pgNumType` (§17.6.12) `w:fmt` (decimal, decimalZero, upper/lower
+  letter and roman) and `w:start`, preserving other attributes. Chapter numbers (`w:chapStyle`,
+  `w:chapSep`) are not written and remain unsupported in layout. The setting is applied to the
+  section with the caret and is not part of undo history.
+- Remove Page Numbers deletes paragraphs holding a PAGE field from the current section's existing
+  header and footer stories.
+
+### Fields (§17.16)
+
+- Insert → Field, Date & Time and Document Property insert body fields (`w:fldSimple` /
+  complex fields on save) with their current result cached: DATE, TIME, CREATEDATE, SAVEDATE
+  (§17.16.5.13, .67, .11, .55) with the date-time picture switch `\@` (§17.16.4.1: M, d, y, h, H, m,
+  s, AM/PM, quoted literals), AUTHOR, TITLE, SUBJECT, KEYWORDS, COMMENTS, LASTSAVEDBY, FILENAME
+  (`\p`), DOCPROPERTY (core and extended properties), NUMPAGES, NUMWORDS, NUMCHARS, PAGE, SEQ, REF,
+  USERNAME, USERINITIALS, with the general formatting switch `\*` (§17.16.4.3: Upper, Lower,
+  FirstCap, Caps, roman, ROMAN, alphabetic, ALPHABETIC, Ordinal, CardText, OrdText, Hex,
+  MERGEFORMAT). Update Fields (F9) recomputes these from the open document's properties; without a
+  document context only DATE and TIME refresh, so cached document information is never blanked.
+  The numeric picture switch `\#` and EDITTIME are not evaluated. Fields in headers and footers are
+  limited to PAGE and NUMPAGES; Date & Time inserts plain text there.
+- Document properties are read from `docProps/core.xml` and `docProps/app.xml`; this editor does not
+  write them, so a DOCPROPERTY for an empty property shows a bracketed placeholder until fields update.
+- Content controls bound to document properties (`w:dataBinding`) are not produced; the reader keeps
+  such controls read-only.
+
+### Drop caps (§17.3.1.11 framePr, §17.18.20 ST_DropCap)
+
+- The first character moves into its own preceding paragraph with `w:framePr w:dropCap` (`drop` or
+  `margin`), `w:lines`, `w:wrap="around"`, `w:vAnchor="text"`, `w:hAnchor` (`text` for drop, `page`
+  for margin) and `w:hSpace`, exact line spacing and a lowered (`w:position`) enlarged run. Layout
+  places the cap at the following paragraph's first line, spanning `lines` lines, with its baseline
+  on line `lines`; dropped caps indent those lines, margin caps sit left of the column. Ignored for
+  caps: x/y offsets and alignments. Gaps: indented paragraphs (the cap uses the column edge),
+  per-font cap heights, caps across pages or in section columns.
+
+### Equations (§22.1 Office Math)
+
+- Equations are typed in a UnicodeMath-like linear format and converted to OMML (`m:oMath`, or
+  `m:oMathPara` when displayed on its own line): fractions `m:f`, scripts `m:sSup`/`m:sSub`/
+  `m:sSubSup`/`m:sPre`, radicals `m:rad` (`m:degHide`), n-ary operators `m:nary` (`m:chr`,
+  `m:limLoc`, `m:subHide`/`m:supHide`), delimiters `m:d` (`m:begChr`/`m:endChr`), functions
+  `m:func`, limits `m:limLow`, accents `m:acc`, bars `m:bar`, matrices `m:m` and equation arrays
+  `m:eqArr`, with child elements in schema order. Equations are atomic objects: the canvas shows
+  their linear text; the editor dialog previews them as MathML. Gaps: alignment points in equation
+  arrays, delimiter separators, nested superscripts, two-dimensional canvas rendering.
+
+### Symbols
+
+- Symbols are ordinary characters; a symbol font choice is written as `w:rFonts` ascii/hAnsi on the
+  inserted run. Nonbreaking and optional hyphens are inserted as U+2011 and U+00AD (not
+  `w:noBreakHyphen` / `w:softHyphen` elements). `w:sym` (§17.3.3.30) is read but not written.
+
+## Draw tab: ink, drawing canvases and ink to shape (2026-10-13)
+
+Ink is saved as ordinary DrawingML so every reader shows it; nothing depends on InkML content parts
+(`w14:contentPart` is neither written nor read). Writer: [docx-ink.js](../src/engine/docx-ink.js),
+[ink-shapes.js](../src/engine/ink-shapes.js); extension reader:
+[docx-ink-extension.js](../src/engine/docx-ink-extension.js); placement:
+[draw-commit.js](../src/views/draw-commit.js).
+
+### Floating ink (Part 1 §20.4.2.3 anchor, §20.4.3 positions, Part 4 wpg/wps)
+
+- Each inking session's strokes on a page are one `wp:anchor` holding a `wpg:wgp` group
+  (`wpg:cNvGrpSpPr`, `wpg:grpSpPr` with `a:xfrm` off/ext/chOff/chExt equal, so child coordinates are
+  EMU in the frame). `wp:docPr` is named `Ink n` with a description; `wp:wrapNone`,
+  `allowOverlap="1"`, `relativeHeight` above existing drawings. Pen and pencil ink is in front of
+  the text (`behindDoc="0"`); highlighter ink is a separate group behind it (`behindDoc="1"`).
+- Position: `wp:positionH relativeFrom="page"` and `wp:positionV relativeFrom="paragraph"` with
+  `wp:posOffset`, relative to the paragraph that starts on the page at or above the ink (the run
+  carrying the drawing is inserted at that paragraph's start), so ink moves with its text. Editing a
+  group keeps its anchor paragraph and shifts the offsets; groups authored with `wp:align` or
+  percentage offsets are rewritten with page-relative offsets when edited. Pages on which no body
+  paragraph starts (one paragraph spanning the whole page, or a page of table) cannot take new ink.
+- Each stroke is a `wps:wsp` whose `a:custGeom` (§20.1.9.8) has one `a:path` (§20.1.9.15) tracing the
+  stroke's filled outline with `a:moveTo`/`a:lnTo`/`a:close` in a 1/16-pixel path grid
+  (`w`/`h`), empty `avLst`/`gdLst`/`ahLst`/`cxnLst`, `a:rect l t r b`, and `a:ln` with `a:noFill`.
+  Fills: pen `a:solidFill`; highlighter `a:solidFill` with `a:alpha val="50000"` (§20.1.2.3.1);
+  pencil `a:pattFill prst="pct75"` (§20.1.8.47) whose background is the same colour at 35% alpha.
+  Pressure is baked into the outline's width, so all readers draw the same shape.
+- Every stroke's `wps:cNvPr` carries `a:extLst/a:ext uri="{3582A2A6-0F3C-4AC8-9E1A-D2DA59872D4E}"`
+  (§20.1.2.2.15) with one `pdi:stroke` element in this app's namespace
+  `http://schemas.puter.com/documents/2026/ink` (tool, colour, nominal width, centre line as
+  EMU/pressure triples). It has no rendering effect; readers that do not know it ignore it (the
+  extension list is the schema's preservation mechanism; the content validates as lax wildcard
+  content, so no `mc:Ignorable` is needed). The reader accepts this extension only in that exact
+  shape; a group is editable as ink only when every child carries it and the group is unrotated and
+  unflipped, otherwise it remains an ordinary retained drawing.
+
+### Drawing canvas
+
+- An inline (`wp:inline`) `wpg:wgp` named `Drawing Canvas n` (6 in × 3 in or the text width), in a
+  paragraph of its own. Its first child is a `prstGeom rect` frame with `a:noFill` and a 0.5 pt light
+  grey outline marked by a `pdi:canvas` extension; ink drawn inside it is added to the group, clipped
+  to the frame. This is a group, not a `wpc:wpc` canvas (the Word 2010 canvas element is not written).
+
+### Ink to Shape (§20.1.9.18 prstGeom)
+
+- Recognised strokes become `wps:wsp` shapes anchored like ink: `line` (with `flipH`/`flipV` for
+  direction) and arrows as `line` with `a:tailEnd type="triangle"`; `rect` and `ellipse` (with
+  `a:xfrm rot` when drawn at an angle of more than 10°); `triangle` (isosceles, `flipV` when the apex is
+  down), `rtTriangle` (flips put the right angle where it was drawn), or a three-point `a:custGeom`.
+  No fill; `a:ln` in the pen's colour and width with `cap="rnd"` and `a:round`.
+
+### Remaining gaps
+
+- InkML (`w14:contentPart`, `inkml:ink`) ink from other processors is not read as ink; such drawings
+  open as before (retained or approximated). Ink drawn here is DrawingML only, so other processors
+  show it but cannot erase it stroke by stroke.
+- Strokes in a session are committed as individual groups and gathered into one group when the
+  session ends (tool change); a file saved in the middle of a session holds one group per stroke.
+- Ink in headers, footers and table cells is not supported (ink is placed on the body layer).
+## Co-authoring, sharing and version history (docs/collaboration.md)
+
+Co-editing adds no new WordprocessingML: a shared document is saved by the writing tab through the
+same exporter as any document, from a model rebuilt from the shared state. What the shared state
+must carry for the saved package to keep its meaning:
+
+- Paragraph and run properties (§17.3.1 pPr, §17.3.2 rPr) travel as the model holds them, including
+  the original property XML the exporter preserves; `tests/collab-fixtures.test.js` round-trips a
+  sample of `tests/fixtures` (paragraphs, tables, numbering, styles, comments) through the shared
+  document and requires the same model.
+- Bookmarks (§17.13.6), comment ranges (§17.13.4.3–.5) and editing permission ranges (§17.13.7
+  permStart/permEnd) are zero-width markers; they are attached to the character they precede, so a
+  concurrent insertion before them moves them as Word-processing semantics require. A marker
+  duplicated by a concurrent edit keeps its first position; one whose characters were all deleted
+  stays at the deletion point (the editor's own rule).
+- Comments (§17.13.4.2) are shared per comment; the comments part is created when the first comment
+  is added by anyone.
+- Tables (§17.4), styles (§17.7), numbering (§17.9) and section/page properties (§17.6) are atomic
+  per table, style, abstract/instance definition and page setting. Concurrent restructuring of one
+  table keeps one structure; the merged model is validated before it is shown or saved.
+- Content the shared text cannot represent (content controls with no text, §17.5.2) switches the
+  document to single-editor mode instead of approximating it.
+- A comment-only participant's editor uses the document-protection guard in `comments` mode
+  (§17.15.1.29 semantics); nothing about the role is written to `w:documentProtection`.
+- Joining people open the owner's original package (its untouched parts byte for byte), then the
+  shared state; parts outside the model are saved by the writing tab from its own package.
+- Version details (author, name) are kept beside each snapshot as `<snapshot>.json` in the versions
+  folder, not inside the package.
+
+Browser export of a co-edited document is validated by `tests/browser/collab.spec.js` (saved under
+`test-results/collab-coedited.docx`) with `tools/check-docx-schema.py`. Gaps: header/footer stories
+are atomic per story; document settings outside the model (protection, review settings) are not
+shared live.
+## Format area (2026-10-13)
+
+Font, Paragraph, Tabs, Borders and Shading, Bullets and Numbering, Text Effects, Change Case and Style
+dialogs, the Styles pane (Style Inspector, Reveal Formatting), Apply Styles, advanced Find and
+Replace, paste options and Paste Special, Format Painter keys and Dictate. Every change is one model
+transaction (one undo step). Behavior tests: `tests/list-definitions.test.js`,
+`tests/advanced-search.test.js`, `tests/format-inspection.test.js`, `tests/paste-modes.test.js`,
+`tests/format-paragraph-flags.test.js`, `tests/format-area.test.js`. Independent fixture:
+`tools/format_features_fixture.py` writes `tests/fixtures/format-features/format.docx` directly as
+WordprocessingML (regression: `tests/format-features-fixture.test.js`). Browser exports from
+`tests/browser/format-*.spec.js` pass `tools/check-docx-schema.py` (transitional XSD, standard MCE view).
+
+### Run properties (§17.3.2)
+
+- Hidden text: `w:vanish` (§17.3.2.41) is now an editable run property (Font dialog → Hidden, Find
+  formatting, Format Painter). Hidden runs keep their text and caret positions but lay out with no
+  advance; with formatting marks shown they are laid out with a dotted underline (display only). The
+  writer emits `w:vanish w:val="1|0"` in schema order; `w:specVanish` and `w:webHidden` are untouched.
+- Text effects: fill (`w14:textFill`, including no fill), outline (`w14:textOutline`, solid colour,
+  width, round join) and outer shadow (`w14:shadow`: blur, distance, direction, colour, alpha) from the
+  Format Text Effects dialog. These are Office 2010 extensions written under `mc:Ignorable`. Reflection,
+  glow and 3-D formats are preserved when imported but are not offered (the canvas does not paint them).
+- Ligatures (`w14:ligatures`) are offered in the Font dialog only when the document's compatibility
+  settings enable OpenType features (§17.15.3 compatSetting); number forms and stylistic sets are not
+  offered because the canvas does not render them.
+- Set As Default writes the chosen run properties into the default paragraph style (Normal), not into
+  `w:docDefaults`; caps/strike "off" choices remove the style declaration instead of writing off values.
+
+### Paragraph properties (§17.3.1)
+
+- `w:mirrorIndents` (§17.3.1.18) is editable and laid out: on even pages the left (inside) and right
+  (outside) indents swap, as a sideways shift of each line (line width is unchanged). It was
+  previously rejected on import. Mirroring follows physical page parity; it applies to body
+  paragraphs, not table cells.
+- `w:suppressLineNumbers` (§17.3.1.34) and `w:suppressAutoHyphens` (§17.3.1.33) are editable,
+  inherited through styles and written in schema order. They are stored only: this editor neither
+  numbers lines nor hyphenates automatically.
+- `w:contextualSpacing`, keep options, widow control, outline level, indents, spacing and line
+  spacing are set from the Paragraph dialog through the existing paragraph writer.
+- Bar tabs: `w:tab w:val="bar"` (§17.3.1.37, ST_TabJc §17.18.84) are accepted on import, editable in the
+  Tabs dialog, skipped as targets for tab characters and painted as a 1px rule over the full height of
+  each line of the paragraph (including in table cells and mirrored lines). They were previously rejected.
+- Shading (`w:shd`, §17.3.1.31 / §17.3.2.32): the Shading tab offers Clear, Solid and the percentage
+  patterns pct5–pct95. A pattern is written as the flat colour it paints (`w:val="clear"` with the
+  blended fill), using the same blend the importer applies to imported percentage patterns; the
+  pattern itself is not retained. Text shading writes run `w:shd`.
+- Paragraph borders (`w:pBdr`, §17.3.1.24) from the Borders tab: per-side style, width (eighths of a
+  point), colour and distance; Between writes `w:between`. Borders on text (`w:bdr`, §17.3.2.4) are not
+  offered.
+
+### Page borders (§17.6.10)
+
+`w:pgBorders` with `w:offsetFrom` (text/page), `w:display` (all pages, first page, all but first),
+`w:zOrder` and per-side `w:space`. Only single-section documents can change page borders; art borders
+(`w:art`) are not offered.
+
+### Numbering (§17.9)
+
+Define New Bullet, Define New Number Format, Adjust List Indents and Define New Multilevel List write a
+new generated `w:abstractNum`/`w:num` pair copying the list's existing levels and reassign every
+paragraph of that list; imported definitions are left untouched. Supported level properties:
+`w:start`, `w:numFmt` (bullet, decimal, decimalZero, upper/lowerRoman, upper/lowerLetter, none),
+`w:lvlText` (literal text around `%1`–`%9`), `w:lvlJc`, `w:suff` (tab/space/nothing), `w:pPr/w:ind`
+and a numbering-only `w:tab`, and label `w:rPr` (`w:rFonts`, `w:b`, `w:i`, `w:color`). Set Numbering
+Value uses a `w:lvlOverride/w:startOverride` on a new instance (as Restart Numbering does); Continue
+Numbering reassigns the following items to the previous list's `w:numId`. Picture bullets
+(`w:lvlPicBulletId`) and legal numbering choices are not offered.
+
+### Styles (§17.7)
+
+- New Style from Formatting creates a `w:style` (paragraph or character) whose `w:pPr`/`w:rPr` hold the
+  selection's direct formatting, with `w:basedOn` and `w:next`.
+- Deleting a style removes its `w:style` element; paragraphs using it get the default paragraph style
+  (`w:pStyle` rewritten), runs lose `w:rStyle`, and styles based on it are rebased onto its own base.
+  Default and built-in styles (Normal, Title, Subtitle, headings) cannot be deleted. Other definitions
+  keep their original XML.
+- Reveal Formatting reports values as direct when they differ from the style hierarchy (the same
+  comparison Format Painter uses); it reads, never writes.
+
+### Find and Replace
+
+Advanced options search the joined document text (paragraph marks as `^p`), headers and footers
+(each editable header/footer story once) or the selection. Special characters: `^p ^t ^l ^m ^n ^s ^~ ^-
+^+ ^= ^^`, find-only `^? ^# ^$ ^w ^g`, replace-only `^&`. Wildcards (case-sensitive): `? * [ ] [!]
+{n,m} @ < > ( )` and `\1`–`\9` in the replacement. Formatting conditions cover run properties,
+paragraph properties and paragraph/character styles; replacement formatting is applied through the
+ordinary formatting commands after the text replacement, in one transaction. Not supported: sounds
+like, all word forms, and replacing with paragraph marks inside table cells.
+
+### Paste
+
+Keep Source Formatting uses the clipboard fragment as before; Merge Formatting keeps only bold,
+italic, underline and links and leaves the destination's paragraph style and font; Keep Text Only
+pastes plain text. Paste Special adds the clipboard picture when present. Nothing new is written to
+the file format beyond the pasted runs.
+
+### Remaining gaps
+
+Multiple discontiguous selections are not supported: Select All Instances and Select Text With Similar
+Formatting select the first range and highlight the rest. Line numbering and hyphenation are not laid
+out. Page borders cannot be set per section. Dictation depends on the browser's speech service.
+## Document views (2026-10-13)
+
+Code: [engine/document-views.js](../src/engine/document-views.js) (screen geometry),
+[engine/docx-view-settings.js](../src/engine/docx-view-settings.js) (`w:view`),
+[engine/outline-editing.js](../src/engine/outline-editing.js) (outline commands),
+[views/document-views.js](../src/views/document-views.js), [views/outline-view.js](../src/views/outline-view.js),
+[views/read-mode.js](../src/views/read-mode.js). Fixtures written independently from the schema:
+[tests/fixtures/document-views](../tests/fixtures/document-views) (generator: `tools/document_views_fixture.py`).
+
+### Document view setting (§17.15.1.92 `w:view`, §17.18.102 ST_View)
+
+- Read on open: `print` → Print Layout, `web` → Web Layout, `outline` and `masterPages` → Outline,
+  `normal` → Draft, `none` → Print Layout. Other values and malformed settings parts are ignored.
+- Written on save only when the user chose a different view: the attribute of an existing `w:view`
+  is updated, or a `w:view` element is inserted as the first child after `w:writeProtection`
+  (CT_Settings sequence). Print Layout is never written into a document that did not name a view.
+  A package without a settings part gets one (relationship and content-type override) only for a
+  non-default view. All other settings and parts are kept byte for byte (tested).
+- Read Mode has no ST_View value and is not stored. `w:readModeInkLockDown` (§17.15.1.66) is neither
+  read nor written. `w:zoom` (§17.15.1.94) is preserved but not applied.
+
+### Views are display-only
+
+- Web Layout, Draft and Read Mode lay the unchanged body out on a screen geometry: section page size,
+  margins, columns (`w:cols`), page borders (`w:pgBorders`), header/footer references and vertical
+  alignment are replaced in a private copy for layout only; `w:sectPr` and every part are unchanged.
+  Switching through all views and saving yields the same package as before (unit and browser tests).
+- Web Layout: one column at the window width; the page background (`w:background`) is drawn across
+  the full width; headers and footers are not shown. Draft: the same, on white, without floating
+  drawings (anchored `wp:anchor` objects stay in the document but are not drawn or hit-tested; text
+  still wraps around their reserved area — an approximation), with manual page breaks (`w:br
+  w:type="page"`) and section breaks shown as labelled dotted rules and each break starting a new
+  strip. Footnotes keep their page-bottom placement within a strip.
+- Read Mode: screen pages sized to columns of the window; optional text spacing multiplies auto line
+  spacing (and exact/at-least values) by 1.35, adds 6 pt after paragraphs and 0.6 pt letter spacing
+  in the private layout copy only. Page colours are screen colours, never `w:background`.
+- Printing and PDF export always use the authored pages, whatever view is showing.
+
+### Outline levels (§17.3.1.20 `w:outlineLvl`, §17.7.4.17 style `w:pPr`)
+
+- A paragraph's level is its resolved `w:outlineLvl` (direct or from its style chain): 0–8 are
+  heading levels 1–9; 9 or absent is body text. Table cell paragraphs are body text.
+- Promote/Demote/Promote to Heading 1/Demote to Body Text apply the paragraph style whose id is
+  `Heading{n}` (or whose name is `heading n`) when the document defines it, and remove a direct
+  `w:outlineLvl` so the style decides; without such a style a direct `w:outlineLvl` is written (for
+  example level 8 in a document with Heading1–6). Body text applies the default paragraph style.
+  Built-in heading styles keep their fixed level, as in the model's existing rule.
+- Move Up/Down and Navigation-pane dragging reorder whole paragraphs (`w:p`) and tables (`w:tbl`),
+  a heading together with the paragraphs it leads. Sections (`w:sectPr` in `w:pPr`), frames
+  (`w:framePr`) and block-level content controls are not moved (the command reports why). The
+  document's closing empty paragraph stays last. Deleting a section in the Navigation pane removes
+  its paragraphs; new headings are empty paragraphs with the heading style.
+- Gaps: master documents and subdocuments (`w:subDoc`, the `masterPages` view) are not supported;
+  outline numbering linked to headings follows the existing numbering support only.
+## Picture and shape effects, preset picture geometry and hidden drawings (2026-10-13)
+
+- **Effect lists** (§20.1.8.26 `a:effectLst`): members must follow CT_EffectList order without
+  duplicates. Top-level pictures (`pic:spPr`) and standalone shapes (`wps:spPr`, including effects
+  resolved from a theme `effectRef`) accept any subset of `a:glow`, `a:outerShdw`, `a:reflection`
+  and `a:softEdge`. `a:blur`, `a:fillOverlay`, `a:innerShdw` and `a:prstShdw`, and the new effects
+  on shapes or pictures inside groups, keep the document read-only as before. A list holding only
+  an outer shadow reads exactly as before.
+- **Glow** (§20.1.8.32): `rad` and one color (with alpha); painted behind the drawing as its
+  silhouette blurred over the radius and strengthened at the edge. A zero radius paints nothing.
+- **Soft edge** (§20.1.8.53): `rad`; the drawing's alpha ramps from zero on its silhouette's edge to
+  full at about the radius inside it (Gaussian of the silhouette remapped). Applied before the shadow
+  for pictures; for shapes the in-scene shadow is softened with the shape (approximation).
+- **Reflection** (§20.1.8.50): the supported form is a vertical mirror below the drawing —
+  `sx` 100%, `sy` −100%, `kx`/`ky` 0, `algn` `bl` or `b`, `fadeDir` 5400000 and, with a distance,
+  `dir` 5400000 — with `blurRad`, `stA`, `stPos`, `endA`, `endPos` and `dist`. The mirror image fades
+  linearly from `stA` to `endA` between `stPos` and `endPos` of the drawing's height and is clear
+  beyond `endPos`. Other reflection geometry is unsupported.
+- Effects add ink around the drawing only: the frame, `wp:effectExtent`, wrapping and layout are
+  unchanged, and the source XML is kept in the drawing for saving. Effect rasters keep the
+  4,096 px / 4 MP preview limits.
+- **Black and white** (§20.1.8.11 `a:biLevel`): `thresh` (0–100%) joins the ordered blip color
+  effects; pixels whose luminance (0.299 R + 0.587 G + 0.114 B) is at or above the threshold become
+  white and the rest black, keeping alpha. A missing or out-of-range threshold is unsupported.
+- **Preset geometry on pictures** (§20.1.9.18 `a:prstGeom` in `pic:spPr`): any preset the shape
+  reader evaluates (with `a:avLst` guide adjustments) now clips the picture, and its outline follows
+  the preset; `rect` keeps the unclipped picture path and still requires an empty `a:avLst`. 3D
+  pictures keep the rectangle/ellipse subset. The same applies to pictures inside groups.
+- **Rotated and flipped styled pictures**: pictures with a clip, outline, backing fill, shadow or
+  the effects above may now carry `a:xfrm` `rot`, `flipH` and `flipV` (§20.1.7.6); the scene paints
+  the unrotated frame and the page rotates it like an ordinary picture, so effect directions rotate
+  with the picture. Rotated 3D pictures and pictures whose fill does not rotate with the shape
+  (`rotWithShape="0"`) remain unsupported. Text-wrapped rotated pictures remain unsupported, as for
+  plain pictures.
+- **Hidden drawings** (§20.4.2.5 `wp:docPr@hidden`, and `pic:cNvPr@hidden` on a top-level picture):
+  `1`/`true`/`on` opens the drawing as hidden — it keeps its anchor run, position and XML, paints
+  nothing (on screen and in print), is skipped by hit-testing and does not take part in square or
+  top-and-bottom text exclusion or overlap resolution. An inline hidden drawing still reserves its
+  space in the line. Invalid values are unsupported.
+
+## Picture Format, Shape Format and Arrange (2026-10-13)
+
+Every command rewrites the drawing's DrawingML and reads it back through the document reader
+(`drawing-format.js`); the subset below is what the editor writes. Anything it reads is kept as authored.
+
+### Shape properties (§20.1.2.2.35 spPr, §20.1.2.2.20 grpSpPr)
+
+- Fills (§20.1.8): `a:noFill`, `a:solidFill` with `a:srgbClr` or `a:schemeClr` (§20.1.2.3.29) and the
+  `a:lumMod`/`a:lumOff`/`a:alpha` transforms (§20.1.2.3.20, .21, .1); `a:gradFill` with `a:gsLst`
+  stops and `a:lin` (`ang`, `scaled`) or `a:path` (`circle`, `rect`) with `a:fillToRect`; `a:pattFill`
+  (§20.1.8.47) with `a:fgClr`/`a:bgClr`; `a:blipFill` picture fills with `a:stretch`. Shape styles use
+  theme colours as `a:schemeClr` when the document has a theme, otherwise RGB values from an original
+  palette.
+- Outlines (§20.1.2.2.24 `a:ln`): `w`, `cmpd` (sng, dbl, thickThin, thinThick, tri), `cap`; fill,
+  `a:prstDash` (§20.1.10.48), joins (`a:round`, `a:bevel`, `a:miter lim`), `a:headEnd`/`a:tailEnd`
+  (§20.1.10.55 types, `w`, `len`). Children are written in schema order.
+- Effects (§20.1.8.26 `a:effectLst`) in schema order: `a:glow` (`rad`), `a:outerShdw` (`blurRad`,
+  `dist`, `dir`, optional `sx`/`sy`, `algn`, `rotWithShape="0"`), `a:reflection` (below the object:
+  `stA`, `stPos`, `endA`, `endPos`, `dist`, `dir="5400000"`, `sy="-100000"`, `algn="bl"`), `a:softEdge`
+  (`rad`). See "Picture and shape effects" for what the renderer paints.
+- 3-D (pictures only): `a:scene3d` with `a:camera` (orthographicFront, perspectiveLeft,
+  perspectiveRight) and `a:lightRig rig="threePt" dir="t"`, `a:sp3d` with `a:bevelT` (circle, angle).
+- Geometry: `a:prstGeom` (§20.1.9.18) with `a:avLst` guides for Change Shape and Crop to Shape;
+  transforms (§20.1.7.6 `a:xfrm`): `rot`, `flipH`, `flipV`; `a:ext` follows the frame size.
+
+### Pictures (§20.2 pic:pic, §20.1.8.13 a:blip)
+
+- Corrections and colour written as blip effects: `a:lum` (`bright`, `contrast`), `a:grayscl`,
+  `a:duotone` with two `a:srgbClr`, `a:biLevel thresh` (black and white), `a:clrChange` with a fully
+  transparent `a:clrTo` (Set Transparent Color), `a:alphaModFix amt` (transparency). Recolor presets
+  replace each other.
+- Pixel edits (Remove Background, Sharpen/Soften, Saturation, Color Tone, Artistic Effects) write a
+  processed PNG (or JPEG for opaque JPEG sources) as the main blip and keep the original in the
+  picture's original layer (MS-ODRAWXML `a14:imgProps`/`a14:imgLayer r:embed` in the blip's extension
+  list, extension URI `{BEBA8EAE-BF5A-486C-A8C5-ECC9F3942E4B}`) with `a14:imgEffect` children:
+  `a14:backgroundRemoval` (`t`, `b`, `l`, `r` and `a14:foregroundMark`/`a14:backgroundMark` line
+  segments), `a14:sharpenSoften amount`, `a14:saturation sat`, `a14:colorTemperature colorTemp` and the
+  artistic effect element (no attributes). The reader shows the main blip and ignores the layer, as
+  that extension specifies. An SVG companion blip is removed when pixels are processed.
+- Crop (§20.1.8.55 `a:srcRect`, 1/1000 %), including negative values for Fit; Compress Pictures
+  resamples the blip and removes `a:srcRect` when cropped areas are deleted; media it replaces is
+  dropped from the package on save only when no relationship in any part still references it.
+- Change Picture replaces the blip relationship target with a new media part and crops it to fill the
+  existing extent.
+
+### Non-visual properties (§20.4.2.5 wp:docPr)
+
+`name`, `descr` (alt text), `title`, the decorative extension (`adec:decorative val="1"`, URI
+`{C183D7F6-B498-43B3-948B-1728B52AA6E4}`) and `hidden="1"` (Selection pane). Grouping copies each
+object's name and description to the child's `cNvPr`; ungrouping copies them back to `wp:docPr`.
+
+### Frames and wrapping (§20.4.2.3 wp:anchor, §20.4.2.8 wp:inline)
+
+- In line with text: `wp:inline` with `distT/B/L/R="0"`, extent, effect extent, properties and graphic
+  carried across.
+- Floating: `wp:anchor` with `simplePos="0"`, `relativeHeight`, `behindDoc`, `locked`, `layoutInCell`,
+  `allowOverlap`; `wp:positionH`/`wp:positionV` (§20.4.2.10, .11) with `wp:align` or `wp:posOffset`
+  and `relativeFrom` column/margin/page (horizontal) or paragraph/line/margin/page/topMargin/
+  bottomMargin (vertical); `wp:wrapNone`, `wp:wrapSquare` (§20.4.2.17), `wp:wrapTight` (§20.4.2.20) and
+  `wp:wrapThrough` (§20.4.2.18) with a rectangular `wp:wrapPolygon` (§20.4.2.16, `edited="0"`),
+  `wp:wrapTopAndBottom` (§20.4.2.20), with `wrapText` and distances. Children are written in schema
+  order and unknown children (relative sizes) are kept.
+- Supported subset (what the reader opens editable): square, tight and through wrapping use
+  column/paragraph offsets; top-and-bottom uses a paragraph offset; only wrapNone takes alignment,
+  page/margin bases, `allowOverlap="0"` and `layoutInCell="0"`. Tight and through wrap around the
+  object's rectangle (the polygon is kept, not used for layout).
+- Aspect lock: `a:graphicFrameLocks noChangeAspect` (§20.1.2.2.19) on `wp:cNvGraphicFramePr`, and
+  `a:picLocks noChangeAspect` for pictures.
+- Arrange (Bring Forward, Send Backward, to Front, to Back, Selection pane order) rewrites
+  `relativeHeight` densely within the behind-text and in-front layers; In Front of Text / Behind Text
+  set `behindDoc` (switching wrapped objects to wrapNone).
+
+### Groups (§20.4 wpg:wgp, §20.1.7.5 group transform)
+
+Group writes one `wp:anchor` (the first object's coordinates, wrapping and layer, offsets moved to the
+group's top-left) with `wpg:wgp` (`wpg:cNvGrpSpPr`, `wpg:grpSpPr` with `a:off`, `a:ext`, `a:chOff`,
+`a:chExt` equal to the group size) and the objects' own `wps:wsp`, `pic:pic` or nested `wpg:grpSp`,
+each with an `a:xfrm` at its page position. Ungroup maps each child through the group's child space,
+flips and rotation into its own floating drawing. Charts, diagrams and drawings with links are not
+grouped.
+
+### Text in shapes
+
+- Body properties (§20.1.2.1.1 `wps:bodyPr`): `anchor` (t, ctr, b), `lIns`/`tIns`/`rIns`/`bIns`, `wrap`
+  (square/none), `a:spAutoFit`/`a:noAutofit`.
+- WordArt Styles on shape text: run properties in `w:txbxContent` — `w:color` and the w14 effects
+  `w14:shadow`, `w14:textOutline`, `w14:textFill` (MS-DOCX §2.6) in CT_RPr order.
+
+### Validation
+
+`tests/drawing-xml.test.js` and `tests/drawing-format.test.js` write every edit, read it back through
+the reader, save and reopen the package editable. Browser exports from `tests/browser/pictures.spec.js`
+(`test-results/pictures-exports/`) and the independent fixture `tests/fixtures/pictures/pictures.docx`
+(`tests/fixtures/pictures/make_fixture.py`) validate with `tools/check-docx-schema.py`. Schema validity does not
+establish layout fidelity: effects, artistic filters and tight wrapping are approximations.

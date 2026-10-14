@@ -1,6 +1,6 @@
 # Documents
 
-A browser word processor with an original canvas editor and `.docx` files stored in your own Puter cloud.
+A browser word processor with an original canvas editor and `.docx` files stored in your own Puter cloud — an open-source alternative to Microsoft Word.
 
 This branch implements the original canvas engine. **AGPL code and dependencies must not be introduced.** The dependency policy is recorded in [AGENTS.md](AGENTS.md) and checked by `npm run check:licenses` and before production builds.
 
@@ -102,6 +102,7 @@ Older app-authored import/export helpers remain for later migration. They do not
 
 - Application and original canvas engine: [MIT](../../LICENSE).
 - ZIP codec `fflate`: MIT.
+- Real-time co-editing (CRDT) `yjs` and its `lib0` and `isomorphic.js` helpers: MIT.
 - Noto Sans: [OFL-1.1](public/fonts/OFL.txt), with [source provenance](public/fonts/PROVENANCE.md).
 - Other retained dependencies: [third-party notices](public/licenses/THIRD_PARTY.txt).
 

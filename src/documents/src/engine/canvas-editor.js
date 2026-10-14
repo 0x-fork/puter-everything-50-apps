@@ -1,3 +1,4 @@
+import { isNoteStoryKind } from './footnotes.js';
 import { StorySession } from './story-session.js';
 import { decodeShape } from './canvas-shapes.js';
 import { wordPosition, optionWordPosition } from './word-navigation.js';
@@ -23,7 +24,7 @@ import { tableBorderWidth } from './table-border-layout.js';
 import { layoutPageStories } from './page-story-layout.js';
 import { drawingPageContexts, drawingPageContext } from './shape-page-fields.js';
 import { paintParagraphBorder } from './canvas-paragraph-borders.js';
-import { paintTableBorder } from './canvas-table-borders.js';
+import { paintTableBorder, paintCellDiagonals } from './canvas-table-borders.js';
 import { deviceTableBorders, deviceTableFillRects } from './border-device-layout.js';
 import { paragraphBackgrounds, paintOnParagraphBackground } from './paragraph-backgrounds.js';
 import { paintParagraphBackgrounds } from './canvas-paragraph-backgrounds.js';
@@ -37,10 +38,13 @@ import { hasRunBackground, runBackground, foregroundBackground, runBackgroundRec
 import { paintColor } from './colors.js';
 import { TextDocument, boundaries, locate, paragraphFormat, paragraphText } from './model.js';
 import { cellContext } from './tables.js';
+import { cellBlockRects } from './table-selection.js';
 import { paragraphEdges } from './paragraph-geometry.js';
 import { pageGeometry } from './page-settings.js';
 import { pageBorderStrokes } from './page-borders.js';
+import { lineNumberLabels } from './line-numbers.js';
 import { paintPagePictureBackground } from './canvas-page-background.js';
+import { viewGeometry, viewPageStories, fitContinuousPages, isContinuousView, usesScreenGeometry } from './document-views.js';
 import { font, layoutDocument, caretRect, lineAtPosition, verticalLine, hitTestStop, nearestStop, imageAtPoint, selectionRects } from './layout.js';
 import { refreshPageReferences } from './page-reference-refresh.js';
 import { positionedImageBounds } from './positioned-images.js';
@@ -67,6 +71,8 @@ export class CanvasEditor {
     this.onUpdateFields = onUpdateFields;
     this.onLink = onLink; this.onOpenLink = onOpenLink; this.visitedLinks = new Set();
     this.zoom = 1;
+    // The document view laid out on screen (document-views.js); null is Print Layout.
+    this.view = null;
     // Screen-only painters run over each page after its content: (context, pageIndex, geometry) => void.
     this.overlays = [];
     this.destroyed = false;
@@ -239,16 +245,20 @@ export class CanvasEditor {
     this.findHighlights = matches; this.findRects = null; this.paint();
   }
   /** Tinted document ranges beneath the text, such as commented text: [{ start, end, fill }] in document order. */
-  setRangeTints(tints = []) {
+  setRangeTints(tints = [], layer = 'default') {
+    // Separate layers (comments, highlighted merge fields) combine without replacing each other.
+    this.tintLayers = { ...this.tintLayers, [layer]: tints };
+    tints = Object.values(this.tintLayers).flat().sort((a, b) => a.start - b.start || a.end - b.end);
     const current = this.rangeTints || [];
     if (tints.length === current.length && tints.every((t, i) => t.start === current[i].start && t.end === current[i].end && t.fill === current[i].fill)) return;
     this.rangeTints = tints; this.tintRects = null; this.paint();
   }
   /** Vertical bars in the left margin beside lines that touch the given ranges (tracked changes). */
-  setMarginBars(ranges = [], color = '#7a7a7a') {
-    const key = JSON.stringify([ranges.map(r => [r.start, r.end]), color]);
+  // side: 'left', 'right' or 'outside' (right on odd pages, left on even ones).
+  setMarginBars(ranges = [], color = '#7a7a7a', side = 'left') {
+    const key = JSON.stringify([ranges.map(r => [r.start, r.end]), color, side]);
     if (key === this.marginBarKey) return;
-    this.marginBarKey = key; this.marginBars = { ranges, color }; this.paint();
+    this.marginBarKey = key; this.marginBars = { ranges, color, side }; this.paint();
   }
   rangeTintRects() {
     const tints = this.rangeTints, layout = this.session.path === null ? this.selectionLayout : null;
@@ -286,7 +296,7 @@ export class CanvasEditor {
     return count;
   }
   execute(action, onFailure, options, quiet = false) {
-    if (this.readOnly || this.composition) return;
+    if (this.readOnly || this.viewOnly || this.composition) return;
     try {
       const revision = this.session.revision;
       this.session.run(() => action(), () => {
@@ -310,15 +320,21 @@ export class CanvasEditor {
     const current = this.session.definition || { sections: Array.from({ length: sections }, () => ({ header: {}, footer: {}, firstPageDifferent: false })), stories: {}, evenAndOdd: false };
     const { variant = 'default', section: first = 0, story = {}, ...settings } = extra;
     this.session.definition = { ...current, ...settings, stories: { ...current.stories, [path]: { kind, paragraphs, tables: [], editable: true, ...story } },
-      sections: kind === 'footnote' ? current.sections : current.sections.map((section, i) => i < first || section[kind][variant] ? section : { ...section, [kind]: { ...section[kind], [variant]: path } }) };
+      sections: isNoteStoryKind(kind) ? current.sections : current.sections.map((section, i) => i < first || section[kind][variant] ? section : { ...section, [kind]: { ...section[kind], [variant]: path } }) };
     this.session.sectionRevision = undefined;
     this.relayout();
   }
   /** Different first page for a section, and different odd and even pages for the document (display only; the package writes them). */
-  setStoryOptions({ section, firstPageDifferent, evenAndOdd } = {}) {
+  setStoryOptions({ section, firstPageDifferent, evenAndOdd, pageNumbering } = {}) {
     const current = this.session.definition || { sections: Array.from({ length: this.session.body.paragraphs.filter(p => p.sectionEnd).length + 1 }, () => ({ header: {}, footer: {}, firstPageDifferent: false })), stories: {}, evenAndOdd: false };
     this.session.definition = { ...current, ...(evenAndOdd !== undefined ? { evenAndOdd: !!evenAndOdd } : {}),
-      sections: current.sections.map((s, i) => i === section && firstPageDifferent !== undefined ? { ...s, firstPageDifferent: !!firstPageDifferent } : s) };
+      sections: current.sections.map((s, i) => {
+        if (i !== section) return s;
+        const next = firstPageDifferent !== undefined ? { ...s, firstPageDifferent: !!firstPageDifferent } : { ...s };
+        // Page numbering (format and restart) applies to this section's PAGE fields and page count.
+        if (pageNumbering !== undefined) { if (pageNumbering) next.pageNumbering = pageNumbering; else delete next.pageNumbering; }
+        return next;
+      }) };
     this.session.sectionRevision = undefined;
     if (this.session.path !== null) this.editStory(null); else this.relayout();
   }
@@ -341,7 +357,7 @@ export class CanvasEditor {
   setImageProperties(patch) { return this.execute(() => this.model.setImageProperties(patch)); }
   async applyDrawingText(pkg, image, frame, paragraphs, { signal, tables } = {}) {
     this.finishComposition();
-    if (this.readOnly || this.destroyed || signal?.aborted) return false;
+    if (this.readOnly || this.viewOnly || this.destroyed || signal?.aborted) return false;
     const revision = this.session.revision, model = this.model;
     if (model.selectedImage !== image) throw new Error('Select the drawing again before editing its text.');
     const prepared = pkg.prepareDrawingTextEdit(image, frame, paragraphs, model.assets, model.styles, model.numbering, tables);
@@ -366,7 +382,19 @@ export class CanvasEditor {
       this.images.delete(id); delete model.assets[id]; preview.close(); throw error;
     }
   }
+  /**
+   * Viewing: the document stays editable underneath (layout, styles and saving are unchanged) while
+   * every edit path refuses, so switching back loses nothing. A read-only package stays read-only.
+   */
+  setViewOnly(on) {
+    this.finishComposition();
+    this.viewOnly = !!on;
+    this.input.readOnly = this.readOnly || this.viewOnly;
+    if (this.viewOnly && this.session.path !== null) this.editStory(null);
+    this.onSelection?.();
+  }
   async insertImageFile(file) {
+    if (this.readOnly || this.viewOnly) return false;
     if (file.size > 10 * 1024 * 1024) throw new Error('Choose a PNG, JPEG or TIFF image up to 10 MB.');
     this.finishComposition();
     const path = this.session.path, revision = this.session.revision, selection = { ...this.model.selection }, bytes = new Uint8Array(await file.arrayBuffer()), info = imageInfo(bytes), asset = { bytes, mime: info.mime };
@@ -435,10 +463,13 @@ export class CanvasEditor {
   restartNumbering() { this.execute(() => this.model.restartNumbering()); this.focus(); }
   adjustIndent(delta) { this.execute(() => this.model.adjustIndent(delta)); this.focus(); }
   insertTab() { this.execute(() => this.model.replace('\t')); this.focus(); }
-  setPageSettings(patch) { return this.execute(() => this.model.setPageSettings(patch)); }
+  setPageSettings(patch, options) { return this.execute(() => this.model.setPageSettings(patch, options)); }
+  insertSectionBreak(type) { const ok = this.execute(() => this.model.insertSectionBreak(type)); this.focus(); return ok; }
   insertPageBreak() { this.execute(() => this.model.insertPageBreak()); this.focus(); }
   travelHistory(direction) {
-    if (this.readOnly || this.composition) return;
+    if (this.readOnly || this.viewOnly || this.composition) return;
+    // The host can keep history beyond this editor's (changes that reopened the package).
+    if (!this.session[direction === 'undo' ? 'history' : 'future'].length && this.onHistoryEnd?.(direction)) return;
     try {
       if (this.session[direction](() => { this.validateStory(); this.relayout(); })) this.onChange();
       this.focus(); this.revealCaret();
@@ -456,11 +487,33 @@ export class CanvasEditor {
     this.host.classList.toggle('accessible-editing', value);
     this.syncInput(); this.paint(); this.focus();
   }
+  /**
+   * Show the document in a screen view: { kind: 'web' | 'draft' | 'read', width, height, … } in layout
+   * pixels, or null for Print Layout. Only the display changes; the model and its pages are untouched.
+   */
+  setView(view) {
+    const next = view && usesScreenGeometry(view.kind) ? { ...view } : null;
+    if (JSON.stringify(next) === JSON.stringify(this.view)) return false;
+    this.finishComposition();
+    if (next && this.session.path !== null) { this.session.activate(null); this.caretPage = null; }
+    this.view = next;
+    this.relayout();
+    return true;
+  }
+  /** Lay the body and its page stories out for a view (null: the authored pages). */
+  computeLayout(view = this.view) {
+    const body = this.session.body;
+    const stories = view ? viewPageStories(this.pageStories, view.kind) : this.pageStories;
+    let layout = layoutDocument(body.paragraphs, this.measure, pageGeometry(body.pageSettings), body.numbering, body.tables, stories, { bestEffort: this.readOnly, drawingLayouts: this.drawingLayouts, ...(!this.readOnly ? { styles: this.model.styles } : {}), ...(view ? { viewGeometry: viewGeometry(view) } : {}) });
+    const storyLayout = layoutPageStories(layout, stories, [...body.paragraphs.filter(p => p.sectionEnd).map(p => p.sectionEnd), body.pageSettings], this.measure, this.model.numbering, { bestEffort: this.readOnly, drawingLayouts: this.drawingLayouts, ...(!this.readOnly ? { styles: this.model.styles } : {}) });
+    if (view && isContinuousView(view.kind)) layout = fitContinuousPages(layout, storyLayout);
+    // Draft shows text only: floating drawings stay in the document but are not drawn or hit.
+    if (view?.kind === 'draft') layout = { ...layout, floatingObjects: [] };
+    return { layout, storyLayout };
+  }
   relayout() {
     this.tablePaintCache = new Map();
-    const body = this.session.body;
-    this.layout = layoutDocument(body.paragraphs, this.measure, pageGeometry(body.pageSettings), body.numbering, body.tables, this.pageStories, { bestEffort: this.readOnly, drawingLayouts: this.drawingLayouts, ...(!this.readOnly ? { styles: this.model.styles } : {}) });
-    this.storyLayout = layoutPageStories(this.layout, this.pageStories, [...body.paragraphs.filter(p => p.sectionEnd).map(p => p.sectionEnd), body.pageSettings], this.measure, this.model.numbering, { bestEffort: this.readOnly, drawingLayouts: this.drawingLayouts, ...(!this.readOnly ? { styles: this.model.styles } : {}) });
+    ({ layout: this.layout, storyLayout: this.storyLayout } = this.computeLayout());
     if (this.session.path !== null) {
       this.storyPage = this.session.page;
       const occurrences = this.storyLayout.positions.filter(p => p.path === this.session.path);
@@ -468,8 +521,11 @@ export class CanvasEditor {
       if (this.storyPage === undefined) this.session.activate(null);
       else this.session.page = this.storyPage;
     }
+    // Section line numbers are labels beside the finished body lines (§17.6.8); views without pages show none.
+    const body = this.session.body;
+    this.lineNumbers = this.view ? [] : lineNumberLabels(this.layout, body.paragraphs, body.numbering, body.styles, this.measure);
     this.selectionLayout = this.session.path === null ? this.layout : pageStorySelectionLayout(this.layout, this.storyLayout, this.session.path, this.storyPage);
-    this.input.setAttribute('aria-label', this.inputLabel || (this.session.path === null ? 'Document text' : ({ header: 'Header text', footer: 'Footer text', footnote: 'Footnote text' }[this.pageStories.stories[this.session.path].kind] || 'Story text')));
+    this.input.setAttribute('aria-label', this.inputLabel || (this.session.path === null ? 'Document text' : ({ header: 'Header text', footer: 'Footer text', footnote: 'Footnote text', endnote: 'Endnote text' }[this.pageStories.stories[this.session.path].kind] || 'Story text')));
     this.drawingPageContexts = drawingPageContexts(this.layout, this.pageStories);
     while (this.pages.children.length > this.layout.pageCount) this.pages.lastChild.remove();
     while (this.pages.children.length < this.layout.pageCount) {
@@ -519,6 +575,15 @@ export class CanvasEditor {
   }
   printSheets() {
     this.finishComposition();
+    // Printing always uses the authored pages, whatever view is on screen: lay them out privately and
+    // put the screen layout back afterwards, without touching the page canvases.
+    if (this.view) {
+      const screen = { view: this.view, layout: this.layout, storyLayout: this.storyLayout, selectionLayout: this.selectionLayout, tablePaintCache: this.tablePaintCache, drawingPageContexts: this.drawingPageContexts };
+      const printed = this.computeLayout(null);
+      Object.assign(this, printed, { selectionLayout: printed.layout, tablePaintCache: new Map(), drawingPageContexts: drawingPageContexts(printed.layout, this.pageStories), view: null });
+      try { return this.printSheets(); } finally { Object.assign(this, screen); }
+    }
+    this.printedLayout = { layout: this.layout, storyLayout: this.storyLayout };
     const sheets = this.layout.pages.map(geometry => {
       const canvas = document.createElement('canvas');
       canvas.className = 'document-page';
@@ -534,7 +599,8 @@ export class CanvasEditor {
     const [start, end] = this.model.range;
     // A shape selected on its own shows only its frame handles.
     const shapeOnly = end === start + 1 && this.drawingEditor?.canResize(this.model.selectedImage);
-    const rects = shapeOnly ? [] : selectionRects(this.selectionLayout, start, end);
+    // A rectangular cell selection highlights whole cells rather than the text range through them.
+    const rects = shapeOnly ? [] : this.model.cellBlock ? cellBlockRects(this.selectionLayout, this.model) : selectionRects(this.selectionLayout, start, end);
     const owned = this.model.selection.controlCaret?.side === 'inside' && start === end && !this.accessible && document.activeElement === this.input
       ? inlineControlCaret(this.model.paragraphs, start, this.model.selection.controlCaret) : null;
     const controlRects = owned && !owned.control.hiddenAppearance ? owned.start === owned.end
@@ -560,7 +626,8 @@ export class CanvasEditor {
       for (const pageStory of [true, false]) {
         const floatingObjects = pageStory ? this.storyLayout.floatingObjects : this.layout.floatingObjects || [];
         const paintFloating = behind => {
-          for (const f of floatingObjects) if (f.page === index && !!f.image.anchor.behind === behind) {
+          // A hidden drawing (§20.4.2.5) keeps its anchor and place but paints nothing; hidden ink likewise.
+          for (const f of floatingObjects) if (f.page === index && !!f.image.anchor.behind === behind && !this.hiddenDrawing?.(f.image) && !f.image.hidden) {
             if (f.cellClip) { ctx.save(); ctx.beginPath(); ctx.rect(f.cellClip.left ?? 0, f.cellClip.top, (f.cellClip.right ?? geometry.width) - (f.cellClip.left ?? 0), f.cellClip.bottom - f.cellClip.top); ctx.clip(); }
             const angle = normalizedRotation(f.image.rotation);
             if (angle) {
@@ -620,7 +687,9 @@ export class CanvasEditor {
         const backgrounds = paragraphBackgrounds(pageLines, geometry, paintedCells);
         const paragraphBorders = (pageStory ? this.storyLayout.borders : this.layout.paragraphBorders || []).filter(border => border.page === index);
         const paintedParagraphInk = paintParagraphBackgrounds(ctx, new Set([...backgrounds.values()].map(value => value.rect).filter(Boolean)), paragraphBorders);
-        for (const guide of printing ? [false] : [true, false]) for (const stroke of tableBorders) if (stroke.guide === guide) paintTableBorder(ctx, stroke);
+        // Dashed gridlines mark borderless cell edges on screen (View Gridlines); they never print.
+        for (const guide of printing || this.showTableGridlines === false ? [false] : [true, false]) for (const stroke of tableBorders) if (stroke.guide === guide) paintTableBorder(ctx, stroke);
+        paintCellDiagonals(ctx, paintedCells.filter(cell => cell.page === index && (cell.borders?.tl2br || cell.borders?.tr2bl)));
         for (const border of paragraphBorders) paintParagraphBorder(ctx, border, paintedParagraphInk.get(border));
         // Run backgrounds precede selection and glyphs, including repeated headers.
         const surfaceGeometry = geometry;
@@ -642,7 +711,8 @@ export class CanvasEditor {
         }
         if (!printing && !pageStory) for (const r of tinted) if (r.page === index) { ctx.fillStyle = r.fill; ctx.fillRect(r.x, r.y, r.width, r.height); }
         if (!printing && !pageStory && this.marginBars?.ranges.length) {
-          const bars = this.marginBars.ranges, x = Math.max(4, (geometry.left ?? 96) - 22);
+          const side = this.marginBars.side === 'outside' ? (index % 2 ? 'left' : 'right') : this.marginBars.side;
+          const bars = this.marginBars.ranges, x = side === 'right' ? Math.min(geometry.width - 5, geometry.width - (geometry.right ?? 96) + 20) : Math.max(4, (geometry.left ?? 96) - 22);
           ctx.fillStyle = this.marginBars.color;
           for (const line of pageLines) if (bars.some(r => r.start <= line.end && r.end > line.start)) ctx.fillRect(x, line.y, 1.25, line.height);
         }
@@ -668,6 +738,8 @@ export class CanvasEditor {
               const marker = line.marker; ctx.fillStyle = paintColor(marker.color, foregroundBackground(marker, background)); setCanvasTextStyle(ctx, marker); paintTextShadows(ctx, marker, line.baseline); paintText(ctx, marker, line.baseline);
               for (const u of marker.underlines || []) { ctx.fillStyle = paintColor(u.color, foregroundBackground(u, background)); paintUnderline(ctx, { ...u, x: u.x + marker.x }, line.baseline); }
             }
+            // Bar tabs: a hairline over the line's full height, so consecutive lines join.
+            for (const bar of imagesOnly ? [] : line.bars || []) { ctx.fillStyle = paintColor('auto', background); ctx.fillRect(Math.round(bar.x), line.y, 1, line.height); }
             for (const leader of imagesOnly ? [] : line.leaders || []) {
               ctx.save(); ctx.beginPath(); ctx.rect(leader.x, line.clipText === false ? 0 : line.y, leader.width, line.clipText === false ? geometry.height : line.height); ctx.clip();
               ctx.fillStyle = paintColor(leader.color, foregroundBackground(leader, background));
@@ -681,7 +753,7 @@ export class CanvasEditor {
                 if (clipImage) { ctx.save(); ctx.beginPath(); ctx.rect(0, line.y, geometry.width, line.height); ctx.clip(); }
                 const upright = fragment.uprightImage;
                 if (upright) { ctx.save(); leaveCellText(ctx, physical.cellText.matrix); }
-                const bitmap = this.images.get(fragment.image.assetId), top = upright?.y ?? line.baseline - fragment.ascent;
+                const bitmap = this.hiddenDrawing?.(fragment.image) || fragment.image.hidden ? null : this.images.get(fragment.image.assetId), top = upright?.y ?? line.baseline - fragment.ascent;
                 if (bitmap) {
                   if (fragment.image.opacity !== undefined) { ctx.save(); ctx.globalAlpha *= fragment.image.opacity; }
                   const { flipH, flipV } = fragment.image, angle = normalizedRotation(fragment.image.rotation), transformed = flipH || flipV || angle;
@@ -731,6 +803,10 @@ export class CanvasEditor {
           });
         }
         paintFloating(false);
+      }
+      for (const label of this.lineNumbers || []) if (label.page === index) {
+        ctx.save(); ctx.fillStyle = paintColor(label.style.color, geometry.background || '#FFFFFF'); setCanvasTextStyle(ctx, label.style);
+        paintText(ctx, { ...label.style, text: label.text, x: label.x, width: label.width }, label.baseline); ctx.restore();
       }
       if (geometry.pageBorders?.zOrder !== 'back') for (const border of pageBorders) paintParagraphBorder(ctx, border);
       if (!printing && this.pageStories) {
@@ -811,6 +887,8 @@ export class CanvasEditor {
     if (!nearest) return 0;
     const page = Number(nearest.canvas.dataset.page), y = (event.clientY - nearest.r.top) / this.zoom;
     this.pointImage = imageAtPoint(this.selectionLayout, page, (event.clientX - nearest.r.left) / this.zoom, y, { includeBehindText: !!event.altKey });
+    // A view can hide some drawings (hidden ink); they are not painted, so they are not hit either.
+    if (this.pointImage && this.hiddenDrawing?.(this.pointImage.image)) this.pointImage = null;
     const hit = hitTestStop(this.selectionLayout, page, (event.clientX - nearest.r.left) / this.zoom, y), position = hit.offset;
     this.pointLink = hyperlinkAtPoint(this.selectionLayout, this.model.paragraphs, page, (event.clientX - nearest.r.left) / this.zoom, y, this.pointImage);
     if (!updateCaret) return position;
@@ -839,15 +917,17 @@ export class CanvasEditor {
     if (e.button !== 0 || this.composition) return;
     this.typingGroup = null; this.deleteGroup = null;
     e.preventDefault();
+    // Crop mode and Shift+click drawing selection take the press first (image-interaction.js).
+    if (this.imageInteraction.pointerDown(e)) return;
     if (this.session.path !== null) {
       const story = this.storyAtEvent(e);
       if (story && this.pageStories.stories[story.pageStory].editable && (story.pageStory !== this.session.path || story.page !== this.storyPage)) this.editStory(story.pageStory, story.page);
       // Footnotes are edited in place: a click back in the body leaves the note.
-      else if (!story && this.pageStories?.stories[this.session.path]?.kind === 'footnote' && !this.readOnly) this.editStory(null);
+      else if (!story && isNoteStoryKind(this.pageStories?.stories[this.session.path]?.kind) && !this.readOnly) this.editStory(null);
     } else if (!this.readOnly) {
       // A click in a footnote edits it directly.
       const story = this.storyAtEvent(e, true);
-      if (story && this.pageStories?.stories[story.pageStory]?.kind === 'footnote' && this.pageStories.stories[story.pageStory].editable) this.editStory(story.pageStory, story.page);
+      if (story && isNoteStoryKind(this.pageStories?.stories[story.pageStory]?.kind) && this.pageStories.stories[story.pageStory].editable) this.editStory(story.pageStory, story.page);
     }
     let position = this.point(e), restoredPromptSelection, restoredOutsideCaret, sameOffsetCaret;
     if ((e.ctrlKey || e.metaKey) && this.pointLink) { this.openHyperlink(this.pointLink.link); return; }
@@ -1153,6 +1233,7 @@ export class CanvasEditor {
   }
   keydown(e) {
     if (e.isComposing || this.composition || e.keyCode === 229) return;
+    if (this.imageInteraction.keydown(e)) return;
     if (e.key === 'F9' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       e.preventDefault(); if (this.onUpdateFields) this.onUpdateFields(); else this.updatePageReferences(); return;
     }
@@ -1212,7 +1293,7 @@ export class CanvasEditor {
     }
   }
   beforeInput(e) {
-    if (this.readOnly) { e.preventDefault(); return; }
+    if (this.readOnly || this.viewOnly) { e.preventDefault(); return; }
     if (e.isComposing || this.composition || !e.cancelable) return;
     this.nativeSelection();
     if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') { e.preventDefault(); e.inputType === 'historyUndo' ? this.undo() : this.redo(); return; }
@@ -1313,7 +1394,7 @@ export class CanvasEditor {
     return this.model.replace(value.slice(start, tail), { checkpoint });
   }
   nativeInput() {
-    if (this.readOnly) { this.syncInput(); return; }
+    if (this.readOnly || this.viewOnly) { this.syncInput(); return; }
     try {
       const revision = this.session.revision;
       this.session.run(() => {

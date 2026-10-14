@@ -55,7 +55,7 @@ of this audit. Source order lists/writer names alone are not behavior consumers.
 | `stylePaneFormatFilter` | Retained, no style-pane preference consumer. Implement applicable style listing/filter/sort behavior with named/latent style metadata. |
 | `stylePaneSortMethod` | Retained, no style-pane preference consumer. Implement applicable style listing/filter/sort behavior with named/latent style metadata. |
 | `documentType` | Retained metadata, no document-type workflow consumer. Verify applicability before classifying a visual failure. |
-| `mailMerge` | Retained, no settings-driven mail-merge workflow. Cached field text/ordinary field support does not implement merge data sources and output. |
+| `mailMerge` | Partial (§17.14): read and written by the Mailings tab. `mainDocumentType`, `viewMergedData`, `activeRecord`, `mailSubject` and `addressFieldName` are managed; `dataType` is added as `native` for new main documents; data source links, queries and ODSO mappings are preserved but not opened (the recipient list is embedded in a custom XML part instead). Normal Document removes the element. |
 | `revisionView` | Retained, no settings-defined revision-view initialization. App has separate view modes; verify stored visibility/author-filter combinations. |
 | `trackRevisions` | Partial: imported flag and editing/tracking toggle serialize. Text/paragraph revisions supported subsets; complete formatting/move/table/section revision semantics remain open. |
 | `doNotTrackMoves` | Retained, no independent switch consumer. Existing revision support is not proof that these tracking policies are honored. |
@@ -65,10 +65,10 @@ of this audit. Source order lists/writer names alone are not behavior consumers.
 | `styleLockTheme` | Retained, no settings-defined style/protection consumer. Requires combined formatting-protection and style-lock controls. |
 | `styleLockQFSet` | Retained, no settings-defined style/protection consumer. Requires combined formatting-protection and style-lock controls. |
 | `defaultTabStop` | Partial: validated tab geometry, defaults to 720 twips; supported edits serialize. Measurement bounds and complete story/context inheritance need controls. |
-| `autoHyphenation` | Retained, no settings-driven automatic hyphenation consumer. Implement language-aware hyphenation and these controls. Soft/nonbreaking hyphen support is separate. |
-| `consecutiveHyphenLimit` | Retained, no settings-driven automatic hyphenation consumer. Implement language-aware hyphenation and these controls. Soft/nonbreaking hyphen support is separate. |
-| `hyphenationZone` | Retained, no settings-driven automatic hyphenation consumer. Implement language-aware hyphenation and these controls. Soft/nonbreaking hyphen support is separate. |
-| `doNotHyphenateCaps` | Retained, no settings-driven automatic hyphenation consumer. Implement language-aware hyphenation and these controls. Soft/nonbreaking hyphen support is separate. |
+| `autoHyphenation` | Implemented (2026-10-13): read with default off, written on change; drives English-only automatic hyphenation in layout. See conformance “Hyphenation: automatic, manual and options”. |
+| `consecutiveHyphenLimit` | Implemented (2026-10-13): 0/absent means no limit; limits lines in a paragraph ending in a hyphen; written on change. |
+| `hyphenationZone` | Implemented (2026-10-13): default 360 twips, twips or universal measure; split only when the line would otherwise leave more than the zone free; written on change. |
+| `doNotHyphenateCaps` | Implemented (2026-10-13): words written entirely in capitals are not split; written on change. |
 | `showEnvelope` | Retained, no envelope-view/workflow consumer. Check applicability separately from ordinary pages. |
 | `summaryLength` | Retained, no summary-generation preference consumer. Not physical page layout. |
 | `clickAndTypeStyle` | Retained, no settings-defined click-and-type default style consumer. Ordinary caret placement is not this workflow. |

@@ -29,10 +29,11 @@ test('menus opened from the ribbon draw every icon from the ribbon\'s own set', 
   await openEditor(page);
   await page.getByRole('button', { name: 'Paste options', exact: true }).click();
   const icons = page.getByRole('menu', { name: 'Paste options' }).locator('.menu-icon svg');
-  await expect(icons).toHaveCount(2);
-  expect(await icons.evaluateAll(list => list.map(svg => svg.classList.contains('ico')))).toEqual([true, true]);
+  await expect(icons.first()).toBeVisible();
+  expect(await icons.count()).toBeGreaterThanOrEqual(2);
+  expect(await icons.evaluateAll(list => list.every(svg => svg.classList.contains('ico')))).toBe(true);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('menubar', { name: 'Menu bar' }).getByRole('menuitem', { name: 'File', exact: true }).click();
   const fileIcons = page.getByRole('menu', { name: 'File' }).locator('.menu-icon svg');
   expect(await fileIcons.evaluateAll(list => list.every(svg => svg.classList.contains('ico')))).toBe(true);
 });
@@ -45,19 +46,22 @@ test('related table, picture and shape commands have distinct icons', async ({ p
   await tab(page, 'Table Layout').click();
   expect(await iconOf(page, 'Paragraph After')).not.toBe(await iconOf(page, 'Insert Below'));
   expect(await iconOf(page, 'Paragraph Before')).not.toBe(await iconOf(page, 'Paragraph After'));
-  expect(await iconOf(page, 'Merge Below')).not.toBe(await iconOf(page, 'Merge Cells'));
+  expect(await iconOf(page, 'Split Table')).not.toBe(await iconOf(page, 'Split Cells…'));
+  expect(await iconOf(page, 'Select')).not.toBe(await iconOf(page, 'Delete'));
   const deleteTable = await page.evaluate(async () => (await import('/src/ui/command-icons.js')).commandIconBody('deleteTable'));
   await page.keyboard.press('ControlOrMeta+End'); await page.keyboard.press('Enter');
   await tab(page, 'Insert').click();
   await page.getByRole('button', { name: 'Shapes', exact: true }).click();
-  await page.locator('.shape-gallery-item').first().click();
+  await page.locator('.shape-gallery-item').nth(2).click();
+  await page.locator('canvas.canvas-page').first().click({ position: { x: 200, y: 400 } });
   await tab(page, 'Shape Format').click();
-  expect(await iconOf(page, 'Delete Shape')).not.toBe(deleteTable);
+  expect(await iconOf(page, 'Edit Shape')).not.toBe(deleteTable);
+  expect(await iconOf(page, 'Shape Fill')).not.toBe(await iconOf(page, 'Shape Effects'));
 });
 
 test('large commands, split buttons and titled fields fit inside their ribbon group', async ({ page }) => {
   await openEditor(page);
-  for (const name of ['Home', 'Insert', 'Layout', 'References', 'Review', 'View']) {
+  for (const name of ['Home', 'Insert', 'Draw', 'Layout', 'References', 'Mailings', 'Review', 'View']) {
     await tab(page, name).click();
     const overflow = await page.evaluate(() => {
       const panel = document.querySelector('.ribbon-panel:not([hidden])'), bad = [];
@@ -77,6 +81,7 @@ test('the Header & Footer tab sets its position labels and close command without
   await openEditor(page);
   await tab(page, 'Insert').click();
   await page.getByRole('button', { name: 'Header', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Edit Header' }).click();
   await expect(tab(page, 'Header & Footer')).toHaveAttribute('aria-selected', 'true');
   const panel = page.locator('.ribbon-panel:not([hidden])');
   for (const label of ['Header from Top', 'Footer from Bottom']) {

@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 import puterLocalhost from '../../dev/puter-localhost.mjs';
+import collabDevServer from './dev/collab-dev-server.mjs';
 
 export default defineConfig({
-  plugins: [puterLocalhost('documents')],
+  plugins: [puterLocalhost('documents'), collabDevServer()],
   base: './',
   build: {
     target: 'es2022',
@@ -12,6 +13,7 @@ export default defineConfig({
       input: {
         app: fileURLToPath(new URL('./index.html', import.meta.url)),
         playground: fileURLToPath(new URL('./playground.html', import.meta.url)),
+        mirror: fileURLToPath(new URL('./mirror.html', import.meta.url)),
       },
     },
   },

@@ -37,6 +37,15 @@ export const publishing = { enabled: true };
  * Whether leaving the page now could lose work: edits not yet written, or a
  * write still in flight. Used for the browser's "leave site?" prompt.
  */
+const AUTOSAVE_KEY = 'documents:autosave';
+/** Whether edits save themselves (they do, until AutoSave is turned off on this device). */
+export function autosaveEnabled() {
+  try { return globalThis.localStorage?.getItem(AUTOSAVE_KEY) !== '0'; } catch { return true; }
+}
+export function setAutosaveEnabled(on) {
+  try { if (on) globalThis.localStorage?.removeItem(AUTOSAVE_KEY); else globalThis.localStorage?.setItem(AUTOSAVE_KEY, '0'); } catch { /* storage unavailable */ }
+}
+
 export function needsUnloadWarning(doc) {
   if (!doc) return false;
   return doc.dirty || doc.status === 'saving' || !!doc._saving;
@@ -104,7 +113,7 @@ export class Doc extends EventTarget {
     // Saves and exports still receive an initialization failure; observe it
     // here as well in case the user has not asked to export yet.
     this._ready?.catch(() => {});
-    if (this.dirty) this._schedule(this.autosaveDelay);
+    if (this.dirty && this.autosave) this._schedule(this.autosaveDelay);
   }
 
   /** Nothing on screen is worth saving (a file the engine could not open, a reopen): no edits pending, and the status says so. */
@@ -139,13 +148,32 @@ export class Doc extends EventTarget {
     this._timer = setTimeout(() => this.save({ auto: true }).catch(() => {}), ms);
   }
 
+  /**
+   * In a shared document one client writes the file (the owner's elected tab); the others leave
+   * saving to it: their edits reach the file through the room, so they are never "unsaved" here.
+   */
+  setSaving(on) {
+    if (this.writes === !!on) return;
+    this.writes = !!on;
+    if (!this.writes) { clearTimeout(this._timer); this._timer = null; this.savedVersion = this.version; this._setStatus('saved'); }
+  }
+
   /** The engine reports an edit. */
   changed() {
     // After the editor has closed (a content error, a reopen) nothing from it may be saved over the file.
     if (this._deleted || this._closed) return;
     this.version += 1;
+    if (this.writes === false) { this.savedVersion = this.version; return; }
     this._setStatus('unsaved');
-    if (this.exporter) this._schedule(this.autosaveDelay);
+    if (this.exporter && this.autosave) this._schedule(this.autosaveDelay);
+  }
+
+  /** AutoSave (on unless turned off in the title bar): edits save themselves; off, they wait for Save. */
+  get autosave() { return autosaveEnabled(); }
+  setAutosave(on) {
+    setAutosaveEnabled(on);
+    if (on && this.dirty && this.exporter) this._schedule(0);
+    else if (!on && !this._saving) { clearTimeout(this._timer); this._timer = null; }
   }
 
   /**
@@ -172,7 +200,7 @@ export class Doc extends EventTarget {
   async save({ auto = false } = {}) {
     clearTimeout(this._timer);
     this._timer = null;
-    if (this._deleted) return true;
+    if (this._deleted || this.writes === false) return true;
     if (this._closed) return false;
     while (this._saving) {
       try {
@@ -247,7 +275,7 @@ export class Doc extends EventTarget {
       // Edits that landed while the write was in flight keep the doc dirty.
       this.savedVersion = version;
       this._setStatus(this.dirty ? 'unsaved' : 'saved');
-      if (this.dirty) this._schedule(this.autosaveDelay);
+      if (this.dirty && this.autosave) this._schedule(this.autosaveDelay);
       return true;
     } catch (e) {
       console.error(e);
@@ -284,19 +312,19 @@ export class Doc extends EventTarget {
   /** Leave a version snapshot when one is due. Never affects the save status. */
   _snapshot(blob) {
     if (!versioning.enabled || !this.path || this._snapshotting) return;
-    this._snapshotting = snapshotIfDue(this.path, blob, this.lastVersionAt)
+    this._snapshotting = snapshotIfDue(this.path, blob, this.lastVersionAt, { meta: this.versionMeta?.() })
       .then((t) => { this.lastVersionAt = t; })
       .catch((e) => { console.warn('[documents] version snapshot failed', e); })
       .finally(() => { this._snapshotting = null; });
   }
 
   /** Snapshot the current content now (saving first when needed). Resolves the version or null. */
-  async saveVersionNow() {
+  async saveVersionNow(meta = {}) {
     if (this.dirty || !this.path) await this.save();
     return this._withFileLock(async () => {
       if (!this.path) return null;
       if (this._snapshotting) await this._snapshotting;
-      const v = await saveVersion(this.path, await this.toBlob());
+      const v = await saveVersion(this.path, await this.toBlob(), { meta: { ...this.versionMeta?.(), ...meta } });
       if (v) this.lastVersionAt = v.time;
       return v;
     });
