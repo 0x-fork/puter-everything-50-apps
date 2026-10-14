@@ -1159,7 +1159,7 @@ const pairs = {
   "Recovered board": "Tableau récupéré",
   "Space + drag": "Espace + glisser",
   "Ctrl or Cmd + scroll": "Ctrl ou Cmd + défilement",
-  "Shift + click": "Maj + clic",
+  "Shift or Ctrl/Cmd + click": "Maj ou Ctrl/Cmd + clic",
   "Ctrl or Cmd + Shift + Z or Ctrl or Cmd + Y":
     "Ctrl ou Cmd + Maj + Z ou Ctrl ou Cmd + Y",
   "Ctrl or Cmd + S": "Ctrl ou Cmd + S",

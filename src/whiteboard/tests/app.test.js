@@ -20507,6 +20507,49 @@ test("Shift-clicking a selected object with a wobble only deselects it", async (
   }
 });
 
+test("Ctrl- or Cmd-click adds an object to the selection or takes it out", async () => {
+  const app = await setup();
+  try {
+    const { selected, pointer } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 200, h: 100 }),
+      item("rect", 400, 0, { w: 200, h: 100 }),
+    ]);
+    const [a, b] = selected;
+    const press = (o, extra = {}) => {
+      const at = { x: o.x + 100, y: o.y + 50 };
+      pointer("pointerdown", at, extra);
+      pointer("pointerup", at, extra);
+    };
+    const chosen = () =>
+      selectedClipboard(app)
+        .map((i) => i.id)
+        .sort();
+    press(a);
+    await app.tick();
+    assert.deepEqual(chosen(), [a.id]);
+    press(b, { metaKey: true });
+    await app.tick();
+    assert.deepEqual(chosen(), [a.id, b.id].sort());
+    // Held from the press, they still drag the selection without snapping.
+    const at = { x: a.x + 100, y: a.y + 50 };
+    pointer("pointerdown", at, { ctrlKey: true });
+    pointer("pointermove", { x: at.x + 33, y: at.y + 21 }, { ctrlKey: true });
+    pointer("pointerup", { x: at.x + 33, y: at.y + 21 }, { ctrlKey: true });
+    await app.tick();
+    const moved = selectedClipboard(app);
+    assert.deepEqual(moved.map((i) => i.id).sort(), [a.id, b.id].sort());
+    for (const o of [a, b])
+      assert.equal(moved.find((i) => i.id === o.id).x, o.x + 33);
+    a.x += 33;
+    a.y += 21;
+    press(a, { ctrlKey: true });
+    await app.tick();
+    assert.deepEqual(chosen(), [b.id]);
+  } finally {
+    await app.close();
+  }
+});
+
 test("a picked fill applies when the picker closes on a press elsewhere on the board", async () => {
   const app = await setup();
   const { doc, w } = app;

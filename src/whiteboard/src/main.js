@@ -8081,16 +8081,19 @@ function pointerDown(
     // still takes that object, so a drag moves it. Shift starts a marquee.
     if (!id && !e.shiftKey)
       id = selectedAt(visibleItems(), selection, p, 4 / view.z)?.id;
+    // Shift-, Ctrl- or Cmd-click adds an object to the selection or takes
+    // it out, as in other whiteboards.
+    const adding = e.shiftKey || e.ctrlKey || e.metaKey;
     if (id) {
       const linkedItem = current.items.find((i) => i.id === id);
       let link =
-        !e.shiftKey &&
+        !adding &&
         !e.altKey &&
         textLinkHit(linkedItem, canvas.getContext("2d"), p);
       const now = performance.now();
       const doubleClick =
         !e.altKey &&
-        !e.shiftKey &&
+        !adding &&
         lastTap?.id === id &&
         now - lastTap.time < DOUBLE_CLICK_MS;
       // A second press within the double-click window opens the object's
@@ -8110,11 +8113,12 @@ function pointerDown(
         linkedItem.type === "table" &&
         selection.size === 1 &&
         selection.has(id) &&
-        !e.shiftKey &&
+        !adding &&
         !e.altKey
           ? tableCellAt(linkedItem, p)
           : null;
-      if (e.shiftKey) {
+      let unselect = null;
+      if (adding) {
         selectionAnchor = null;
         if (focusedGroup && linkedItem.groupId !== focusedGroup) {
           focusedGroup = null;
@@ -8123,7 +8127,16 @@ function pointerDown(
         const members = descendants(current.items, new Set([id]), {
           groups: !focusedGroup,
         });
-        if (selection.has(id)) {
+        // Ctrl or Cmd held from the press still drags the selection, without
+        // snapping, or says why it cannot, so with them the object leaves on
+        // a release that has not moved.
+        if (
+          selection.has(id) &&
+          !e.shiftKey &&
+          (isSharedReadOnly() || !hasLocked(current.items, selection))
+        )
+          unselect = { members, groups: !focusedGroup };
+        else if (selection.has(id)) {
           members.forEach((id) => selection.delete(id));
           // Taking an object out of the selection starts no drag: a slight
           // wobble would otherwise move what is left and record an undo step.
@@ -8155,7 +8168,7 @@ function pointerDown(
       const alone = descendants(current.items, new Set([id]), {
         groups: !focusedGroup,
       });
-      const narrow = !e.shiftKey &&
+      const narrow = !adding &&
         !e.altKey &&
         [...selection].some((other) => !alone.has(other)) && {
           id,
@@ -8177,6 +8190,7 @@ function pointerDown(
                 linkRuns: linkedItem.textRuns,
                 start: p,
                 refused,
+                unselect,
               }
             : null;
         draw();
@@ -8189,6 +8203,7 @@ function pointerDown(
         kind: "move",
         groupFocus: focusedGroup,
         narrow: editOnRelease ? false : narrow,
+        unselect,
         edit: editOnRelease ? { id, point: p } : null,
         tableCell: clickedCell,
         link,
@@ -8999,6 +9014,12 @@ function pointerUp(event) {
     !drag.active &&
     !drag.duplicate &&
     drag.narrow;
+  const unselect =
+    event?.type === "pointerup" &&
+    ["move", "link"].includes(drag.kind) &&
+    !drag.active &&
+    !drag.duplicate &&
+    drag.unselect;
   const clickedTable =
     clickedCell && current.items.find((i) => i.id === drag.id);
   if (
@@ -9147,6 +9168,12 @@ function pointerUp(event) {
   drag = null;
   if (narrowTo && current.items.some((i) => i.id === narrowTo.id))
     selectItems(new Set([narrowTo.id]), { withinGroup: narrowTo.withinGroup });
+  if (unselect) {
+    unselect.members.forEach((id) => selection.delete(id));
+    selection = descendants(current.items, selection, {
+      groups: unselect.groups,
+    });
+  }
   sendPresence();
   if (movedBranch) revealQuickObject(movedBranch, { minimal: true });
   else draw();
@@ -12745,7 +12772,7 @@ function help() {
       ["Ctrl/Cmd + Plus/Minus", "Zoom in or out"],
       ["Ctrl/Cmd + 0", "Reset zoom to 100 percent"],
       ["Alt/Option + 1 / 2", "Fit board / zoom to selection"],
-      ["Shift + click", "Select multiple objects"],
+      ["Shift or Ctrl/Cmd + click", "Select multiple objects"],
       ["Ctrl/Cmd + F", "Find on board"],
       ["Ctrl/Cmd + K", "Command palette"],
       ["Arrow keys", "Move selected objects"],
