@@ -11,6 +11,7 @@ import { output, inScript, type RunResult } from './runner';
 import mathutilsPy from './py/mathutils.py?raw';
 import bpyPy from './py/bpy.py?raw';
 import runtimePy from './py/p3d_runtime.py?raw';
+import bpyExtrasPy from './py/bpy_extras.py?raw';
 
 export const PYODIDE_VERSION = '314.0.7';
 export const PYODIDE_INDEX_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
@@ -291,7 +292,8 @@ export function loadPython(): Promise<PyodideAPI> {
       inst.FS.writeFile('/home/pyodide/p3d/mathutils.py', mathutilsPy);
       inst.FS.writeFile('/home/pyodide/p3d/bpy.py', bpyPy);
       inst.FS.writeFile('/home/pyodide/p3d/p3d_runtime.py', runtimePy);
-      inst.runPython("import sys\nsys.path.insert(0, '/home/pyodide/p3d')\nimport bpy, mathutils, p3d_runtime");
+      inst.FS.writeFile('/home/pyodide/p3d/bpy_extras.py', bpyExtrasPy);
+      inst.runPython("import sys\nsys.path.insert(0, '/home/pyodide/p3d')\nimport bpy, mathutils, p3d_runtime, bpy_extras\nsys.modules['bpy_extras.object_utils'] = bpy_extras.object_utils");
       runtime = inst.pyimport('p3d_runtime');
       py = inst;
       python.version = String(inst.runPython('import sys; sys.version.split()[0]'));

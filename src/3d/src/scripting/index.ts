@@ -20,15 +20,19 @@
 //   Mesh: vertices[i].co/select/normal, edges, polygons (vertices, normal, center, area, use_smooth,
 //       material_index), loops, from_pydata(verts, edges, faces) (loose edges are not stored),
 //       update(), transform(), clear_geometry(), shade_smooth/flat(), materials.append/pop/clear,
-//       vertices/polygons.foreach_get/foreach_set
+//       vertices/polygons.foreach_get/foreach_set, loops.foreach_get('vertex_index'),
+//       uv_layers (one map: active, new(), data[i].uv, foreach_get/foreach_set('uv'))
 //   Material/World: node_tree.nodes[name|i].inputs[name].default_value, nodes.new/remove,
-//       links.new(output, input)/remove; Action: fcurves.new/find/remove, keyframe_points.insert
+//       links.new(output, input)/remove, image nodes' .image; Camera: view_frame(scene);
+//   Images: images.new, images.load(name) of files offered by the app (scripting/files.ts,
+//       e.g. images attached to the AI assistant's chat); Action: fcurves.new/find/remove, keyframe_points.insert
 //   Scene: frame_current, frame_set(), frame_start/end, render.*, cursor, camera, world, collection,
 //       objects; Collection: objects.link/unlink, children.link/unlink, all_objects
 //   bpy.context: scene, object, active_object, selected_objects, visible_objects, view_layer
 //       (objects.active get/set), mode, collection, area, material, evaluated_depsgraph_get()
 //   bpy.ops.<module>.<op>(**props[, 'INVOKE_DEFAULT']) → {'FINISHED'} / {'CANCELLED'}; poll()
 //   mathutils: Vector, Matrix, Euler, Quaternion, Color, geometry (subset), noise (Python, subset)
+//   bpy_extras.object_utils.world_to_camera_view(scene, camera, co)
 //   bpy.props: Float/Int/Bool/String/Enum/FloatVector/IntVector/BoolVectorProperty
 //   bpy.types.Operator: bl_idname, bl_label, bl_description, bl_options ('REGISTER', 'UNDO',
 //       'INTERNAL'), annotated properties, poll(), execute(), invoke() (no modal), self.report()

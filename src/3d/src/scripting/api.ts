@@ -10,7 +10,7 @@
 // (see runner.ts).
 import { Matrix4 } from 'three';
 import { app, operators, type OpResult } from '../app/app';
-import type { DocumentData, ObjectData, MeshData, NodeTreeData, NodeData, ID, TextData, CollectionData, MaterialData } from '../data/types';
+import type { DocumentData, ObjectData, MeshData, NodeTreeData, NodeData, ID, ImageData, TextData, CollectionData, MaterialData } from '../data/types';
 import { newObject, newMeshData, newMaterial, newCollection, newCamera, newLight, newImage, newText, newAction, newNodeGroup, newWorld, newCurve, newArmature, newLattice, uid } from '../data/defaults';
 import { buildMesh, edgeTopology, emptyMeshArrays, faceCenter, faceVerts, polyNormal } from '../mesh/mesh';
 import { cow, cloneShared } from '../data/cow';
@@ -21,6 +21,7 @@ import { insertKeyframe, evaluateFCurve as evaluateFC } from '../anim/fcurve';
 import { localMatrix, applyMatrixToObject } from '../eval/transform';
 import { getValue } from '../data/rna';
 import { uiState } from '../app/prefs';
+import { scriptFile, scriptFileNames } from './files';
 import { Matrix, Vector, mathutils } from './mathutils';
 import { allSockets, getNodeType, nodeSockets, nodeTypes, socketDefault } from '../nodes/registry';
 import { ctxOf, makeNode } from '../nodes/tree';
@@ -640,6 +641,9 @@ class MeshStruct extends IDStruct {
   get loops() {
     return new MeshLoops(this.__id);
   }
+  get uv_layers() {
+    return new MeshUVLayers(this.__id);
+  }
   get materials() {
     return new IDMaterials(() => this.me as unknown as { materials: (ID | null)[] }, `${this.__path}.materials`);
   }
@@ -940,6 +944,9 @@ class MeshLoops extends PropCollection<unknown> {
   constructor(readonly meId: string) {
     super(`bpy.data.meshes[${JSON.stringify(tableOf(app.doc, 'meshes')[meId]?.name)}].loops`);
   }
+  override get length() {
+    return meshOf(this.meId).indices.length;
+  }
   list() {
     const me = meshOf(this.meId);
     return Array.from(me.indices, (v, i) => ({ __kind: 'struct', __type: 'MeshLoop', index: i, vertex_index: v }));
@@ -947,7 +954,140 @@ class MeshLoops extends PropCollection<unknown> {
   nameOf() {
     return '';
   }
+  override getItem(key: number | string) {
+    if (typeof key !== 'number') throw pyError('TypeError', 'bpy_prop_collection: index must be an int');
+    const me = meshOf(this.meId);
+    const n = me.indices.length;
+    const i = key < 0 ? key + n : key;
+    if (i < 0 || i >= n) throw pyError('IndexError', `bpy_prop_collection[index]: index ${key} out of range, size ${n}`);
+    return { __kind: 'struct', __type: 'MeshLoop', index: i, vertex_index: me.indices[i] };
+  }
+  foreach_get(attr: string, seq?: unknown) {
+    if (attr !== 'vertex_index') throw pyError('TypeError', `foreach_get: unsupported attribute "${attr}" (supported: vertex_index)`);
+    const out = Array.from(meshOf(this.meId).indices);
+    if (Array.isArray(seq)) for (let i = 0; i < out.length && i < seq.length; i++) seq[i] = out[i];
+    return out;
+  }
 }
+
+const hasUVs = (me: MeshData) => me.indices.length > 0 && me.uvs.length === me.indices.length * 2;
+
+/**
+ * A mesh's UV maps. Meshes here have one, stored per face corner (loop) like
+ * the reference's: uv_layers.active.data[loop_index].uv, or all at once with
+ * foreach_get / foreach_set('uv', flat). new() gives the one map a name.
+ */
+class MeshUVLayers extends PropCollection<unknown> {
+  constructor(readonly meId: string) {
+    super(`bpy.data.meshes[${JSON.stringify(tableOf(app.doc, 'meshes')[meId]?.name)}].uv_layers`);
+  }
+  list() {
+    return hasUVs(meshOf(this.meId)) ? [this.layer()] : [];
+  }
+  nameOf(x: unknown) {
+    return (x as { name: string }).name;
+  }
+  get active() {
+    return hasUVs(meshOf(this.meId)) ? this.layer() : null;
+  }
+  set active(_v: unknown) {
+    /* there is only one */
+  }
+  /** The mesh's UV map, made (all corners at 0, 0) if it has none; a mesh holds one, so a second new() returns it renamed. */
+  new(name = 'UVMap', do_init = true) {
+    void do_init;
+    const me = meshOf(this.meId);
+    if (!me.indices.length) throw pyError('RuntimeError', 'Error: a mesh without faces has no UV map; build its faces first');
+    if (!hasUVs(me)) me.uvs = new Float32Array(me.indices.length * 2);
+    me.uv_map_name = String(name || 'UVMap');
+    touched('geometry');
+    return this.layer();
+  }
+  remove(_layer: unknown) {
+    throw pyError('RuntimeError', 'Error: this app keeps one UV map per mesh; it cannot be removed');
+  }
+  private layer() {
+    const id = this.meId;
+    const path = `${this.__path}[${JSON.stringify(meshOf(id).uv_map_name || 'UVMap')}]`;
+    const n = () => meshOf(id).indices.length;
+    const write = (i: number, u: number, v: number) => {
+      const uvs = cow(meshOf(id), 'uvs');
+      uvs[i * 2] = u;
+      uvs[i * 2 + 1] = v;
+      touched('geometry');
+    };
+    const loop = (i: number) => ({
+      __kind: 'struct',
+      __type: 'MeshUVLoop',
+      get uv() {
+        return boundVector('VECTOR', () => meshOf(id).uvs.subarray(i * 2, i * 2 + 2), (k, x) => {
+          cow(meshOf(id), 'uvs')[i * 2 + k] = x;
+          touched('geometry');
+        });
+      },
+      set uv(v: unknown) {
+        const a = toPlain(v) as number[];
+        write(i, Number(a?.[0]), Number(a?.[1]));
+      },
+      toString: () => `<bpy_struct, MeshUVLoop at ${path}.data[${i}]>`,
+    });
+    const data = new (class extends PropCollection<unknown> {
+      override get length() {
+        return n();
+      }
+      list() {
+        return Array.from({ length: n() }, (_, i) => loop(i));
+      }
+      nameOf() {
+        return '';
+      }
+      override getItem(key: number | string) {
+        if (typeof key !== 'number') throw pyError('TypeError', 'bpy_prop_collection: index must be an int');
+        const i = key < 0 ? key + n() : key;
+        if (i < 0 || i >= n()) throw pyError('IndexError', `bpy_prop_collection[index]: index ${key} out of range, size ${n()}`);
+        return loop(i);
+      }
+      foreach_get(attr: string, seq?: unknown) {
+        return uvForeachGet(attr, seq);
+      }
+      foreach_set(attr: string, seq: unknown) {
+        uvForeachSet(attr, seq);
+      }
+    })(`${path}.data`);
+    const uvForeachGet = (attr: string, seq?: unknown) => {
+      if (attr !== 'uv') throw pyError('TypeError', `foreach_get: unsupported attribute "${attr}" (supported: uv)`);
+      const out = Array.from(meshOf(id).uvs);
+      if (Array.isArray(seq)) for (let i = 0; i < out.length && i < seq.length; i++) seq[i] = out[i];
+      return out;
+    };
+    const uvForeachSet = (attr: string, seq: unknown) => {
+      if (attr !== 'uv') throw pyError('TypeError', `foreach_set: unsupported attribute "${attr}" (supported: uv)`);
+      const a = (toPlain(seq) as unknown[]).flat() as number[];
+      const me = meshOf(id);
+      if (a.length !== me.indices.length * 2) throw pyError('ValueError', `foreach_set: expected ${me.indices.length * 2} values (u, v per loop), got ${a.length}`);
+      me.uvs = Float32Array.from(a, Number);
+      touched('geometry');
+    };
+    return {
+      __kind: 'struct',
+      __type: 'MeshUVLoopLayer',
+      get name() {
+        return meshOf(id).uv_map_name || 'UVMap';
+      },
+      set name(v: string) {
+        meshOf(id).uv_map_name = String(v || 'UVMap');
+        touched();
+      },
+      active: true,
+      active_render: true,
+      data,
+      foreach_get: uvForeachGet,
+      foreach_set: uvForeachSet,
+      toString: () => `<bpy_struct, MeshUVLoopLayer("${meshOf(id).uv_map_name || 'UVMap'}") at ${path}>`,
+    };
+  }
+}
+kwMethod(MeshUVLayers.prototype, 'new', ['name', 'do_init']);
 
 /** Material slots of mesh/curve data: append / pop / clear. */
 class IDMaterials extends PropCollection<unknown> {
@@ -1195,6 +1335,21 @@ class NodeStruct extends Struct {
   }
   get outputs() {
     return new SocketsCollection(this.getTree, this.__nid, true, `${this.__path}.outputs`);
+  }
+  /** Image Texture, Environment Texture and image nodes: the image (stored as its id, unset until one is chosen). */
+  get image() {
+    if (!this.hasImage()) return undefined;
+    const id = this.node.props.image as string | null | undefined;
+    return id && app.doc.images[id] ? wrapId('images', id) : null;
+  }
+  set image(v: unknown) {
+    if (!this.hasImage()) throw pyError('AttributeError', `'${nodeLabel(this.node.type).replace(/ /g, '')}' object has no attribute 'image'`);
+    if (v !== null && v !== undefined && !(isIdWrapper(v) && v.__table === 'images')) throw pyError('TypeError', `${this.node.type}.image expected an Image (bpy.data.images[...]) or None`);
+    this.node.props.image = v ? (v as { __id: string }).__id : null;
+    touched();
+  }
+  private hasImage() {
+    return 'image' in this.node.props || !!getNodeType(this.node.type)?.props.some((p) => p.id === 'image' && p.type === 'IMAGE');
   }
 }
 const NODE_HIDDEN = new Set(['id', 'type', 'inputs', 'props', 'parent']);
@@ -1793,6 +1948,55 @@ function fcurveWrapper(getAct: () => import('../data/types').ActionData | undefi
 }
 
 
+class CameraStruct extends IDStruct {
+  /**
+   * The corners of the camera's frame in its local space, as the reference
+   * returns them (top right, bottom right, bottom left, top left): with a
+   * scene, shaped by its render resolution and pixel aspect; lens shift included.
+   */
+  view_frame(scene: unknown = null) {
+    void scene;
+    const ca = this.__raw as unknown as import('../data/types').CameraData;
+    const r = app.doc.scene.render;
+    const aspect = (r.resolution_x * r.pixel_aspect_x) / Math.max(1e-9, r.resolution_y * r.pixel_aspect_y);
+    const horizontal = ca.sensor_fit === 'HORIZONTAL' || (ca.sensor_fit === 'AUTO' && aspect >= 1);
+    const d = ca.display_size || 1;
+    let half: number;
+    if (ca.type === 'ORTHO') half = ca.ortho_scale / 2;
+    else half = ((ca.sensor_fit === 'VERTICAL' ? ca.sensor_height : ca.sensor_width) / 2 / ca.lens) * d;
+    const [w, h] = horizontal ? [half, half / aspect] : [half * aspect, half];
+    const big = 2 * Math.max(w, h);
+    const sx = ca.shift_x * big,
+      sy = ca.shift_y * big;
+    return [new Vector([w + sx, h + sy, -d]), new Vector([w + sx, -h + sy, -d]), new Vector([-w + sx, -h + sy, -d]), new Vector([-w + sx, h + sy, -d])];
+  }
+}
+kwMethod(CameraStruct.prototype, 'view_frame', ['scene']);
+
+/**
+ * bpy_extras.object_utils.world_to_camera_view, as in the reference: where a
+ * world-space point falls in the camera's frame, x and y from 0 to 1 (bottom
+ * left to top right, outside that range when off frame) and z the distance in
+ * front of the camera. Used for projecting a photo onto a model through the camera.
+ */
+function worldToCameraView(scene: unknown, obj: unknown, coord: unknown) {
+  if (!isIdWrapper(obj) || obj.__table !== 'objects' || (obj as unknown as { type: string }).type !== 'CAMERA') throw pyError('TypeError', 'world_to_camera_view(): obj must be a camera object');
+  const ob = obj as unknown as { matrix_world: Matrix; data: CameraStruct };
+  const co = (ob.matrix_world.normalized().inverted().matmul(toPlain(coord) as number[])) as Vector;
+  const z = -co.z;
+  const cam = ob.data;
+  let frame = cam.view_frame(scene).slice(0, 3);
+  if ((cam as unknown as { type: string }).type !== 'ORTHO') {
+    if (z === 0) return new Vector([0.5, 0.5, 0]);
+    frame = frame.map((v) => new Vector([-(v.x / (v.z / z)), -(v.y / (v.z / z)), -(v.z / (v.z / z))]));
+  }
+  const [minX, maxX] = [frame[2].x, frame[1].x];
+  const [minY, maxY] = [frame[1].y, frame[0].y];
+  return new Vector([(co.x - minX) / (maxX - minX), (co.y - minY) / (maxY - minY), z]);
+}
+
+export const bpy_extras = { object_utils: { world_to_camera_view: worldToCameraView } };
+
 const ID_CLASSES: Record<string, new (table: string, id: string) => IDStruct> = {
   objects: ObjectStruct,
   meshes: MeshStruct,
@@ -1800,6 +2004,7 @@ const ID_CLASSES: Record<string, new (table: string, id: string) => IDStruct> = 
   worlds: WorldStruct,
   node_groups: NodeGroupStruct,
   images: ImageStruct,
+  cameras: CameraStruct,
   texts: TextStruct,
   collections: CollectionStruct,
   actions: ActionStruct,
@@ -1959,9 +2164,24 @@ class IDCollection extends PropCollection<unknown> {
     idCache.delete(`${this.table}:${item.__id}`);
     touched();
   }
-  /** Load is unavailable without a file system; images can be opened from the Image editor. */
-  load(filepath: string) {
-    throw pyError('RuntimeError', `Error: cannot read "${filepath}": scripts have no file system access in the browser`);
+  /**
+   * Images only: opens a file offered to scripts (scripting/files.ts), such as
+   * an image attached to the AI assistant's chat; scripts have no file system.
+   */
+  load(filepath: string, check_existing = false) {
+    const path = String(filepath ?? '');
+    const offered = this.table === 'images' ? scriptFile(path) : null;
+    if (!offered) {
+      const names = this.table === 'images' ? scriptFileNames() : [];
+      const can = names.length ? ` Files that can be loaded: ${names.map((n) => JSON.stringify(n)).join(', ')}.` : ' Images can be opened from the Image Editor (Image › Open).';
+      throw pyError('RuntimeError', `Error: cannot read "${path}": scripts have no file system access in the browser.${can}`);
+    }
+    if (check_existing) {
+      const hit = Object.values(app.doc.images).find((im) => im.filepath === offered.name);
+      if (hit) return wrapId('images', hit.id);
+    }
+    const { name, bytes, mime, width, height } = offered;
+    return this.add({ id: uid('im'), name, mime, bytes, width, height, source: 'FILE', colorspace: 'sRGB', filepath: name, revision: 0 } as ImageData);
   }
   get is_updated() {
     return false;
@@ -1972,6 +2192,7 @@ class IDCollection extends PropCollection<unknown> {
 }
 kwMethod(IDCollection.prototype, 'new', ['name', 'object_data']);
 kwMethod(IDCollection.prototype, 'remove', ['object', 'do_unlink']);
+kwMethod(IDCollection.prototype, 'load', ['filepath', 'check_existing']);
 
 // specialised `new` keyword names per collection
 const NEW_PARAMS: Record<string, string[]> = {

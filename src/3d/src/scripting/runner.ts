@@ -2,7 +2,7 @@
 // ("Run Script" = one undo step), JavaScript execution with line-numbered errors.
 import { app } from '../app/app';
 import { scriptState, Struct, PropCollection, BoundArray } from './rna';
-import { bpy } from './api';
+import { bpy, bpy_extras } from './api';
 import { mathutils, VecBase, Matrix } from './mathutils';
 
 // ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ const scriptConsole = {
 
 /** Globals available to JavaScript scripts and the JS console. */
 export function jsGlobals(): Record<string, unknown> {
-  return { bpy, mathutils, ...mathutils, C: bpy.context, D: bpy.data, print: printFn, console: scriptConsole };
+  return { bpy, bpy_extras, mathutils, ...mathutils, C: bpy.context, D: bpy.data, print: printFn, console: scriptConsole };
 }
 
 let lineOffset: number | null = null;
