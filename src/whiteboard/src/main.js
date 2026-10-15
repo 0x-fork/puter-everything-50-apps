@@ -224,6 +224,7 @@ import {
   Unlock,
   Maximize,
   MessageSquare,
+  MessageSquareHeart,
   Magnet,
   Map as MapIcon,
   Minus,
@@ -352,6 +353,7 @@ const icons = {
   Unlock,
   Maximize,
   MessageSquare,
+  MessageSquareHeart,
   Magnet,
   Map: MapIcon,
   Minus,
@@ -1550,9 +1552,21 @@ const altText = createAltText({
 const onboarding = createOnboarding({
   focusCanvas: () => document.querySelector("#canvas")?.focus(),
 });
+// Feedback goes to the people who make Whiteboard through Puter's own
+// dialog, so it is offered only where Puter can show it.
+const feedbackAvailable = () =>
+  typeof window.puter?.ui?.showFeedbackDialog === "function";
+async function sendFeedback() {
+  if (!feedbackAvailable()) return;
+  // Resolves false when dismissed, and also when a cross-origin isolated
+  // page could not tell, so only a confirmed send is thanked.
+  if (await window.puter.ui.showFeedbackDialog())
+    toast("Thank you for your feedback.");
+}
 const helpCenter = createHelpCenter({
   modal,
   icon,
+  feedback: { available: feedbackAvailable, send: sendFeedback },
   refresh: iconsRefresh,
   tour: () => startTour(),
   shortcuts: () => help(),
@@ -2227,6 +2241,7 @@ function boardCommands(recent = []) {
     recent,
     frames: current ? orderedFrames(visualBoard().items) : [],
     authorsShown: showAuthors,
+    feedback: feedbackAvailable(),
     undo: collaboration
       ? !!collaboration.shared.undo.undoStack.length
       : !!history.past.length,
@@ -3459,7 +3474,7 @@ async function home({
       ),
     ].map((canvas) => [canvas.dataset.preview, canvas]),
   );
-  app.innerHTML = `<div class="workspace"><aside class="sidebar"><a class="brand" href="#" aria-label="Whiteboard home">${logo}</a><div class="workspace-label">Personal workspace</div><nav aria-label="Board library"><button data-filter="all" class="nav-item ${filter === "all" ? "active" : ""}">${icon("layout-dashboard")}All boards<span>${libraryFigure(boards.filter((b) => !b.deletedAt).length + cloudOnly().length)}</span></button><button data-filter="favorites" class="nav-item ${filter === "favorites" ? "active" : ""}">${icon("star")}Favorites<span>${libraryFigure(boards.filter((b) => b.favorite && !b.deletedAt).length)}</span></button><button data-filter="trash" class="nav-item ${filter === "trash" ? "active" : ""}">${icon("trash-2")}Trash</button>${organizationHome.notificationsItem()}</nav>${organizationHome.sidebar()}<div class="sidebar-bottom">${window.puter?.auth?.isSignedIn?.() ? "" : `<div class="sidebar-note" role="note">${icon("hard-drive")}<span>${t("Boards stay in this browser until you sign in.")}</span><button class="text-btn" data-action="sign-in">${t("Sign in")}</button></div>`}${themeControl(true)}<a class="powered" href="https://developer.puter.com" target="_blank" rel="noopener">Powered by Puter ${icon("arrow-up-right")}</a></div></aside><main class="library"><h1 class="sr-only">Whiteboard</h1><header class="library-top"><span class="crumbs"><span class="crumb-parent">Workspace <span class="slash">/</span></span> <strong>${filter === "trash" ? "Trash" : filter === "favorites" ? "Favorites" : "All boards"}</strong></span><div class="top-right">${button("command", "Command palette (Ctrl/Cmd K)", "commands")}${button("users", "Join shared board", "join-shared")}${button("circle-help", "Help and training", "help-center")}${button("keyboard", "Keyboard shortcuts", "help")}${account.markup()}</div></header><div class="library-body">${
+  app.innerHTML = `<div class="workspace"><aside class="sidebar"><a class="brand" href="#" aria-label="Whiteboard home">${logo}</a><div class="workspace-label">Personal workspace</div><nav aria-label="Board library"><button data-filter="all" class="nav-item ${filter === "all" ? "active" : ""}">${icon("layout-dashboard")}All boards<span>${libraryFigure(boards.filter((b) => !b.deletedAt).length + cloudOnly().length)}</span></button><button data-filter="favorites" class="nav-item ${filter === "favorites" ? "active" : ""}">${icon("star")}Favorites<span>${libraryFigure(boards.filter((b) => b.favorite && !b.deletedAt).length)}</span></button><button data-filter="trash" class="nav-item ${filter === "trash" ? "active" : ""}">${icon("trash-2")}Trash</button>${organizationHome.notificationsItem()}</nav>${organizationHome.sidebar()}<div class="sidebar-bottom">${window.puter?.auth?.isSignedIn?.() ? "" : `<div class="sidebar-note" role="note">${icon("hard-drive")}<span>${t("Boards stay in this browser until you sign in.")}</span><button class="text-btn" data-action="sign-in">${t("Sign in")}</button></div>`}${feedbackAvailable() ? `<button class="nav-item feedback-item" data-action="feedback">${icon("message-square-heart")}${t("Send feedback")}</button>` : ""}${themeControl(true)}<a class="powered" href="https://developer.puter.com" target="_blank" rel="noopener">Powered by Puter ${icon("arrow-up-right")}</a></div></aside><main class="library"><h1 class="sr-only">Whiteboard</h1><header class="library-top"><span class="crumbs"><span class="crumb-parent">Workspace <span class="slash">/</span></span> <strong>${filter === "trash" ? "Trash" : filter === "favorites" ? "Favorites" : "All boards"}</strong></span><div class="top-right">${button("command", "Command palette (Ctrl/Cmd K)", "commands")}${button("users", "Join shared board", "join-shared")}${button("circle-help", "Help and training", "help-center")}${button("keyboard", "Keyboard shortcuts", "help")}${account.markup()}</div></header><div class="library-body">${
     filter === "trash"
       ? ""
       : `<section aria-labelledby="start-heading"><div class="section-heading"><h2 id="start-heading">Start with a little inspiration</h2><button class="text-btn" data-action="templates">Browse all templates ${icon("arrow-up-right")}</button></div><div class="templates">${featuredTemplates()
@@ -13288,6 +13303,8 @@ async function action(a) {
       return home({ push: true });
     case "help":
       return help();
+    case "feedback":
+      return sendFeedback();
     case "sign-in":
       return signInAccount();
     case "sign-out":

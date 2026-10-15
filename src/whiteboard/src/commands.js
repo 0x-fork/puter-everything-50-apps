@@ -49,6 +49,8 @@ export function commandEntries({
   frames = [],
   // Whether sticky notes on a shared board show who added them.
   authorsShown = false,
+  // Whether Puter can show its dialog for feedback to the app's makers.
+  feedback = false,
 }) {
   const entries = [];
   const add = (
@@ -924,6 +926,13 @@ export function commandEntries({
     "help guides training onboarding documentation aide guides formation",
   );
   add("tour", "Take the tour", "Help", "tour onboarding tips visite astuces");
+  if (feedback)
+    add(
+      "feedback",
+      "Send feedback",
+      "Help",
+      "feedback suggestion bug problem idea report rétroaction suggestion signaler",
+    );
   add(
     "migrate-miro",
     "Migrate from Miro",

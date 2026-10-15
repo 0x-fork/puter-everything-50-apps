@@ -447,6 +447,12 @@ nav + .workspace-label {
     outline-offset: 1px;
   }
 }
+/* Sending feedback is a row like the navigation above it, kept with the
+   settings at the foot of the sidebar so it never crowds the boards. */
+.sidebar-bottom .feedback-item {
+  min-height: 38px;
+  padding-block: 0;
+}
 .powered {
   display: flex;
   align-items: center;
@@ -2402,7 +2408,8 @@ kbd {
     height: 28px;
   }
   .workspace-label,
-  .powered {
+  .powered,
+  .feedback-item {
     display: none;
   }
   .sidebar nav {

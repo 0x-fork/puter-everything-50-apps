@@ -259,12 +259,13 @@ export function createHelpCenter({
   refresh = () => {},
   org = null,
   toast = () => {},
+  feedback = null,
 }) {
   return {
     open(role = "all") {
       modal(
         "Help and training",
-        `<div class="help-top"><label class="search">${icon("search")}<input id="help-search" type="search" aria-label="${t("Search help")}" placeholder="${t("Search help")}"></label><label class="field">${t("Guides for")}<select id="help-role">${ROLES.map(([v, l]) => `<option value="${v}" ${v === role ? "selected" : ""}>${t(l)}</option>`).join("")}</select></label></div><div class="dialog-footer help-actions"><button class="secondary" id="help-tour">${icon("map")}${t("Take the tour")}</button><button class="secondary" id="help-keys">${icon("keyboard")}${t("Keyboard shortcuts")}</button></div><p id="help-count" class="sr-only" role="status"></p><div id="help-results" class="help-results"></div>${org?.info?.role ? `<form id="help-feedback" class="policy-form"><fieldset><legend>${t("Rate your experience")}</legend><div class="rating" role="radiogroup" aria-label="${t("How easy is Whiteboard to use?")}">${[1, 2, 3, 4, 5].map((n) => `<label><input type="radio" name="help-ease" value="${n}" required> ${n}</label>`).join("")}</div><small>${t("1 is very hard, 5 is very easy. Ratings are anonymous.")}</small><div class="field"><span id="help-comment-label">${t("What would make it better? (optional)")}</span><div id="help-comment"></div></div><div class="dialog-footer"><button class="primary">${t("Send feedback")}</button></div></fieldset></form>` : ""}`,
+        `<div class="help-top"><label class="search">${icon("search")}<input id="help-search" type="search" aria-label="${t("Search help")}" placeholder="${t("Search help")}"></label><label class="field">${t("Guides for")}<select id="help-role">${ROLES.map(([v, l]) => `<option value="${v}" ${v === role ? "selected" : ""}>${t(l)}</option>`).join("")}</select></label></div><div class="dialog-footer help-actions"><button class="secondary" id="help-tour">${icon("map")}${t("Take the tour")}</button><button class="secondary" id="help-keys">${icon("keyboard")}${t("Keyboard shortcuts")}</button>${feedback?.available() ? `<button class="secondary" id="help-app-feedback" title="${t("Tell the people who make Whiteboard what to improve")}">${icon("message-square-heart")}${t("Send feedback")}</button>` : ""}</div><p id="help-count" class="sr-only" role="status"></p><div id="help-results" class="help-results"></div>${org?.info?.role ? `<form id="help-feedback" class="policy-form"><fieldset><legend>${t("Rate your experience")}</legend><div class="rating" role="radiogroup" aria-label="${t("How easy is Whiteboard to use?")}">${[1, 2, 3, 4, 5].map((n) => `<label><input type="radio" name="help-ease" value="${n}" required> ${n}</label>`).join("")}</div><small>${t("1 is very hard, 5 is very easy. Ratings are anonymous.")}</small><div class="field"><span id="help-comment-label">${t("What would make it better? (optional)")}</span><div id="help-comment"></div></div><div class="dialog-footer"><button class="primary">${t("Send feedback")}</button></div></fieldset></form>` : ""}`,
         (d) => {
           d.classList.add("help-dialog");
           const placeholder = d.querySelector("#help-comment");
@@ -310,6 +311,13 @@ export function createHelpCenter({
             d.close();
             shortcuts();
           };
+          d.querySelector("#help-app-feedback")?.addEventListener(
+            "click",
+            () => {
+              d.close();
+              feedback.send();
+            },
+          );
           d.querySelector("#help-feedback")?.addEventListener(
             "submit",
             async (e) => {
@@ -364,6 +372,8 @@ addTranslations({
   "What would make it better? (optional)":
     "Qu’est-ce qui l’améliorerait? (facultatif)",
   "Send feedback": "Envoyer la rétroaction",
+  "Tell the people who make Whiteboard what to improve":
+    "Dites aux créateurs de Whiteboard ce qu’ils pourraient améliorer",
   "Invalid feedback language.": "Langue de rétroaction invalide.",
   "Thank you for your feedback.": "Merci de votre rétroaction.",
   "Search help": "Chercher dans l’aide",

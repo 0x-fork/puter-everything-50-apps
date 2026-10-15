@@ -50099,3 +50099,44 @@ test("a shape's border is set thicker, dashed or dotted from a toolbar popover i
     await app.close();
   }
 });
+
+test("people can send feedback through Puter from the library, help, and command palette", async () => {
+  let sent = 0;
+  const a = await setup({
+    ui: {
+      showFeedbackDialog: async () => {
+        sent++;
+        return true;
+      },
+    },
+  });
+  try {
+    await a.click('[data-action="feedback"]');
+    assert.equal(sent, 1);
+    assert.match(a.doc.querySelector("#toast").textContent, /Thank you/);
+    await a.click('[data-action="help-center"]');
+    await a.click("#help-app-feedback");
+    assert.equal(sent, 2);
+    assert.equal(a.doc.querySelector("dialog[open]"), null);
+    await a.click('[data-action="new"]');
+    await a.click('[data-action="commands"]');
+    paletteQuery(a, "Send feedback");
+    await a.click('[data-command="feedback"]');
+    assert.equal(sent, 3);
+  } finally {
+    await a.close();
+  }
+  // Without Puter's dialog there is nowhere to send it, so nothing offers it.
+  const b = await setup();
+  try {
+    assert.equal(b.doc.querySelector('[data-action="feedback"]'), null);
+    await b.click('[data-action="help-center"]');
+    assert.equal(b.doc.querySelector("#help-app-feedback"), null);
+    b.doc.querySelector("dialog[open]").close();
+    await b.click('[data-action="commands"]');
+    paletteQuery(b, "Send feedback");
+    assert.equal(b.doc.querySelector('[data-command="feedback"]'), null);
+  } finally {
+    await b.close();
+  }
+});
