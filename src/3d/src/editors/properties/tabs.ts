@@ -1,22 +1,38 @@
-// Properties tabs: render, output, scene, world, collection, object, data, material.
+// Properties tabs: scene, world, collection, object, data, material.
+import { materialSettingsPanel, ensureMaterialDefaults } from '../../render/realtime/materialprops';
+import { lightInfluencePanel, lightShadowPanel, lightDistancePanel, ensureLightDefaults } from '../../render/realtime/lightprops';
 import { h, type Child } from '../../ui/h';
 import { icon } from '../../ui/icons';
 import { app } from '../../app/app';
 import { registerTab } from './properties';
 import { panel, enumMenu, button, opButton, textField, enumRow, checkbox, numberField } from '../../ui/widgets';
-import { num, bool, enumProp, colorProp, vecProp, splitRow, textProp, boolHeading, oid } from '../../ui/props';
+import { num, bool, enumProp, colorProp, vecProp, splitRow, textProp, boolHeading, oid, objectProp } from '../../ui/props';
 import type { ObjectData, MaterialData, MeshData, WorldData, LightData, CameraData, CurveData } from '../../data/types';
 import { newMaterial, uid, newWorld } from '../../data/defaults';
 import { uniqueName } from '../../ops/object';
 import { cloneShared } from '../../data/cow';
 import { openMenu } from '../../ui/menu';
+import { idSelectorMenuHooks } from '../../ui/idmenu';
 import { materialSlots } from '../view3d/draw';
 import { uiList } from './uilist';
+import { cameraPanels } from '../../render/final/props/camera';
+import { materialSpecials, shapeKeySpecials, vertexGroupSpecials } from '../../object/listmenus';
+import { propertiesCollection } from '../../object/relations';
+import { objectCollectionsPanel } from '../../object/collections';
+
+/** Small lock toggle used inside list rows. */
+function lockToggle(on: boolean, tip: string, toggle: () => void): Child {
+  return h('button', { class: { 'ul-lock': true, on }, 'data-tip': tip, onpointerdown: (e: PointerEvent) => e.stopPropagation(), onclick: (e: MouseEvent) => (e.stopPropagation(), toggle()) }, icon(on ? 'locked' : 'unlocked'));
+}
 
 const ob = () => app.activeObject;
 
 /** Extra Object-tab panels contributed by other modules (shown after Instancing, e.g. Motion Paths). */
 export const objectExtraPanels: ((o: ObjectData) => Child)[] = [];
+/** Keying Sets panel of the Scene tab (drawn by the animation module). */
+export const sceneKeyingPanel: { draw: (() => Child) | null } = { draw: null };
+/** Rigid Body World panel of the Scene tab (provided by the physics module). */
+export const sceneRigidBodyPanel: { draw: (() => Child) | null } = { draw: null };
 const changed = (label: string) => {
   app.pushUndo(label);
   app.changed('doc');
@@ -45,129 +61,7 @@ registerTab({
   },
 });
 
-// ---------------------------------------------------------------------------
-// Render
-
-registerTab({
-  id: 'RENDER',
-  label: 'Render',
-  icon: 'render',
-  group: 1,
-  poll: () => true,
-  draw: () => {
-    const r = app.doc.scene.render;
-    const engines: [string, string][] = [
-      ['RASTER', 'Realtime (Raster)'],
-      ['PATHTRACE', 'Path Tracer'],
-      ['SOLID', 'Solid (Workbench)'],
-    ];
-    return [
-      enumProp(r, 'engine', 'Render Engine', engines),
-      r.engine === 'PATHTRACE'
-        ? [
-            panel('rs-sampling', 'Sampling', () => [
-              h('div', { class: 'sub-label' }, 'Viewport'),
-              num(r, 'preview_samples', 'Max Samples', { int: true, min: 1, max: 65536 }),
-              bool(r, 'preview_denoising', 'Denoise'),
-              h('div', { class: 'sub-label' }, 'Render'),
-              num(r, 'samples', 'Max Samples', { int: true, min: 1, max: 65536 }),
-              bool(r, 'use_denoising', 'Denoise'),
-            ]),
-            panel('rs-bounces', 'Light Paths', () => [num(r, 'max_bounces', 'Total', { int: true, min: 0, max: 64 }), num(r as never, 'diffuse_bounces' as never, 'Diffuse', { int: true, min: 0, max: 64 }), num(r as never, 'glossy_bounces' as never, 'Glossy', { int: true, min: 0, max: 64 }), num(r as never, 'transmission_bounces' as never, 'Transmission', { int: true, min: 0, max: 64 })]),
-          ]
-        : r.engine === 'RASTER'
-          ? [
-              panel('rs-sampling', 'Sampling', () => [num(r, 'raster_samples', 'Render Samples', { int: true, min: 1, max: 256 }), h('div', { class: 'prop-note' }, 'Temporal anti-aliasing samples accumulated for final renders.')]),
-              panel('rs-ao', 'Ambient Occlusion', () => [num(r, 'gtao_distance', 'Distance', { unit: 'distance', min: 0 })], { header: checkbox('rs-ao-on', '', r.use_gtao, (v) => ((r.use_gtao = v), changed('Ambient Occlusion'))), closed: true }),
-              panel('rs-bloom', 'Bloom', () => [num(r, 'bloom_threshold', 'Threshold', { min: 0 }), num(r, 'bloom_intensity', 'Intensity', { min: 0, softMax: 1 }), num(r, 'bloom_radius', 'Radius', { min: 0, softMax: 10 })], { header: checkbox('rs-bloom-on', '', r.use_bloom, (v) => ((r.use_bloom = v), changed('Bloom'))), closed: true }),
-              panel('rs-shadows', 'Shadows', () => [enumProp(r, 'shadow_cube_size', 'Cube Size', [['512', '512 px'], ['1024', '1024 px'], ['2048', '2048 px'], ['4096', '4096 px']].map(([v, l]) => ({ value: v, label: l }))), bool(r, 'use_soft_shadows', 'Soft Shadows')], { closed: true }),
-              panel('rs-motion', 'Motion Blur', () => [num(r, 'motion_blur_shutter', 'Shutter', { min: 0, max: 2 })], { header: checkbox('rs-mb-on', '', r.use_motion_blur, (v) => ((r.use_motion_blur = v), changed('Motion Blur'))), closed: true }),
-            ]
-          : [panel('rs-solid', 'Lighting', () => h('div', { class: 'prop-note' }, 'Renders with the viewport solid shading settings.'))],
-      panel('rs-film', 'Film', () => [bool(r, 'film_transparent', 'Transparent')], { closed: true }),
-      panel('rs-cm', 'Color Management', () => [
-        enumProp(r, 'view_transform', 'View Transform', [['STANDARD', 'Standard'], ['AGX', 'AgX'], ['FILMIC', 'Filmic'], ['KHRONOS_PBR_NEUTRAL', 'Khronos PBR Neutral'], ['RAW', 'Raw']]),
-        num(r, 'exposure', 'Exposure', { min: -32, max: 32, softMin: -10, softMax: 10 }),
-        num(r, 'gamma', 'Gamma', { min: 0, max: 5 }),
-      ], { closed: true }),
-    ];
-  },
-});
-
-// ---------------------------------------------------------------------------
-// Output
-
-registerTab({
-  id: 'OUTPUT',
-  label: 'Output',
-  icon: 'output',
-  group: 1,
-  poll: () => true,
-  draw: () => {
-    const s = app.doc.scene;
-    const r = s.render;
-    return [
-      panel('out-format', 'Format', () => [
-        splitRow(
-          'Resolution X',
-          numberField({ id: 'res-x', value: r.resolution_x, int: true, min: 4, max: 16384, unit: 'pixel', set: (v, f) => ((r.resolution_x = v), app.changed('doc'), f && app.pushUndo('Resolution')) }),
-        ),
-        splitRow('Y', numberField({ id: 'res-y', value: r.resolution_y, int: true, min: 4, max: 16384, unit: 'pixel', set: (v, f) => ((r.resolution_y = v), app.changed('doc'), f && app.pushUndo('Resolution')) })),
-        num(r, 'resolution_percentage', '%', { unit: 'percentage', int: true, min: 1, max: 1000, softMax: 100, slider: true }),
-        num(r, 'pixel_aspect_x', 'Aspect X', { min: 1, max: 200 }),
-        num(r, 'pixel_aspect_y', 'Y', { min: 1, max: 200 }),
-        splitRow(
-          'Frame Rate',
-          enumMenu(
-            'fps',
-            [23.98, 24, 25, 29.97, 30, 50, 59.94, 60, 120, 240].map((v) => ({ value: String(v), label: `${v} fps` })),
-            String(+(r.fps / r.fps_base).toFixed(2)),
-            (v) => {
-              const f = Number(v);
-              if (Number.isInteger(f)) {
-                r.fps = f;
-                r.fps_base = 1;
-              } else {
-                r.fps = Math.round(f);
-                r.fps_base = Math.round(f) / f;
-              }
-              changed('Frame Rate');
-            },
-          ),
-        ),
-      ]),
-      panel('out-range', 'Frame Range', () => [num(s, 'frame_start', 'Frame Start', { int: true, min: 0 }), num(s, 'frame_end', 'End', { int: true, min: 0 }), num(s, 'frame_step', 'Step', { int: true, min: 1 })]),
-      panel('out-output', 'Output', () => [
-        textProp(r, 'filepath', 'Output Path'),
-        enumProp(r, 'file_format', 'File Format', [['PNG', 'PNG'], ['JPEG', 'JPEG'], ['WEBP', 'WebP'], ['WEBM', 'WebM Video']]),
-        enumProp(r, 'color_mode', 'Color', [['BW', 'BW'], ['RGB', 'RGB'], ['RGBA', 'RGBA']]),
-      ]),
-    ];
-  },
-});
-
-// ---------------------------------------------------------------------------
-// View layer
-
-registerTab({
-  id: 'VIEW_LAYER',
-  label: 'View Layer',
-  icon: 'view_layer',
-  group: 1,
-  poll: () => true,
-  draw: () => {
-    const r = app.doc.scene.render;
-    return [
-      panel('vl-passes', 'Passes', () => [
-        h('div', { class: 'sub-label' }, 'Data'),
-        bool(r, 'use_pass_combined', 'Combined'),
-        bool(r, 'use_pass_z', 'Z'),
-        bool(r, 'use_pass_mist', 'Mist'),
-        bool(r, 'use_pass_normal', 'Normal'),
-      ]),
-    ];
-  },
-});
+// Render, Output and View Layer tabs live in src/render/final/props/.
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -180,11 +74,10 @@ registerTab({
   poll: () => true,
   draw: () => {
     const s = app.doc.scene;
-    const cams = Object.values(app.doc.objects).filter((o) => o.type === 'CAMERA');
     const worlds = Object.values(app.doc.worlds);
     return [
       panel('sc-scene', 'Scene', () => [
-        splitRow('Camera', enumMenu('sc-cam', [{ value: '', label: '—' }, ...cams.map((c) => ({ value: c.id, label: c.name, icon: 'outliner_ob_camera' }))], s.camera ?? '', (v) => ((s.camera = v || null), changed('Scene Camera')))),
+        objectProp(s, 'camera', 'Camera', { filter: (c) => c.type === 'CAMERA', undo: 'Scene Camera' }),
         splitRow('World', enumMenu('sc-world', [{ value: '', label: '—' }, ...worlds.map((w) => ({ value: w.id, label: w.name, icon: 'world' }))], s.world ?? '', (v) => ((s.world = v || null), changed('Scene World')))),
       ]),
       panel('sc-units', 'Units', () => [
@@ -194,7 +87,7 @@ registerTab({
         enumProp(s.unit_settings, 'length_unit', 'Length', [['ADAPTIVE', 'Adaptive'], ['KILOMETERS', 'Kilometers'], ['METERS', 'Meters'], ['CENTIMETERS', 'Centimeters'], ['MILLIMETERS', 'Millimeters'], ['MICROMETERS', 'Micrometers']]),
       ]),
       panel('sc-gravity', 'Gravity', () => [vecProp(s, 'gravity', 'Gravity', { unit: 'none' })], { header: checkbox('sc-grav-on', '', s.use_gravity, (v) => ((s.use_gravity = v), changed('Gravity'))) }),
-      panel('sc-rb', 'Rigid Body World', () =>
+      sceneRigidBodyPanel.draw ? sceneRigidBodyPanel.draw() : panel('sc-rb', 'Rigid Body World', () =>
         s.rigidbody_world
           ? [
               num(s.rigidbody_world, 'time_scale', 'Speed', { min: 0, max: 100 }),
@@ -206,9 +99,11 @@ registerTab({
             ]
           : opButton('rigidbody.world_add', 'Add Rigid Body World'),
       ),
-      panel('sc-keying', 'Keying Sets', () => [
-        enumProp(s as never, 'keying_set' as never, 'Active Keying Set', [['LocRotScale', 'Location, Rotation & Scale'], ['Location', 'Location'], ['Rotation', 'Rotation'], ['Scale', 'Scale'], ['Available', 'Available'], ['WholeCharacter', 'Whole Character']]),
-      ], { closed: true }),
+      sceneKeyingPanel.draw
+        ? sceneKeyingPanel.draw()
+        : panel('sc-keying', 'Keying Sets', () => [
+            enumProp(s as never, 'keying_set' as never, 'Active Keying Set', [['LocRotScale', 'Location, Rotation & Scale'], ['Location', 'Location'], ['Rotation', 'Rotation'], ['Scale', 'Scale'], ['Available', 'Available'], ['WholeCharacter', 'Whole Character']]),
+          ], { closed: true }),
     ];
   },
 });
@@ -270,7 +165,7 @@ registerTab({
             ]
           : h('div', { class: 'prop-note' }, 'The world node tree has no Background node. Edit it in the Shader Editor (World).'),
       ),
-      panel('wo-mist', 'Mist Pass', () => [num(w as never, 'mist_start' as never, 'Start', { unit: 'distance' }), num(w as never, 'mist_depth' as never, 'Depth', { unit: 'distance' })], { closed: true }),
+      panel('wo-mist', 'Mist Pass', () => [num(w as never, 'mist_start' as never, 'Start', { unit: 'distance' }), num(w as never, 'mist_depth' as never, 'Depth', { unit: 'distance' }), enumProp(w as never, 'mist_falloff' as never, 'Falloff', [['QUADRATIC', 'Quadratic'], ['LINEAR', 'Linear'], ['INVERSE_QUADRATIC', 'Inverse Quadratic']])], { closed: true }),
       panel('wo-display', 'Viewport Display', () => [colorProp(w, 'color', 'Color')], { closed: true }),
     ];
   },
@@ -316,13 +211,20 @@ registerTab({
   },
   draw: () => {
     const doc = app.doc;
-    const act = app.activeObject;
-    const c = (act && Object.values(doc.collections).find((x) => x.objects.includes(act.id) && x.id !== doc.scene.collection)) ?? Object.values(doc.collections).find((x) => x.id !== doc.scene.collection);
+    const c = propertiesCollection();
     if (!c) return h('div', { class: 'prop-note' }, 'No collection');
     return [
       h('div', { class: 'id-row' }, icon('collection'), textField('col-name', c.name, (v) => ((c.name = uniqueName(doc, v, 'collections')), changed('Rename Collection')))),
       panel('col-restrict', 'Restrictions', () => [boolHeading(c, 'hide_select', 'Selectable', '', {}), bool(c, 'hide_render', 'Disable in Renders'), bool(c, 'holdout' as never, 'Holdout'), bool(c, 'indirect_only' as never, 'Indirect Only')]),
-      panel('col-instancing', 'Instancing', () => [vecProp(c, 'instance_offset', 'Offset', { unit: 'distance' })], { closed: true }),
+      panel(
+        'col-instancing',
+        'Instancing',
+        () => [
+          vecProp(c, 'instance_offset', 'Offset', { unit: 'distance' }),
+          h('div', { class: 'btn-row btn-stack' }, opButton('object.instance_offset_from_cursor'), opButton('object.instance_offset_from_object'), opButton('object.instance_offset_to_cursor')),
+        ],
+        { closed: true },
+      ),
     ];
   },
 });
@@ -363,14 +265,16 @@ registerTab({
           if (!v) o.parent_type = 'OBJECT';
           changed('Set Parent');
         })),
-        o.parent ? enumProp(o, 'parent_type', 'Parent Type', [['OBJECT', 'Object'], ['BONE', 'Bone'], ['VERTEX', 'Vertex']]) : null,
+        o.parent ? enumProp(o, 'parent_type', 'Parent Type', [['OBJECT', 'Object'], ['BONE', 'Bone'], ['VERTEX', 'Vertex'], ['VERTEX_3', '3 Vertices']]) : null,
         o.parent && o.parent_type === 'BONE' ? textProp(o, 'parent_bone', 'Parent Bone') : null,
         num(o as never, 'pass_index' as never, 'Pass Index', { int: true, min: 0 }),
       ], { closed: true }),
-      panel('ob-collections', 'Collections', () => Object.values(doc.collections).filter((c) => c.objects.includes(o.id)).map((c) => h('div', { key: c.id, class: 'chip-row' }, icon('collection'), c.id === doc.scene.collection ? 'Scene Collection' : c.name)), { closed: true }),
+      panel('ob-collections', 'Collections', () => objectCollectionsPanel(o), { closed: true }),
       panel('ob-instancing', 'Instancing', () => [
         enumProp(o, 'instance_type', 'Instancing', [['NONE', 'None'], ['COLLECTION', 'Collection'], ['VERTS', 'Vertices'], ['FACES', 'Faces']]),
         o.instance_type === 'COLLECTION' ? splitRow('Collection', enumMenu('ob-inst-col', Object.values(doc.collections).filter((c) => c.id !== doc.scene.collection).map((c) => ({ value: c.id, label: c.name })), o.instance_collection ?? '', (v) => ((o.instance_collection = v), changed('Instance Collection')))) : null,
+        o.instance_type === 'VERTS' ? bool(o as never, 'use_instance_vertices_rotation' as never, 'Align to Vertex Normal') : null,
+        o.instance_type === 'FACES' ? [bool(o as never, 'use_instance_faces_scale' as never, 'Scale by Face Size'), o.use_instance_faces_scale && o.instance_faces_scale !== undefined ? num(o as never, 'instance_faces_scale' as never, 'Factor', { min: 0.001, max: 10000 }) : null] : null,
       ], { closed: true }),
       objectExtraPanels.map((p) => p(o)),
       panel('ob-visibility', 'Visibility', () => [
@@ -421,11 +325,20 @@ export function customProps(custom: Record<string, unknown>): Child {
 // ---------------------------------------------------------------------------
 // Data-block selector (browse / name / new / unlink)
 
-export function dataBlockSelector<T extends { id: string; name: string; use_fake_user?: boolean }>(id: string, iconName: string, items: T[], current: string | null, set: (id: string | null) => void, create: () => void, opts: { duplicate?: () => void; users?: number } = {}): Child {
+export function dataBlockSelector<T extends { id: string; name: string; use_fake_user?: boolean }>(id: string, iconName: string, items: T[], current: string | null, set: (id: string | null) => void, create: () => void, opts: { duplicate?: () => void; users?: number; noUnlink?: boolean } = {}): Child {
   const cur = items.find((i) => i.id === current);
   return h(
     'div',
-    { class: 'id-selector' },
+    {
+      class: 'id-selector',
+      oncontextmenu: (e: MouseEvent) => {
+        const extra = cur ? idSelectorMenuHooks.flatMap((f) => f(cur.id)) : [];
+        if (!extra.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu(extra, { x: e.clientX, y: e.clientY });
+      },
+    },
     h(
       'button',
       {
@@ -445,7 +358,7 @@ export function dataBlockSelector<T extends { id: string; name: string; use_fake
           opts.users && opts.users > 1 ? h('button', { class: 'ids-users', 'data-tip': 'Display number of users of this data (click to make a single-user copy)', onclick: () => opts.duplicate?.() }, String(opts.users)) : null,
           h('button', { class: { 'ids-btn': true, on: !!cur.use_fake_user }, 'data-tip': 'Fake User\nSave this data-block even if it has no users', onclick: () => ((cur.use_fake_user = !cur.use_fake_user), changed('Fake User')) }, icon(cur.use_fake_user ? 'fake_user_on' : 'fake_user_off')),
           opts.duplicate ? h('button', { class: 'ids-btn', 'data-tip': 'New (duplicate)', onclick: () => opts.duplicate!() }, icon('duplicate')) : null,
-          h('button', { class: 'ids-btn', 'data-tip': 'Unlink Data-Block', onclick: () => set(null) }, icon('x')),
+          opts.noUnlink ? null : h('button', { class: 'ids-btn', 'data-tip': 'Unlink Data-Block', onclick: () => set(null) }, icon('x')),
         ]
       : h('button', { class: 'btn ids-new', onclick: create }, icon('add'), 'New'),
   );
@@ -459,6 +372,7 @@ function meshData(o: ObjectData, me: MeshData): Child {
   const users = Object.values(doc.objects).filter((x) => x.data === me.id).length;
   return [
     dataBlockSelector('me', 'mesh_data', Object.values(doc.meshes), me.id, (id) => id && ((o.data = id), changed('Assign Mesh')), () => {}, {
+      noUnlink: true,
       users,
       duplicate: () => {
         const d = cloneShared(me);
@@ -472,12 +386,15 @@ function meshData(o: ObjectData, me: MeshData): Child {
     panel('me-vgroups', 'Vertex Groups', () => [
       uiList(
         'vg',
-        me.vertex_groups.map((g) => ({ key: g.name, label: g.name, icon: 'group_vertex' })),
+        me.vertex_groups.map((g, i) => ({ key: g.name, label: g.name, icon: 'group_vertex', rightSize: 'compact' as const, right: lockToggle(!!g.lock_weight, 'Lock weights', () => ((me.vertex_groups[i] = { ...g, lock_weight: !g.lock_weight }), changed('Lock Vertex Group'))) })),
         o.vertex_group_active_index ?? 0,
         (i) => ((o.vertex_group_active_index = i), app.changed('doc')),
         {
           add: () => app.run('object.vertex_group_add'),
           remove: () => app.run('object.vertex_group_remove'),
+          specials: vertexGroupSpecials,
+          up: me.vertex_groups.length > 1 ? () => app.run('object.vertex_group_move', { direction: 'UP' }) : undefined,
+          down: me.vertex_groups.length > 1 ? () => app.run('object.vertex_group_move', { direction: 'DOWN' }) : undefined,
           rename: (i, name) => {
             me.vertex_groups[i].name = name;
             changed('Rename Vertex Group');
@@ -492,12 +409,25 @@ function meshData(o: ObjectData, me: MeshData): Child {
     panel('me-shapekeys', 'Shape Keys', () => [
       uiList(
         'sk',
-        me.shape_keys.map((k, i) => ({ key: k.name, label: k.name, icon: 'shapekey_data', right: i > 0 ? numberField({ id: `sk.${me.id}.${i}`, value: k.value, min: k.slider_min, max: k.slider_max, slider: true, set: (v, f) => ((k.value = v), app.changed('doc'), f && app.pushUndo('Shape Key Value')) }) : null })),
+        me.shape_keys.map((k, i) => ({
+          key: k.name,
+          label: k.name,
+          icon: 'shapekey_data',
+          rightSize: 'wide' as const,
+          right: [
+            i > 0 ? numberField({ id: `sk.${me.id}.${i}`, value: k.value, min: k.slider_min, max: k.slider_max, slider: true, set: (v, f) => ((k.value = v), app.changed('doc'), f && app.pushUndo('Shape Key Value')) }) : null,
+            i > 0 ? checkbox(`sk-mute.${me.id}.${i}`, '', !k.mute, (v) => ((k.mute = !v), changed('Shape Key Mute'))) : null,
+            lockToggle(!!k.lock_shape, 'Lock shape against edits', () => ((me.shape_keys[i] = { ...k, lock_shape: !k.lock_shape }), changed('Lock Shape Key'))),
+          ],
+        })),
         me.active_shape_key_index,
         (i) => ((me.active_shape_key_index = i), app.changed('doc')),
         {
           add: () => app.run('object.shape_key_add', { from_mix: false }),
           remove: () => app.run('object.shape_key_remove'),
+          specials: shapeKeySpecials,
+          up: me.shape_keys.length > 2 ? () => app.run('object.shape_key_move', { type: 'UP' }) : undefined,
+          down: me.shape_keys.length > 2 ? () => app.run('object.shape_key_move', { type: 'DOWN' }) : undefined,
           rename: (i, name) => {
             me.shape_keys[i].name = name;
             changed('Rename Shape Key');
@@ -519,7 +449,7 @@ function meshData(o: ObjectData, me: MeshData): Child {
         : me.shape_keys.length
           ? h('div', { class: 'prop-note' }, 'The Basis key is the rest shape.')
           : null,
-      me.shape_keys.length ? bool(me as never, 'use_shape_key_edit_mode' as never, 'Shape Key Edit Mode') : null,
+      me.shape_keys.length ? [bool(o as never, 'show_only_shape_key' as never, 'Pin Active Shape Key'), bool(me as never, 'use_shape_key_edit_mode' as never, 'Shape Key Edit Mode')] : null,
     ]),
     panel('me-uvmaps', 'UV Maps', () => [uiList('uv', [{ key: me.uv_map_name, label: me.uv_map_name, icon: 'uv' }], 0, () => {}, { rename: (_i, name) => ((me.uv_map_name = name), changed('Rename UV Map')) })]),
     panel('me-colors', 'Color Attributes', () => [
@@ -531,6 +461,11 @@ function meshData(o: ObjectData, me: MeshData): Child {
         { add: () => app.run('geometry.color_attribute_add'), remove: () => app.run('geometry.color_attribute_remove') },
       ),
     ]),
+    panel('me-remesh', 'Remesh', () => [
+      splitRow('Voxel Size', numberField({ id: `me-voxel-${me.id}`, value: me.remesh_voxel_size ?? 0.1, min: 0.0001, max: 10, unit: 'distance', precision: 4, set: (x, final) => ((me.remesh_voxel_size = x), app.changed('ui'), final && app.pushUndo('Voxel Size')) })),
+      h('div', { class: 'btn-row' }, opButton('object.voxel_remesh', 'Voxel Remesh')),
+    ], { closed: true }),
+    panel('me-geodata', 'Geometry Data', () => [h('div', { class: 'btn-row' }, opButton('mesh.customdata_mask_clear', 'Clear Sculpt Mask Data'))], { closed: true }),
     panel('me-normals', 'Normals', () => [
       splitRow('Auto Smooth', checkbox('me-autosmooth', '', me.auto_smooth_angle !== undefined, (v) => ((me.auto_smooth_angle = v ? (30 * Math.PI) / 180 : undefined), changed('Auto Smooth')))),
       me.auto_smooth_angle !== undefined ? num(me as never, 'auto_smooth_angle' as never, 'Angle', { unit: 'angle', min: 0, max: Math.PI }) : null,
@@ -541,14 +476,11 @@ function meshData(o: ObjectData, me: MeshData): Child {
 function lightData(o: ObjectData, la: LightData): Child {
   const anim = (path: string) => ({ ob: o, path: `data.${path}` });
   return [
-    dataBlockSelector('la', 'light_data', Object.values(app.doc.lights), la.id, (id) => id && ((o.data = id), changed('Assign Light')), () => {}),
+    dataBlockSelector('la', 'light_data', Object.values(app.doc.lights), la.id, (id) => id && ((o.data = id), changed('Assign Light')), () => {}, { noUnlink: true }),
     panel('la-light', 'Light', () => [
       h('div', { class: 'enum-tabs' }, enumRow('la-type', [['POINT', 'Point', 'light_point'], ['SUN', 'Sun', 'light_sun'], ['SPOT', 'Spot', 'light_spot'], ['AREA', 'Area', 'light_area']].map(([v, l, i]) => ({ value: v, label: l, icon: i })), la.type, (v) => ((la.type = v as LightData['type']), la.type === 'SUN' && la.energy > 100 && (la.energy = 1), changed('Light Type')))),
       colorProp(la, 'color', 'Color', { anim: anim('color') }),
       la.type === 'SUN' ? num(la, 'energy', 'Strength', { min: 0, softMax: 10, anim: anim('energy') }) : num(la, 'energy', 'Power', { unit: 'power', min: 0, softMax: 10000, anim: anim('energy') }),
-      num(la, 'diffuse_factor', 'Diffuse', { min: 0, max: 1, slider: true }),
-      num(la, 'specular_factor', 'Specular', { min: 0, max: 1, slider: true }),
-      num(la, 'volume_factor', 'Volume', { min: 0, max: 1, slider: true }),
       la.type === 'SUN' ? num(la, 'angle', 'Angle', { unit: 'angle', min: 0, max: Math.PI }) : la.type !== 'AREA' ? num(la, 'shadow_soft_size', 'Radius', { unit: 'distance', min: 0 }) : null,
       la.type === 'AREA'
         ? [
@@ -557,53 +489,23 @@ function lightData(o: ObjectData, la: LightData): Child {
             la.shape === 'RECTANGLE' || la.shape === 'ELLIPSE' ? num(la, 'size_y', 'Y', { unit: 'distance', min: 0 }) : null,
           ]
         : null,
+      la.type === 'SPOT' ? panel('la-spot', 'Beam Shape', () => [num(la, 'spot_size', 'Spot Size', { unit: 'angle', min: (1 * Math.PI) / 180, max: Math.PI }), num(la, 'spot_blend', 'Blend', { min: 0, max: 1, slider: true }), bool(la, 'show_cone', 'Show Cone')], { sub: true }) : null,
+      (ensureLightDefaults(la), [lightInfluencePanel(o, la), lightShadowPanel(la), lightDistancePanel(la)]),
     ]),
-    la.type === 'SPOT' ? panel('la-spot', 'Beam Shape', () => [num(la, 'spot_size', 'Spot Size', { unit: 'angle', min: (1 * Math.PI) / 180, max: Math.PI }), num(la, 'spot_blend', 'Blend', { min: 0, max: 1, slider: true }), bool(la, 'show_cone', 'Show Cone')]) : null,
-    panel('la-shadow', 'Shadow', () => [num(la as never, 'shadow_buffer_bias' as never, 'Bias', { min: 0 })], { header: checkbox('la-shadow-on', '', la.use_shadow, (v) => ((la.use_shadow = v), changed('Light Shadow'))) }),
-    panel('la-cutoff', 'Custom Distance', () => [num(la as never, 'cutoff_distance' as never, 'Distance', { unit: 'distance', min: 0 })], { closed: true, header: checkbox('la-cut-on', '', !!la.use_custom_distance, (v) => ((la.use_custom_distance = v), changed('Custom Distance'))) }),
   ];
 }
 
 function cameraData(o: ObjectData, ca: CameraData): Child {
   const doc = app.doc;
-  return [
-    dataBlockSelector('ca', 'camera_data', Object.values(doc.cameras), ca.id, (id) => id && ((o.data = id), changed('Assign Camera')), () => {}),
-    panel('ca-lens', 'Lens', () => [
-      enumProp(ca, 'type', 'Type', [['PERSP', 'Perspective'], ['ORTHO', 'Orthographic'], ['PANO', 'Panoramic']]),
-      ca.type === 'ORTHO'
-        ? num(ca, 'ortho_scale', 'Orthographic Scale', { min: 0.001, anim: { ob: o, path: 'data.ortho_scale' } })
-        : ca.lens_unit === 'FOV'
-          ? splitRow('Field of View', numberField({ id: 'ca-fov', value: 2 * Math.atan(ca.sensor_width / 2 / ca.lens), unit: 'angle', min: 0.0064, max: 3.0107, set: (v, f) => ((ca.lens = ca.sensor_width / 2 / Math.tan(v / 2)), app.changed('doc'), f && app.pushUndo('Field of View')) }))
-          : num(ca, 'lens', 'Focal Length', { min: 1, max: 5000, softMax: 500, precision: 1, anim: { ob: o, path: 'data.lens' } }),
-      enumProp(ca, 'lens_unit', 'Lens Unit', [['MILLIMETERS', 'Millimeters'], ['FOV', 'Field of View']]),
-      num(ca, 'shift_x', 'Shift X', { min: -10, max: 10, step: 0.01 }),
-      num(ca, 'shift_y', 'Y', { min: -10, max: 10, step: 0.01 }),
-      num(ca, 'clip_start', 'Clip Start', { unit: 'distance', min: 1e-6 }),
-      num(ca, 'clip_end', 'End', { unit: 'distance', min: 1e-6 }),
-    ]),
-    panel('ca-dof', 'Depth of Field', () => [
-      splitRow('Focus on Object', enumMenu('ca-focus', [{ value: '', label: '—' }, ...Object.values(doc.objects).map((x) => ({ value: x.id, label: x.name }))], ca.dof.focus_object ?? '', (v) => ((ca.dof.focus_object = v || null), changed('Focus Object')))),
-      num(ca.dof, 'focus_distance', 'Focus Distance', { unit: 'distance', min: 0, anim: { ob: o, path: 'data.dof.focus_distance' } }),
-      num(ca.dof, 'aperture_fstop', 'F-Stop', { min: 0.1, softMax: 128, precision: 1 }),
-      num(ca.dof, 'aperture_blades', 'Blades', { int: true, min: 0, max: 16 }),
-    ], { closed: true, header: checkbox('ca-dof-on', '', ca.dof.use_dof, (v) => ((ca.dof.use_dof = v), changed('Depth of Field'))) }),
-    panel('ca-sensor', 'Camera', () => [enumProp(ca, 'sensor_fit', 'Sensor Fit', [['AUTO', 'Auto'], ['HORIZONTAL', 'Horizontal'], ['VERTICAL', 'Vertical']]), num(ca, 'sensor_width', ca.sensor_fit === 'VERTICAL' ? 'Width' : 'Size', { unit: 'none', min: 1, max: 100 }), ca.sensor_fit !== 'AUTO' ? num(ca, 'sensor_height', 'Height', { min: 1, max: 100 }) : null], { closed: true }),
-    panel('ca-display', 'Viewport Display', () => [num(ca, 'display_size', 'Size', { unit: 'distance', min: 0.01, max: 1000 }), bool(ca, 'show_passepartout', 'Passepartout'), num(ca, 'passepartout_alpha', 'Opacity', { min: 0, max: 1, slider: true })], { closed: true }),
-  ];
+  return [dataBlockSelector('ca', 'camera_data', Object.values(doc.cameras), ca.id, (id) => id && ((o.data = id), changed('Assign Camera')), () => {}, { noUnlink: true }), cameraPanels(o, ca)];
 }
 
 function curveData(o: ObjectData, cu: CurveData): Child {
   const isText = o.type === 'FONT';
   return [
-    dataBlockSelector('cu', 'curve_data', Object.values(app.doc.curves), cu.id, (id) => id && ((o.data = id), changed('Assign Curve')), () => {}),
+    dataBlockSelector('cu', 'curve_data', Object.values(app.doc.curves), cu.id, (id) => id && ((o.data = id), changed('Assign Curve')), () => {}, { noUnlink: true }),
     isText
-      ? panel('cu-text', 'Text', () => [
-          splitRow('Body', h('textarea', { class: 'text-body', value: cu.body ?? '', onchange: (e: Event) => ((cu.body = (e.target as HTMLTextAreaElement).value), changed('Edit Text')), onkeydown: (e: KeyboardEvent) => e.stopPropagation() })),
-          num(cu as never, 'size' as never, 'Size', { unit: 'distance', min: 0.0001 }),
-          enumProp(cu as never, 'align_x' as never, 'Alignment Horizontal', [['LEFT', 'Left'], ['CENTER', 'Center'], ['RIGHT', 'Right'], ['JUSTIFY', 'Justify']]),
-          num(cu as never, 'space_character' as never, 'Character Spacing', { min: 0, max: 10 }),
-          num(cu as never, 'space_line' as never, 'Line Spacing', { min: 0, max: 10 }),
-        ])
+      ? fontDataPanels.map((f) => f(o, cu))
       : panel('cu-shape', 'Shape', () => [enumRow('cu-dims', [{ value: '2D', label: '2D' }, { value: '3D', label: '3D' }], cu.dimensions, (v) => ((cu.dimensions = v as '2D'), changed('Dimensions'))), num(cu, 'resolution_u', 'Resolution Preview U', { int: true, min: 1, max: 1024 }), cu.dimensions === '2D' ? enumProp(cu, 'fill_mode', 'Fill Mode', [['NONE', 'None'], ['BACK', 'Back'], ['FRONT', 'Front'], ['BOTH', 'Both']]) : null]),
     panel('cu-geometry', 'Geometry', () => [
       num(cu, 'offset', 'Offset', { min: -10, max: 10 }),
@@ -612,9 +514,26 @@ function curveData(o: ObjectData, cu: CurveData): Child {
       num(cu, 'bevel_depth', 'Depth', { unit: 'distance', min: 0 }),
       num(cu, 'bevel_resolution', 'Resolution', { int: true, min: 0, max: 32 }),
       bool(cu, 'use_fill_caps', 'Fill Caps'),
+      ...curveGeometryRows.map((f) => f(o, cu)),
     ]),
+    ...curveDataPanels.map((f) => f(o, cu)),
   ];
 }
+
+/** Object Data tab contents for object types defined by feature modules (e.g. speakers). */
+export const dataTabDrawers: Record<string, (o: ObjectData) => Child> = {};
+
+/** Extra panels at the end of the curve / text Object Data tab (e.g. Active Spline). */
+export const curveDataPanels: ((ob: ObjectData, cu: CurveData) => Child)[] = [];
+
+/** Extra rows at the end of the curve Geometry panel (bevel / taper objects). */
+export const curveGeometryRows: ((ob: ObjectData, cu: CurveData) => Child)[] = [];
+
+/** Panels of the text (FONT) Object Data tab, before Geometry. */
+export const fontDataPanels: ((ob: ObjectData, cu: CurveData) => Child)[] = [];
+
+/** Extra panels of the armature Object Data tab, after Skeleton (e.g. Bone Collections, Selection Sets). */
+export const armatureDataPanels: ((ob: ObjectData, arm: import('../../data/types').ArmatureData) => Child)[] = [];
 
 registerTab({
   id: 'DATA',
@@ -628,6 +547,8 @@ registerTab({
   draw: () => {
     const o = ob()!;
     const doc = app.doc;
+    const extra = dataTabDrawers[o.type];
+    if (extra) return extra(o);
     if (o.type === 'MESH' && o.data) return meshData(o, doc.meshes[o.data]);
     if (o.type === 'LIGHT' && o.data) return lightData(o, doc.lights[o.data]);
     if (o.type === 'CAMERA' && o.data) return cameraData(o, doc.cameras[o.data]);
@@ -635,8 +556,9 @@ registerTab({
     if (o.type === 'ARMATURE' && o.data) {
       const arm = doc.armatures[o.data];
       return [
-        dataBlockSelector('ar', 'armature_data', Object.values(doc.armatures), arm.id, (id) => id && ((o.data = id), changed('Assign Armature')), () => {}),
+        dataBlockSelector('ar', 'armature_data', Object.values(doc.armatures), arm.id, (id) => id && ((o.data = id), changed('Assign Armature')), () => {}, { noUnlink: true }),
         panel('ar-skeleton', 'Skeleton', () => [enumRow('ar-pose', [{ value: 'POSE', label: 'Pose Position' }, { value: 'REST', label: 'Rest Position' }], arm.pose_position, (v) => ((arm.pose_position = v as 'POSE'), changed('Pose Position')))]),
+        ...armatureDataPanels.map((f) => f(o, arm)),
         panel('ar-display', 'Viewport Display', () => [enumProp(arm, 'display_type', 'Display As', [['OCTAHEDRAL', 'Octahedral'], ['STICK', 'Stick'], ['BBONE', 'B-Bone'], ['ENVELOPE', 'Envelope'], ['WIRE', 'Wire']]), bool(arm, 'show_names', 'Names'), bool(arm, 'show_axes', 'Axes'), bool(arm as never, 'show_in_front' as never, 'In Front')]),
         panel('ar-bones', 'Bones', () => arm.bones.map((b) => h('div', { key: b.name, class: { 'chip-row': true, on: arm.active_bone === b.name }, onclick: () => ((arm.active_bone = b.name), app.changed('doc')) }, icon('bone_data'), b.name))),
       ];
@@ -662,7 +584,7 @@ export function activeMaterial(o: ObjectData | null): MaterialData | null {
 function slotOwner(o: ObjectData): { materials: (string | null)[] } | null {
   const doc = app.doc;
   if (!o.data) return null;
-  return (doc.meshes[o.data] ?? doc.curves[o.data]) ?? null;
+  return (doc.meshes[o.data] ?? doc.curves[o.data] ?? doc.metaballs?.[o.data] ?? doc.hair_curves?.[o.data]) ?? null;
 }
 
 registerTab({
@@ -691,6 +613,9 @@ registerTab({
         {
           add: () => app.run('object.material_slot_add'),
           remove: () => app.run('object.material_slot_remove'),
+          specials: materialSpecials,
+          up: slots.length > 1 ? () => app.run('object.material_slot_move', { direction: 'UP' }) : undefined,
+          down: slots.length > 1 ? () => app.run('object.material_slot_move', { direction: 'DOWN' }) : undefined,
           extra: app.doc.mode === 'EDIT' ? h('div', { class: 'btn-row' }, opButton('object.material_slot_assign', 'Assign'), opButton('object.material_slot_select', 'Select'), opButton('object.material_slot_deselect', 'Deselect')) : null,
         },
       ),
@@ -729,15 +654,9 @@ export const worldSurfacePanel: { draw: ((w: WorldData) => Child) | null } = { d
 
 function materialPanels(ma: MaterialData): Child {
   return [
-    panel('ma-preview', 'Preview', () => h('div', { class: 'mat-preview', style: { background: `radial-gradient(circle at 35% 35%, #fff8 0, transparent 30%), radial-gradient(circle, ${swatchCss(ma)} 0 60%, transparent 61%)` } }), { closed: true }),
+    panel('ma-preview', 'Preview', () => h('div', { class: 'mat-preview', style: { background: `radial-gradient(circle at 35% 35%, #ffffff88 0, transparent 30%), radial-gradient(circle, ${swatchCss(ma)} 0 60%, transparent 61%)` } }), { closed: true }),
     panel('ma-surface', 'Surface', () => (materialSurfacePanel.draw ? materialSurfacePanel.draw(ma) : h('div', { class: 'prop-note' }, 'Edit the node tree in the Shader Editor.'))),
-    panel('ma-settings', 'Settings', () => [
-      bool(ma, 'use_backface_culling', 'Backface Culling'),
-      enumProp(ma, 'blend_method', 'Blend Mode', [['OPAQUE', 'Opaque'], ['CLIP', 'Alpha Clip'], ['HASHED', 'Alpha Hashed'], ['BLEND', 'Alpha Blend']]),
-      ma.blend_method === 'CLIP' ? num(ma, 'alpha_threshold', 'Clip Threshold', { min: 0, max: 1, slider: true }) : null,
-      enumProp(ma as never, 'shadow_method' as never, 'Shadow Mode', [['NONE', 'None'], ['OPAQUE', 'Opaque'], ['CLIP', 'Alpha Clip'], ['HASHED', 'Alpha Hashed']]),
-      num(ma as never, 'pass_index' as never, 'Pass Index', { int: true, min: 0 }),
-    ], { closed: true }),
+    (ensureMaterialDefaults(ma), materialSettingsPanel(ma)),
     panel('ma-display', 'Viewport Display', () => [colorProp(ma, 'diffuse_color', 'Color', { alpha: true }), num(ma, 'metallic', 'Metallic', { min: 0, max: 1, slider: true }), num(ma, 'roughness', 'Roughness', { min: 0, max: 1, slider: true })], { closed: true }),
   ];
 }

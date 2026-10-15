@@ -1,13 +1,16 @@
 // 3D viewport header (mode selector, menus, transform settings, shading).
+import { solidLightingChooser, hdriChooser } from './studiochooser';
 import { h, type Child } from '../../ui/h';
 import { icon } from '../../ui/icons';
 import { openMenu, openPopover, type MenuItem } from '../../ui/menu';
 import { app } from '../../app/app';
-import { uiState } from '../../app/prefs';
-import type { View3D } from './view3d';
+import { prefs } from '../../app/prefs';
+import { currentOrientation, customOrientations, setOrientation, BUILTIN_ORIENTATIONS } from '../../ops/orientations';
+import { activeView3D, type View3D } from './view3d';
 import { viewMenu, selectMenu, addMenu, objectMenu } from './menus';
 import { modeMenus } from './modemenus';
-import { checkbox, numberField, enumRow, colorSwatch, panel } from '../../ui/widgets';
+import { overlayPopoverSections } from './hooks';
+import { checkbox, numberField, enumRow, colorSwatch, panel, enumMenu } from '../../ui/widgets';
 import type { Mode } from '../../data/types';
 import { renderContext } from '../../render/context';
 
@@ -26,7 +29,7 @@ export function availableModes() {
   return MODE_ITEMS.filter((m) => m.types.includes('*') || (ob && m.types.includes(ob.type)));
 }
 
-function menuButton(label: string, items: () => MenuItem[]) {
+function menuButton(label: string, items: () => MenuItem[], search = false) {
   return h(
     'button',
     {
@@ -34,26 +37,18 @@ function menuButton(label: string, items: () => MenuItem[]) {
       class: 'hdr-menu',
       onpointerdown: (e: PointerEvent) => {
         e.preventDefault();
-        openMenu(items(), e.currentTarget as HTMLElement);
+        openMenu(items(), e.currentTarget as HTMLElement, { search });
       },
       onpointerenter: (e: PointerEvent) => {
         // menu bar hover switching while a header menu is open
-        if (document.querySelector('.hdr-menu.menu-open') && !(e.currentTarget as HTMLElement).classList.contains('menu-open')) openMenu(items(), e.currentTarget as HTMLElement);
+        if (document.querySelector('.hdr-menu.menu-open') && !(e.currentTarget as HTMLElement).classList.contains('menu-open')) openMenu(items(), e.currentTarget as HTMLElement, { search });
       },
     },
     label,
   );
 }
 
-const ORIENTATIONS = [
-  ['GLOBAL', 'Global', 'orientation_global'],
-  ['LOCAL', 'Local', 'orientation_local'],
-  ['NORMAL', 'Normal', 'orientation_normal'],
-  ['GIMBAL', 'Gimbal', 'orientation_gimbal'],
-  ['VIEW', 'View', 'orientation_view'],
-  ['CURSOR', 'Cursor', 'orientation_cursor'],
-  ['PARENT', 'Parent', 'orientation_local'],
-] as const;
+const ORIENTATIONS = BUILTIN_ORIENTATIONS;
 
 const PIVOTS = [
   ['BOUNDING_BOX_CENTER', 'Bounding Box Center', 'pivot_boundbox'],
@@ -85,8 +80,8 @@ function iconDrop(id: string, iconName: string, tip: string, onDown: (el: HTMLEl
         onDown(e.currentTarget as HTMLElement);
       },
     },
-    icon(iconName),
-    icon('down_arrow_hlt', 'tiny'),
+    // a dropdown-only button (next to a toggle) shows just its arrow
+    iconName === 'down_arrow_hlt' ? icon('down_arrow_hlt', 'tiny') : [icon(iconName), icon('down_arrow_hlt', 'tiny')],
   );
 }
 
@@ -95,11 +90,14 @@ function iconToggle(id: string, iconName: string, on: boolean, tip: string, onCl
 }
 
 export function viewHeader(v: View3D): Child {
+  // while a modal operation runs in this viewport its header shows the operation's values
+  if (app.modal?.header && activeView3D() === v) return h('div', { class: 'hdr-row hdr-modal' }, h('span', { class: 'hdr-modal-text', style: 'padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis' }, app.modal.header()));
   const doc = app.doc;
   const ts = doc.scene.tool_settings;
   const mode = MODE_ITEMS.find((m) => m.mode === doc.mode) ?? MODE_ITEMS[0];
   const mm = modeMenus[doc.mode];
-  const orient = ORIENTATIONS.find((o) => o[0] === uiState.orientation) ?? ORIENTATIONS[0];
+  const curOrient = currentOrientation();
+  const orient: readonly [string, string, string] = ORIENTATIONS.find((o) => o[0] === curOrient) ?? [curOrient, curOrient, 'orientation_local'];
   const pivot = PIVOTS.find((p) => p[0] === ts.transform_pivot_point) ?? PIVOTS[3];
   const snapEl = SNAP_ELEMENTS.find((s) => s[0] === ts.snap_elements[0]) ?? SNAP_ELEMENTS[0];
   const propOn = doc.mode === 'OBJECT' ? ts.use_proportional_edit_objects : ts.use_proportional_edit;
@@ -127,9 +125,10 @@ export function viewHeader(v: View3D): Child {
       h('span', null, mode.label),
       icon('down_arrow_hlt', 'tiny'),
     ),
+    mm?.headerLead?.() ?? null,
     menuButton('View', viewMenu),
     !mm?.select || mm.select().length ? menuButton('Select', selectMenu) : null,
-    (doc.mode === 'OBJECT' || doc.mode === 'EDIT') && (!mm?.add || mm.add().length) ? menuButton('Add', mm?.add ?? addMenu) : null,
+    (doc.mode === 'OBJECT' || doc.mode === 'EDIT') && (!mm?.add || mm.add().length) ? menuButton('Add', mm?.add ?? addMenu, true) : null,
     doc.mode === 'OBJECT' ? menuButton('Object', objectMenu) : null,
     ...(mm?.header?.() ?? []).map(([label, fn]) => menuButton(label, fn)),
     mm?.headerExtra?.() ?? null,
@@ -143,11 +142,7 @@ export function viewHeader(v: View3D): Child {
         'data-tip': 'Transform Orientation',
         onpointerdown: (e: PointerEvent) => {
           e.preventDefault();
-          openMenu(
-            ORIENTATIONS.map(([id, label, ic]) => ({ label, icon: ic, active: uiState.orientation === id, action: () => ((uiState.orientation = id), app.changed('ui')) })),
-            e.currentTarget as HTMLElement,
-            { title: 'Transform Orientation' },
-          );
+          openMenu(orientationMenu(), e.currentTarget as HTMLElement, { title: 'Transform Orientations' });
         },
       },
       icon(orient[2]),
@@ -156,7 +151,12 @@ export function viewHeader(v: View3D): Child {
     ),
     iconDrop('pivot', pivot[2], 'Transform Pivot Point', (el) =>
       openMenu(
-        PIVOTS.map(([id, label, ic]) => ({ label, icon: ic, active: ts.transform_pivot_point === id, action: () => setTool('transform_pivot_point', id) })),
+        [
+          ...PIVOTS.map(([id, label, ic]) => ({ label, icon: ic, active: ts.transform_pivot_point === id, action: () => setTool('transform_pivot_point', id) })),
+          ...(doc.mode === 'OBJECT'
+            ? [{ separator: true } as MenuItem, { label: 'Only Locations', checked: !!(ts as { use_transform_pivot_point_align?: boolean }).use_transform_pivot_point_align, action: () => setTool('use_transform_pivot_point_align', !(ts as { use_transform_pivot_point_align?: boolean }).use_transform_pivot_point_align) }]
+            : []),
+        ],
         el,
         { title: 'Pivot Point' },
       ),
@@ -165,23 +165,7 @@ export function viewHeader(v: View3D): Child {
       'div',
       { class: 'hdr-group' },
       iconToggle('snap', ts.use_snap ? 'snap_on' : 'snap_off', ts.use_snap, 'Snap (Shift Tab)\nSnap during transform', () => setTool('use_snap', !ts.use_snap)),
-      iconDrop('snapel', snapEl[2], 'Snapping', (el) =>
-        openPopover(el, () =>
-          h(
-            'div',
-            { class: 'pop-panel' },
-            h('div', { class: 'pop-title' }, 'Snap Target for Individual Elements'),
-            h('div', { class: 'pop-list' }, SNAP_ELEMENTS.map(([id, label, ic]) => h('button', { key: id, class: { 'pop-item': true, on: ts.snap_elements.includes(id) }, onclick: (e: MouseEvent) => {
-              if (e.shiftKey) ts.snap_elements = ts.snap_elements.includes(id) ? ts.snap_elements.filter((x) => x !== id) : [...ts.snap_elements, id];
-              else ts.snap_elements = [id];
-              app.pushUndo('Snap Element');
-              app.changed('ui');
-            } }, icon(ic), label))),
-            h('div', { class: 'pop-title' }, 'Snap With'),
-            enumRow('snap-target', [['CLOSEST', 'Closest'], ['CENTER', 'Center'], ['MEDIAN', 'Median'], ['ACTIVE', 'Active']].map(([value, label]) => ({ value, label })), ts.snap_target, (x) => setTool('snap_target', x)),
-          ),
-        { width: 230 }),
-      ),
+      iconDrop('snapel', snapEl[2], 'Snapping', (el) => openPopover(el, snappingPopover, { width: 240 })),
     ),
     h(
       'div',
@@ -189,7 +173,10 @@ export function viewHeader(v: View3D): Child {
       iconToggle('prop', propOn ? 'prop_on' : 'prop_off', propOn, 'Proportional Editing (O)', () => setTool(doc.mode === 'OBJECT' ? 'use_proportional_edit_objects' : 'use_proportional_edit', !propOn)),
       iconDrop('propfall', 'smooth', 'Proportional Editing Falloff', (el) =>
         openMenu(
-          ['SMOOTH', 'SPHERE', 'ROOT', 'INVERSE_SQUARE', 'SHARP', 'LINEAR', 'CONSTANT', 'RANDOM'].map((f) => ({ label: f[0] + f.slice(1).toLowerCase().replace('_', ' '), active: ts.proportional_edit_falloff === f, action: () => setTool('proportional_edit_falloff', f) })),
+          [
+            ...['SMOOTH', 'SPHERE', 'ROOT', 'INVERSE_SQUARE', 'SHARP', 'LINEAR', 'CONSTANT', 'RANDOM'].map((f) => ({ label: f[0] + f.slice(1).toLowerCase().replace('_', ' '), active: ts.proportional_edit_falloff === f, action: () => setTool('proportional_edit_falloff', f) })),
+            ...(doc.mode === 'EDIT' ? [{ separator: true } as MenuItem, { label: 'Connected Only', checked: ts.use_proportional_connected, action: () => setTool('use_proportional_connected', !ts.use_proportional_connected) }] : []),
+          ],
           el,
           { title: 'Proportional Editing Falloff' },
         ),
@@ -207,12 +194,16 @@ export function viewHeader(v: View3D): Child {
             [
               ['MESH', 'Mesh', 'outliner_ob_mesh'],
               ['CURVE', 'Curve', 'outliner_ob_curve'],
+              ['META', 'Metaball', 'outliner_ob_meta'],
               ['FONT', 'Text', 'outliner_ob_font'],
+              ['CURVES', 'Curves', 'outliner_ob_curves'],
               ['ARMATURE', 'Armature', 'outliner_ob_armature'],
               ['LATTICE', 'Lattice', 'outliner_ob_lattice'],
               ['EMPTY', 'Empty', 'outliner_ob_empty'],
               ['LIGHT', 'Light', 'outliner_ob_light'],
+              ['LIGHT_PROBE', 'Light Probe', 'outliner_ob_lightprobe'],
               ['CAMERA', 'Camera', 'outliner_ob_camera'],
+              ['SPEAKER', 'Speaker', 'outliner_ob_speaker'],
             ] as const
           ).map(([t, label, ic]) =>
             h(
@@ -246,6 +237,11 @@ export function viewHeader(v: View3D): Child {
             { class: 'pop-panel' },
             h('div', { class: 'pop-title' }, 'Viewport Gizmos'),
             checkbox('nav-g', 'Navigate', v.showNavGizmo, (x) => ((v.showNavGizmo = x), v.drawUI())),
+            checkbox('tool-g', 'Active Tools', v.showToolGizmo, (x) => ((v.showToolGizmo = x), v.drawSvg(), app.changed('ui'))),
+            h('div', { class: 'pop-title' }, 'Object Gizmos'),
+            checkbox('obg-move', 'Move', v.objectGizmos.translate, (x) => ((v.objectGizmos.translate = x), v.drawSvg(), app.changed('ui'))),
+            checkbox('obg-rot', 'Rotate', v.objectGizmos.rotate, (x) => ((v.objectGizmos.rotate = x), v.drawSvg(), app.changed('ui'))),
+            checkbox('obg-scale', 'Scale', v.objectGizmos.scale, (x) => ((v.objectGizmos.scale = x), v.drawSvg(), app.changed('ui'))),
           ),
         ),
       'hidden-icon'),
@@ -256,6 +252,10 @@ export function viewHeader(v: View3D): Child {
       iconToggle('ov', 'overlay', v.overlay.show_overlays, 'Show Overlays (Shift Alt Z)', () => ((v.overlay.show_overlays = !v.overlay.show_overlays), app.changed('ui'))),
       iconDrop('ov-pop', 'down_arrow_hlt', 'Overlays', (el) => openPopover(el, () => overlayPopover(v), { width: 280 }), 'hidden-icon'),
     ),
+    // edit mode overlays get their own dropdown
+    app.doc.mode === 'EDIT' && (app.activeObject?.type === 'MESH' || app.activeObject?.type === 'CURVE' || app.activeObject?.type === 'CURVES')
+      ? iconDrop('ov-edit', 'editmode_hlt', `${EDIT_OVERLAY_NAMES[app.activeObject.type]} Edit Mode Overlays`, (el) => openPopover(el, () => h('div', { class: 'pop-panel' }, h('div', { class: 'pop-title' }, `${EDIT_OVERLAY_NAMES[app.activeObject?.type ?? 'MESH']} Edit Mode`), editOverlaySections(v)), { width: 260 }))
+      : null,
     iconToggle('xray', 'xray', sh.type === 'WIREFRAME' ? sh.show_xray_wireframe : sh.show_xray, 'Toggle X-Ray (Alt Z)', () => {
       if (sh.type === 'WIREFRAME') sh.show_xray_wireframe = !sh.show_xray_wireframe;
       else sh.show_xray = !sh.show_xray;
@@ -285,11 +285,70 @@ export function viewHeader(v: View3D): Child {
   );
 }
 
+/** Transform orientation dropdown: built-in and custom orientations, create / delete. */
+function orientationMenu(): MenuItem[] {
+  const cur = currentOrientation();
+  const custom = customOrientations();
+  return [
+    ...ORIENTATIONS.map(([id, label, ic]) => ({ label, icon: ic, active: cur === id, action: () => setOrientation(id) })),
+    ...(custom.length ? [{ separator: true } as MenuItem, ...custom.map((c) => ({ label: c.name, icon: 'orientation_local', active: cur === c.name, action: () => setOrientation(c.name) }))] : []),
+    { separator: true },
+    { label: 'Create Orientation', icon: 'add', op: 'transform.create_orientation', props: { use: true } },
+    { label: 'Delete Orientation', icon: 'remove', op: 'transform.delete_orientation' },
+  ];
+}
+
+type SnapExtras = { use_snap_grid_absolute?: boolean; snap_angle_increment_3d?: number; snap_angle_increment_3d_precision?: number };
+
+/** Snapping popover (header snap dropdown, Shift Ctrl Tab). */
+export function snappingPopover(): Child {
+  const ts = app.doc.scene.tool_settings;
+  const tx = ts as typeof ts & SnapExtras;
+  const deg = Math.PI / 180;
+  return h(
+    'div',
+    { class: 'pop-panel' },
+    h('div', { class: 'pop-title' }, 'Snap Target for Individual Elements'),
+    h(
+      'div',
+      { class: 'pop-list' },
+      SNAP_ELEMENTS.map(([id, label, ic]) =>
+        h(
+          'button',
+          {
+            key: id,
+            class: { 'pop-item': true, on: ts.snap_elements.includes(id) },
+            'data-tip': 'Shift-click to combine several element types',
+            onclick: (e: MouseEvent) => {
+              if (e.shiftKey) ts.snap_elements = ts.snap_elements.includes(id) ? ts.snap_elements.filter((x) => x !== id) : [...ts.snap_elements, id];
+              else ts.snap_elements = [id];
+              app.pushUndo('Snap Element');
+              app.changed('ui');
+            },
+          },
+          icon(ic),
+          label,
+        ),
+      ),
+    ),
+    ts.snap_elements.includes('INCREMENT') ? checkbox('snap-abs', 'Absolute Grid Snap', !!tx.use_snap_grid_absolute, (x) => setTool('use_snap_grid_absolute', x)) : null,
+    ts.snap_elements.includes('FACE') ? checkbox('snap-align', 'Align Rotation to Target', !!ts.use_snap_align_rotation, (x) => setTool('use_snap_align_rotation', x)) : null,
+    h('div', { class: 'pop-title' }, 'Snap With'),
+    enumRow('snap-target', [['CLOSEST', 'Closest'], ['CENTER', 'Center'], ['MEDIAN', 'Median'], ['ACTIVE', 'Active']].map(([value, label]) => ({ value, label })), ts.snap_target, (x) => setTool('snap_target', x)),
+    h('div', { class: 'pop-title' }, 'Rotation Increment'),
+    numberField({ id: 'snap-rot', label: 'Angle', value: tx.snap_angle_increment_3d ?? 5 * deg, min: 0.01 * deg, max: Math.PI, unit: 'angle', set: (x) => setTool('snap_angle_increment_3d', x) }),
+    numberField({ id: 'snap-rotp', label: 'Precision', value: tx.snap_angle_increment_3d_precision ?? 1 * deg, min: 0.01 * deg, max: Math.PI, unit: 'angle', set: (x) => setTool('snap_angle_increment_3d_precision', x) }),
+  );
+}
+
 function setTool(key: string, value: unknown) {
   (app.doc.scene.tool_settings as unknown as Record<string, unknown>)[key] = value;
   app.pushUndo('Tool Setting');
   app.changed('ui', 'doc');
 }
+
+/** Extra sections of the Viewport Overlays popover (e.g. grease pencil options). */
+export const overlayPopoverHooks: ((v: View3D) => Child)[] = [];
 
 function overlayPopover(v: View3D): Child {
   const o = v.overlay;
@@ -297,28 +356,54 @@ function overlayPopover(v: View3D): Child {
     (o as unknown as Record<string, unknown>)[k] = x;
     app.changed('ui');
   };
-  const editing = app.doc.mode === 'EDIT';
+  const axisBtn = (k: 'show_axis_x' | 'show_axis_y' | 'show_axis_z', l: string) => h('button', { key: k, class: { on: !!o[k] }, 'data-tip': `Show the ${l} axis line`, onclick: () => set(k)(!o[k]) }, l);
   return h(
     'div',
     { class: 'pop-panel' },
     h('div', { class: 'pop-title' }, 'Viewport Overlays'),
-    h('div', { class: 'pop-sub' }, 'Guides'),
-    h('div', { class: 'pop-grid' }, checkbox('o-grid', 'Grid', o.show_floor, set('show_floor')), checkbox('o-x', 'X', o.show_axis_x, set('show_axis_x')), checkbox('o-y', 'Y', o.show_axis_y, set('show_axis_y')), checkbox('o-z', 'Z', o.show_axis_z, set('show_axis_z'))),
-    numberField({ id: 'o-gscale', label: 'Scale', value: o.grid_scale, min: 0.001, max: 1000, set: (x) => set('grid_scale')(x) }),
-    h('div', { class: 'pop-grid' }, checkbox('o-text', 'Text Info', o.show_text, set('show_text')), checkbox('o-stats', 'Statistics', o.show_stats, set('show_stats')), checkbox('o-cursor', '3D Cursor', o.show_cursor, set('show_cursor')), checkbox('o-ann', 'Annotations', o.show_annotation, set('show_annotation'))),
-    h('div', { class: 'pop-sub' }, 'Objects'),
-    h('div', { class: 'pop-grid' }, checkbox('o-extras', 'Extras', o.show_extras, set('show_extras')), checkbox('o-rel', 'Relationship Lines', o.show_relationship_lines, set('show_relationship_lines')), checkbox('o-outline', 'Outline Selected', o.show_outline_selected, set('show_outline_selected')), checkbox('o-bones', 'Bones', o.show_bones, set('show_bones')), checkbox('o-orig', 'Origins', o.show_object_origins, set('show_object_origins')), checkbox('o-origall', 'Origins (All)', o.show_object_origins_all, set('show_object_origins_all')), checkbox('o-mpaths', 'Motion Paths', o.show_motion_paths !== false, set('show_motion_paths'))),
-    h('div', { class: 'pop-sub' }, 'Geometry'),
-    h('div', { class: 'pop-grid' }, checkbox('o-wire', 'Wireframe', o.show_wireframes, set('show_wireframes')), checkbox('o-faceor', 'Face Orientation', o.show_face_orientation, set('show_face_orientation'))),
-    numberField({ id: 'o-wireop', label: 'Opacity', value: o.wireframe_opacity, min: 0, max: 1, slider: true, set: (x) => set('wireframe_opacity')(x) }),
-    editing
-      ? [
-          h('div', { class: 'pop-sub' }, 'Mesh Edit Mode'),
-          h('div', { class: 'pop-grid' }, checkbox('o-seam', 'Seams', o.show_edge_seams, set('show_edge_seams')), checkbox('o-sharp', 'Sharp', o.show_edge_sharp, set('show_edge_sharp')), checkbox('o-crease', 'Crease', o.show_edge_crease, set('show_edge_crease')), checkbox('o-fcen', 'Center', o.show_face_center, set('show_face_center')), checkbox('o-fnorm', 'Face Normals', o.show_face_normals, set('show_face_normals')), checkbox('o-vnorm', 'Vertex Normals', o.show_vertex_normals, set('show_vertex_normals')), checkbox('o-len', 'Edge Length', o.show_extra_edge_length, set('show_extra_edge_length')), checkbox('o-idx', 'Indices', o.show_extra_indices, set('show_extra_indices'))),
-          numberField({ id: 'o-nlen', label: 'Normal Size', value: o.normals_length, min: 0.0001, max: 100, set: (x) => set('normals_length')(x) }),
-        ]
-      : null,
+    panel('ov-guides', 'Guides', () => [
+      h('div', { class: 'pop-grid ov-guides' }, checkbox('o-grid', 'Grid', o.show_floor, set('show_floor')), h('div', { class: 'ov-axes' }, h('span', { class: 'ov-axes-label' }, 'Axes'), h('div', { class: 'enum-row' }, axisBtn('show_axis_x', 'X'), axisBtn('show_axis_y', 'Y'), axisBtn('show_axis_z', 'Z')))),
+      numberField({ id: 'o-gscale', label: 'Scale', value: o.grid_scale, min: 0.001, max: 1000, set: (x) => set('grid_scale')(x) }),
+      h('div', { class: 'pop-grid' }, checkbox('o-cursor', '3D Cursor', o.show_cursor, set('show_cursor')), checkbox('o-ann', 'Annotations', o.show_annotation, set('show_annotation'))),
+    ], { sub: true }),
+    panel('ov-text', 'Text', () => [h('div', { class: 'pop-grid' }, checkbox('o-text', 'General Info', o.show_text, set('show_text')), checkbox('o-stats', 'Statistics', o.show_stats, set('show_stats')))], { sub: true }),
+    panel('ov-objects', 'Objects', () => [
+      h('div', { class: 'pop-grid' }, checkbox('o-extras', 'Extras', o.show_extras, set('show_extras')), checkbox('o-bones', 'Bones', o.show_bones, set('show_bones')), checkbox('o-rel', 'Relationship Lines', o.show_relationship_lines, set('show_relationship_lines')), checkbox('o-mpaths', 'Motion Paths', o.show_motion_paths !== false, set('show_motion_paths')), checkbox('o-outline', 'Outline Selected', o.show_outline_selected, set('show_outline_selected')), checkbox('o-orig', 'Origins', o.show_object_origins, set('show_object_origins')), h('span'), checkbox('o-origall', 'Origins (All)', o.show_object_origins_all, set('show_object_origins_all'))),
+    ], { sub: true }),
+    panel('ov-geometry', 'Geometry', () => [
+      h('div', { class: 'row-split' }, checkbox('o-wire', '', o.show_wireframes, set('show_wireframes'), { tip: 'Wireframe\nShow the wireframe of every object' }), numberField({ id: 'o-wireop', label: 'Wireframe Opacity', value: o.wireframe_opacity, min: 0, max: 1, slider: true, set: (x) => set('wireframe_opacity')(x) })),
+      checkbox('o-faceor', 'Face Orientation', o.show_face_orientation, set('show_face_orientation')),
+    ], { sub: true }),
+    overlayPopoverSections.map((f) => f(v)),
+    overlayPopoverHooks.map((f) => f(v)),
   );
+}
+
+const EDIT_OVERLAY_NAMES: Record<string, string> = { MESH: 'Mesh', CURVE: 'Curve', CURVES: 'Curves' };
+
+/** Overlays of the edit mode (own header popover next to the overlays one). */
+function editOverlaySections(v: View3D): Child {
+  const o = v.overlay;
+  const set = (k: keyof typeof o) => (x: unknown) => {
+    (o as unknown as Record<string, unknown>)[k] = x;
+    app.changed('ui');
+  };
+  if (app.activeObject?.type === 'CURVES')
+    return [h('div', { class: 'pop-line' }, h('span', null, 'Handles'), enumMenu('o-handles', [{ value: 'ALL', label: 'All' }, { value: 'SELECTED', label: 'Selected' }, { value: 'NONE', label: 'None' }], o.display_handle ?? 'SELECTED', set('display_handle')))];
+  if (app.activeObject?.type === 'CURVE')
+    return [
+      h('div', { class: 'pop-line' }, h('span', null, 'Handles'), enumMenu('o-handles', [{ value: 'ALL', label: 'All' }, { value: 'SELECTED', label: 'Selected' }, { value: 'NONE', label: 'None' }], o.display_handle ?? 'SELECTED', set('display_handle'))),
+      checkbox('o-cnorm', 'Normals', o.show_curve_normals !== false, set('show_curve_normals')),
+      numberField({ id: 'o-cnlen', label: 'Normal Size', value: o.normals_length, min: 0.0001, max: 100, set: (x) => set('normals_length')(x) }),
+    ];
+  return [
+    h('div', { class: 'pop-grid' }, checkbox('o-seam', 'Seams', o.show_edge_seams, set('show_edge_seams')), checkbox('o-sharp', 'Sharp', o.show_edge_sharp, set('show_edge_sharp')), checkbox('o-crease', 'Crease', o.show_edge_crease, set('show_edge_crease')), checkbox('o-fcen', 'Center', o.show_face_center, set('show_face_center'))),
+    panel('ov-mesh-measure', 'Measurement', () => [h('div', { class: 'pop-grid' }, checkbox('o-len', 'Edge Length', o.show_extra_edge_length, set('show_extra_edge_length')), prefs.show_developer_ui ? checkbox('o-idx', 'Indices', o.show_extra_indices, set('show_extra_indices')) : null)], { sub: true }),
+    panel('ov-mesh-normals', 'Normals', () => [
+      h('div', { class: 'pop-grid' }, checkbox('o-vnorm', 'Vertex Normals', o.show_vertex_normals, set('show_vertex_normals')), checkbox('o-fnorm', 'Face Normals', o.show_face_normals, set('show_face_normals'))),
+      numberField({ id: 'o-nlen', label: 'Size', value: o.normals_length, min: 0.0001, max: 100, set: (x) => set('normals_length')(x) }),
+    ], { sub: true }),
+  ];
 }
 
 function shadingPopover(v: View3D): Child {
@@ -338,6 +423,7 @@ function shadingPopover(v: View3D): Child {
       h('div', { class: 'pop-title' }, 'Lighting'),
       checkbox('s-lights', 'Scene Lights', s[lightsKey], set(lightsKey)),
       checkbox('s-world', 'Scene World', s[worldKey], set(worldKey)),
+      !s[worldKey] ? hdriChooser(v) : null,
       !s[worldKey] ? numberField({ id: 's-strength', label: 'Strength', value: s.studiolight_intensity, min: 0, max: 2, slider: true, set: (x) => set('studiolight_intensity')(x) }) : null,
       h('div', { class: 'pop-title' }, 'Render Pass'),
       h('div', { class: 'pop-line' }, 'Combined'),
@@ -346,7 +432,8 @@ function shadingPopover(v: View3D): Child {
   return h(
     'div',
     { class: 'pop-panel' },
-    panel('sh-light', 'Lighting', () => [enumRow('s-light', items([['STUDIO', 'Studio'], ['MATCAP', 'MatCap'], ['FLAT', 'Flat']]), s.light, set('light'))], { sub: true }),
+    h('div', { class: 'pop-title' }, 'Viewport Shading'),
+    panel('sh-light', 'Lighting', () => [enumRow('s-light', items([['STUDIO', 'Studio'], ['MATCAP', 'MatCap'], ['FLAT', 'Flat']]), s.light, set('light')), solidLightingChooser(v)], { sub: true }),
     panel('sh-color', 'Color', () => [
       h('div', { class: 'enum-grid' }, enumRow('s-color', items([['MATERIAL', 'Material'], ['OBJECT', 'Object'], ['VERTEX', 'Attribute'], ['SINGLE', 'Single'], ['RANDOM', 'Random'], ['TEXTURE', 'Texture']]), s.color_type, set('color_type'))),
       s.color_type === 'SINGLE' ? colorSwatch('s-single', s.single_color, (c) => set('single_color')(c.slice(0, 3))) : null,

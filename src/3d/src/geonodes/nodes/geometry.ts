@@ -1,4 +1,5 @@
 // Geometry, attribute and instance-level nodes that work on any component.
+import { curvesMoved } from '../curves/curvedata';
 import { gn, prop, sprop } from './defs';
 import { evalOn, pointDomainOf, hasDomain, DATA_TYPE_ITEMS } from './common';
 import { GeometrySet, InstancesComponent, composeMat, geometryBounds, mulMat, allocData, readAttribute, type Component } from '../geometry';
@@ -43,7 +44,7 @@ function setPositions(c: Component, sel: Field, pos: Field, off: Field, implicit
   void implicitPos;
   const cc = c.copy();
   cc.positions = out;
-  return cc;
+  return cc.kind === 'CURVES' ? curvesMoved(cc, old) : cc;
 }
 
 gn('GeometryNodeSetPosition', 'geometry', {
@@ -444,6 +445,7 @@ export function valueSocket(id: string, t: FieldType, name = id): SocketDef {
     VECTOR: [0, 0, 0],
     RGBA: [0, 0, 0, 1],
     ROTATION: [0, 0, 0],
+    MATRIX: undefined,
   };
   return {
     name,

@@ -19,7 +19,7 @@ function passTexture(x: NodeCtx, pass: PassName): Texture | null {
   return cachedTexture(`rl|${L.version}|${pass}`, () => {
     const { width: W, height: H } = L;
     const out = new Float32Array(W * H * 4);
-    const ch = pass === 'Combined' || pass === 'Normal' ? 4 : 1;
+    const ch = src.length >= W * H * 4 ? 4 : 1;
     for (let y = 0; y < H; y++) {
       const sy = H - 1 - y;
       if (ch === 4) {
@@ -51,6 +51,7 @@ registerExec('CompositorNodeRLayers', (x) => {
     x.outs.set('Depth', Result.single('FLOAT', 0));
     x.outs.set('Normal', Result.single('VECTOR', [0, 0, 0]));
     x.outs.set('Mist', Result.single('FLOAT', 0));
+    x.outs.set('AO', Result.single('FLOAT', 1));
     return;
   }
   const d: Domain = { w: L.width, h: L.height, xf: ident() };
@@ -70,6 +71,21 @@ registerExec('CompositorNodeRLayers', (x) => {
   if (normal) x.outs.set('Normal', Result.image('VECTOR', normal, d));
   const mist = passTexture(x, 'Mist');
   if (mist) x.outs.set('Mist', Result.image('FLOAT', mist, d));
+  const ao = passTexture(x, 'AO');
+  if (ao) x.outs.set('AO', Result.image('FLOAT', ao, d));
+  // shader AOVs: colors (RGBA) or values
+  for (const [name, buf] of Object.entries(L.passes))
+    if (name.startsWith('AOV ') && buf) {
+      const t = passTexture(x, name as PassName);
+      const color = buf.length >= L.width * L.height * 4;
+      if (t) x.outs.set(name, Result.image(color ? 'RGBA' : 'FLOAT', t, d));
+    }
+  // index, cryptomatte and AOV passes (outputs named after the passes)
+  for (const s of x.outputSockets()) {
+    if (x.outs.has(s.identifier) || !(s.identifier in L.passes)) continue;
+    const t = passTexture(x, s.identifier);
+    if (t) x.outs.set(s.identifier, Result.image(s.type === 'RGBA' ? 'RGBA' : s.type === 'VECTOR' ? 'VECTOR' : 'FLOAT', t, d));
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -3,16 +3,17 @@ import { Vector3 } from 'three';
 import { h, type Child } from '../../ui/h';
 import { icon } from '../../ui/icons';
 import { app } from '../../app/app';
+import { prefs } from '../../app/prefs';
 import type { View3D } from './view3d';
 import type { ViewName } from '../../render/navcam';
 
 const AX = [
-  { v: new Vector3(1, 0, 0), label: 'X', color: '#ff3352', view: 'RIGHT' as ViewName },
-  { v: new Vector3(0, 1, 0), label: 'Y', color: '#8bdc00', view: 'BACK' as ViewName },
-  { v: new Vector3(0, 0, 1), label: 'Z', color: '#2890ff', view: 'TOP' as ViewName },
-  { v: new Vector3(-1, 0, 0), label: '', color: '#ff3352', view: 'LEFT' as ViewName },
-  { v: new Vector3(0, -1, 0), label: '', color: '#8bdc00', view: 'FRONT' as ViewName },
-  { v: new Vector3(0, 0, -1), label: '', color: '#2890ff', view: 'BOTTOM' as ViewName },
+  { v: new Vector3(1, 0, 0), label: 'X', color: '#fc364b', view: 'RIGHT' as ViewName },
+  { v: new Vector3(0, 1, 0), label: 'Y', color: '#84e003', view: 'BACK' as ViewName },
+  { v: new Vector3(0, 0, 1), label: 'Z', color: '#398efc', view: 'TOP' as ViewName },
+  { v: new Vector3(-1, 0, 0), label: '', color: '#fc364b', view: 'LEFT' as ViewName },
+  { v: new Vector3(0, -1, 0), label: '', color: '#84e003', view: 'FRONT' as ViewName },
+  { v: new Vector3(0, 0, -1), label: '', color: '#398efc', view: 'BOTTOM' as ViewName },
 ];
 
 export function navGizmo(v: View3D): Child {
@@ -25,6 +26,8 @@ export function navGizmo(v: View3D): Child {
   }).sort((a, b) => a.z - b.z);
   const startDrag = (e: PointerEvent) => {
     e.preventDefault();
+    // Quad View's fixed views cannot be turned
+    if (v.lockRotation) return;
     const target = (e.target as Element).closest('[data-axis]') as Element | null;
     const axis = target ? Number(target.getAttribute('data-axis')) : -1;
     let moved = false;
@@ -58,9 +61,12 @@ export function navGizmo(v: View3D): Child {
   return h(
     'div',
     { key: 'navgizmo', class: 'nav-gizmo-wrap' },
-    h(
+    // Preferences ▸ Viewport ▸ Mini Axes: the interactive gizmo, a small axes corner (drawn elsewhere) or nothing
+    prefs.mini_axis_type !== 'GIZMO'
+      ? null
+      : h(
       'svg',
-      { class: 'nav-gizmo', width: 80, height: 80, viewBox: '0 0 80 80', onpointerdown: startDrag },
+      { class: 'nav-gizmo', width: prefs.gizmo_size_navigate_v3d, height: prefs.gizmo_size_navigate_v3d, viewBox: '0 0 80 80', onpointerdown: startDrag },
       h('circle', { class: 'ng-bg', cx: 40, cy: 40, r: 38 }),
       items.map((it) =>
         h(
@@ -72,7 +78,9 @@ export function navGizmo(v: View3D): Child {
         ),
       ),
     ),
-    h(
+    !prefs.show_navigate_ui
+      ? null
+      : h(
       'div',
       { class: 'nav-buttons' },
       h('button', { class: 'nav-btn', 'data-tip': 'Zoom\nZoom in/out in the view (drag)', onpointerdown: (e: PointerEvent) => v.navDrag(e, 'zoom') }, icon('view_zoom')),

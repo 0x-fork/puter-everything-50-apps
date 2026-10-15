@@ -2,7 +2,7 @@
 import type { ActionData, DocumentData, FCurve, ObjectData } from '../data/types';
 import { app } from '../app/app';
 import { newAction } from '../data/defaults';
-import { insertKeyframe } from './fcurve';
+import { insertKeyframe, evaluateFCurve, keyframeDefaults } from './fcurve';
 import { getValue } from '../data/rna';
 
 export function ensureAction(doc: DocumentData, ob: ObjectData): ActionData {
@@ -39,12 +39,20 @@ export function ensureFCurve(act: ActionData, path: string, index: number): FCur
       extrapolation: 'CONSTANT',
       modifiers: [],
       group: bone ? bone[1] : GROUPS[path] ?? undefined,
-      // vector transform channels default to "Auto XYZ to RGB" like the reference preferences
-      color_mode: /(^|\.)(location|rotation_euler|rotation_quaternion|rotation_axis_angle|scale|delta_location|delta_rotation_euler|delta_scale)$/.test(path) ? (/rotation_(quaternion|axis_angle)$/.test(path) ? 'AUTO_YRGB' : 'AUTO_RGB') : 'AUTO_RAINBOW',
+      // vector transform channels default to "Auto XYZ to RGB"
+      color_mode: !keyframeDefaults.xyzToRgb ? 'AUTO_RAINBOW' : /(^|\.)(location|rotation_euler|rotation_quaternion|rotation_axis_angle|scale|delta_location|delta_rotation_euler|delta_scale)$/.test(path) ? (/rotation_(quaternion|axis_angle)$/.test(path) ? 'AUTO_YRGB' : 'AUTO_RGB') : 'AUTO_RAINBOW',
     };
     act.fcurves.push(fc);
   }
   return fc;
+}
+
+/** With "Only Insert Needed", a key is skipped when the curve already has that value there. */
+function needed(act: ActionData, path: string, index: number, frame: number, value: number) {
+  if (!keyframeDefaults.insertNeeded) return true;
+  const fc = act.fcurves.find((f) => f.data_path === path && f.array_index === index);
+  if (!fc || !fc.keyframe_points.length) return true;
+  return Math.abs(evaluateFCurve(fc, frame) - value) > 1e-6 * Math.max(1, Math.abs(value));
 }
 
 /** Insert keyframes for a property path (all array elements when index = -1). */
@@ -54,18 +62,35 @@ export function keyProperty(doc: DocumentData, ob: ObjectData, path: string, ind
   const type = doc.scene.tool_settings.keyframe_type;
   if (Array.isArray(val) || ArrayBuffer.isView(val)) {
     const arr = val as ArrayLike<number>;
-    for (let i = 0; i < arr.length; i++) if (index < 0 || i === index) insertKeyframe(ensureFCurve(act, path, i), frame, Number(arr[i]), { type });
-  } else if (typeof val === 'number' || typeof val === 'boolean') insertKeyframe(ensureFCurve(act, path, 0), frame, Number(val), { type, interpolation: typeof val === 'boolean' ? 'CONSTANT' : 'BEZIER' });
+    for (let i = 0; i < arr.length; i++) if ((index < 0 || i === index) && needed(act, path, i, frame, Number(arr[i]))) insertKeyframe(ensureFCurve(act, path, i), frame, Number(arr[i]), { type });
+  } else if ((typeof val === 'number' || typeof val === 'boolean') && needed(act, path, 0, frame, Number(val))) insertKeyframe(ensureFCurve(act, path, 0), frame, Number(val), { type, interpolation: typeof val === 'boolean' ? 'CONSTANT' : keyframeDefaults.interpolation });
 }
 
 export function rotationPath(ob: { rotation_mode: string }) {
   return ob.rotation_mode === 'QUATERNION' ? 'rotation_quaternion' : ob.rotation_mode === 'AXIS_ANGLE' ? 'rotation_axis_angle' : 'rotation_euler';
 }
 
-export type KeyingSet = 'Location' | 'Rotation' | 'Scale' | 'LocRotScale' | 'LocRot' | 'LocScale' | 'RotScale' | 'Available' | 'WholeCharacter' | 'BUILTIN_KSI_VisualLocRot';
+export type KeyingSet = 'Location' | 'Rotation' | 'Scale' | 'LocRotScale' | 'LocRot' | 'LocScale' | 'RotScale' | 'Available' | 'WholeCharacter' | 'BUILTIN_KSI_VisualLocRot' | `KS:${string}`;
+
+/** Insert keys for every path of a user keying set; returns the number of paths keyed. */
+export function insertUserKeyingSet(doc: DocumentData, name: string): number {
+  const set = doc.scene.keying_sets?.find((k) => k.name === name);
+  let n = 0;
+  for (const p of set?.paths ?? []) {
+    const ob = p.id ? doc.objects[p.id] : undefined;
+    if (!ob || !p.data_path) continue;
+    keyProperty(doc, ob, p.data_path, p.index);
+    n++;
+  }
+  return n;
+}
 
 export function insertKeyframesForObjects(objects: ObjectData[], ks: KeyingSet = 'LocRotScale') {
   const doc = app.doc;
+  if (ks.startsWith('KS:')) {
+    insertUserKeyingSet(doc, ks.slice(3));
+    return;
+  }
   for (const ob of objects) {
     if (doc.mode === 'POSE' && ob.type === 'ARMATURE' && ob.pose) {
       insertBoneKeys(doc, ob, ks);
@@ -117,7 +142,7 @@ export function deleteKeyframesAt(objects: ObjectData[], frame: number) {
       fc.keyframe_points = fc.keyframe_points.filter((k) => Math.abs(k.co[0] - frame) > 0.5);
       n += before - fc.keyframe_points.length;
     }
-    act.fcurves = act.fcurves.filter((f) => f.keyframe_points.length);
+    act.fcurves = act.fcurves.filter((f) => f.keyframe_points.length || f.sampled_points?.length);
   }
   return n;
 }

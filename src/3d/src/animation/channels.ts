@@ -3,6 +3,7 @@
 // drivers and NLA tracks. Pure document logic (no DOM) so it can be unit tested.
 import type { ActionData, DocumentData, Driver, FCurve, NlaTrack, ObjectData, ShapeKey } from '../data/types';
 import { channelLabel, dataBlock } from '../data/rna';
+import { driverAction } from './drivercurves';
 
 export type SpaceKind = 'DOPESHEET' | 'ACTION' | 'SHAPEKEY' | 'GRAPH' | 'DRIVERS' | 'NLA';
 export type ChannelKind = 'SUMMARY' | 'OBJECT' | 'ACTION' | 'GROUP' | 'FCURVE' | 'SHAPEKEY' | 'DRIVERS' | 'DRIVER' | 'NLA_ACTION' | 'NLA_TRACK';
@@ -28,6 +29,8 @@ export interface Channel {
   driverIndex?: number;
   track?: NlaTrack;
   trackIndex?: number;
+  /** the channel's property can't be found */
+  error?: boolean;
   /** F-Curves summarized by this row (keys drawn/edited through it) */
   curves: CurveRef[];
   expandable: boolean;
@@ -41,6 +44,8 @@ export interface ChannelFilter {
   onlyErrors?: boolean;
   isVisible: (ob: ObjectData) => boolean;
   activeObject: ObjectData | null;
+  /** F-Curves whose property can't be found ("Only Show Errors", error highlight) */
+  curveError?: (ob: ObjectData, fc: FCurve) => boolean;
   /** driver error lookup (Drivers editor "Only Show Errors") */
   driverError?: (ob: ObjectData, d: Driver) => string | null;
 }
@@ -84,6 +89,8 @@ export function objectIcon(ob: ObjectData) {
     LATTICE: 'outliner_ob_lattice',
     POINTCLOUD: 'outliner_ob_pointcloud',
     GREASEPENCIL: 'outliner_ob_greasepencil',
+    META: 'outliner_ob_meta',
+    CURVES: 'outliner_ob_curves',
   };
   return m[ob.type] ?? 'object';
 }
@@ -96,6 +103,7 @@ export function activeAction(doc: DocumentData, ob: ObjectData | null | undefine
 const boneOf = (path: string) => /^pose\.bones\["([^"]+)"\]/.exec(path)?.[1];
 
 function curveVisibleForFilter(doc: DocumentData, ob: ObjectData, fc: FCurve, f: ChannelFilter) {
+  if (f.onlyErrors && f.curveError && !f.curveError(ob, fc)) return false;
   if (f.onlySelected && doc.mode === 'POSE' && ob.pose) {
     const bone = boneOf(fc.data_path);
     if (bone && ob.pose[bone] && !ob.pose[bone].select) return false;
@@ -145,14 +153,15 @@ function actionRows(
       expandable: true,
       expanded: exp,
     });
-    if (exp) for (const r of inGroup) rows.push(curveRow(r, depth + 1));
+    if (exp) for (const r of inGroup) rows.push(curveRow(r, depth + 1, f));
   }
-  for (const r of refs) if (!r.fc.group) rows.push(curveRow(r, depth));
+  for (const r of refs) if (!r.fc.group) rows.push(curveRow(r, depth, f));
   return refs;
 }
 
-function curveRow(r: CurveRef, depth: number): Channel {
+function curveRow(r: CurveRef, depth: number, f?: ChannelFilter): Channel {
   return {
+    error: f?.curveError?.(r.ob, r.fc) ?? false,
     key: curveKey(r.ob, r.action, r.fc),
     kind: 'FCURVE',
     depth,
@@ -244,6 +253,9 @@ export function buildChannels(doc: DocumentData, space: SpaceKind, f: ChannelFil
       if (!drivers.length) continue;
       const okey = `dob:${ob.id}`;
       const oexp = isExpanded(okey, 'OBJECT');
+      const action = driverAction(ob);
+      const refs = drivers.map(({ d }) => ({ ob, action, fc: d.fcurve! }));
+      curves.push(...refs);
       rows.push({
         key: okey,
         kind: 'OBJECT',
@@ -251,7 +263,7 @@ export function buildChannels(doc: DocumentData, space: SpaceKind, f: ChannelFil
         label: ob.name,
         icon: objectIcon(ob),
         ob,
-        curves: [],
+        curves: refs,
         expandable: true,
         expanded: oexp,
       });
@@ -265,24 +277,28 @@ export function buildChannels(doc: DocumentData, space: SpaceKind, f: ChannelFil
         label: 'Drivers',
         icon: 'graph',
         ob,
-        curves: [],
+        curves: refs,
         expandable: true,
         expanded: dexp,
       });
       if (!dexp) continue;
-      for (const { d, i } of drivers)
+      drivers.forEach(({ d, i }, n) =>
         rows.push({
           key: driverKey(ob, d),
           kind: 'DRIVER',
           depth: 2,
           label: channelLabel(d.data_path, d.array_index),
           ob,
+          action,
+          fc: d.fcurve,
           driver: d,
           driverIndex: i,
-          curves: [],
+          error: !!f.driverError?.(ob, d),
+          curves: [refs[n]],
           expandable: false,
           expanded: false,
-        });
+        }),
+      );
     }
     return { rows, curves };
   }
@@ -414,7 +430,7 @@ export function channelSelected(ch: Channel): boolean {
     case 'SHAPEKEY':
       return ch.fc ? !!ch.fc.select : channelState.selectedShapeKeys.has(ch.key);
     case 'DRIVER':
-      return channelState.selectedDrivers.has(ch.key);
+      return ch.fc ? !!ch.fc.select : channelState.selectedDrivers.has(ch.key);
     case 'NLA_TRACK':
       return !!ch.track?.select;
     default:
@@ -440,6 +456,7 @@ export function setChannelSelected(ch: Channel, value: boolean) {
       else channelState.selectedShapeKeys.delete(ch.key);
       break;
     case 'DRIVER':
+      if (ch.fc) ch.fc.select = value;
       if (value) channelState.selectedDrivers.add(ch.key);
       else channelState.selectedDrivers.delete(ch.key);
       break;
@@ -451,6 +468,6 @@ export function setChannelSelected(ch: Channel, value: boolean) {
 
 /** Curves affected by a channel-level setting toggle on this row. */
 export function channelCurves(ch: Channel): FCurve[] {
-  if (ch.kind === 'FCURVE' || ch.kind === 'SHAPEKEY') return ch.fc ? [ch.fc] : [];
+  if (ch.kind === 'FCURVE' || ch.kind === 'SHAPEKEY' || ch.kind === 'DRIVER') return ch.fc ? [ch.fc] : [];
   return ch.curves.map((r) => r.fc);
 }

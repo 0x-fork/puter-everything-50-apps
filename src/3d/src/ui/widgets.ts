@@ -1,10 +1,11 @@
-// Property widgets in the style of the reference UI: drag-to-edit number fields,
+// Property widgets: drag-to-edit number fields,
 // sliders, checkboxes, enum menus, color swatches with a picker, text fields.
 import { h, type VNode, type Child } from './h';
 import { icon } from './icons';
-import { openMenu, openPopover, setWidgetDragging, type MenuItem } from './menu';
+import { openMenu, openPopover, setWidgetDragging, menuSettings, type MenuItem } from './menu';
 import { app } from '../app/app';
 import { parseExpression, evalExpression } from '../anim/drivers';
+import { buttonHooks, getBinding, bindingValue } from './binding';
 
 export type Unit = 'none' | 'distance' | 'angle' | 'factor' | 'percentage' | 'time' | 'pixel' | 'mass' | 'power' | 'frame';
 
@@ -33,6 +34,15 @@ export interface NumberOpts {
 }
 
 const editing = new Map<string, string>(); // id -> text being edited
+
+/** Display options (Preferences ▸ Interface sets these). */
+export const widgetSettings = {
+  /** show 0..1 factors as percentages */
+  factorPercentage: false,
+  /** colour picker layout */
+  colorPicker: 'CIRCLE_HSV' as 'CIRCLE_HSV' | 'CIRCLE_HSL' | 'SQUARE_SV' | 'SQUARE_HS' | 'SQUARE_HV',
+};
+const pct = (o: NumberOpts) => o.unit === 'factor' && widgetSettings.factorPercentage;
 
 export function formatNumber(v: number, unit: Unit = 'none', precision = 3, int = false): string {
   if (!Number.isFinite(v)) return String(v);
@@ -113,7 +123,7 @@ function displayStep(o: NumberOpts) {
 /** Number field with drag / click-to-type / arrow increments. */
 export function numberField(o: NumberOpts): VNode {
   const text = editing.get(o.id);
-  const cls = ['num-field', o.slider ? 'slider' : '', o.anim ? `anim-${o.anim}` : '', o.disabled ? 'disabled' : '', o.className ?? ''].join(' ');
+  const cls = ['num-field', o.slider ? 'slider' : '', o.anim ? `anim-${o.anim}` : '', o.disabled ? 'disabled' : '', multiIds.has(o.id) ? 'multi-sel' : '', o.className ?? ''].join(' ');
   if (text !== undefined) {
     return h('input', {
       key: o.id,
@@ -128,8 +138,11 @@ export function numberField(o: NumberOpts): VNode {
       oninput: (e: Event) => editing.set(o.id, (e.target as HTMLInputElement).value),
       onkeydown: (e: KeyboardEvent) => {
         e.stopPropagation();
-        if (e.key === 'Enter') commitText(o, (e.target as HTMLInputElement).value);
-        else if (e.key === 'Escape') {
+        if (e.key === 'Enter') {
+          commitText(o, (e.target as HTMLInputElement).value);
+          // Alt+Enter: also set the value on the other selected items
+          if (e.altKey) buttonHooks.altEdit(o.id);
+        } else if (e.key === 'Escape') {
           editing.delete(o.id);
           app.changed('ui');
         } else if (e.key === 'Tab') {
@@ -167,7 +180,7 @@ export function numberField(o: NumberOpts): VNode {
     o.slider ? h('div', { class: 'num-fill' }) : null,
     !o.slider && !o.disabled ? h('span', { class: 'num-arrow l', onpointerdown: (e: PointerEvent) => arrowStep(e, o, -1) }, '‹') : null,
     o.label && !o.noLabel ? h('span', { class: 'num-label' }, o.label) : null,
-    h('span', { class: 'num-value' }, formatNumber(o.value, unit, o.precision ?? (o.unit === 'factor' ? 3 : 3), o.int)),
+    h('span', { class: 'num-value' }, pct(o) ? formatNumber(o.value * 100, 'percentage') : formatNumber(o.value, unit, o.precision ?? (o.unit === 'factor' ? 3 : 3), o.int)),
     !o.slider && !o.disabled ? h('span', { class: 'num-arrow r', onpointerdown: (e: PointerEvent) => arrowStep(e, o, 1) }, '›') : null,
   );
 }
@@ -192,8 +205,9 @@ function arrowStep(e: PointerEvent, o: NumberOpts, dir: number) {
 
 function commitText(o: NumberOpts, text: string) {
   editing.delete(o.id);
+  if (text.trim().startsWith('#') && buttonHooks.hashExpression(o.id, text.trim().slice(1).trim())) return void app.changed('ui');
   try {
-    const v = parseNumber(text, o.unit === 'factor' ? 'none' : o.unit);
+    const v = parseNumber(text.replace(/%\s*$/, ''), o.unit === 'factor' ? 'none' : o.unit) / (pct(o) ? 100 : 1);
     if (Number.isFinite(v)) o.set(clamp(v, o), true);
   } catch {
     app.report('ERROR', `Invalid expression: ${text}`);
@@ -201,11 +215,32 @@ function commitText(o: NumberOpts, text: string) {
   app.changed('ui');
 }
 
+/** Ids of the stacked number fields taking part in a vertical multi-drag. */
+const multiIds = new Set<string>();
+
+/** Write a value through a field's registered binding (used for the other fields of a multi-drag). */
+function writeBinding(id: string, v: number) {
+  const b = getBinding(id);
+  if (!b) return;
+  if (b.min !== undefined) v = Math.max(b.min, v);
+  if (b.max !== undefined) v = Math.min(b.max, v);
+  if (b.int) v = Math.round(v);
+  const cur = b.owner[b.key];
+  if (b.index !== undefined && cur && typeof cur === 'object') {
+    const next = Array.from(cur as ArrayLike<number>);
+    next[b.index] = v;
+    b.owner[b.key] = ArrayBuffer.isView(cur) ? new (cur.constructor as Float32ArrayConstructor)(next) : next;
+  } else b.owner[b.key] = v;
+  b.onChange?.();
+}
+
 function startDrag(e: PointerEvent, o: NumberOpts) {
   if (e.button !== 0) return;
   e.preventDefault();
   e.stopPropagation();
   const el = e.currentTarget as HTMLElement;
+  const x0 = e.clientX,
+    y0 = e.clientY;
   let lastX = e.clientX,
     travel = 0;
   const start = o.value;
@@ -215,21 +250,58 @@ function startDrag(e: PointerEvent, o: NumberOpts) {
   const lockable = 'requestPointerLock' in el;
   const sliderJump = o.slider;
   const step = displayStep(o);
+  // vertical drag first: gather the fields stacked in this column, then drag sideways to edit them all
+  let multi: { phase: 'collect' | 'edit'; xRef: number; starts: Map<string, number> } | null = null;
+  const collect = (y: number) => {
+    const lo = Math.min(y0, y),
+      hi = Math.max(y0, y);
+    const cx = rect.left + rect.width / 2;
+    multiIds.clear();
+    multiIds.add(o.id);
+    for (const f of document.querySelectorAll<HTMLElement>('.num-field[data-id]')) {
+      const r = f.getBoundingClientRect();
+      const id = f.dataset.id!;
+      if (id === o.id || f.classList.contains('disabled') || Math.abs(r.left + r.width / 2 - cx) > rect.width / 2) continue;
+      const cy = r.top + r.height / 2;
+      if (cy < lo - r.height / 2 || cy > hi + r.height / 2) continue;
+      const b = getBinding(id);
+      const v = b ? bindingValue(b) : undefined;
+      if (typeof v !== 'number') continue;
+      multiIds.add(id);
+      if (!multi!.starts.has(id)) multi!.starts.set(id, v);
+    }
+    app.changed('ui');
+  };
+  const lock = () => {
+    if (lockable && !sliderJump) {
+      try {
+        void (el.requestPointerLock?.() as unknown as Promise<void> | undefined)?.catch?.(() => {});
+      } catch {
+        // pointer lock is optional
+      }
+    }
+  };
   const move = (ev: PointerEvent) => {
     const dx = document.pointerLockElement ? ev.movementX : ev.clientX - lastX;
     lastX = ev.clientX;
+    if (!moved && !multi && !sliderJump && Math.abs(ev.clientY - y0) > 8 && Math.abs(ev.clientY - y0) > Math.abs(ev.clientX - x0) * 1.5) {
+      multi = { phase: 'collect', xRef: ev.clientX, starts: new Map() };
+      setWidgetDragging(true);
+    }
+    if (multi?.phase === 'collect') {
+      collect(ev.clientY);
+      if (Math.abs(ev.clientX - multi.xRef) < 6) return;
+      multi.phase = 'edit';
+      moved = true;
+      lock();
+      return;
+    }
     travel += Math.abs(dx);
     if (!moved && travel < 3) return;
     if (!moved) {
       moved = true;
       setWidgetDragging(true);
-      if (lockable && !sliderJump) {
-        try {
-          void (el.requestPointerLock?.() as unknown as Promise<void> | undefined)?.catch?.(() => {});
-        } catch {
-          // pointer lock is optional
-        }
-      }
+      lock();
     }
     if (sliderJump) {
       const lo = o.softMin ?? o.min ?? 0,
@@ -246,7 +318,12 @@ function startDrag(e: PointerEvent, o: NumberOpts) {
       const snap = o.unit === 'angle' ? (5 * Math.PI) / 180 : o.int ? 1 : step;
       v = Math.round(v / snap) * snap;
     }
+    if (multi) for (const [id, s0] of multi.starts) writeBinding(id, s0 + (v - start));
     o.set(v, false);
+  };
+  const finishMulti = () => {
+    multiIds.clear();
+    app.changed('ui');
   };
   const up = (ev: PointerEvent) => {
     removeEventListener('pointermove', move, true);
@@ -254,13 +331,24 @@ function startDrag(e: PointerEvent, o: NumberOpts) {
     removeEventListener('keydown', key, true);
     if (document.pointerLockElement) document.exitPointerLock();
     setWidgetDragging(false);
-    void ev;
+    if (multi && multi.phase === 'collect') {
+      // released without editing: nothing changes
+      finishMulti();
+      return;
+    }
     if (!moved) {
-      editing.set(o.id, o.int ? String(Math.round(start)) : o.unit === 'angle' ? trim((start * 180) / Math.PI, 4) : trim(start, 5));
+      editing.set(o.id, o.int ? String(Math.round(start)) : o.unit === 'angle' ? trim((start * 180) / Math.PI, 4) : pct(o) ? trim(start * 100, 3) : trim(start, 5));
       app.changed('ui');
       return;
     }
-    o.set(clamp(value, o), true);
+    const v = clamp(value, o);
+    if (multi) {
+      for (const [id, s0] of multi.starts) writeBinding(id, s0 + (v - start));
+      finishMulti();
+    }
+    o.set(v, true);
+    // Alt held: copy the result to the other selected items
+    if (ev.altKey) buttonHooks.altEdit(o.id);
   };
   const key = (ev: KeyboardEvent) => {
     if (ev.key === 'Escape') {
@@ -270,6 +358,10 @@ function startDrag(e: PointerEvent, o: NumberOpts) {
       removeEventListener('keydown', key, true);
       if (document.pointerLockElement) document.exitPointerLock();
       setWidgetDragging(false);
+      if (multi) {
+        for (const [id, s0] of multi.starts) writeBinding(id, s0);
+        finishMulti();
+      }
       o.set(start, false);
       app.changed('doc');
     }
@@ -281,16 +373,31 @@ function startDrag(e: PointerEvent, o: NumberOpts) {
 
 // ---------------------------------------------------------------------------
 
+/** Press on a checkbox and drag over others to set them all to the same state. */
+let checkDrag: { value: boolean; done: Set<string> } | null = null;
+
 export function checkbox(id: string, label: string, value: boolean, set: (v: boolean) => void, opts: { disabled?: boolean; tip?: string; anim?: string | null } = {}): VNode {
   return h(
     'label',
     {
       key: id,
+      'data-id': id,
       class: { checkbox: true, on: value, disabled: !!opts.disabled, [`anim-${opts.anim}`]: !!opts.anim },
       'data-tip': opts.tip ?? '',
       onpointerdown: (e: PointerEvent) => {
         e.preventDefault();
-        if (!opts.disabled) set(!value);
+        if (e.button !== 0 || opts.disabled) return;
+        checkDrag = { value: !value, done: new Set([id]) };
+        addEventListener('pointerup', () => (checkDrag = null), { once: true, capture: true });
+        set(!value);
+        // Alt+click: set the same value on the other selected items
+        if (e.altKey) buttonHooks.altEdit(id);
+      },
+      onpointerenter: () => {
+        const d = checkDrag;
+        if (!d || opts.disabled || d.done.has(id)) return;
+        d.done.add(id);
+        if (value !== d.value) set(d.value);
       },
     },
     h('span', { class: 'cb-box' }, value ? icon('check') : null),
@@ -335,7 +442,7 @@ export function opButton(idname: string, label?: string, props: Record<string, u
       key: `op-${idname}-${label ?? ''}-${JSON.stringify(props)}`,
       class: `btn op ${opts.className ?? ''}`,
       disabled: !enabled,
-      'data-tip': opts.tip ?? '',
+      'data-tip': menuSettings.pythonTips && opts.tip ? `${opts.tip}\nPython: bpy.ops.${idname}()` : (opts.tip ?? ''),
       onclick: (e: MouseEvent) => app.run(idname, props, { event: { x: e.clientX, y: e.clientY } }),
     },
     opts.icon ? icon(opts.icon) : null,
@@ -357,12 +464,33 @@ export function enumMenu(id: string, items: EnumItem[], value: string, set: (v: 
     'button',
     {
       key: id,
+      'data-id': id,
       class: `enum-menu ${opts.className ?? ''}`,
       'data-tip': opts.tip ?? cur?.description ?? '',
       disabled: !!opts.disabled,
+      // Ctrl+wheel steps through the items
+      onwheel: (e: WheelEvent) => {
+        if (!(e.ctrlKey || e.metaKey) || opts.disabled || !items.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const i = items.findIndex((it) => it.value === value);
+        const next = items[Math.max(0, Math.min(items.length - 1, (i < 0 ? 0 : i) + (e.deltaY > 0 ? 1 : -1)))];
+        if (next && next.value !== value) set(next.value);
+      },
       onpointerdown: (e: PointerEvent) => {
         e.preventDefault();
-        const menu: MenuItem[] = items.map((it) => ({ label: it.label, icon: it.icon, active: it.value === value, description: it.description, action: () => set(it.value) }));
+        const alt = e.altKey;
+        const menu: MenuItem[] = items.map((it) => ({
+          label: it.label,
+          icon: it.icon,
+          active: it.value === value,
+          description: it.description,
+          action: () => {
+            set(it.value);
+            // opened with Alt: also set the choice on the other selected items
+            if (alt) buttonHooks.altEdit(id);
+          },
+        }));
         openMenu(menu, e.currentTarget as HTMLElement, { title: opts.title });
       },
     },
@@ -376,7 +504,19 @@ export function enumMenu(id: string, items: EnumItem[], value: string, set: (v: 
 export function enumRow(id: string, items: EnumItem[], value: string, set: (v: string) => void, opts: { iconOnly?: boolean; multi?: string[]; className?: string } = {}): VNode {
   return h(
     'div',
-    { key: id, class: `enum-row ${opts.className ?? ''}` },
+    {
+      key: id,
+      'data-id': id,
+      class: `enum-row ${opts.className ?? ''}`,
+      onwheel: (e: WheelEvent) => {
+        if (!(e.ctrlKey || e.metaKey) || opts.multi || !items.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const i = items.findIndex((it) => it.value === value);
+        const next = items[Math.max(0, Math.min(items.length - 1, (i < 0 ? 0 : i) + (e.deltaY > 0 ? 1 : -1)))];
+        if (next && next.value !== value) set(next.value);
+      },
+    },
     items.map((it) =>
       h(
         'button',
@@ -446,6 +586,16 @@ export function rgbToHsv(r: number, g: number, b: number): [number, number, numb
   return [hh, max === 0 ? 0 : d / max, max];
 }
 
+export function hsvToHsl(hh: number, s: number, v: number): [number, number, number] {
+  const l = v * (1 - s / 2);
+  return [hh, l <= 0 || l >= 1 ? 0 : (v - l) / Math.min(l, 1 - l), l];
+}
+
+export function hslToHsv(hh: number, s: number, l: number): [number, number, number] {
+  const v = l + s * Math.min(l, 1 - l);
+  return [hh, v <= 0 ? 0 : 2 * (1 - l / v), v];
+}
+
 export function hsvToRgb(hh: number, s: number, v: number): [number, number, number] {
   const i = Math.floor(hh * 6),
     f = hh * 6 - i,
@@ -474,6 +624,7 @@ export function colorSwatch(id: string, value: number[], set: (v: number[], fina
     'button',
     {
       key: id,
+      'data-id': id,
       class: { 'color-swatch': true, [`anim-${opts.anim}`]: !!opts.anim },
       style: { '--swatch': colorCss(value, linear), '--alpha': String(value[3] ?? 1) },
       'data-tip': `Color\n#${colorHex(value, linear)}`,
@@ -497,45 +648,85 @@ function openColorPicker(anchor: HTMLElement, initial: number[], set: (v: number
     return alpha ? [...rgb, a] : rgb;
   };
   const emit = (final: boolean) => set(out(), final);
+  // picker layout: a 2D field (disc or square) for two components and a bar for the third
+  const type = widgetSettings.colorPicker;
+  const circle = type.startsWith('CIRCLE');
+  const toPicker = (H: number, S: number, V: number): [number, number, number] => {
+    if (type === 'CIRCLE_HSL') {
+      const [, sl, l] = hsvToHsl(H, S, V);
+      return [H, sl, l];
+    }
+    if (type === 'SQUARE_SV') return [S, V, H];
+    if (type === 'SQUARE_HS') return [H, S, V];
+    if (type === 'SQUARE_HV') return [H, V, S];
+    return [H, S, V];
+  };
+  const fromPicker = (pa: number, pb: number, pc: number): [number, number, number] => {
+    if (type === 'CIRCLE_HSL') return hslToHsv(pa, pb, pc);
+    if (type === 'SQUARE_SV') return [pc, pa, pb];
+    if (type === 'SQUARE_HS') return [pa, pb, pc];
+    if (type === 'SQUARE_HV') return [pa, pc, pb];
+    return [pa, pb, pc];
+  };
+  const setPicker = (pa: number, pb: number, pc: number) => {
+    [hh, s, v] = fromPicker(pa, pb, pc);
+  };
   let wheelCanvas: HTMLCanvasElement | null = null;
   const drawWheel = (c: HTMLCanvasElement) => {
     wheelCanvas = c;
     const ctx = c.getContext('2d')!;
     const size = c.width,
       r = size / 2;
+    const pc = toPicker(hh, s, v)[2];
     const img = ctx.createImageData(size, size);
     for (let y = 0; y < size; y++)
       for (let x = 0; x < size; x++) {
-        const dx = x - r,
-          dy = y - r,
-          d = Math.hypot(dx, dy) / r;
         const i = (y * size + x) * 4;
-        if (d > 1) {
-          img.data[i + 3] = 0;
-          continue;
+        let pa: number, pb: number;
+        let alphaPx = 1;
+        if (circle) {
+          const dx = x - r,
+            dy = y - r,
+            d = Math.hypot(dx, dy) / r;
+          if (d > 1) {
+            img.data[i + 3] = 0;
+            continue;
+          }
+          pa = (Math.atan2(-dy, dx) / (Math.PI * 2) + 1) % 1;
+          pb = d;
+          alphaPx = Math.min(1, (1 - d) * r);
+        } else {
+          pa = x / (size - 1);
+          pb = 1 - y / (size - 1);
         }
-        const ang = (Math.atan2(-dy, dx) / (Math.PI * 2) + 1) % 1;
-        const [cr, cg, cb] = hsvToRgb(ang, d, v);
+        const [ch, cs, cv] = fromPicker(pa, pb, pc);
+        const [cr, cg, cb] = hsvToRgb(ch, cs, cv);
         img.data[i] = cr * 255;
         img.data[i + 1] = cg * 255;
         img.data[i + 2] = cb * 255;
-        img.data[i + 3] = Math.min(1, (1 - d) * r) * 255;
+        img.data[i + 3] = alphaPx * 255;
       }
     ctx.putImageData(img, 0, 0);
   };
   const pop = openPopover(anchor, () => {
     if (wheelCanvas) drawWheel(wheelCanvas);
-    const ang = hh * Math.PI * 2;
+    const [pa, pb, pc] = toPicker(hh, s, v);
+    const ang = pa * Math.PI * 2;
     const cur = hsvToRgb(hh, s, v);
+    const barStops = Array.from({ length: 9 }, (_, k) => {
+      const t = k / 8;
+      const [bh, bs, bv] = fromPicker(pa, pb, t);
+      return `rgb(${hsvToRgb(bh, bs, bv).map((x) => Math.round(x * 255)).join(',')}) ${(1 - t) * 100}%`;
+    }).reverse();
     return h(
       'div',
-      { class: 'color-picker' },
+      { class: 'color-picker', 'data-picker': type },
       h(
         'div',
         { class: 'cp-top' },
         h(
           'div',
-          { class: 'cp-wheel' },
+          { class: { 'cp-wheel': true, 'cp-square': !circle } },
           h('canvas', {
             width: 160,
             height: 160,
@@ -544,10 +735,16 @@ function openColorPicker(anchor: HTMLElement, initial: number[], set: (v: number
               const c = e.currentTarget as HTMLCanvasElement;
               const pick = (ev: PointerEvent) => {
                 const r = c.getBoundingClientRect();
-                const dx = ev.clientX - r.left - r.width / 2,
-                  dy = ev.clientY - r.top - r.height / 2;
-                hh = (Math.atan2(-dy, dx) / (Math.PI * 2) + 1) % 1;
-                s = Math.min(1, Math.hypot(dx, dy) / (r.width / 2));
+                const [, , pcNow] = toPicker(hh, s, v);
+                if (circle) {
+                  const dx = ev.clientX - r.left - r.width / 2,
+                    dy = ev.clientY - r.top - r.height / 2;
+                  setPicker((Math.atan2(-dy, dx) / (Math.PI * 2) + 1) % 1, Math.min(1, Math.hypot(dx, dy) / (r.width / 2)), pcNow);
+                } else {
+                  const fx = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)),
+                    fy = Math.max(0, Math.min(1, 1 - (ev.clientY - r.top) / r.height));
+                  setPicker(fx, fy, pcNow);
+                }
                 emit(false);
                 pop.redraw();
               };
@@ -563,18 +760,19 @@ function openColorPicker(anchor: HTMLElement, initial: number[], set: (v: number
               addEventListener('pointerup', up);
             },
           }),
-          h('div', { class: 'cp-cursor', style: { left: `${80 + Math.cos(ang) * s * 80}px`, top: `${80 - Math.sin(ang) * s * 80}px` } }),
+          h('div', { class: 'cp-cursor', style: circle ? { left: `${80 + Math.cos(ang) * pb * 80}px`, top: `${80 - Math.sin(ang) * pb * 80}px` } : { left: `${pa * 160}px`, top: `${(1 - pb) * 160}px` } }),
         ),
         h(
           'div',
           {
             class: 'cp-value',
-            style: { background: `linear-gradient(to top, #000, rgb(${hsvToRgb(hh, s, 1).map((x) => x * 255).join(',')}))` },
+            style: { background: `linear-gradient(to bottom, ${barStops.join(', ')})` },
             onpointerdown: (e: PointerEvent) => {
               const bar = e.currentTarget as HTMLElement;
               const pick = (ev: PointerEvent) => {
                 const r = bar.getBoundingClientRect();
-                v = Math.max(0, Math.min(1, 1 - (ev.clientY - r.top) / r.height));
+                const [qa, qb] = toPicker(hh, s, v);
+                setPicker(qa, qb, Math.max(0, Math.min(1, 1 - (ev.clientY - r.top) / r.height)));
                 emit(false);
                 pop.redraw();
               };
@@ -590,7 +788,7 @@ function openColorPicker(anchor: HTMLElement, initial: number[], set: (v: number
               addEventListener('pointerup', up);
             },
           },
-          h('div', { class: 'cp-vcursor', style: { top: `${(1 - v) * 100}%` } }),
+          h('div', { class: 'cp-vcursor', style: { top: `${(1 - pc) * 100}%` } }),
         ),
       ),
       enumRow('cp-mode', ['RGB', 'HSV', 'HEX'].map((m) => ({ value: m, label: m === 'HEX' ? 'Hex' : m })), mode, (m) => {
@@ -668,13 +866,14 @@ export function rowAligned(...content: Child[]): VNode {
   return h('div', { class: 'row-aligned' }, ...content);
 }
 
-export function decorator(state: 'none' | 'keyed' | 'animated' | 'driven', onClick?: () => void): VNode {
+export function decorator(state: 'none' | 'keyed' | 'animated' | 'driven', onClick?: () => void, onContext?: (e: MouseEvent) => void): VNode {
   return h(
     'button',
     {
       class: `decorator ${state}`,
       'data-tip': state === 'none' ? 'Insert Keyframe' : state === 'keyed' ? 'Delete Keyframe' : 'Insert Keyframe',
       onclick: onClick ?? null,
+      oncontextmenu: onContext ?? null,
       tabindex: '-1',
     },
     icon(state === 'keyed' ? 'decorate_keyframe' : state === 'animated' ? 'decorate_animate' : 'decorate'),
@@ -690,28 +889,58 @@ export function setPanelOpen(id: string, open: boolean) {
 }
 
 /** Collapsible panel (sub-panels nest inside). */
+/** Text the Properties search is filtering by; while set, panels show their contents. */
+let panelSearch = '';
+export function setPanelSearch(q: string) {
+  panelSearch = q;
+}
+
+/** Press on a panel header and drag over others to open / close them all. */
+let panelDrag: { open: boolean; done: Set<string> } | null = null;
+
+/** Collapsible panel (sub-panels nest inside). */
 export function panel(id: string, title: Child, body: () => Child, opts: { closed?: boolean; header?: Child; sub?: boolean; className?: string; icon?: string } = {}): VNode {
-  const open = isPanelOpen(id, !opts.closed);
+  const open = panelSearch ? true : isPanelOpen(id, !opts.closed);
   return h(
     'section',
-    { key: id, class: { panel: true, sub: !!opts.sub, open, [opts.className ?? '']: !!opts.className } },
+    { key: id, 'data-panel': id, class: { panel: true, sub: !!opts.sub, open, [opts.className ?? '']: !!opts.className } },
     h(
       'header',
       {
         class: 'panel-header',
         onpointerdown: (e: PointerEvent) => {
-          if ((e.target as HTMLElement).closest('button, input, .num-field, label, .enum-menu')) return;
+          if (e.button !== 0 || (e.target as HTMLElement).closest('button, input, .num-field, label, .enum-menu, .ph-grip')) return;
           e.preventDefault();
-          // ctrl-click: collapse all others (reference behaviour)
-          setPanelOpen(id, !open);
+          if (e.ctrlKey || e.metaKey) {
+            // Ctrl+click: open this panel and collapse its siblings
+            const section = (e.currentTarget as HTMLElement).parentElement;
+            for (const sib of section?.parentElement?.children ?? []) {
+              const pid = (sib as HTMLElement).dataset?.panel;
+              if (pid && pid !== id) setPanelOpen(pid, false);
+            }
+            setPanelOpen(id, true);
+          } else {
+            setPanelOpen(id, !open);
+            panelDrag = { open: !open, done: new Set([id]) };
+            addEventListener('pointerup', () => (panelDrag = null), { once: true, capture: true });
+          }
           app.changed('ui');
+        },
+        onpointerenter: () => {
+          const d = panelDrag;
+          if (!d || d.done.has(id)) return;
+          d.done.add(id);
+          if (isPanelOpen(id, !opts.closed) !== d.open) {
+            setPanelOpen(id, d.open);
+            app.changed('ui');
+          }
         },
       },
       h('span', { class: 'ph-arrow' }, icon(open ? 'disclosure_tri_down' : 'disclosure_tri_right')),
       opts.icon ? icon(opts.icon) : null,
       opts.header ?? null,
       h('span', { class: 'ph-title' }, title),
-      opts.sub ? null : h('span', { class: 'ph-grip' }, '⠿'),
+      opts.sub ? null : h('span', { class: 'ph-grip', 'data-tip': 'Drag to reorder panels' }, '⠿'),
     ),
     open ? h('div', { class: 'panel-body' }, body()) : null,
   );

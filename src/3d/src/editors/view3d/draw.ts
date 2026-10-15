@@ -1,5 +1,6 @@
 // Viewport drawing: scene pass (per shading mode), grid & overlays, ID pass,
 // selection outline compositing.
+import { applyStudioLighting, hdriEnvironment } from '../../render/studiolights';
 import {
   Color,
   Scene,
@@ -82,11 +83,11 @@ function runPassHooks(pass: 'SCENE' | 'OVERLAY' | 'ID', view: DrawView, camera: 
 }
 
 const theme = {
-  bg: new Color().setRGB(0.239, 0.239, 0.239),
+  bg: new Color().setRGB(0.229, 0.232, 0.239),
   wire: new Color(0, 0, 0),
   wireEdit: new Color(0, 0, 0),
-  selected: new Color().setRGB(0.929, 0.341, 0.0),
-  active: new Color().setRGB(1.0, 0.627, 0.157),
+  selected: new Color().setRGB(0.884, 0.376, 0.013),
+  active: new Color().setRGB(0.987, 0.645, 0.115),
 };
 // three.js colors are linear; theme values above are display values → convert
 for (const c of Object.values(theme)) c.convertSRGBToLinear();
@@ -96,6 +97,9 @@ export function setThemeBackground(srgb: [number, number, number]) {
 }
 
 const grid = createGrid();
+/** Colour tables of the viewport (Preferences ▸ Themes writes them). */
+export const viewportTheme = theme;
+export const gridMaterial = grid.mat;
 const overlayScene = new Scene();
 overlayScene.add(grid.mesh);
 overlayScene.matrixWorldAutoUpdate = false;
@@ -109,12 +113,12 @@ fsScene.add(fsQuad);
 const fsCam = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
 const originGeo = new BufferGeometry();
-const originPts = new Points(originGeo, new PointsMaterial({ size: 6, sizeAttenuation: false, color: 0xffa028, depthTest: false, transparent: true }));
+const originPts = new Points(originGeo, new PointsMaterial({ size: 6, sizeAttenuation: false, color: 0xfca41d, depthTest: false, transparent: true }));
 originPts.renderOrder = 10;
 const originGeoSel = new BufferGeometry();
-const originPtsSel = new Points(originGeoSel, new PointsMaterial({ size: 6, sizeAttenuation: false, color: 0xed5700, depthTest: false, transparent: true }));
+const originPtsSel = new Points(originGeoSel, new PointsMaterial({ size: 6, sizeAttenuation: false, color: 0xe16003, depthTest: false, transparent: true }));
 const originGeoAll = new BufferGeometry();
-const originPtsAll = new Points(originGeoAll, new PointsMaterial({ size: 5, sizeAttenuation: false, color: 0xbbbbbb, depthTest: false, transparent: true }));
+const originPtsAll = new Points(originGeoAll, new PointsMaterial({ size: 5, sizeAttenuation: false, color: 0xbbbcbe, depthTest: false, transparent: true }));
 const relLines = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.4 }));
 const originScene = new Scene();
 originScene.add(originPtsAll, originPtsSel, originPts, relLines);
@@ -147,7 +151,7 @@ function solidColor(doc: DocumentData, ob: ObjectData, shading: Shading, slot: n
 }
 
 export function materialSlots(doc: DocumentData, ob: ObjectData): (string | null)[] {
-  const data = ob.data ? ((doc.meshes[ob.data] ?? doc.curves[ob.data]) as { materials?: (string | null)[] } | undefined) : undefined;
+  const data = ob.data ? ((doc.meshes[ob.data] ?? doc.curves[ob.data] ?? doc.metaballs?.[ob.data] ?? doc.hair_curves?.[ob.data]) as { materials?: (string | null)[] } | undefined) : undefined;
   const base = data?.materials ?? [];
   if (!ob.object_materials) return base;
   return base.map((m, i) => (ob.material_slots_link?.[i] === 'OBJECT' ? ob.object_materials![i] ?? null : m));
@@ -162,13 +166,16 @@ function assignMaterials(app: App, ctx: RenderContext, view: DrawView, mode: 'SO
     const meshes: Mesh[] = [];
     if (so.mesh) meshes.push(so.mesh);
     so.instances?.children.forEach((c) => meshes.push(c as Mesh));
+    so.duplis?.children.forEach((c) => meshes.push(c as Mesh));
     const xray = (sh.type === 'SOLID' || sh.type === 'WIREFRAME') && sh.show_xray;
     for (const mesh of meshes) {
+      // instances of other objects use those objects' materials
+      const ob = (mesh.userData.source && doc.objects[mesh.userData.source as string]) || so.ev.ob;
       const groups = mesh.geometry.groups;
       const slotsCount = Math.max(1, ...groups.map((g) => (g.materialIndex ?? 0) + 1));
       const mats: Material[] = [];
       for (let s = 0; s < slotsCount; s++) {
-        if (mode === 'ID') mats.push(idMaterial(ctx.sync.objectIndex(ob.id)));
+        if (mode === 'ID') mats.push(idMaterial(ctx.sync.objectIndex(so.ev.ob.id)));
         else if (mode === 'SOLID') {
           const hasColors = !!mesh.geometry.getAttribute('color');
           mats.push(
@@ -228,6 +235,8 @@ export function drawViewport(app: App, ctx: RenderContext, view: DrawView, x: nu
 
   // --- background & environment
   let bg: Color = theme.bg;
+  // the studio light / matcap this view uses (shared shader uniforms)
+  applyStudioLighting(sh);
   const rendered = sh.type === 'RENDERED';
   const material = sh.type === 'MATERIAL';
   const world = doc.scene.world ? doc.worlds[doc.scene.world] : null;
@@ -244,13 +253,13 @@ export function drawViewport(app: App, ctx: RenderContext, view: DrawView, x: nu
         else if (b) scene.background = b;
       }
     } else {
-      scene.environment = ctx.studio();
+      scene.environment = hdriEnvironment(r, engine.pmrem, sh.studio_hdri) ?? ctx.studio();
       scene.environmentIntensity = sh.studiolight_intensity;
     }
   }
   if (sh.background_type === 'VIEWPORT' && !rendered) bg = new Color().setRGB(...sh.background_color);
   if (sh.background_type === 'WORLD' && !rendered && world) bg = new Color(world.color[0], world.color[1], world.color[2]);
-  if (rendered && doc.scene.render.film_transparent) bg = new Color(0.12, 0.12, 0.12);
+  if (rendered && doc.scene.render.film_transparent) bg = new Color(0.107, 0.11, 0.117);
 
   // lights on only when scene lights are used
   for (const so of ctx.sync.objects.values()) if (so.light) so.light.visible = useLights && so.root.visible && !so.ev.ob.hide_render;
@@ -344,21 +353,26 @@ function drawOverlays(app: App, ctx: RenderContext, view: DrawView, camera: Came
     const shown = so.root.visible;
     set(so.mesh, false);
     so.instances && set(so.instances, false);
+    so.duplis && set(so.duplis, false);
     if (so.light) set(so.light, so.light.visible);
     const col = helperColor(app, ob, theme.wire);
     const inEdit = editing && app.graph.editObjects.has(ob.id);
     // the camera being looked through is not drawn (only its frame, as the passepartout)
-    const lookingThrough = !!view.sceneCamera && ob.id === doc.scene.camera;
+    const lookingThrough = !!view.sceneCamera && ob.id === ((view as { activeCameraId?: () => string | null }).activeCameraId?.() ?? doc.scene.camera);
     const showWire =
       shown &&
-      !inEdit &&
+      // curves keep their wire while editing (the control points are an overlay on top)
+      (!inEdit || ob.type !== 'MESH') &&
       !!so.wire &&
       (sh.type === 'WIREFRAME' || ob.display_type === 'WIRE' || ob.display_type === 'BOUNDS' || ob.show_wire || ov.show_wireframes || (ob.type !== 'MESH' && !so.mesh?.geometry.index?.count));
     if (so.wire) {
       set(so.wire, showWire);
       const m = so.wire.material as LineBasicMaterial;
       const st = objectColorState(app, ob);
-      if (sh.type === 'WIREFRAME' || ob.display_type === 'WIRE' || ob.type !== 'MESH') {
+      if (inEdit) {
+        m.color.copy(theme.wire);
+        m.opacity = 1;
+      } else if (sh.type === 'WIREFRAME' || ob.display_type === 'WIRE' || ob.type !== 'MESH') {
         m.color.copy(st ? col : sh.type === 'WIREFRAME' ? new Color(0, 0, 0) : theme.wire);
         m.opacity = st ? 1 : sh.type === 'WIREFRAME' ? 0.85 : 1;
       } else {
@@ -394,14 +408,14 @@ function drawOverlays(app: App, ctx: RenderContext, view: DrawView, camera: Came
         const active = pose && arm?.active_bone === bname;
         if (c.userData.boneFill) {
           const mm = (c as Mesh).material as MeshBasicMaterial;
-          mm.color.set(pose ? (active ? 0x8cffff : selected ? 0x50c8ff : 0x7a8a99) : 0x8c8c8c);
+          mm.color.set(pose ? (active ? 0xa2f9fe : selected ? 0x44ccfc : 0x7b8999) : 0x8b8c8e);
           mm.opacity = sh.type === 'WIREFRAME' ? 0 : 0.85;
           mm.depthTest = !arm?.show_in_front;
         } else {
           const lm = (c as LineSegments).material as LineBasicMaterial;
           const eSel = armEdit && !!bone?.select,
             eAct = armEdit && arm?.active_bone === bname;
-          lm.color.copy(pose ? (active ? new Color(1, 1, 1) : selected ? new Color(0.314, 0.784, 1) : new Color(0, 0, 0)) : armEdit ? (eSel ? (eAct ? new Color(1, 0.8, 0.5) : new Color(1, 0.52, 0)) : new Color(0, 0, 0)) : col);
+          lm.color.copy(pose ? (active ? new Color(1, 1, 1) : selected ? new Color(0.268, 0.798, 0.989) : new Color(0, 0, 0)) : armEdit ? (eSel ? (eAct ? new Color(0.992, 0.818, 0.493) : new Color(0.96, 0.554, 0.015)) : new Color(0, 0, 0)) : col);
           lm.depthTest = !arm?.show_in_front;
         }
       }

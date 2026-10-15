@@ -4,11 +4,33 @@ import { appIcon, icon } from './icons';
 import { openMenu, promptText, type MenuItem } from './menu';
 import { app, registerOperators } from '../app/app';
 import { Screen, defaultWorkspaces, workspaceTemplates, type Workspace, type LayoutNode } from './screen';
-import { uiState, prefs } from '../app/prefs';
-import { importMenu, exportMenu, projectUiState } from '../io/files';
+import { uiState, prefs, savePrefs } from '../app/prefs';
+import { projectUiState } from '../io/files';
+import { appMenu, fileMenu, editMenu, renderMenu, windowMenu, helpMenu, fileNewTemplates } from './topbar';
+
+export { fileNewTemplates };
+
+/** Extra status bar content (e.g. the progress of a running render job), drawn before reports. */
+export const statusWidgets: (() => Child)[] = [];
 import { textField } from './widgets';
-import { setMode } from '../ops/object';
+import { setMode, activeCollection } from '../ops/object';
+import { statsLines } from '../editors/view3d/view3d';
 import { assistantOpen } from '../assistant';
+import './screenops';
+import './favorites';
+import './areawindow';
+import './screenshot';
+import './menuicons';
+import { APP_VERSION } from '../scripting/wmops';
+
+const STATUSBAR_KEY = 'p3d.ui.statusbar';
+function loadStatusbarShown() {
+  try {
+    return localStorage.getItem(STATUSBAR_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
 
 export class Shell {
   el: HTMLElement;
@@ -31,6 +53,14 @@ export class Shell {
     this.status.className = 'statusbar';
     root.append(this.top, main, this.status);
     this.screen = new Screen(main);
+    // the mouse hints follow the editor under the pointer
+    let lastHover: unknown = null;
+    main.addEventListener('pointerover', () => {
+      if (app.hoverArea === lastHover) return;
+      lastHover = app.hoverArea;
+      this.drawStatus();
+    });
+    this.el.classList.toggle('no-statusbar', !this.showStatusbar);
     this.setWorkspace('Layout', false);
     projectUiState.save = () => ({
       workspace: this.active,
@@ -101,12 +131,37 @@ export class Shell {
     this.drawTop();
   }
 
-  moveWorkspace(name: string, dir: -1 | 1) {
+  /** Move a workspace tab to the front or the back of the tab list. */
+  moveWorkspace(name: string, to: 'FRONT' | 'BACK') {
     const i = this.workspaces.findIndex((w) => w.name === name);
-    const j = i + dir;
-    if (i < 0 || j < 0 || j >= this.workspaces.length) return;
-    [this.workspaces[i], this.workspaces[j]] = [this.workspaces[j], this.workspaces[i]];
+    if (i < 0) return;
+    const [ws] = this.workspaces.splice(i, 1);
+    if (to === 'FRONT') this.workspaces.unshift(ws);
+    else this.workspaces.push(ws);
     this.drawTop();
+  }
+
+  /** Delete every workspace except `name`. */
+  deleteOtherWorkspaces(name: string) {
+    const keep = this.workspaces.find((w) => w.name === name);
+    if (!keep) return;
+    for (const w of this.workspaces) if (w !== keep) this.layouts.delete(w.name);
+    this.workspaces = [keep];
+    if (this.active !== name) {
+      this.active = '';
+      this.setWorkspace(name);
+    } else this.drawTop();
+  }
+
+  showStatusbar = loadStatusbarShown();
+  setStatusbarShown(v: boolean) {
+    this.showStatusbar = v;
+    this.el.classList.toggle('no-statusbar', !v);
+    try {
+      localStorage.setItem(STATUSBAR_KEY, v ? '1' : '0');
+    } catch {
+      // storage unavailable
+    }
   }
 
   setWorkspace(name: string, switchMode = true) {
@@ -121,7 +176,7 @@ export class Shell {
     if (switchMode && ws.mode !== undefined) {
       const ob = app.activeObject;
       const target = ws.mode;
-      const valid = ob && (target === 'OBJECT' || (ob.type === 'MESH' && target !== 'PAINT_GREASE_PENCIL') || (target === 'PAINT_GREASE_PENCIL' && ob.type === 'GREASEPENCIL') || (target === 'EDIT' && ['CURVE', 'FONT', 'ARMATURE', 'LATTICE'].includes(ob.type)) || (target === 'POSE' && ob.type === 'ARMATURE'));
+      const valid = ob && (target === 'OBJECT' || (ob.type === 'MESH' && target !== 'PAINT_GREASE_PENCIL') || (target === 'PAINT_GREASE_PENCIL' && ob.type === 'GREASEPENCIL') || (target === 'EDIT' && ['CURVE', 'FONT', 'ARMATURE', 'LATTICE', 'META'].includes(ob.type)) || (target === 'POSE' && ob.type === 'ARMATURE'));
       if (valid && app.doc.mode !== target && setMode(app.doc, target)) app.changed('mode');
     } else if (switchMode && !ws.mode && app.doc.mode !== 'OBJECT') {
       if (setMode(app.doc, 'OBJECT')) app.changed('mode');
@@ -162,7 +217,7 @@ export class Shell {
         {
           class: 'ws-tabs',
           role: 'tablist',
-          // the tab strip scrolls horizontally with the wheel when it doesn't fit (as in the reference UI)
+          // the tab strip scrolls horizontally with the wheel when it doesn't fit
           onwheel: (e: WheelEvent) => {
             const el = e.currentTarget as HTMLElement;
             if (el.scrollWidth <= el.clientWidth) return;
@@ -182,17 +237,7 @@ export class Shell {
               onclick: () => this.setWorkspace(w.name),
               oncontextmenu: (e: MouseEvent) => {
                 e.preventDefault();
-                openMenu(
-                  [
-                    { label: 'Duplicate', action: () => this.duplicateWorkspace(w.name) },
-                    { label: 'Delete', disabled: this.workspaces.length <= 1, action: () => this.deleteWorkspace(w.name) },
-                    { label: 'Rename…', action: () => promptText('Rename Workspace', w.name, (n) => n && this.renameWorkspace(w.name, n)) },
-                    { separator: true },
-                    { label: 'Reorder to Front', action: () => this.moveWorkspace(w.name, -1) },
-                    { label: 'Reorder to Back', action: () => this.moveWorkspace(w.name, 1) },
-                  ],
-                  { x: e.clientX, y: e.clientY },
-                );
+                openMenu(workspaceMenu(this, w.name), { x: e.clientX, y: e.clientY });
               },
               ondblclick: () => promptText('Rename Workspace', w.name, (n) => n && this.renameWorkspace(w.name, n)),
             },
@@ -246,38 +291,108 @@ export class Shell {
   drawStatus() {
     const m = app.modal;
     const doc = app.doc;
-    const hints: [string, string][] = m?.status?.() ?? [
+    const hints: [string, string][] = m?.status?.() ?? editorHints(app.hoverArea?.type) ?? [
       ['LMB', modeHint()],
       ['MMB', 'Rotate View'],
       ['RMB', doc.mode === 'OBJECT' ? 'Object' : 'Context Menu'],
     ];
     const last = app.reports[app.reports.length - 1];
     const showReport = last && Date.now() - last.time < 6000;
-    let stats = '';
-    if (prefs.show_statusbar_stats) {
-      let verts = 0,
-        faces = 0,
-        tris = 0,
-        objs = 0,
-        sel = 0;
-      for (const ev of app.graph.objects.values()) {
-        if (!ev.visible) continue;
-        objs++;
-        if (ev.ob.select) sel++;
-        if (ev.mesh) {
-          verts += ev.mesh.positions.length / 3;
-          const nf = ev.mesh.offsets.length - 1;
-          faces += nf;
-          tris += ev.mesh.indices.length - 2 * nf;
-        }
-      }
-      stats = `${doc.scene.collection ? 'Scene Collection' : ''} | ${app.activeObject?.name ?? ''} | Verts ${verts.toLocaleString()} | Faces ${faces.toLocaleString()} | Tris ${tris.toLocaleString()} | Objects ${sel}/${objs}`;
-    }
+    const right: Child[] = [];
+    if (this.fileStatus) right.push(h('span', { key: 'file', class: 'sb-file' }, this.fileStatus));
+    if (prefs.show_statusbar_stats) right.push(h('span', { key: 'stats', class: 'sb-stats' }, statusStats()));
+    if (prefs.show_statusbar_scene_duration) right.push(h('span', { key: 'dur', class: 'sb-duration' }, sceneDuration()));
+    const mem = prefs.show_statusbar_memory ? memoryText() : '';
+    if (mem) right.push(h('span', { key: 'mem', class: 'sb-memory' }, mem));
+    if (prefs.show_statusbar_version) right.push(h('span', { key: 'ver', class: 'sb-version' }, APP_VERSION));
     patch(this.status, [
-      h('div', { class: 'sb-hints' }, m?.header ? h('span', { class: 'sb-modal' }, m.header()) : null, hints.map(([k, l]) => h('span', { class: 'sb-hint', key: k + l }, h('kbd', null, k), l))),
-      h('div', { class: 'sb-center' }, showReport ? h('span', { class: `sb-report ${last.type.toLowerCase()}` }, icon(last.type === 'ERROR' ? 'error' : 'info_small'), last.message) : null),
-      h('div', { class: 'sb-right' }, this.fileStatus ? h('span', { class: 'sb-file' }, this.fileStatus) : null, h('span', { class: 'sb-stats' }, stats), h('span', { class: 'sb-version' }, 'v1.0')),
+      h('div', { class: 'sb-hints' }, m?.header ? h('span', { class: 'sb-modal' }, m.header()) : null, hints.map(([k, l]) => h('span', { class: 'sb-hint', key: k + l }, hintKey(k), l))),
+      h('div', { class: 'sb-center' }, statusWidgets.map((w) => w()), showReport ? h('span', { class: `sb-report ${last.type.toLowerCase()}` }, icon(last.type === 'ERROR' ? 'error' : 'info_small'), last.message) : null),
+      h('div', { class: 'sb-right', oncontextmenu: (e: MouseEvent) => (e.preventDefault(), openMenu(statusMenu(this), { x: e.clientX, y: e.clientY })) }, right.flatMap((c, i) => (i ? [h('span', { key: `sep${i}`, class: 'sb-sep' }), c] : [c]))),
     ]);
+  }
+}
+
+/** A mouse button hint shows a mouse icon; other keys show as key caps. */
+function hintKey(k: string): Child {
+  const mouse: Record<string, string> = { LMB: 'mouse_lmb', MMB: 'mouse_mmb', RMB: 'mouse_rmb' };
+  return mouse[k] ? h('span', { class: 'sb-mouse', 'aria-label': k }, icon(mouse[k])) : h('kbd', null, k);
+}
+
+/** Scene statistics for the status bar: active collection, active object, then the mode's counts. */
+function statusStats(): string {
+  const doc = app.doc;
+  const short: Record<string, string> = { Vertices: 'Verts', Triangles: 'Tris' };
+  const rows = statsLines();
+  const objects = rows.find(([k]) => k === 'Objects');
+  const counts = rows.filter(([k]) => k !== 'Objects' && (doc.mode === 'EDIT' || k !== 'Edges')).map(([k, v]) => `${short[k] ?? k}:${v.replace(/ \/ /g, '/')}`);
+  const coll = doc.collections[activeCollection(doc)];
+  const parts = [coll && coll.id !== doc.scene.collection ? coll.name : 'Scene Collection', app.activeObject?.name ?? '', ...counts, objects ? `Objects:${objects[1].replace(/ \/ /g, '/')}` : ''];
+  return parts.filter(Boolean).join(' | ');
+}
+
+/** Length of the scene's frame range as time, then the frame count. */
+function sceneDuration(): string {
+  const s = app.doc.scene;
+  const fps = s.render.fps / (s.render.fps_base || 1);
+  const frames = s.frame_end - s.frame_start + 1;
+  const secs = frames / fps;
+  const mm = Math.floor(secs / 60);
+  const ss = secs - mm * 60;
+  return `Duration: ${String(mm).padStart(2, '0')}:${ss.toFixed(2).padStart(5, '0')} (Frame ${s.frame_current}/${frames})`;
+}
+
+/** Script memory in use, where the browser reports it. */
+function memoryText(): string {
+  const m = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
+  return m ? `Memory: ${(m.usedJSHeapSize / 1048576).toFixed(1)} MiB` : '';
+}
+
+/** Right-click menu of the status bar: what its right side shows. */
+function statusMenu(sh: Shell): MenuItem[] {
+  const toggle = (key: 'show_statusbar_stats' | 'show_statusbar_scene_duration' | 'show_statusbar_memory' | 'show_statusbar_version') => () => {
+    prefs[key] = !prefs[key];
+    savePrefs();
+    sh.drawStatus();
+  };
+  const hasMemory = !!(performance as Performance & { memory?: unknown }).memory;
+  return [
+    { label: 'Scene Statistics', checked: prefs.show_statusbar_stats, action: toggle('show_statusbar_stats') },
+    { label: 'Scene Duration', checked: prefs.show_statusbar_scene_duration, action: toggle('show_statusbar_scene_duration') },
+    ...(hasMemory ? [{ label: 'System Memory', checked: prefs.show_statusbar_memory, action: toggle('show_statusbar_memory') }] : []),
+    { label: 'App Version', checked: prefs.show_statusbar_version, action: toggle('show_statusbar_version') },
+  ];
+}
+
+/** Mouse hints of editors other than the 3D view (undefined: the 3D view's hints). */
+function editorHints(type: string | undefined): [string, string][] | undefined {
+  const pan: [string, string] = ['MMB', 'Pan View'];
+  switch (type) {
+    case undefined:
+    case 'VIEW_3D':
+      return undefined;
+    case 'SHADER':
+    case 'GEOMETRY':
+    case 'COMPOSITOR':
+    case 'DOPESHEET':
+    case 'TIMELINE':
+    case 'GRAPH':
+    case 'DRIVERS':
+    case 'NLA':
+    case 'SEQUENCE_EDITOR':
+    case 'CLIP_EDITOR':
+    case 'IMAGE_EDITOR':
+    case 'UV':
+      return [['LMB', 'Select'], pan, ['RMB', 'Context Menu']];
+    case 'OUTLINER':
+    case 'FILE_BROWSER':
+    case 'SPREADSHEET':
+      return [['LMB', 'Select'], pan, ['RMB', 'Context Menu']];
+    case 'TEXT':
+    case 'CONSOLE':
+      return [['LMB', 'Set Cursor'], pan, ['RMB', 'Context Menu']];
+    default:
+      return [pan, ['RMB', 'Context Menu']];
   }
 }
 
@@ -288,82 +403,21 @@ function modeHint() {
   return 'Select';
 }
 
-function appMenu(): MenuItem[] {
+/** Right-click menu of a workspace tab. */
+function workspaceMenu(sh: Shell, name: string): MenuItem[] {
+  const p = { name };
   return [
-    { label: 'About', action: () => app.run('wm.about') },
+    { label: 'Duplicate', op: 'workspace.duplicate', props: p },
+    { label: 'Delete', op: 'workspace.delete', props: p },
+    { label: 'Rename…', action: () => promptText('Rename Workspace', name, (n) => n && sh.renameWorkspace(name, n)) },
     { separator: true },
-    { label: 'Install Application…', disabled: true },
-  ];
-}
-
-/** File ▸ New entries (application templates, e.g. 2D Animation); modules append to it. */
-export const fileNewTemplates: { label: string; icon?: string; template: string }[] = [{ label: 'General', icon: 'file_blank', template: '' }];
-
-function fileMenu(): MenuItem[] {
-  return [
-    { label: 'New', icon: 'file_blank', submenu: () => fileNewTemplates.map((t) => ({ label: t.label, icon: t.icon, op: 'wm.read_homefile', props: t.template ? { app_template: t.template } : {}, shortcut: t.template ? undefined : 'Ctrl N' })) },
-    { label: 'Open…', icon: 'file_folder', shortcut: 'Ctrl O', op: 'wm.open_mainfile' },
-    { label: 'Recover Last Session', op: 'wm.recover_last_session' },
+    { label: 'Reorder to Front', op: 'workspace.reorder_to_front', props: p },
+    { label: 'Reorder to Back', op: 'workspace.reorder_to_back', props: p },
     { separator: true },
-    { label: 'Save', icon: 'file_3d', shortcut: 'Ctrl S', op: 'wm.save_mainfile' },
-    { label: 'Save As…', shortcut: 'Shift Ctrl S', op: 'wm.save_as_mainfile' },
-    { separator: true },
-    { label: 'Import', icon: 'import', submenu: importMenu },
-    { label: 'Export', icon: 'export', submenu: exportMenu },
-    { separator: true },
-    { label: 'Clean Up', submenu: () => [{ label: 'Purge Unused Data', op: 'outliner.orphans_purge' }] },
-    { separator: true },
-    { label: 'Defaults', submenu: () => [{ label: 'Load Factory Settings', op: 'wm.read_factory_settings' }] },
-  ];
-}
-
-function editMenu(): MenuItem[] {
-  return [
-    { label: 'Undo', shortcut: 'Ctrl Z', op: 'ed.undo', disabled: !app.undo.canUndo },
-    { label: 'Redo', shortcut: 'Shift Ctrl Z', op: 'ed.redo', disabled: !app.undo.canRedo },
-    { separator: true },
-    { label: 'Undo History…', shortcut: 'Ctrl Alt Z', op: 'ed.undo_history' },
-    { separator: true },
-    { label: 'Repeat Last', shortcut: 'Shift R', op: 'screen.repeat_last' },
-    { label: 'Adjust Last Operation…', shortcut: 'F9', op: 'screen.redo_last' },
-    { separator: true },
-    { label: 'Menu Search…', shortcut: 'F3', op: 'wm.search_menu' },
-    { label: 'Rename Active Item…', shortcut: 'F2', op: 'object.rename' },
-    { separator: true },
-    { label: 'Preferences…', icon: 'preferences', shortcut: 'Ctrl ,', op: 'screen.userpref_show' },
-  ];
-}
-
-function renderMenu(): MenuItem[] {
-  return [
-    { label: 'Render Image', icon: 'render', shortcut: 'F12', op: 'render.render' },
-    { label: 'Render Animation', shortcut: 'Ctrl F12', op: 'render.render', props: { animation: true } },
-    { separator: true },
-    { label: 'Render Audio…', op: 'sound.mixdown' },
-    { separator: true },
-    { label: 'View Render', shortcut: 'F11', op: 'render.view_show' },
-  ];
-}
-
-function windowMenu(shell: Shell): MenuItem[] {
-  return [
-    { label: 'Toggle Window Fullscreen', action: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) },
-    { separator: true },
-    { label: 'Next Workspace', shortcut: 'Ctrl Page Down', op: 'screen.workspace_cycle', props: { direction: 'NEXT' } },
     { label: 'Previous Workspace', shortcut: 'Ctrl Page Up', op: 'screen.workspace_cycle', props: { direction: 'PREV' } },
+    { label: 'Next Workspace', shortcut: 'Ctrl Page Down', op: 'screen.workspace_cycle', props: { direction: 'NEXT' } },
     { separator: true },
-    { label: 'AI Assistant', icon: 'assistant', checked: assistantOpen(), op: 'wm.assistant_toggle' },
-    { separator: true },
-    { label: 'Show Status Bar Statistics', checked: prefs.show_statusbar_stats, action: () => ((prefs.show_statusbar_stats = !prefs.show_statusbar_stats), shell.drawStatus()) },
-    { separator: true },
-    { label: 'Save Screenshot', op: 'screen.screenshot' },
-  ];
-}
-
-function helpMenu(): MenuItem[] {
-  return [
-    { label: 'Keyboard Shortcuts', op: 'wm.keymap_reference' },
-    { label: 'About', op: 'wm.about' },
+    { label: 'Delete All Others', op: 'workspace.delete_all_others', props: p },
   ];
 }
 
@@ -371,6 +425,26 @@ export let shell: Shell;
 export function setShell(s: Shell) {
   shell = s;
 }
+
+/** Workspace named by an operator's `name` property (empty: the active one). */
+const wsName = (p: Record<string, unknown>) => String(p.name || shell?.active || '');
+const wsProp = { id: 'name', label: 'Workspace', type: 'string' as const, default: '', hidden: true };
+
+registerOperators([
+  { idname: 'workspace.duplicate', label: 'Duplicate Workspace', description: 'Add a copy of the workspace with the same layout', undo: false, props: [wsProp], poll: () => !!shell, exec: (_c, p) => shell.duplicateWorkspace(wsName(p)) },
+  { idname: 'workspace.delete', label: 'Delete Workspace', description: 'Remove the workspace tab', undo: false, props: [wsProp], poll: () => !!shell && shell.workspaces.length > 1, exec: (_c, p) => shell.deleteWorkspace(wsName(p)) },
+  { idname: 'workspace.reorder_to_front', label: 'Reorder Workspace to Front', description: 'Move the workspace tab to the start of the list', undo: false, props: [wsProp], poll: () => !!shell, exec: (_c, p) => shell.moveWorkspace(wsName(p), 'FRONT') },
+  { idname: 'workspace.reorder_to_back', label: 'Reorder Workspace to Back', description: 'Move the workspace tab to the end of the list', undo: false, props: [wsProp], poll: () => !!shell, exec: (_c, p) => shell.moveWorkspace(wsName(p), 'BACK') },
+  { idname: 'workspace.delete_all_others', label: 'Delete All Other Workspaces', description: 'Remove every workspace tab except this one', undo: false, props: [wsProp], poll: () => !!shell && shell.workspaces.length > 1, exec: (_c, p) => shell.deleteOtherWorkspaces(wsName(p)) },
+  {
+    idname: 'screen.toggle_statusbar',
+    label: 'Show Status Bar',
+    description: 'Show or hide the status bar at the bottom of the window',
+    undo: false,
+    poll: () => !!shell,
+    exec: () => shell.setStatusbarShown(!shell.showStatusbar),
+  },
+]);
 
 registerOperators([
   {
@@ -382,24 +456,6 @@ registerOperators([
       const i = shell.workspaces.findIndex((w) => w.name === shell.active);
       const n = shell.workspaces.length;
       shell.setWorkspace(shell.workspaces[(i + (p.direction === 'NEXT' ? 1 : n - 1)) % n].name);
-    },
-  },
-  {
-    idname: 'screen.screenshot',
-    label: 'Save Screenshot',
-    undo: false,
-    exec: () => {
-      import('../render/context').then(({ renderContext }) => {
-        if (!renderContext) return;
-        renderContext.engine.drawAll();
-        renderContext.engine.canvas.toBlob((b) => {
-          if (!b) return;
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(b);
-          a.download = 'screenshot.png';
-          a.click();
-        });
-      });
     },
   },
 ]);

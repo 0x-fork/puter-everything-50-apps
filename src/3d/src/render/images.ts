@@ -10,6 +10,18 @@ interface Entry {
 }
 
 const cache = new Map<string, Entry>();
+
+/** Texture sampling quality (Preferences ▸ Viewport ▸ Textures). */
+export const textureSettings = { anisotropy: 8 };
+
+/** Re-apply texture settings to every cached texture. */
+export function applyTextureSettings() {
+  for (const e of cache.values()) {
+    if (e.tex.anisotropy === textureSettings.anisotropy) continue;
+    e.tex.anisotropy = textureSettings.anisotropy;
+    e.tex.needsUpdate = true;
+  }
+}
 let onReady: (() => void) | null = null;
 export function onImageReady(fn: () => void) {
   onReady = fn;
@@ -26,10 +38,10 @@ export function generatedPixels(img: Img, ctx: CanvasRenderingContext2D) {
     const cell = Math.max(1, Math.floor(w / 8));
     for (let y = 0; y < h; y += cell)
       for (let x = 0; x < w; x += cell) {
-        ctx.fillStyle = ((x / cell + y / cell) & 1) === 0 ? '#2a2a2a' : '#c8c8c8';
+        ctx.fillStyle = ((x / cell + y / cell) & 1) === 0 ? '#272829' : '#c9cacb';
         ctx.fillRect(x, y, cell, cell);
       }
-    ctx.strokeStyle = 'rgba(255,255,255,.45)';
+    ctx.strokeStyle = 'rgba(255, 255, 255,.45)';
     ctx.lineWidth = Math.max(1, w / 512);
     for (let i = 0; i <= 32; i++) {
       const p = (i / 32) * w;
@@ -48,7 +60,7 @@ export function generatedPixels(img: Img, ctx: CanvasRenderingContext2D) {
       for (let i = 0; i < n; i++) {
         ctx.fillStyle = `hsl(${(i / n) * 360}, 70%, ${30 + (j / n) * 45}%)`;
         ctx.fillRect(i * cw, h - (j + 1) * ch, cw, ch);
-        ctx.fillStyle = 'rgba(0,0,0,.6)';
+        ctx.fillStyle = 'rgba(0, 0, 0,.6)';
         ctx.font = `${Math.floor(ch / 3)}px sans-serif`;
         ctx.fillText(`${String.fromCharCode(65 + i)}${j + 1}`, i * cw + cw * 0.3, h - j * ch - ch * 0.35);
       }
@@ -108,7 +120,7 @@ function entry(img: Img): Entry {
   tex.wrapS = tex.wrapT = RepeatWrapping;
   tex.minFilter = LinearMipmapLinearFilter;
   tex.magFilter = LinearFilter;
-  tex.anisotropy = 8;
+  tex.anisotropy = textureSettings.anisotropy;
   tex.needsUpdate = true;
   return fresh;
 }
@@ -144,4 +156,25 @@ export function pruneImages(doc: DocumentData) {
       cache.get(id)!.tex.dispose();
       cache.delete(id);
     }
+}
+
+/** Whether the image's canvas holds its current pixels (decoding finished). */
+export function imageReady(img: Img): boolean {
+  const e = cache.get(img.id);
+  return !!e && e.key === keyOf(img) && e.ready;
+}
+
+/** Install already-known pixels for an image (after an edit) so it shows without re-decoding. */
+export function primeImage(img: Img, pixels: globalThis.ImageData) {
+  const e = entry(img);
+  const canvas = e.canvas;
+  if (canvas.width !== pixels.width || canvas.height !== pixels.height) {
+    canvas.width = pixels.width;
+    canvas.height = pixels.height;
+  }
+  canvas.getContext('2d', { willReadFrequently: true })!.putImageData(pixels, 0, 0);
+  // the decode started by entry() must not overwrite these pixels
+  const fresh: Entry = { key: keyOf(img), tex: e.tex, canvas, ready: true };
+  cache.set(img.id, fresh);
+  e.tex.needsUpdate = true;
 }

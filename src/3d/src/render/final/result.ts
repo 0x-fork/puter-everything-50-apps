@@ -1,7 +1,9 @@
 // The "Render Result": float passes of the last render, display conversion and encoding.
 import { toDisplayRGBA8, displayPixel, type ViewSettings } from './colormanage';
+import { compositeOverlay, type StampField } from './stamp';
 
-export type PassName = 'Combined' | 'Depth' | 'Normal' | 'Mist';
+/** Built-in passes plus shader AOVs (`AOV <name>`, see render/realtime/aov.ts). */
+export type PassName = 'Combined' | 'Depth' | 'Normal' | 'Mist' | 'Position' | 'UV' | 'IndexOB' | 'IndexMA' | 'DiffCol' | 'Emit' | 'AO' | `AOV ${string}`;
 export type ChannelMode = 'COLOR_ALPHA' | 'COLOR' | 'ALPHA' | 'Z';
 
 export interface RenderInfo {
@@ -30,6 +32,10 @@ export interface RenderResult {
   view?: ViewSettings;
   /** raw render passes when `passes.Combined` holds a post-processed (composited) image */
   viewLayer?: Partial<Record<PassName, Float32Array>>;
+  /** metadata of the render (Output ▸ Metadata), written into saved files */
+  metadata?: StampField[];
+  /** burnt-in metadata: RGBA8 overlay drawn over the display-converted Combined pass */
+  overlay?: Uint8ClampedArray;
 }
 
 /** Post-processing of each finished frame of a render job (e.g. compositing), in order. */
@@ -52,21 +58,66 @@ export function touchVirtualImage(id: string) {
   for (const fn of virtualListeners) fn(id);
 }
 
-export const PASS_CHANNELS: Record<PassName, number> = { Combined: 4, Depth: 1, Normal: 4, Mist: 1 };
+export const PASS_CHANNELS: Record<PassName, number> = { Combined: 4, Depth: 1, Normal: 4, Mist: 1, Position: 4, UV: 4, IndexOB: 1, IndexMA: 1, DiffCol: 4, Emit: 4, AO: 1 };
 
-let current: RenderResult | null = null;
+/** Channels of a pass in a result of the given size (AOVs are RGBA colors or single values). */
+export function passChannels(name: PassName, buf?: Float32Array, pixels?: number): number {
+  const c = PASS_CHANNELS[name];
+  if (c) return c;
+  return buf && pixels ? Math.max(1, Math.round(buf.length / pixels)) : 4;
+}
+
+/** Readable label of a pass. */
+export function passLabel(name: PassName): string {
+  return PASS_LABELS[name] ?? (name.startsWith('AOV ') ? name.slice(4) : name);
+}
+
+/** Display order of passes (pass menus, Render Layers outputs). */
+export const PASS_ORDER: PassName[] = ['Combined', 'Depth', 'Mist', 'Normal', 'Position', 'UV', 'IndexOB', 'IndexMA', 'DiffCol', 'Emit', 'AO'];
+
+/** Readable pass names. */
+export const PASS_LABELS: Record<PassName, string> = { Combined: 'Combined', Depth: 'Depth', Normal: 'Normal', Mist: 'Mist', Position: 'Position', UV: 'UV', IndexOB: 'Object Index', IndexMA: 'Material Index', DiffCol: 'Diffuse Color', Emit: 'Emission', AO: 'Ambient Occlusion' };
+
+/** Render slots: renders go into the active slot so earlier ones can be compared. */
+export const RENDER_SLOTS = 8;
+const slots: (RenderResult | null)[] = new Array(RENDER_SLOTS).fill(null);
+let activeSlot = 0;
 const listeners = new Set<(pixels: boolean) => void>();
 
 export const renderResult = {
   get(): RenderResult | null {
-    return current;
+    return slots[activeSlot];
   },
   set(r: RenderResult | null) {
-    current = r;
+    slots[activeSlot] = r;
+    this.touch();
+  },
+  /** Index of the slot that is shown and rendered into. */
+  get slot() {
+    return activeSlot;
+  },
+  setSlot(i: number) {
+    activeSlot = Math.max(0, Math.min(RENDER_SLOTS - 1, i));
+    this.touch();
+  },
+  hasRender(i: number) {
+    return !!slots[i];
+  },
+  /** Next (or previous) slot holding a render; the active slot when there is none. */
+  cycle(reverse = false) {
+    for (let k = 1; k <= RENDER_SLOTS; k++) {
+      const i = (activeSlot + (reverse ? -k : k) + RENDER_SLOTS * 2) % RENDER_SLOTS;
+      if (slots[i]) return i;
+    }
+    return activeSlot;
+  },
+  clearSlot() {
+    slots[activeSlot] = null;
     this.touch();
   },
   /** Pixels changed (bumps the version so displays re-convert). */
   touch() {
+    const current = slots[activeSlot];
     if (current) current.version++;
     for (const l of listeners) l(true);
   },
@@ -122,7 +173,9 @@ export function passToRGBA8(r: RenderResult, pass: PassName, channel: ChannelMod
       return out;
     }
     const keep = channel === 'COLOR_ALPHA' && (opts.keepAlpha ?? true);
-    return toDisplayRGBA8(src, r.width, r.height, view, { keepAlpha: keep, dither: opts.dither }, out);
+    toDisplayRGBA8(src, r.width, r.height, view, { keepAlpha: keep, dither: opts.dither }, out);
+    if (r.overlay && r.overlay.length === out.length) compositeOverlay(out, r.overlay);
+    return out;
   }
   if (pass === 'Depth') {
     const [lo, hi] = depthRange(src);
@@ -133,14 +186,27 @@ export function passToRGBA8(r: RenderResult, pass: PassName, channel: ChannelMod
     }
     return out;
   }
-  if (pass === 'Mist') {
+  if (pass === 'DiffCol' || pass === 'Emit') {
+    // light passes are shown through the view transform, opaque
+    toDisplayRGBA8(src, r.width, r.height, view, { keepAlpha: false }, out);
+    return out;
+  }
+  if (pass === 'IndexOB' || pass === 'IndexMA') {
     for (let i = 0; i < n; i++) {
       out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = src[i] * 255;
       out[i * 4 + 3] = 255;
     }
     return out;
   }
-  // Normal: raw values (negative components clip, like viewing the pass directly)
+  // single-value passes (Mist, AO, value AOVs) show as grey
+  if (pass === 'Mist' || passChannels(pass, src, n) === 1) {
+    for (let i = 0; i < n; i++) {
+      out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = src[i] * 255;
+      out[i * 4 + 3] = 255;
+    }
+    return out;
+  }
+  // Normal / Position / UV: raw values (negative components clip, like viewing the pass directly)
   for (let i = 0; i < n; i++) {
     out[i * 4] = src[i * 4] * 255;
     out[i * 4 + 1] = src[i * 4 + 1] * 255;
@@ -156,7 +222,7 @@ export function samplePixel(r: RenderResult, pass: PassName, x: number, y: numbe
   const i = y * r.width + x;
   const src = r.passes[pass];
   if (!src) return null;
-  const ch = PASS_CHANNELS[pass];
+  const ch = passChannels(pass, src, r.width * r.height);
   const raw = Array.from(src.subarray(i * ch, i * ch + ch));
   const out: { raw: number[]; display?: number[]; depth?: number } = { raw };
   if (pass === 'Combined') {
