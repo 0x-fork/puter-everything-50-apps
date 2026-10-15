@@ -22,6 +22,9 @@ import { localMatrix, applyMatrixToObject } from '../eval/transform';
 import { getValue } from '../data/rna';
 import { uiState } from '../app/prefs';
 import { Matrix, Vector, mathutils } from './mathutils';
+import { allSockets, getNodeType, nodeSockets, nodeTypes, socketDefault } from '../nodes/registry';
+import { ctxOf, makeNode } from '../nodes/tree';
+import type { SocketDef } from '../nodes/types';
 import {
   Struct,
   PropCollection,
@@ -1024,6 +1027,18 @@ const SOCKET_DEFAULTS: Record<string, Record<string, unknown>> = {
   ShaderNodeValue: { Value: 0.5 },
 };
 
+/** Node types of older versions of the reference application, and what replaced them. */
+const LEGACY_NODES: Record<string, string> = {
+  ShaderNodeMixRGB: "ShaderNodeMix with data_type = 'RGBA'; its sockets are Factor, A, B and Result",
+  ShaderNodeTexMusgrave: 'ShaderNodeTexNoise (noise_type FBM, MULTIFRACTAL, …)',
+  ShaderNodeBsdfGlossy: 'ShaderNodeBsdfAnisotropic',
+  ShaderNodeBsdfVelvet: 'ShaderNodeBsdfSheen',
+  ShaderNodeSeparateRGB: 'ShaderNodeSeparateColor',
+  ShaderNodeCombineRGB: 'ShaderNodeCombineColor',
+  ShaderNodeSeparateHSV: "ShaderNodeSeparateColor with mode = 'HSV'",
+  ShaderNodeCombineHSV: "ShaderNodeCombineColor with mode = 'HSV'",
+};
+
 const NODE_LABELS: Record<string, string> = {
   ShaderNodeBsdfPrincipled: 'Principled BSDF',
   ShaderNodeOutputMaterial: 'Material Output',
@@ -1092,8 +1107,20 @@ class NodesCollection extends PropCollection<unknown> {
   new(type: string) {
     const tree = treeOrThrow(this.getTree);
     if (typeof type !== 'string' || !/^[A-Z][A-Za-z0-9]+$/.test(type)) throw pyError('RuntimeError', `Error: Node type ${type} undefined`);
-    const label = nodeLabel(type);
-    const n: NodeData = { id: uid('node'), type, name: uniqueName(Object.fromEntries(tree.nodes.map((x) => [x.id, x])), label), location: [0, 0], inputs: {}, props: {}, select: true };
+    let n: NodeData;
+    if (getNodeType(type)) {
+      // A registered type gets its default settings and set-up, as when added in the node editor.
+      n = makeNode(tree, type, [0, 0]);
+      n.name = uniqueName(Object.fromEntries(tree.nodes.map((x) => [x.id, x])), n.name);
+      n.select = true;
+    } else if (Object.values(nodeTypes).some((d) => d.treeTypes.includes(tree.type) && !d.idname.startsWith('Node') && !d.idname.endsWith('NodeGroup'))) {
+      const hint = LEGACY_NODES[type] ? ` (use ${LEGACY_NODES[type]})` : '';
+      throw pyError('RuntimeError', `Error: Node type ${type} undefined${hint}`);
+    } else {
+      // Without this kind of tree's own node definitions loaded (only frames, reroutes and groups), any type is accepted so values can be set ahead of them.
+      const label = nodeLabel(type);
+      n = { id: uid('node'), type, name: uniqueName(Object.fromEntries(tree.nodes.map((x) => [x.id, x])), label), location: [0, 0], inputs: {}, props: {}, select: true };
+    }
     for (const o of tree.nodes) o.select = false;
     tree.nodes.push(n);
     tree.active_node = n.id;
@@ -1161,11 +1188,129 @@ class NodeStruct extends Struct {
   get inputs() {
     return new SocketsCollection(this.getTree, this.__nid, false, `${this.__path}.inputs`);
   }
+  /** Color Ramp nodes: the ramp (stored flat as position, r, g, b, a per stop). */
+  get color_ramp() {
+    if (!Array.isArray(this.node.props.color_ramp)) return undefined;
+    return colorRamp(() => this.node, `${this.__path}.color_ramp`);
+  }
   get outputs() {
     return new SocketsCollection(this.getTree, this.__nid, true, `${this.__path}.outputs`);
   }
 }
 const NODE_HIDDEN = new Set(['id', 'type', 'inputs', 'props', 'parent']);
+
+const RAMP_STRIDE = 5;
+
+function colorRamp(node: () => NodeData, path: string) {
+  const flat = () => node().props.color_ramp as number[];
+  /** Writes the stops back, sorted by position as the reference keeps them. */
+  const write = (f: number[]) => {
+    const stops: number[][] = [];
+    for (let i = 0; i + RAMP_STRIDE <= f.length; i += RAMP_STRIDE) stops.push(f.slice(i, i + RAMP_STRIDE));
+    stops.sort((a, b) => a[0] - b[0]);
+    node().props.color_ramp = stops.flat();
+    touched();
+  };
+  const elements = new RampElements(flat, write, `${path}.elements`);
+  const prop = (key: string, def: string) => ({
+    get: () => (node().props[key] as string | undefined) ?? def,
+    set: (v: string) => {
+      node().props[key] = String(v);
+      touched();
+    },
+    enumerable: true,
+  });
+  return Object.defineProperties(
+    { __kind: 'struct', __type: 'ColorRamp', elements, evaluate: (pos: number) => evaluateRamp(flat(), Number(pos)), toString: () => `<bpy_struct, ColorRamp at ${path}>` },
+    { interpolation: prop('ramp_interpolation', 'LINEAR'), color_mode: prop('ramp_color_mode', 'RGB'), hue_interpolation: prop('ramp_hue_interpolation', 'NEAR') },
+  );
+}
+
+/** Linear blend of the stops at `pos` (for ColorRamp.evaluate and new stops). */
+function evaluateRamp(f: number[], pos: number): number[] {
+  const stops: number[][] = [];
+  for (let i = 0; i + RAMP_STRIDE <= f.length; i += RAMP_STRIDE) stops.push(f.slice(i, i + RAMP_STRIDE));
+  stops.sort((a, b) => a[0] - b[0]);
+  if (!stops.length) return [0, 0, 0, 1];
+  if (pos <= stops[0][0]) return stops[0].slice(1);
+  for (let i = 1; i < stops.length; i++) {
+    if (pos <= stops[i][0]) {
+      const a = stops[i - 1],
+        b = stops[i];
+      const t = b[0] > a[0] ? (pos - a[0]) / (b[0] - a[0]) : 0;
+      return [1, 2, 3, 4].map((k) => a[k] + (b[k] - a[k]) * t);
+    }
+  }
+  return stops[stops.length - 1].slice(1);
+}
+
+class RampElements extends PropCollection<unknown> {
+  constructor(
+    private flat: () => number[],
+    private write: (f: number[]) => void,
+    path: string,
+  ) {
+    super(path);
+  }
+  list() {
+    return Array.from({ length: Math.floor(this.flat().length / RAMP_STRIDE) }, (_, i) => this.element(i));
+  }
+  nameOf() {
+    return '';
+  }
+  private element(i: number) {
+    const self = this;
+    const at = (k: number) => self.flat()[i * RAMP_STRIDE + k];
+    const set = (k: number, v: number) => {
+      const f = [...self.flat()];
+      f[i * RAMP_STRIDE + k] = v;
+      self.write(f);
+    };
+    return {
+      __kind: 'struct',
+      __type: 'ColorRampElement',
+      __index: i,
+      get position() {
+        return at(0);
+      },
+      set position(v: number) {
+        set(0, Math.max(0, Math.min(1, Number(v))));
+      },
+      get color() {
+        return boundVector('COLOR', () => self.flat().slice(i * RAMP_STRIDE + 1, i * RAMP_STRIDE + 5), (k, x) => set(k + 1, x));
+      },
+      set color(v: unknown) {
+        const c = toPlain(v) as number[];
+        const f = [...self.flat()];
+        for (let k = 0; k < 4; k++) f[i * RAMP_STRIDE + 1 + k] = Number(c[k] ?? (k === 3 ? 1 : 0));
+        self.write(f);
+      },
+      get alpha() {
+        return at(4);
+      },
+      set alpha(v: number) {
+        set(4, Number(v));
+      },
+      toString: () => `<bpy_struct, ColorRampElement at ${self.__path}[${i}]>`,
+    };
+  }
+  /** A stop at `position`, colored as the ramp is there. */
+  new(position: number) {
+    const pos = Math.max(0, Math.min(1, Number(position)));
+    this.write([...this.flat(), pos, ...evaluateRamp(this.flat(), pos)]);
+    const i = this.list().findIndex((e) => (e as { position: number }).position === pos);
+    return this.getItem(i < 0 ? this.length - 1 : i);
+  }
+  remove(element: unknown) {
+    const i = (element as { __index?: number })?.__index;
+    if (typeof i !== 'number' || i < 0 || i >= this.length) throw pyError('ValueError', 'ColorRampElements.remove(): element not found');
+    if (this.length <= 1) throw pyError('RuntimeError', 'Error: unable to delete the only element');
+    const f = [...this.flat()];
+    f.splice(i * RAMP_STRIDE, RAMP_STRIDE);
+    this.write(f);
+  }
+}
+kwMethod(RampElements.prototype, 'new', ['position']);
 
 function nodeWrapper(getTree: () => NodeTreeData | null | undefined, nid: string, base: string) {
   const s = new NodeStruct(getTree, nid, '');
@@ -1173,7 +1318,12 @@ function nodeWrapper(getTree: () => NodeTreeData | null | undefined, nid: string
   return proxify(s);
 }
 
-/** Sockets are addressed by name; any name is accepted so values can be set before node definitions exist. */
+/**
+ * A node's sockets. On a registered node type they are the node's real sockets
+ * (looked up by name, then identifier; values and links are stored by
+ * identifier). On an unknown type any name is accepted, so values can be set
+ * before node definitions exist.
+ */
 class SocketsCollection extends PropCollection<unknown> {
   constructor(
     readonly getTree: () => NodeTreeData | null | undefined,
@@ -1188,7 +1338,29 @@ class SocketsCollection extends PropCollection<unknown> {
     if (!n) throw pyError('ReferenceError', 'node has been removed');
     return n;
   }
+  /** The node's current sockets on this side, or null for an unknown node type. */
+  private defs(all = false): SocketDef[] | null {
+    const n = this.node();
+    if (!getNodeType(n.type)) return null;
+    const ctx = ctxOf(app.doc, treeOrThrow(this.getTree));
+    const s = all ? allSockets(n, ctx) : nodeSockets(n, ctx);
+    return this.output ? s.outputs : s.inputs;
+  }
+  /** A socket by name or identifier: the available ones first, then any the node type has. */
+  private lookup(key: string): SocketDef | null {
+    for (const list of [this.defs(), this.defs(true)]) {
+      const hit = list?.find((d) => d.name === key) ?? list?.find((d) => d.identifier === key);
+      if (hit) return hit;
+    }
+    return null;
+  }
   list() {
+    // Every socket in order, the unavailable ones too (enabled false), so indices match the reference.
+    const all = this.defs(true);
+    if (all) {
+      const on = new Set(this.defs()!.map((d) => d.identifier));
+      return all.map((d) => this.socket(d.identifier, d, on.has(d.identifier)));
+    }
     const n = this.node();
     const tree = treeOrThrow(this.getTree);
     const names = new Set<string>();
@@ -1206,44 +1378,60 @@ class SocketsCollection extends PropCollection<unknown> {
   }
   override getItem(key: number | string) {
     if (typeof key === 'number') return super.getItem(key);
-    return this.socket(key);
+    const defs = this.defs();
+    if (!defs) return this.socket(key);
+    const d = this.lookup(key);
+    if (!d) throw pyError('KeyError', `'bpy_prop_collection[key]: key "${key}" not found' (${this.output ? 'outputs' : 'inputs'}: ${defs.map((x) => JSON.stringify(x.name)).join(', ') || 'none'})`);
+    return this.socket(d.identifier, d, defs.some((x) => x.identifier === d.identifier));
   }
-  override get(key: string | number, def: unknown = null) {
-    if (typeof key === 'string') return this.socket(key);
+  override get(key: string | number, ...rest: unknown[]) {
+    const def = rest.length ? rest[0] : null;
+    if (typeof key === 'string') {
+      // inputs['Name'] (the collection proxy passes an explicit undefined) raises like the reference, naming the sockets there are.
+      if (rest.length === 1 && rest[0] === undefined && this.defs() && !/^(_|then$|toJSON$|asymmetricMatch$|nodeType$|\$\$)/.test(key)) return this.getItem(key);
+      try {
+        return this.getItem(key);
+      } catch {
+        return def;
+      }
+    }
     return super.get(key, def);
   }
-  private socket(name: string) {
+  private socket(id: string, d?: SocketDef, enabled = true) {
     const self = this;
+    const name = d?.name ?? id;
+    const fallback = () => (d ? socketDefault(d) : ((SOCKET_DEFAULTS[self.node().type]?.[id] as unknown) ?? null));
     return {
       __kind: 'struct',
       __type: this.output ? 'NodeSocketOutput' : 'NodeSocketInput',
-      __socket: { node: this.nid, name, output: this.output, tree: this.getTree },
+      __socket: { node: this.nid, name: id, output: this.output, tree: this.getTree },
       name,
-      identifier: name,
+      identifier: id,
+      type: d?.type ?? 'VALUE',
       is_output: this.output,
-      enabled: true,
+      enabled,
       get node() {
         return nodeWrapper(self.getTree, self.nid, self.__path.replace(/\.(inputs|outputs)$/, '').replace(/\[[^\]]*\]$/, ''));
       },
       get is_linked() {
-        return treeOrThrow(self.getTree).links.some((l) => (self.output ? l.from_node === self.nid && l.from_socket === name : l.to_node === self.nid && l.to_socket === name));
+        return treeOrThrow(self.getTree).links.some((l) => (self.output ? l.from_node === self.nid && l.from_socket === id : l.to_node === self.nid && l.to_socket === id));
       },
       get links() {
-        return new LinksCollection(self.getTree, `${self.__path}[${JSON.stringify(name)}].links`, (l) => (self.output ? l.from_node === self.nid && l.from_socket === name : l.to_node === self.nid && l.to_socket === name)).list();
+        return new LinksCollection(self.getTree, `${self.__path}[${JSON.stringify(name)}].links`, (l) => (self.output ? l.from_node === self.nid && l.from_socket === id : l.to_node === self.nid && l.to_socket === id)).list();
       },
       get default_value() {
         const n = self.node();
         if (self.output) return (n.props.value ?? null) as unknown;
-        const v = n.inputs[name] ?? (SOCKET_DEFAULTS[n.type]?.[name] as unknown) ?? null;
+        const v = (n.inputs[id] as unknown) ?? fallback();
         if (Array.isArray(v) && v.length >= 2 && v.length <= 4)
           return boundVector(
             v.length === 4 || /color/i.test(name) ? 'COLOR' : 'VECTOR',
-            () => (self.node().inputs[name] ?? SOCKET_DEFAULTS[self.node().type]?.[name] ?? v) as number[],
+            () => (self.node().inputs[id] ?? fallback() ?? v) as number[],
             (i, x) => {
               const node = self.node();
-              const cur = Array.isArray(node.inputs[name]) ? (node.inputs[name] as number[]) : [...(v as number[])];
+              const cur = Array.isArray(node.inputs[id]) ? (node.inputs[id] as number[]) : [...(v as number[])];
               cur[i] = x;
-              node.inputs[name] = cur;
+              node.inputs[id] = cur;
               touched();
             },
           );
@@ -1253,7 +1441,7 @@ class SocketsCollection extends PropCollection<unknown> {
         const n = self.node();
         const p = toPlain(val);
         if (self.output) n.props.value = p as never;
-        else n.inputs[name] = p as never;
+        else n.inputs[id] = p as never;
         touched();
       },
       toString: () => `<bpy_struct, NodeSocket("${name}")>`,
