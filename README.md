@@ -15,6 +15,8 @@ The Everything Project is an effort to rebuild and open-source the world’s sof
 
 ## Getting started
 
+Requires Node.js 22.12 or newer.
+
 ```sh
 git clone https://github.com/HeyPuter/everything.git
 cd everything/src/[app-name]
