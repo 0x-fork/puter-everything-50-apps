@@ -8,6 +8,7 @@ import { uiState, prefs } from '../app/prefs';
 import { importMenu, exportMenu, projectUiState } from '../io/files';
 import { textField } from './widgets';
 import { setMode } from '../ops/object';
+import { assistantOpen } from '../assistant';
 
 export class Shell {
   el: HTMLElement;
@@ -224,6 +225,17 @@ export class Shell {
         icon('add'),
       ),
       h('div', { class: 'tb-spacer' }),
+      h(
+        'button',
+        {
+          class: { 'tb-assistant': true, on: assistantOpen() },
+          'data-tip': 'AI Assistant: build and change the scene by describing it',
+          'aria-pressed': assistantOpen() ? 'true' : 'false',
+          onclick: () => app.run('wm.assistant_toggle'),
+        },
+        icon('assistant'),
+        'Assistant',
+      ),
       h('div', { class: 'tb-scene' }, icon('scene_data'), textField('scene-name', app.doc.scene.name, (v) => ((app.doc.scene.name = v || 'Scene'), app.pushUndo('Rename Scene'), app.changed('doc')))),
       h('div', { class: 'tb-scene' }, icon('view_layer'), h('span', { class: 'tb-vl' }, 'ViewLayer')),
     ]);
@@ -339,6 +351,8 @@ function windowMenu(shell: Shell): MenuItem[] {
     { separator: true },
     { label: 'Next Workspace', shortcut: 'Ctrl Page Down', op: 'screen.workspace_cycle', props: { direction: 'NEXT' } },
     { label: 'Previous Workspace', shortcut: 'Ctrl Page Up', op: 'screen.workspace_cycle', props: { direction: 'PREV' } },
+    { separator: true },
+    { label: 'AI Assistant', icon: 'assistant', checked: assistantOpen(), op: 'wm.assistant_toggle' },
     { separator: true },
     { label: 'Show Status Bar Statistics', checked: prefs.show_statusbar_stats, action: () => ((prefs.show_statusbar_stats = !prefs.show_statusbar_stats), shell.drawStatus()) },
     { separator: true },

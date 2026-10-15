@@ -24,9 +24,11 @@ test('annotate, measure and add cube tools', async ({ page }) => {
   await drag(page, [[box.x + 200, box.y + 500], [box.x + 500, box.y + 540]]);
   expect(await get(page, 'app.doc.scene.rulers?.length')).toBe(1);
   await page.click('[data-tool="builtin.add_cube"]');
-  await drag(page, [[box.x + 800, box.y + 520], [box.x + 900, box.y + 570]]);
-  await page.mouse.move(box.x + 900, box.y + 480, { steps: 4 });
-  await page.mouse.click(box.x + 900, box.y + 480);
+  // near the right of the viewport, whatever its width
+  const right = box.x + box.width - 120;
+  await drag(page, [[right - 100, box.y + 520], [right, box.y + 570]]);
+  await page.mouse.move(right, box.y + 480, { steps: 4 });
+  await page.mouse.click(right, box.y + 480);
   await page.waitForTimeout(100);
   expect(await objectNames(page)).toContain('Cube.001');
   await expectNoErrors(errors);

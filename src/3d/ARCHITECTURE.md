@@ -32,6 +32,7 @@ src/
   tracking/   Movie Clip Editor, 2D tracking, stabilization, Follow Track constraint
   greasepencil/ Grease Pencil objects, Draw/Edit/Sculpt modes, 2D Animation workspace
   scripting/  bpy-style API (JavaScript + Pyodide Python), Text Editor, Console, Info, Preferences
+  assistant/  AI assistant sidebar (Puter AI): agent loop, scene snapshot, tools over the scripting API
   edit/, modifiers/, storage/document.ts, core/   legacy polygon kernels kept for reuse
                                                  (unwrap/UV) and the legacy .3d.json parser
 ```

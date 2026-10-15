@@ -43,6 +43,7 @@ import { loadRecovery, decodeDocument } from './io/native';
 import { setMode } from './ops/object';
 import { loadFonts } from './io/fonts';
 import { registerModules } from './modules';
+import { restoreAssistant } from './assistant';
 
 // The reference application is Z-up; three.js defaults to Y-up for helpers.
 Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -79,6 +80,7 @@ onImageReady(() => {
 
 const shell = new Shell(root);
 setShell(shell);
+restoreAssistant();
 installKeyboard();
 installTooltips(document.body);
 addEventListener('pointerdown', (e) => pointerDownOutsideMenus(e.target), true);

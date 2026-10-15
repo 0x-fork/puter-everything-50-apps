@@ -73,6 +73,31 @@ export interface AreaState {
 
 export type LayoutNode = { split: 'h' | 'v'; ratio: number; a: LayoutNode; b: LayoutNode } | { area: AreaState };
 
+/**
+ * Re-proportion a layout for a new screen width so that, in every side-by-side
+ * split, the narrower side keeps its width in pixels and the wider side (the
+ * main editor) takes the difference. Used when the docked assistant takes or
+ * gives back room, so side editors such as the Properties keep their size.
+ */
+export function fitLayoutWidth(n: LayoutNode, oldW: number, newW: number, gap = 2) {
+  if ('area' in n || Math.abs(oldW - newW) < 1 || oldW <= gap || newW <= gap) return;
+  if (n.split === 'v') {
+    fitLayoutWidth(n.a, oldW, newW, gap);
+    fitLayoutWidth(n.b, oldW, newW, gap);
+    return;
+  }
+  const aOld = (oldW - gap) * n.ratio;
+  const bOld = oldW - gap - aOld;
+  const keepB = aOld >= bOld;
+  const kept = keepB ? bOld : aOld;
+  const grown = newW - gap - kept;
+  // When the main side would get too small, fall back to scaling both sides.
+  if (grown < (newW - gap) * 0.35) return;
+  n.ratio = keepB ? grown / (newW - gap) : kept / (newW - gap);
+  if (keepB) fitLayoutWidth(n.a, aOld, grown, gap);
+  else fitLayoutWidth(n.b, bOld, grown, gap);
+}
+
 export class Area implements AreaLike {
   id: string;
   type: EditorTypeId;
@@ -202,6 +227,8 @@ export class Screen {
   areas: Area[] = [];
   layout!: LayoutNode;
   maximized: Area | null = null;
+  /** Width the docked assistant takes from the screen; layouts are fitted to it as they load. */
+  dock = 0;
   private saved: LayoutNode | null = null;
   private dividers: HTMLElement[] = [];
   constructor(container: HTMLElement) {
@@ -219,6 +246,9 @@ export class Screen {
     this.areas = [];
     this.maximized = null;
     this.saved = null;
+    // A layout made for another dock width (or none) gives or takes the difference from its main editors.
+    const madeFor = (layout as { dock?: number }).dock ?? 0;
+    if (madeFor !== this.dock) fitLayoutWidth(layout, this.el.clientWidth + this.dock - madeFor, this.el.clientWidth);
     this.layout = layout;
     this.walk(layout, (st) => this.areas.push(new Area(this, st)));
     for (const a of this.areas) this.el.append(a.el);
@@ -243,7 +273,17 @@ export class Screen {
       }
       return { split: n.split, ratio: n.ratio, a: ser(n.a), b: ser(n.b) };
     };
-    return ser(this.saved ?? this.layout);
+    const out = ser(this.saved ?? this.layout);
+    if (this.dock) (out as { dock?: number }).dock = this.dock;
+    return out;
+  }
+
+  /** The docked assistant now takes `dock` pixels; the screen went from `oldW` to its current width. */
+  setDock(dock: number, oldW: number) {
+    const newW = this.el.clientWidth;
+    for (const n of [this.layout, this.saved]) if (n) fitLayoutWidth(n, oldW, newW);
+    this.dock = dock;
+    this.relayout();
   }
 
   relayout() {

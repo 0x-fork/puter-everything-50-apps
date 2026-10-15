@@ -342,6 +342,16 @@ export class App {
     }
   }
 
+  /** Go back to an undo mark (`undo.mark()`), dropping the steps after it, e.g. a failed script's partial changes. */
+  revertUndo(mark: object | null): boolean {
+    if (this.modal) return false;
+    const d = this.undo.revertTo(mark);
+    if (!d) return false;
+    this.restoreUndo(d);
+    this.lastOp = null;
+    return true;
+  }
+
   undoStep() {
     if (this.modal) return;
     const d = this.undo.undo();

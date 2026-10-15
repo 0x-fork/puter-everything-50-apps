@@ -245,6 +245,12 @@ const I: Record<string, string> = {
   error: '<path class="f" d="M8 1.5 15 14H1z" fill="#d33"/><path d="M7.2 6h1.6v4H7.2zM7.2 11h1.6v1.5H7.2z" fill="#fff"/>',
   info_small: '<circle class="f" cx="8" cy="8" r="6" fill="#4772b3"/><path d="M7.2 7h1.6v4.5H7.2zM7.2 4.5h1.6V6H7.2z" fill="#fff"/>',
   check: '<path class="s" d="M3 8.5l3 3L13 4.5" fill="none" stroke-width="1.8"/>',
+  // --- assistant
+  assistant: '<path class="f" d="M7 1.5 8.4 5.6 12.5 7 8.4 8.4 7 12.5 5.6 8.4 1.5 7 5.6 5.6z"/><path class="f" d="M12.5 10 13.2 11.8 15 12.5 13.2 13.2 12.5 15 11.8 13.2 10 12.5 11.8 11.8z"/>',
+  send: '<path class="s" d="M8 13V3.5M3.5 8 8 3.5 12.5 8" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  stop: '<rect class="f" x="4" y="4" width="8" height="8" rx="1.5"/>',
+  attach: '<path class="s" d="M11.5 7.5 7.2 11.8a2.7 2.7 0 0 1-3.8-3.8l5.1-5.1a1.8 1.8 0 0 1 2.5 2.5L6 10.4a.9.9 0 0 1-1.3-1.3l4.3-4.3" fill="none" stroke-width="1.3" stroke-linecap="round"/>',
+  new_chat: '<path class="s" d="M13 8.5V13H3V3h4.5" fill="none" stroke-width="1.3" stroke-linejoin="round"/><path class="s" d="M12 2.5 13.5 4 8 9.5H6.5V8z" fill="none" stroke-width="1.3" stroke-linejoin="round"/>',
   link: '<path class="s" d="M6 10 10 6M5.5 7.5 4 9a2.1 2.1 0 0 0 3 3l1.5-1.5M10.5 8.5 12 7a2.1 2.1 0 0 0-3-3L7.5 5.5" fill="none" stroke-width="1.5"/>',
   script: '<path class="s" d="M5.5 4 2 8l3.5 4M10.5 4 14 8l-3.5 4" fill="none" stroke-width="1.5"/>',
   brush: '<path class="f" d="M3 13c0-2 1-3 2.5-3s2 1 2 2-1 2-3 2zM6.5 9l6-6 1 1-6 6z"/>',

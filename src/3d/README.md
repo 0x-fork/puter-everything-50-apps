@@ -86,6 +86,12 @@ feature detection, 2D stabilization and the Follow Track constraint.
 **Scripting.** A `bpy`-style API usable from JavaScript (offline) or Python (Pyodide, loaded on
 first use), Text Editor with run script, Python Console, script-registered operators and panels.
 
+**AI assistant.** A sidebar (open by default; the topbar's Assistant button or Window › AI Assistant
+shows and hides it, and the choice is remembered) where you describe what to build or change. It runs
+on Puter AI: it reads the scene, writes and runs scripts against the `bpy`-style API (a failing script
+is rolled back), looks up the API, takes viewport screenshots to check its work, and reads attached
+reference images, PDFs and text files. Everything it changes for one message is a single undo step.
+
 **Files.** Native `.p3d` project format with autosave/recovery; import of `.blend` files written by
 Blender 2.80–5.x; import/export of glTF/GLB, FBX, OBJ/MTL, STL, PLY and USD (USDA/USDC/USDZ);
 import of Collada and Alembic; legacy `.3d.json` scenes from earlier versions of this app.
