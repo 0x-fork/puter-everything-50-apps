@@ -4,10 +4,11 @@
 // Parametric's assistant panel.
 
 import { app } from '../app/app';
+import { clearScriptFiles } from '../scripting/files';
 import { iconEl } from '../ui/icons';
 import { type Agent, type ExchangeResult, type Step, createAgent } from './agent';
 import { type ChatFn, puterChat } from './ai';
-import { ATTACH_ACCEPT, type Attachment, MAX_ATTACHMENTS, attachmentKind, attachmentProblem, attachmentsTooLarge, formatSize } from './attach';
+import { ATTACH_ACCEPT, type Attachment, MAX_ATTACHMENTS, attachmentKind, attachmentProblem, attachmentsTooLarge, formatSize, offerImages } from './attach';
 import { readAttachment } from './attachments';
 import { viewportUI } from './capture';
 import { renderMarkdown } from './markdown';
@@ -271,6 +272,7 @@ export class AssistantPanel {
     for (const it of [...this.pending]) this.removePending(it);
     for (const img of this.log.querySelectorAll<HTMLImageElement>('img.as-user-thumb')) URL.revokeObjectURL(img.src);
     this.agent.reset();
+    clearScriptFiles();
     this.turn = null;
     this.setBusy(false);
     this.renderEmpty();
@@ -410,6 +412,7 @@ export class AssistantPanel {
     if (text) bubble.append(el('div', { class: 'as-user-text' }, text));
     this.log.append(bubble);
     const label = text || items.map((it) => it.name).join(', ');
+    offerImages(files);
     void this.run(label, (on) => this.agent.send(text, on, { attachments: files }));
   }
 

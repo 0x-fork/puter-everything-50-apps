@@ -16,6 +16,8 @@ const VISION_MAX_BYTES = (5 * 1024 * 1024 * 3) / 4;
 const VISION_MAX_EDGE = 1568;
 const MAX_SHRINK_ROUNDS = 4;
 const DECODE_MS = 10000;
+/** Longest edge of an attached image as scripts load it into the scene (larger photos are scaled down to it). */
+const MAX_TEXTURE_EDGE = 8192;
 /** Long edge of the previews shown in the chat. */
 const THUMB_EDGE = 320;
 /** At most this much inflated from a PDF's object streams (a few kilobytes can inflate to gigabytes). */
@@ -69,13 +71,17 @@ async function drawn(canvas: HTMLCanvasElement, img: CanvasImageSource, w: numbe
   return toBlob(canvas, type, quality);
 }
 
+/** An image as scripts load it into the scene (D.images.load): full size up to MAX_TEXTURE_EDGE, in a format textures decode. */
+export interface TextureImage { blob: Blob; mediaType: string; width: number; height: number }
+
 /**
  * The image as the model can take it: the original when it fits and is a
  * format the model reads, else a copy scaled to VISION_MAX_EDGE (PNG where it
  * may be transparent, JPEG otherwise), shrunk until it is under the byte limit.
- * With it a small `thumb` for the chat. Null when it cannot be decoded.
+ * With it a small `thumb` for the chat and the `texture` scripts may load.
+ * Null when it cannot be decoded.
  */
-export async function fitImageForVision(blob: Blob, mediaType: string): Promise<{ blob: Blob; mediaType: string; thumb?: Blob | null } | null> {
+export async function fitImageForVision(blob: Blob, mediaType: string): Promise<{ blob: Blob; mediaType: string; thumb?: Blob | null; texture?: TextureImage | null } | null> {
   const decoded = await decode(blob);
   if (decoded === undefined) return VISION_TYPES.has(mediaType) && blob.size <= VISION_MAX_BYTES ? { blob, mediaType } : null;
   if (!decoded) return null;
@@ -88,7 +94,16 @@ export async function fitImageForVision(blob: Blob, mediaType: string): Promise<
     const t = Math.min(1, THUMB_EDGE / longEdge);
     const thumb = t === 1 && VISION_TYPES.has(mediaType) ? blob
       : await drawn(canvas, decoded.img, Math.max(1, Math.round(width * t)), Math.max(1, Math.round(height * t)), keepsAlpha ? 'image/png' : 'image/jpeg', 0.8);
-    if (VISION_TYPES.has(mediaType) && blob.size <= VISION_MAX_BYTES && longEdge <= VISION_MAX_EDGE) return { blob, mediaType, thumb };
+    let texture: TextureImage | null = null;
+    if (VISION_TYPES.has(mediaType) && longEdge <= MAX_TEXTURE_EDGE) texture = { blob, mediaType, width, height };
+    else {
+      const k = Math.min(1, MAX_TEXTURE_EDGE / longEdge);
+      const [w, h] = [Math.max(1, Math.round(width * k)), Math.max(1, Math.round(height * k))];
+      const type = keepsAlpha ? 'image/png' : 'image/jpeg';
+      const out = await drawn(canvas, decoded.img, w, h, type, type === 'image/jpeg' ? 0.92 : undefined);
+      if (out) texture = { blob: out, mediaType: type, width: w, height: h };
+    }
+    if (VISION_TYPES.has(mediaType) && blob.size <= VISION_MAX_BYTES && longEdge <= VISION_MAX_EDGE) return { blob, mediaType, thumb, texture };
     let scale = Math.min(1, VISION_MAX_EDGE / longEdge);
     let type = keepsAlpha ? 'image/png' : 'image/jpeg';
     let out: Blob | null = null;
@@ -99,7 +114,7 @@ export async function fitImageForVision(blob: Blob, mediaType: string): Promise<
       else scale *= 0.8;
     }
     if (!out || out.size > VISION_MAX_BYTES) return null;
-    return { blob: out, mediaType: type, thumb };
+    return { blob: out, mediaType: type, thumb, texture };
   } finally {
     decoded.release();
     canvas.width = 0;
@@ -201,7 +216,9 @@ export async function readAttachment(file: File): Promise<Attachment> {
   if (kind === 'image') {
     const fit = await fitImageForVision(file, await imageMediaType(file));
     if (!fit) throw new AttachmentError(`${base.name} could not be read as an image. Try a PNG or JPEG.`);
-    return { ...base, thumb: fit.thumb ?? null, blocks: [imageBlock(fit.mediaType, bytesToBase64(await readBytes(fit.blob)))] };
+    const tex = fit.texture;
+    const source = tex ? { name: base.name, bytes: await readBytes(tex.blob), mime: tex.mediaType, width: tex.width, height: tex.height } : undefined;
+    return { ...base, thumb: fit.thumb ?? null, source, blocks: [imageBlock(fit.mediaType, bytesToBase64(await readBytes(fit.blob)))] };
   }
   if (kind === 'pdf') {
     const bytes = await readBytes(file);

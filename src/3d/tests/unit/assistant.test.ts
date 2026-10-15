@@ -14,7 +14,8 @@ import { runTool, toolSpecs, type AssistantHost } from '../../src/assistant/tool
 import { createAgent } from '../../src/assistant/agent';
 import type { ChatFn, StreamPart } from '../../src/assistant/ai';
 import { SYSTEM_PROMPT, sceneSnapshot } from '../../src/assistant/prompt';
-import { attachmentKind } from '../../src/assistant/attach';
+import { type Attachment, attachmentKind, attachmentMeta, attachmentsGone, attachmentsIntro, imageBlock, offerImages } from '../../src/assistant/attach';
+import { clearScriptFiles } from '../../src/scripting/files';
 
 let host: AssistantHost;
 const objectNames = () => Object.values(app.doc.objects).map((o) => o.name).sort();
@@ -205,6 +206,27 @@ describe('attachments', () => {
     expect(attachmentKind({ name: 'make.py', type: '', size: 1 })).toBe('text');
     expect(attachmentKind({ name: 'chair.obj', type: 'text/plain', size: 1 })).toBeNull();
     expect(attachmentKind({ name: 'chair.glb', type: 'model/gltf-binary', size: 1 })).toBeNull();
+  });
+
+  it('lets scripts load an attached image into the scene, and tells the model how', async () => {
+    clearScriptFiles();
+    const photo = (bytes: Uint8Array): Attachment => ({ name: 'photo.jpg', kind: 'image', size: bytes.length, blocks: [imageBlock('image/jpeg', 'AAAA')], source: { name: 'photo.jpg', bytes, mime: 'image/jpeg', width: 300, height: 400 } });
+    const first = photo(new Uint8Array([1]));
+    offerImages([first]);
+    expect(attachmentsIntro([first])).toContain('D.images.load("photo.jpg")');
+    expect(attachmentsGone([attachmentMeta(first)])).toContain('D.images.load("photo.jpg")');
+    // Another photo of the same name later in the chat gets a number.
+    const second = photo(new Uint8Array([2]));
+    offerImages([second]);
+    expect(second.name).toBe('photo 2.jpg');
+    const r = await script(`const img = D.images.load('photo 2.jpg'); const mat = D.materials.new('Photo'); mat.use_nodes = true;
+      const tex = mat.node_tree.nodes.new('ShaderNodeTexImage'); tex.image = img;
+      mat.node_tree.links.new(tex.outputs['Color'], mat.node_tree.nodes.get('Principled BSDF').inputs['Base Color']);
+      D.objects['Cube'].data.materials.append(mat); print(img.size[0], img.size[1])`);
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain('300 400');
+    expect(Object.values(app.doc.images).find((im) => im.name === 'photo 2.jpg')!.bytes).toEqual(new Uint8Array([2]));
+    expect(attachmentsIntro([{ name: 'notes.txt', kind: 'text' }])).not.toContain('D.images.load');
   });
 });
 
