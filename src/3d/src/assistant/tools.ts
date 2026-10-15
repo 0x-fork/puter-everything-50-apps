@@ -273,6 +273,11 @@ async function runScript(a: Obj, host: AssistantHost): Promise<ToolResult> {
   ins.settle();
   const diff = describeChanges(before, sceneState(app.doc), ins, app.doc);
   const evalErrors = [...app.graph.objects.values()].filter((ev) => ev.error).map((ev) => `[error] ${JSON.stringify(ev.ob.name)}: ${ev.error}`);
+  if (a.dry_run === true) {
+    app.revertUndo(mark);
+    ins.settle();
+    return { ok: true, content: ['The script ran as a dry run: its changes were undone, the scene is as it was.', out, [...opReports, ...evalErrors].join('\n'), diff.changed ? `It would have made these changes:\n${diff.text}` : ''].filter(Boolean).join('\n') };
+  }
   return { ok: true, changed: diff.changed, content: ['The script ran.', out, [...opReports, ...evalErrors].join('\n'), diff.text].filter(Boolean).join('\n') };
 }
 
@@ -302,7 +307,8 @@ function nodeHelp(idname: string): string {
   const lines = [`${def.idname}: "${def.label}" (${def.treeTypes.join(', ')} trees)`];
   if (def.inputs.length) lines.push(`Inputs: ${def.inputs.map(sock).join('; ')}`);
   if (def.outputs.length) lines.push(`Outputs: ${def.outputs.map(sock).join('; ')}`);
-  if (def.props.length) lines.push(`Properties: ${def.props.map((p) => { const d = p as unknown as { name?: string; identifier?: string; default?: unknown; items?: [string, ...unknown[]][] }; return `${d.identifier ?? d.name}${d.default !== undefined ? ` = ${fmtDefault(d.default)}` : ''}${d.items ? ` (${d.items.map((i) => i[0]).join('|')})` : ''}`; }).join(', ')}`);
+  if (def.props.length) lines.push(`Properties (node.<id>): ${def.props.map((p) => `${p.id}${p.d !== undefined ? ` = ${fmtDefault(p.d)}` : ''}${p.items ? ` (${p.items.map((i) => i[0]).join('|')})` : ''}`).join(', ')}`);
+  lines.push('Sockets are listed in order, unavailable ones included; which are available can depend on the properties (e.g. a Mix node\'s data_type).');
   return lines.join('\n');
 }
 
@@ -432,6 +438,7 @@ const TOOLS: ToolDef[] = [
         code: S('The script'),
         language: S('Script language (default javascript). Python loads a runtime of about 10 MB the first time; use it only when the user asks for Python.', { enum: ['javascript', 'python'] }),
         description: S('What the script does, in a few words for the user (e.g. "Build the table legs")'),
+        dry_run: { type: 'boolean', description: 'Run it, report what it printed and would change, then undo everything. For experiments, such as creating a node to inspect its sockets. Never throw on purpose to undo a script; use this.' },
       },
       ['code', 'description'],
     ),

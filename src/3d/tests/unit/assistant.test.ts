@@ -67,6 +67,18 @@ describe('run_script', () => {
     expect(app.undo.history.length).toBe(steps);
   });
 
+  it('undoes a dry run after reporting what it printed and would change', async () => {
+    const steps = app.undo.history.length;
+    const r = await runTool(host, 'run_script', { description: 'Look at a Mix node', dry_run: true, code: "const n = D.materials.new('Probe').node_tree.nodes.new('ShaderNodeMix'); print(n.data_type)" });
+    expect(r.ok).toBe(true);
+    expect(r.changed).toBeFalsy();
+    expect(r.content).toContain('dry run');
+    expect(r.content).toContain('Printed:\nFLOAT');
+    expect(r.content).toContain('New materials: "Probe"');
+    expect(Object.values(app.doc.materials).some((m) => m.name === 'Probe')).toBe(false);
+    expect(app.undo.history.length).toBe(steps);
+  });
+
   it('says when nothing changed', async () => {
     const r = await script(`print(D.objects.length)`);
     expect(r.ok).toBe(true);

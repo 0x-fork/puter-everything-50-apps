@@ -29,7 +29,8 @@ Common patterns that work:
 - Animation: set a value, then ob.keyframe_insert('location', {frame: 1}); C.scene.frame_start / frame_end; C.scene.render.fps.
 - Edit mode: bpy.ops.object.mode_set({mode: 'EDIT'}), then bpy.ops.mesh.* operators (select_all, subdivide, extrude_region_move, inset, bevel…), and back with mode_set({mode: 'OBJECT'}) before the script ends.
 - World and render: C.scene.world.color, C.scene.render.engine ('RASTER', 'PATHTRACE'), resolution_x / resolution_y.
-This API is a reimplementation: most of bpy is there, but not everything. When unsure of an operator, its properties, a modifier's settings or a node's sockets, call api_help instead of guessing. Python (language "python") is available too but loads slowly the first time; use it only when the user asks for Python.
+- Shader nodes: nodes.new('ShaderNodeMix') etc. come with their default settings (node.data_type, node.blend_type, node.operation…). Sockets are looked up by name (the visible one first) and listed in the reference's order, unavailable ones included (socket.enabled), so mix.inputs[6] / inputs[7] are the color A / B of a Mix node with data_type 'RGBA' and mix.outputs[2] its color Result. Color Ramp: ramp.color_ramp.elements[0].color = [r, g, b, 1]; elements.new(0.5).
+This API is a reimplementation: most of bpy is there, but not everything. When unsure of an operator, its properties, a modifier's settings or a node's sockets, call api_help instead of guessing. To experiment (for example create a node to see its sockets or settings), run the script with dry_run: true; it reports what it printed and undoes everything. Python (language "python") is available too but loads slowly the first time; use it only when the user asks for Python.
 
 # How to work
 - Look before you act: read the snapshot, and get_object or get_material when you need details of what is already there.

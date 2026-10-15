@@ -84,7 +84,8 @@ export function stepLabel(name: string, a: Record<string, unknown>): string {
       return `Look at material ${s(a.name)}`;
     case 'run_script': {
       const d = s(a.description).trim();
-      return d ? d.charAt(0).toUpperCase() + d.slice(1) : 'Run a script';
+      const label = d ? d.charAt(0).toUpperCase() + d.slice(1) : 'Run a script';
+      return a.dry_run === true ? `Try out: ${label.charAt(0).toLowerCase()}${label.slice(1)}` : label;
     }
     case 'api_help':
       return `Check the API: ${short(s(a.topic), 48)}`;
