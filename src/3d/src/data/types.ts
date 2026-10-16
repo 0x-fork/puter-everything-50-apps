@@ -27,7 +27,8 @@ export type ObjectType =
   | 'SPEAKER'
   | 'META'
   | 'CURVES'
-  | 'LIGHT_PROBE';
+  | 'LIGHT_PROBE'
+  | 'VOLUME';
 
 export type RotationMode = 'XYZ' | 'XZY' | 'YXZ' | 'YZX' | 'ZXY' | 'ZYX' | 'QUATERNION' | 'AXIS_ANGLE';
 
@@ -154,6 +155,10 @@ export interface MeshData {
   /** faces hidden in the UV editor (without sync selection), one flag per face */
   uv_hide?: Uint8Array;
   users?: number;
+  /** texture space (Generated coordinates): automatic from the bounds, or location ± size */
+  use_auto_texspace?: boolean;
+  texspace_location?: [number, number, number];
+  texspace_size?: [number, number, number];
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +204,10 @@ export interface Spline {
 export interface CurveData {
   id: ID;
   name: string;
+  /** texture space (Generated coordinates): automatic from the bounds, or location ± size */
+  use_auto_texspace?: boolean;
+  texspace_location?: [number, number, number];
+  texspace_size?: [number, number, number];
   dimensions: '2D' | '3D';
   /** Path animation: frames for one run along the path, and the current position in frames (animatable). */
   path_duration?: number;
@@ -341,7 +350,30 @@ export interface CameraData {
   show_composition_golden_tria_b?: boolean;
   show_composition_harmony_tri_a?: boolean;
   show_composition_harmony_tri_b?: boolean;
+  /** reference images drawn behind or in front of the scene when looking through this camera */
+  show_background_images?: boolean;
+  background_images?: CameraBackgroundImage[];
   users?: number;
+}
+
+export interface CameraBackgroundImage {
+  /** what is shown: an image, or a movie clip (footage of a camera solve); absent means image */
+  source?: 'IMAGE' | 'MOVIE_CLIP';
+  image: ID | null;
+  clip?: ID | null;
+  /** with a movie clip source: use the scene's active clip */
+  use_camera_clip?: boolean;
+  alpha: number;
+  display_depth: 'BACK' | 'FRONT';
+  frame_method: 'STRETCH' | 'FIT' | 'CROP';
+  /** offset in units of the camera frame width */
+  offset: [number, number];
+  rotation: number;
+  scale: number;
+  use_flip_x: boolean;
+  use_flip_y: boolean;
+  show_background_image: boolean;
+  show_expanded: boolean;
 }
 
 export interface Bone {
@@ -493,7 +525,7 @@ export interface NodeTreeData {
   /** For node groups: interface sockets */
   interface?: { in_out: 'INPUT' | 'OUTPUT'; name: string; socket_type: string; default_value?: SocketValue; min_value?: number; max_value?: number; identifier: string; hide_value?: boolean; /** identifier of the interface panel holding this input */ panel?: string; /** tooltip of the socket */ description?: string }[];
   /** node groups: collapsible panels that organize the group node's inputs */
-  interface_panels?: { identifier: string; name: string; default_closed?: boolean }[];
+  interface_panels?: { identifier: string; name: string; default_closed?: boolean; /** boolean input drawn as a checkbox in the panel header */ toggle?: string }[];
   active_node?: ID | null;
   view?: { x: number; y: number; zoom: number };
   /** node groups: description shown as a tooltip */
@@ -510,6 +542,13 @@ export interface NodeGroupData {
   tree: NodeTreeData;
   is_modifier?: boolean;
   is_tool?: boolean;
+  /** tools: modes and object types the tool is offered for (all when unset) */
+  is_mode_object?: boolean;
+  is_mode_edit?: boolean;
+  is_mode_sculpt?: boolean;
+  is_type_mesh?: boolean;
+  is_type_curve?: boolean;
+  is_type_pointcloud?: boolean;
   use_fake_user?: boolean;
   users?: number;
 }
@@ -556,7 +595,7 @@ export interface ImageData {
   bytes: Uint8Array | null;
   width: number;
   height: number;
-  source: 'FILE' | 'GENERATED' | 'VIEWER' | 'RENDER';
+  source: 'FILE' | 'GENERATED' | 'VIEWER' | 'RENDER' | 'TILED';
   generated_type?: 'BLANK' | 'UV_GRID' | 'COLOR_GRID';
   generated_color?: Color4;
   colorspace: 'sRGB' | 'Non-Color' | 'Linear';
@@ -566,6 +605,23 @@ export interface ImageData {
   revision?: number;
   use_fake_user?: boolean;
   users?: number;
+  /** UDIM tiles (source 'TILED'): the first tile uses the image's own pixels (src/render/udim.ts) */
+  tiles?: UdimTile[];
+  active_tile_index?: number;
+}
+
+/** One tile of a UDIM image: number 1001 + u + 10 × v of the UV square it covers. */
+export interface UdimTile {
+  number: number;
+  label?: string;
+  /** encoded pixels (null: generated); unused for the first tile */
+  bytes?: Uint8Array | null;
+  mime?: string;
+  width: number;
+  height: number;
+  generated_type?: 'BLANK' | 'UV_GRID' | 'COLOR_GRID';
+  generated_color?: Color4;
+  revision?: number;
 }
 
 export interface TextData {
@@ -982,6 +1038,9 @@ export type RenderEngine = 'RASTER' | 'PATHTRACE' | 'SOLID';
 
 export interface RenderSettings extends RealtimeRenderSettings {
   engine: RenderEngine;
+  /** texture baking (src/bake/settings.ts) */
+  bake?: import('../bake/settings').BakeSettings;
+  bake_type?: import('../bake/settings').BakeType;
   resolution_x: number;
   resolution_y: number;
   resolution_percentage: number;
@@ -1170,6 +1229,12 @@ export interface ToolSettings {
   use_mesh_mirror_x?: boolean;
   use_mesh_mirror_y?: boolean;
   use_mesh_mirror_z?: boolean;
+  /** interactive add tools: where the base is placed, how it is oriented, what Ctrl snaps to */
+  plane_depth?: 'SURFACE' | 'CURSOR_PLANE' | 'CURSOR_VIEW';
+  plane_orientation?: 'SURFACE' | 'DEFAULT';
+  snap_elements_tool?: 'GEOMETRY' | 'DEFAULT';
+  plane_axis?: 'X' | 'Y' | 'Z';
+  plane_axis_auto?: boolean;
 }
 
 export interface SculptSettings {
@@ -1256,6 +1321,9 @@ export interface KeyingSetData {
 
 export interface SceneData {
   name: string;
+  /** step of the timeline's Jump buttons (Ctrl ← / →), in time_jump_unit */
+  time_jump_delta?: number;
+  time_jump_unit?: 'SECONDS' | 'FRAMES';
   /** camera view safe-area margins (fractions of the frame, x and y) */
   safe_areas?: { title: [number, number]; action: [number, number]; title_center: [number, number]; action_center: [number, number] };
   frame_start: number;
@@ -1323,6 +1391,12 @@ export interface DocumentData {
   metaballs?: Record<ID, import('../metaball/types').MetaballData>;
   /** Hair curves data-blocks (src/hair); absent in older files */
   hair_curves?: Record<ID, import('../hair/types').HairCurvesData>;
+  /** Volume data-blocks (src/volume); absent in older files */
+  volumes?: Record<ID, import('../volume/types').VolumeData>;
+  /** Point cloud data-blocks (src/pointcloud); absent in older files */
+  pointclouds?: Record<ID, import('../pointcloud/types').PointCloudData>;
+  /** Library files this file links data-blocks from (src/library); absent in older files */
+  libraries?: Record<ID, import('../library/types').LibraryData>;
   /** Mode of the active object */
   mode: Mode;
   /** Ordering of object ids for stable iteration */

@@ -174,7 +174,8 @@ export function addMenu(): MenuItem[] {
         ['CUBE', 'Cube', 'meta_cube'],
       ].map(([t, l, i]) => ({ label: l, icon: i, op: 'object.metaball_add', props: { type: t } })) },
     { label: 'Text', icon: 'outliner_ob_font', op: 'object.text_add' },
-    { label: 'Point Cloud', icon: 'outliner_ob_pointcloud', op: 'object.pointcloud_add' },
+    { label: 'Point Cloud', icon: 'outliner_ob_pointcloud', op: 'object.pointcloud_random_add' },
+    { label: 'Volume', icon: 'outliner_ob_volume', submenu: () => [{ label: 'Import OpenVDB…', icon: 'file_volume', op: 'object.volume_import' }, { label: 'Empty', icon: 'outliner_ob_volume', op: 'object.volume_add' }] },
     ...addMenuHooks.flatMap((f) => f()),
     { separator: true },
     { label: 'Armature', icon: 'outliner_ob_armature', op: 'object.armature_add' },
@@ -228,7 +229,7 @@ export function meshAddMenu(): MenuItem[] {
     mk('Torus', 'mesh.primitive_torus_add', 'torus'),
     { separator: true },
     mk('Grid', 'mesh.primitive_grid_add', 'grid'),
-    mk('Robot Head', 'mesh.primitive_mascot_add', 'mascot'),
+    mk('Monkey', 'mesh.primitive_monkey_add', 'monkey'),
   ];
 }
 

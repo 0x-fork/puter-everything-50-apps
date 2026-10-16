@@ -179,6 +179,9 @@ function motionBlurPanel(r: RenderSettings): Child {
   );
 }
 
+/** Extra panels appended to the path tracer's Render properties (e.g. Bake). */
+export const pathTraceExtraPanels: ((r: RenderSettings) => Child)[] = [];
+
 function pathTracePanels(r: RenderSettings): Child {
   return [
     panel('rs-sampling', 'Sampling', () => [
@@ -234,6 +237,7 @@ function pathTracePanels(r: RenderSettings): Child {
       ],
       { closed: true },
     ),
+    pathTraceExtraPanels.map((p) => p(r)),
   ];
 }
 
@@ -262,6 +266,9 @@ function solidPanels(r: RenderSettings): Child {
   ];
 }
 
+/** Extra Render tab panels shown above Color Management (registered by feature modules). */
+export const renderExtraPanels: ((r: RenderSettings) => Child)[] = [];
+
 registerTab({
   id: 'RENDER',
   label: 'Render',
@@ -273,6 +280,7 @@ registerTab({
     return [
       engineRow(r),
       r.engine === 'PATHTRACE' ? pathTracePanels(r) : r.engine === 'RASTER' ? rasterPanels(r) : solidPanels(r),
+      ...renderExtraPanels.map((f) => f(r)),
       colorManagementPanel(r),
     ];
   },

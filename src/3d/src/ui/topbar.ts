@@ -15,8 +15,8 @@ import { assistantOpen } from '../assistant';
 import { renderContext } from '../render/context';
 import { shell, type Shell } from './shell';
 import './topbar.css';
-import './appenddialog';
 import { externalDataMenu } from '../io/externaldata';
+import { quickSetupBody, quickSetupPending, splashArt } from './quicksetup';
 
 /** File ▸ New entries (application templates, e.g. 2D Animation); modules append to it. */
 export const fileNewTemplates: { label: string; icon?: string; template: string }[] = [{ label: 'General', icon: 'file_blank', template: '' }];
@@ -65,7 +65,8 @@ export function fileMenu(): MenuItem[] {
     { label: 'Save Copy…', op: 'wm.save_as_mainfile', props: { copy: true } },
     { label: 'Save Incremental', shortcut: 'Ctrl Alt S', op: 'wm.save_mainfile', props: { incremental: true } },
     { separator: true },
-    { label: 'Append…', icon: 'link', op: 'wm.append' },
+    { label: 'Link…', icon: 'link', op: 'wm.link' },
+    { label: 'Append…', icon: 'append_blend', op: 'wm.append' },
     { separator: true },
     { label: 'Import', icon: 'import', submenu: importMenu },
     { label: 'Export', icon: 'export', submenu: exportMenu },
@@ -80,6 +81,8 @@ export function fileMenu(): MenuItem[] {
         { label: 'Load Factory Settings', op: 'wm.read_factory_settings' },
       ],
     },
+    { separator: true },
+    { label: 'Quit', icon: 'panel_close', shortcut: 'Ctrl Q', op: 'wm.quit_blender' },
   ];
 }
 
@@ -90,7 +93,8 @@ export function fileContextMenu(): MenuItem[] {
     { label: 'Open…', icon: 'file_folder', shortcut: 'Ctrl O', op: 'wm.open_mainfile' },
     { label: 'Open Recent', submenu: openRecentMenu },
     { separator: true },
-    { label: 'Append…', icon: 'link', op: 'wm.append' },
+    { label: 'Link…', icon: 'link', op: 'wm.link' },
+    { label: 'Append…', icon: 'append_blend', op: 'wm.append' },
     { separator: true },
     { label: 'Save', shortcut: 'Ctrl S', op: 'wm.save_mainfile' },
     { label: 'Save As…', shortcut: 'Shift Ctrl S', op: 'wm.save_as_mainfile' },
@@ -121,6 +125,7 @@ export function editMenu(): MenuItem[] {
     { label: 'Repeat History…', op: 'screen.repeat_history' },
     { separator: true },
     { label: 'Menu Search…', icon: 'search', shortcut: 'F3', op: 'wm.search_menu' },
+    ...(prefs.show_developer_ui ? [{ label: 'Operator Search…', op: 'wm.search_operator' }] : []),
     { separator: true },
     { label: 'Rename Active Item…', shortcut: 'F2', op: 'wm.call_panel', props: { name: 'TOPBAR_PT_name' } },
     { label: 'Batch Rename…', shortcut: 'Ctrl F2', op: 'wm.batch_rename' },
@@ -165,7 +170,10 @@ export function windowMenu(sh: Shell): MenuItem[] {
 export function helpMenu(): MenuItem[] {
   return [
     { label: 'Keyboard Shortcuts', op: 'wm.keymap_reference' },
+    ...(prefs.show_developer_ui ? [{ label: 'Operator Cheat Sheet', op: 'wm.operator_cheat_sheet' }] : []),
     { separator: true },
+    // feedback goes through Puter's own dialog, so it is offered where the app runs inside Puter
+    ...(window.self !== window.top || (globalThis as { puter?: unknown }).puter ? [{ label: 'Report a Bug', op: 'wm.url_open_preset', props: { type: 'BUG' } }] : []),
     { label: 'Save System Info', op: 'wm.sysinfo' },
     { separator: true },
     { label: 'About', icon: 'info_small', op: 'wm.about' },
@@ -196,8 +204,8 @@ export function appMenu(): MenuItem[] {
   ];
 }
 
-/** Menus that wm.call_menu can open by name. */
-const NAMED_MENUS: Record<string, [string, () => MenuItem[]]> = {
+/** Menus that wm.call_menu (and wm.search_single_menu) can open by name; other modules may add theirs. */
+export const NAMED_MENUS: Record<string, [string, () => MenuItem[]]> = {
   TOPBAR_MT_file_new: ['New File', fileNewMenu],
   TOPBAR_MT_file_open_recent: ['Open Recent', openRecentMenu],
   TOPBAR_MT_file_context_menu: ['File', fileContextMenu],
@@ -213,6 +221,9 @@ const NAMED_MENUS: Record<string, [string, () => MenuItem[]]> = {
 // splash screen
 
 let snapshotsCache: Snapshot[] = [];
+/** the splash shows the Quick Setup page first on the first run */
+let splashPage: 'setup' | 'main' = 'main';
+let splashHandle: { redraw(): void } | null = null;
 
 function splashBody(): Child {
   const recent = recentFiles().slice(0, 8);
@@ -221,65 +232,73 @@ function splashBody(): Child {
     close();
     app.run(op, props);
   };
+  const cols = h(
+    'div',
+    { class: 'splash-cols' },
+    h(
+      'div',
+      { class: 'splash-col' },
+      h('div', { class: 'splash-head' }, 'New File'),
+      fileNewTemplates.map((t) => h('button', { key: t.label, class: 'splash-item', onclick: run('wm.read_homefile', t.template ? { app_template: t.template } : {}) }, icon(t.icon ?? 'file_blank'), h('span', null, t.label))),
+      h('div', { class: 'splash-gap' }),
+      h('button', { class: 'splash-item', onclick: run('wm.open_mainfile') }, icon('file_folder'), h('span', null, 'Open…')),
+      h('button', { class: 'splash-item', onclick: run('wm.recover_last_session') }, icon('undo'), h('span', null, 'Recover Last Session')),
+      snapshotsCache.length ? h('button', { class: 'splash-item', onclick: run('wm.recover_auto_save') }, icon('time'), h('span', null, 'Recover Auto Save…')) : null,
+    ),
+    h(
+      'div',
+      { class: 'splash-col wide' },
+      h('div', { class: 'splash-head' }, 'Recent Files'),
+      recent.length
+        ? recent.map((e) =>
+            h(
+              'button',
+              { key: e.name, class: 'splash-item recent', 'data-tip': `${e.name}\n${sizeLabel(e.size)}, saved or opened ${ago(e.time)}`, onclick: run('wm.open_mainfile', { filepath: e.name }) },
+              icon('file_3d'),
+              h('span', { class: 'splash-recent-name' }, e.name),
+              h('span', { class: 'splash-recent-meta' }, ago(e.time)),
+            ),
+          )
+        : h('div', { class: 'splash-empty' }, 'Files you open or save appear here.'),
+    ),
+  );
+  const foot = h(
+    'div',
+    { class: 'splash-foot' },
+    h(
+      'label',
+      { class: 'splash-check' },
+      h('input', { type: 'checkbox', checked: prefs.show_splash, onchange: (e: Event) => ((prefs.show_splash = (e.target as HTMLInputElement).checked), savePrefs()) }),
+      'Show at startup',
+    ),
+    h('span', { class: 'grow' }),
+    h('button', { class: 'btn', onclick: run('wm.splash_about') }, 'About'),
+    h('button', { class: 'btn', onclick: run('wm.keymap_reference') }, 'Keyboard Shortcuts'),
+  );
   return h(
     'div',
     { class: 'splash' },
     h(
       'div',
       { class: 'splash-hero', onclick: close },
-      h('div', { class: 'splash-orbits' }, h('span', { class: 'o1' }), h('span', { class: 'o2' }), h('span', { class: 'o3' })),
+      splashArt(),
       h('div', { class: 'splash-brand' }, h('span', { class: 'splash-logo' }, appIcon(44)), h('div', null, h('div', { class: 'splash-name' }, '3D'), h('div', { class: 'splash-ver' }, `Version ${APP_VERSION}`))),
     ),
-    h(
-      'div',
-      { class: 'splash-cols' },
-      h(
-        'div',
-        { class: 'splash-col' },
-        h('div', { class: 'splash-head' }, 'New File'),
-        fileNewTemplates.map((t) => h('button', { key: t.label, class: 'splash-item', onclick: run('wm.read_homefile', t.template ? { app_template: t.template } : {}) }, icon(t.icon ?? 'file_blank'), h('span', null, t.label))),
-        h('div', { class: 'splash-gap' }),
-        h('button', { class: 'splash-item', onclick: run('wm.open_mainfile') }, icon('file_folder'), h('span', null, 'Open…')),
-        h('button', { class: 'splash-item', onclick: run('wm.recover_last_session') }, icon('undo'), h('span', null, 'Recover Last Session')),
-        snapshotsCache.length ? h('button', { class: 'splash-item', onclick: run('wm.recover_auto_save') }, icon('time'), h('span', null, 'Recover Auto Save…')) : null,
-      ),
-      h(
-        'div',
-        { class: 'splash-col wide' },
-        h('div', { class: 'splash-head' }, 'Recent Files'),
-        recent.length
-          ? recent.map((e) =>
-              h(
-                'button',
-                { key: e.name, class: 'splash-item recent', 'data-tip': `${e.name}\n${sizeLabel(e.size)}, saved or opened ${ago(e.time)}`, onclick: run('wm.open_mainfile', { filepath: e.name }) },
-                icon('file_3d'),
-                h('span', { class: 'splash-recent-name' }, e.name),
-                h('span', { class: 'splash-recent-meta' }, ago(e.time)),
-              ),
-            )
-          : h('div', { class: 'splash-empty' }, 'Files you open or save appear here.'),
-      ),
-    ),
-    h(
-      'div',
-      { class: 'splash-foot' },
-      h(
-        'label',
-        { class: 'splash-check' },
-        h('input', { type: 'checkbox', checked: prefs.show_splash, onchange: (e: Event) => ((prefs.show_splash = (e.target as HTMLInputElement).checked), savePrefs()) }),
-        'Show at startup',
-      ),
-      h('span', { class: 'grow' }),
-      h('button', { class: 'btn', onclick: run('wm.splash_about') }, 'About'),
-      h('button', { class: 'btn', onclick: run('wm.keymap_reference') }, 'Keyboard Shortcuts'),
-    ),
+    splashPage === 'setup'
+      ? quickSetupBody(() => {
+          splashPage = 'main';
+          splashHandle?.redraw();
+        })
+      : [cols, foot],
   );
 }
 
-export function showSplash() {
+/** Show the splash screen; at startup the first run begins with the Quick Setup page. */
+export function showSplash(opts: { startup?: boolean } = {}) {
   void listSnapshots().then((s) => {
     snapshotsCache = s;
-    openDialog({ id: 'splash', title: 'Welcome', width: 560, className: 'splash-dialog', body: splashBody });
+    splashPage = opts.startup && quickSetupPending() ? 'setup' : 'main';
+    splashHandle = openDialog({ id: 'splash', title: 'Welcome', width: 560, className: 'splash-dialog', body: splashBody });
   });
 }
 
@@ -624,5 +643,5 @@ addKeys('Window', [
 
 // splash at startup (not when a session was recovered, nor for ?factory-startup)
 void freshStart.then((fresh) => {
-  if (fresh && prefs.show_splash) showSplash();
+  if (fresh && (prefs.show_splash || quickSetupPending())) showSplash({ startup: true });
 });

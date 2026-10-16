@@ -9,8 +9,13 @@ import type { TreeEval } from './evaluator';
 /** Severity of a reported message. */
 export type WarningKind = 'ERROR' | 'WARNING' | 'INFO';
 
+/** Values that are only passed along (bundles, closures): identified by their kind. */
+export interface OpaqueVal {
+  readonly opaqueKind: string;
+}
+
 /** Value flowing through a socket. */
-export type Val = number | boolean | string | number[] | Field | GeometrySet | null | undefined;
+export type Val = number | boolean | string | number[] | Field | GeometrySet | OpaqueVal | null | undefined;
 
 /** Environment of one modifier evaluation. */
 export interface EvalEnv {
@@ -30,6 +35,20 @@ export interface EvalEnv {
   collectionObjects(id: string): string[];
   /** cache signature of another object's state (geometry version + transform) */
   objectSig(id: string): string;
+  /** set while a node group runs as a tool (geometry.execute_node_group) */
+  tool?: ToolEnv;
+}
+
+/** What a tool node group sees of the editor it runs from. */
+export interface ToolEnv {
+  mode: 'OBJECT' | 'EDIT' | 'SCULPT';
+  /** 3D cursor in the object's local space */
+  cursor: { location: [number, number, number]; rotation: [number, number, number] };
+  /** active element in Edit Mode */
+  active?: { domain: 'POINT' | 'EDGE' | 'FACE'; index: number };
+  mouse?: { x: number; y: number; width: number; height: number };
+  /** view and projection matrices of the viewport (column-major) */
+  view?: { view: number[]; projection: number[]; ortho: boolean };
 }
 
 export interface ExecContext {

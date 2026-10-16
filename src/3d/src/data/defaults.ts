@@ -24,6 +24,7 @@ import type {
   BrushData,
 } from './types';
 import { startupCube } from '../mesh/primitives';
+import { defaultBakeSettings } from '../bake/settings';
 
 let counter = 0;
 export function uid(prefix = 'id'): ID {
@@ -36,6 +37,8 @@ export const IDENTITY: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 export function defaultRender(): RenderSettings {
   return {
     engine: 'RASTER',
+    bake: defaultBakeSettings(),
+    bake_type: 'COMBINED',
     resolution_x: 1920,
     resolution_y: 1080,
     resolution_percentage: 100,
@@ -78,6 +81,9 @@ export function defaultRender(): RenderSettings {
     use_pass_mist: false,
     use_compositing: true,
     dither_intensity: 1,
+    use_freestyle: false,
+    line_thickness_mode: 'ABSOLUTE',
+    line_thickness: 1,
     preview_raster_samples: 16,
     time_limit: 0,
     sample_clamp_direct: 0,
@@ -590,6 +596,7 @@ export function defaultBrushes(): Record<ID, BrushData> {
 
 export function defaultScene(collection: ID, world: ID): SceneData {
   return {
+    id: uid('sc'),
     name: 'Scene',
     frame_start: 1,
     frame_end: 250,

@@ -3,7 +3,7 @@ import { toDisplayRGBA8, displayPixel, type ViewSettings } from './colormanage';
 import { compositeOverlay, type StampField } from './stamp';
 
 /** Built-in passes plus shader AOVs (`AOV <name>`, see render/realtime/aov.ts). */
-export type PassName = 'Combined' | 'Depth' | 'Normal' | 'Mist' | 'Position' | 'UV' | 'IndexOB' | 'IndexMA' | 'DiffCol' | 'Emit' | 'AO' | `AOV ${string}`;
+export type PassName = 'Combined' | 'Depth' | 'Normal' | 'Mist' | 'Position' | 'UV' | 'IndexOB' | 'IndexMA' | 'DiffCol' | 'Emit' | 'AO' | 'Freestyle' | `AOV ${string}` | `Combined_${string}`;
 export type ChannelMode = 'COLOR_ALPHA' | 'COLOR' | 'ALPHA' | 'Z';
 
 export interface RenderInfo {
@@ -32,6 +32,8 @@ export interface RenderResult {
   view?: ViewSettings;
   /** raw render passes when `passes.Combined` holds a post-processed (composited) image */
   viewLayer?: Partial<Record<PassName, Float32Array>>;
+  /** every rendered view layer (when more than one was rendered), by scene and layer name */
+  layers?: { name: string; scene: string; passes: Partial<Record<PassName, Float32Array>> }[];
   /** metadata of the render (Output ▸ Metadata), written into saved files */
   metadata?: StampField[];
   /** burnt-in metadata: RGBA8 overlay drawn over the display-converted Combined pass */
@@ -58,7 +60,7 @@ export function touchVirtualImage(id: string) {
   for (const fn of virtualListeners) fn(id);
 }
 
-export const PASS_CHANNELS: Record<PassName, number> = { Combined: 4, Depth: 1, Normal: 4, Mist: 1, Position: 4, UV: 4, IndexOB: 1, IndexMA: 1, DiffCol: 4, Emit: 4, AO: 1 };
+export const PASS_CHANNELS: Record<PassName, number> = { Combined: 4, Depth: 1, Normal: 4, Mist: 1, Position: 4, UV: 4, IndexOB: 1, IndexMA: 1, DiffCol: 4, Emit: 4, AO: 1, Freestyle: 4 };
 
 /** Channels of a pass in a result of the given size (AOVs are RGBA colors or single values). */
 export function passChannels(name: PassName, buf?: Float32Array, pixels?: number): number {
@@ -69,55 +71,86 @@ export function passChannels(name: PassName, buf?: Float32Array, pixels?: number
 
 /** Readable label of a pass. */
 export function passLabel(name: PassName): string {
-  return PASS_LABELS[name] ?? (name.startsWith('AOV ') ? name.slice(4) : name);
+  return PASS_LABELS[name] ?? (name.startsWith('AOV ') ? name.slice(4) : name.startsWith('Combined_') ? `Light Group ${name.slice(9)}` : name);
 }
 
 /** Display order of passes (pass menus, Render Layers outputs). */
-export const PASS_ORDER: PassName[] = ['Combined', 'Depth', 'Mist', 'Normal', 'Position', 'UV', 'IndexOB', 'IndexMA', 'DiffCol', 'Emit', 'AO'];
+export const PASS_ORDER: PassName[] = ['Combined', 'Depth', 'Mist', 'Normal', 'Position', 'UV', 'IndexOB', 'IndexMA', 'DiffCol', 'Emit', 'AO', 'Freestyle'];
 
 /** Readable pass names. */
-export const PASS_LABELS: Record<PassName, string> = { Combined: 'Combined', Depth: 'Depth', Normal: 'Normal', Mist: 'Mist', Position: 'Position', UV: 'UV', IndexOB: 'Object Index', IndexMA: 'Material Index', DiffCol: 'Diffuse Color', Emit: 'Emission', AO: 'Ambient Occlusion' };
+export const PASS_LABELS: Record<PassName, string> = { Combined: 'Combined', Depth: 'Depth', Normal: 'Normal', Mist: 'Mist', Position: 'Position', UV: 'UV', IndexOB: 'Object Index', IndexMA: 'Material Index', DiffCol: 'Diffuse Color', Emit: 'Emission', AO: 'Ambient Occlusion', Freestyle: 'Freestyle' };
 
 /** Render slots: renders go into the active slot so earlier ones can be compared. */
 export const RENDER_SLOTS = 8;
-const slots: (RenderResult | null)[] = new Array(RENDER_SLOTS).fill(null);
+interface Slot {
+  name: string;
+  result: RenderResult | null;
+}
+const slots: Slot[] = Array.from({ length: RENDER_SLOTS }, (_, i) => ({ name: `Slot ${i + 1}`, result: null }));
 let activeSlot = 0;
 const listeners = new Set<(pixels: boolean) => void>();
 
 export const renderResult = {
   get(): RenderResult | null {
-    return slots[activeSlot];
+    return slots[activeSlot]?.result ?? null;
   },
   set(r: RenderResult | null) {
-    slots[activeSlot] = r;
+    slots[activeSlot].result = r;
     this.touch();
   },
   /** Index of the slot that is shown and rendered into. */
   get slot() {
     return activeSlot;
   },
+  /** Number of render slots. */
+  get count() {
+    return slots.length;
+  },
   setSlot(i: number) {
-    activeSlot = Math.max(0, Math.min(RENDER_SLOTS - 1, i));
+    activeSlot = Math.max(0, Math.min(slots.length - 1, i));
     this.touch();
   },
   hasRender(i: number) {
-    return !!slots[i];
+    return !!slots[i]?.result;
+  },
+  slotName(i: number) {
+    return slots[i]?.name ?? '';
+  },
+  renameSlot(i: number, name: string) {
+    if (slots[i] && name.trim()) slots[i].name = name.trim();
+    this.touchInfo();
+  },
+  /** Add an empty slot after the existing ones and show it. */
+  addSlot(name?: string) {
+    let n = slots.length + 1;
+    while (slots.some((s) => s.name === `Slot ${n}`)) n++;
+    slots.push({ name: name?.trim() || `Slot ${n}`, result: null });
+    this.setSlot(slots.length - 1);
+    return slots.length - 1;
+  },
+  /** Remove the active slot (one slot always remains). */
+  removeSlot() {
+    if (slots.length <= 1) return false;
+    slots.splice(activeSlot, 1);
+    this.setSlot(Math.min(activeSlot, slots.length - 1));
+    return true;
   },
   /** Next (or previous) slot holding a render; the active slot when there is none. */
   cycle(reverse = false) {
-    for (let k = 1; k <= RENDER_SLOTS; k++) {
-      const i = (activeSlot + (reverse ? -k : k) + RENDER_SLOTS * 2) % RENDER_SLOTS;
-      if (slots[i]) return i;
+    const n = slots.length;
+    for (let k = 1; k <= n; k++) {
+      const i = (activeSlot + (reverse ? -k : k) + n * 2) % n;
+      if (slots[i].result) return i;
     }
     return activeSlot;
   },
   clearSlot() {
-    slots[activeSlot] = null;
+    slots[activeSlot].result = null;
     this.touch();
   },
   /** Pixels changed (bumps the version so displays re-convert). */
   touch() {
-    const current = slots[activeSlot];
+    const current = slots[activeSlot]?.result;
     if (current) current.version++;
     for (const l of listeners) l(true);
   },

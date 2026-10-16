@@ -11,7 +11,8 @@ import { activeTools } from '../../app/prefs';
 import type { MenuItem } from '../../ui/menu';
 import { meshAddMenu, snapMenu } from '../../editors/view3d/menus';
 import { editTransformExtras, mirrorMenu } from '../../editors/view3d/transformui';
-import { selectMode, inMeshEdit } from './context';
+import { selectMode, inMeshEdit, editMeshObjects } from './context';
+import { MeshEdit } from './meshedit';
 import { similarMenu } from './select-extra';
 import { toolHeaderRightHooks } from '../../editors/view3d/tooloptions';
 
@@ -68,11 +69,17 @@ export function separateMenu(): MenuItem[] {
 /** Extrude menu: the entries depend on the select mode. */
 export function extrudeMenu(): MenuItem[] {
   const [v, e] = app.doc.scene.tool_settings.mesh_select_mode;
+  // face entries only when faces are selected (or nothing tells yet)
+  const faces = editMeshObjects().some(({ me }) => MeshEdit.from(me).selectedFaces().length > 0);
   return [
-    { label: 'Extrude Faces', op: 'view3d.edit_mesh_extrude_move_normal', shortcut: 'E' },
-    { label: 'Extrude Faces Along Normals', op: 'view3d.edit_mesh_extrude_move_shrink_fatten' },
-    { label: 'Extrude Individual Faces', op: 'mesh.extrude_faces_move' },
-    { label: 'Extrude Manifold', op: 'mesh.extrude_manifold' },
+    ...(faces
+      ? [
+          { label: 'Extrude Faces', op: 'view3d.edit_mesh_extrude_move_normal', shortcut: 'E' },
+          { label: 'Extrude Faces Along Normals', op: 'view3d.edit_mesh_extrude_move_shrink_fatten' },
+          { label: 'Extrude Individual Faces', op: 'view3d.edit_mesh_extrude_individual_move' },
+          { label: 'Extrude Manifold', op: 'view3d.edit_mesh_extrude_manifold_normal' },
+        ]
+      : []),
     ...(v || e ? [{ label: 'Extrude Edges', op: 'mesh.extrude_edges_move' }] : []),
     ...(v ? [{ label: 'Extrude Vertices', op: 'mesh.extrude_vertices_move' }] : []),
     { separator: true },
@@ -160,6 +167,9 @@ export function edgeMenu(): MenuItem[] {
     { separator: true },
     { label: 'Mark Sharp from Vertices', op: 'mesh.mark_sharp', props: { use_verts: true } },
     { label: 'Set Sharpness by Angle', op: 'mesh.set_sharpness_by_angle' },
+    { separator: true },
+    { label: 'Mark Freestyle Edge', op: 'mesh.mark_freestyle_edge', props: { clear: false } },
+    { label: 'Clear Freestyle Edge', op: 'mesh.mark_freestyle_edge', props: { clear: true } },
   ];
 }
 
@@ -172,6 +182,9 @@ function faceDataMenu(): MenuItem[] {
     { label: 'Reverse UVs', op: 'mesh.uvs_reverse' },
     { separator: true },
     { label: 'Flip Quad Tessellation', op: 'mesh.flip_quad_tessellation' },
+    { separator: true },
+    { label: 'Mark Freestyle Face', op: 'mesh.mark_freestyle_face', props: { clear: false } },
+    { label: 'Clear Freestyle Face', op: 'mesh.mark_freestyle_face', props: { clear: true } },
   ];
 }
 

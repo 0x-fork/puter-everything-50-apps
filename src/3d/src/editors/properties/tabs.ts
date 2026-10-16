@@ -12,13 +12,14 @@ import { newMaterial, uid, newWorld } from '../../data/defaults';
 import { uniqueName } from '../../ops/object';
 import { cloneShared } from '../../data/cow';
 import { openMenu } from '../../ui/menu';
-import { idSelectorMenuHooks } from '../../ui/idmenu';
+import { idSelectorMenuHooks, idDecoration } from '../../ui/idmenu';
 import { materialSlots } from '../view3d/draw';
 import { uiList } from './uilist';
 import { cameraPanels } from '../../render/final/props/camera';
 import { materialSpecials, shapeKeySpecials, vertexGroupSpecials } from '../../object/listmenus';
 import { propertiesCollection } from '../../object/relations';
 import { objectCollectionsPanel } from '../../object/collections';
+import { customPropsPanelBody } from '../../ui/customprops';
 
 /** Small lock toggle used inside list rows. */
 function lockToggle(on: boolean, tip: string, toggle: () => void): Child {
@@ -29,6 +30,10 @@ const ob = () => app.activeObject;
 
 /** Extra Object-tab panels contributed by other modules (shown after Instancing, e.g. Motion Paths). */
 export const objectExtraPanels: ((o: ObjectData) => Child)[] = [];
+/** Extra rows of the Scene tab's Scene panel (e.g. Background Scene). */
+export const sceneMainRows: (() => Child)[] = [];
+/** Extra World-tab panels contributed by other modules (shown before Viewport Display). */
+export const worldExtraPanels: ((w: WorldData) => Child)[] = [];
 /** Keying Sets panel of the Scene tab (drawn by the animation module). */
 export const sceneKeyingPanel: { draw: (() => Child) | null } = { draw: null };
 /** Rigid Body World panel of the Scene tab (provided by the physics module). */
@@ -79,6 +84,7 @@ registerTab({
       panel('sc-scene', 'Scene', () => [
         objectProp(s, 'camera', 'Camera', { filter: (c) => c.type === 'CAMERA', undo: 'Scene Camera' }),
         splitRow('World', enumMenu('sc-world', [{ value: '', label: '—' }, ...worlds.map((w) => ({ value: w.id, label: w.name, icon: 'world' }))], s.world ?? '', (v) => ((s.world = v || null), changed('Scene World')))),
+        ...sceneMainRows.map((f) => f()),
       ]),
       panel('sc-units', 'Units', () => [
         enumProp(s.unit_settings, 'system', 'Unit System', [['NONE', 'None'], ['METRIC', 'Metric'], ['IMPERIAL', 'Imperial']]),
@@ -166,6 +172,7 @@ registerTab({
           : h('div', { class: 'prop-note' }, 'The world node tree has no Background node. Edit it in the Shader Editor (World).'),
       ),
       panel('wo-mist', 'Mist Pass', () => [num(w as never, 'mist_start' as never, 'Start', { unit: 'distance' }), num(w as never, 'mist_depth' as never, 'Depth', { unit: 'distance' }), enumProp(w as never, 'mist_falloff' as never, 'Falloff', [['QUADRATIC', 'Quadratic'], ['LINEAR', 'Linear'], ['INVERSE_QUADRATIC', 'Inverse Quadratic']])], { closed: true }),
+      worldExtraPanels.map((p) => p(w)),
       panel('wo-display', 'Viewport Display', () => [colorProp(w, 'color', 'Color')], { closed: true }),
     ];
   },
@@ -191,7 +198,7 @@ export function imageSlot(owner: Record<string, unknown>, key: string, label: st
       'div',
       { class: 'row-aligned' },
       enumMenu(`img-${oid(owner)}`, [{ value: '', label: '—' }, ...images.map((i) => ({ value: i.id, label: i.name, icon: 'image' }))], String(owner[key] ?? ''), (v) => ((owner[key] = v || null), changed('Assign Image'))),
-      button(`img-open-${oid(owner)}`, icon('file_folder'), () => app.run('image.open', { target_owner: true }, { invoke: true }) && void 0, { tip: 'Open Image' }),
+      button(`img-open-${oid(owner)}`, icon('file_folder'), () => app.run('image.open', { target_owner: true }, { invoke: true }) && void 0, { tip: 'Open Image', className: 'ra-icon' }),
     ),
   );
 }
@@ -214,7 +221,7 @@ registerTab({
     const c = propertiesCollection();
     if (!c) return h('div', { class: 'prop-note' }, 'No collection');
     return [
-      h('div', { class: 'id-row' }, icon('collection'), textField('col-name', c.name, (v) => ((c.name = uniqueName(doc, v, 'collections')), changed('Rename Collection')))),
+      h('div', { class: 'id-row' }, icon(idDecoration(c.id)?.icon ?? 'collection'), idDecoration(c.id)?.readonly ? h('span', { class: 'text-field ids-name-ro', 'data-tip': idDecoration(c.id)!.tip }, c.name) : textField('col-name', c.name, (v) => ((c.name = uniqueName(doc, v, 'collections')), changed('Rename Collection')))),
       panel('col-restrict', 'Restrictions', () => [boolHeading(c, 'hide_select', 'Selectable', '', {}), bool(c, 'hide_render', 'Disable in Renders'), bool(c, 'holdout' as never, 'Holdout'), bool(c, 'indirect_only' as never, 'Indirect Only')]),
       panel(
         'col-instancing',
@@ -225,9 +232,13 @@ registerTab({
         ],
         { closed: true },
       ),
+      ...collectionExtraPanels.map((f) => f(c)),
     ];
   },
 });
+
+/** Extra Collection tab panels (registered by feature modules). */
+export const collectionExtraPanels: ((c: import('../../data/types').CollectionData) => Child)[] = [];
 
 // ---------------------------------------------------------------------------
 // Object
@@ -244,7 +255,7 @@ registerTab({
     const rotPath = o.rotation_mode === 'QUATERNION' ? 'rotation_quaternion' : o.rotation_mode === 'AXIS_ANGLE' ? 'rotation_axis_angle' : 'rotation_euler';
     const parents = Object.values(doc.objects).filter((x) => x.id !== o.id);
     return [
-      h('div', { class: 'id-row' }, icon('object'), textField('ob-name', o.name, (v) => ((o.name = uniqueName(doc, v)), changed('Rename Object')))),
+      h('div', { class: 'id-row' }, icon(idDecoration(o.id)?.icon ?? 'object'), idDecoration(o.id)?.readonly ? h('span', { class: 'text-field ids-name-ro', 'data-tip': idDecoration(o.id)!.tip }, o.name) : textField('ob-name', o.name, (v) => ((o.name = uniqueName(doc, v)), changed('Rename Object')))),
       panel('ob-transform', 'Transform', () => [
         vecProp(o, 'location', 'Location', { unit: 'distance', anim: { ob: o, path: 'location' }, lock: { owner: o, key: 'lock_location' } }),
         o.rotation_mode === 'QUATERNION'
@@ -295,32 +306,10 @@ registerTab({
         colorProp(o, 'color', 'Color', { alpha: true }),
         o.type === 'EMPTY' ? [enumProp(o, 'empty_display_type', 'Display As', [['PLAIN_AXES', 'Plain Axes'], ['ARROWS', 'Arrows'], ['SINGLE_ARROW', 'Single Arrow'], ['CIRCLE', 'Circle'], ['CUBE', 'Cube'], ['SPHERE', 'Sphere'], ['CONE', 'Cone'], ['IMAGE', 'Image']]), num(o, 'empty_display_size', 'Size', { unit: 'distance', min: 0 })] : null,
       ], { closed: true }),
-      panel('ob-custom', 'Custom Properties', () => customProps(o.custom), { closed: true }),
+      panel('ob-custom', 'Custom Properties', () => customPropsPanelBody(o as never, 'object'), { closed: true }),
     ];
   },
 });
-
-export function customProps(custom: Record<string, unknown>): Child {
-  return [
-    button('cp-new', [icon('add'), 'New'], () => {
-      let i = 0;
-      while (`prop${i ? i : ''}` in custom) i++;
-      custom[`prop${i ? i : ''}`] = 1.0;
-      changed('Add Property');
-    }),
-    Object.entries(custom).map(([k, v]) =>
-      h(
-        'div',
-        { key: k, class: 'custom-prop' },
-        typeof v === 'number'
-          ? splitRow(k, numberField({ id: `cp.${k}`, value: v, set: (x, f) => ((custom[k] = x), app.changed('doc'), f && app.pushUndo('Edit Property')) }), h('button', { class: 'icon-btn', onclick: () => (delete custom[k], changed('Remove Property')) }, icon('x')))
-          : typeof v === 'boolean'
-            ? splitRow(k, checkbox(`cp.${k}`, '', v, (x) => ((custom[k] = x), changed('Edit Property'))), h('button', { class: 'icon-btn', onclick: () => (delete custom[k], changed('Remove Property')) }, icon('x')))
-            : splitRow(k, textField(`cp.${k}`, String(v), (x) => ((custom[k] = x), changed('Edit Property'))), h('button', { class: 'icon-btn', onclick: () => (delete custom[k], changed('Remove Property')) }, icon('x'))),
-      ),
-    ),
-  ];
-}
 
 // ---------------------------------------------------------------------------
 // Data-block selector (browse / name / new / unlink)
@@ -346,7 +335,7 @@ export function dataBlockSelector<T extends { id: string; name: string; use_fake
         'data-tip': 'Browse',
         onpointerdown: (e: PointerEvent) => {
           e.preventDefault();
-          openMenu(items.map((i) => ({ label: i.name, icon: iconName, active: i.id === current, action: () => set(i.id) })), e.currentTarget as HTMLElement);
+          openMenu(items.map((i) => ({ label: i.name, icon: idDecoration(i.id)?.icon ?? iconName, description: idDecoration(i.id)?.note, active: i.id === current, action: () => set(i.id) })), e.currentTarget as HTMLElement);
         },
       },
       icon(iconName),
@@ -354,9 +343,10 @@ export function dataBlockSelector<T extends { id: string; name: string; use_fake
     ),
     cur
       ? [
-          textField(`${id}-name`, cur.name, (v) => ((cur.name = v), changed('Rename'))),
+          idDecoration(cur.id) ? h('span', { class: 'ids-lib', 'data-tip': idDecoration(cur.id)!.tip }, icon(idDecoration(cur.id)!.icon)) : null,
+          idDecoration(cur.id)?.readonly ? h('span', { class: 'text-field ids-name-ro', 'data-tip': idDecoration(cur.id)!.tip }, cur.name) : textField(`${id}-name`, cur.name, (v) => ((cur.name = v), changed('Rename'))),
           opts.users && opts.users > 1 ? h('button', { class: 'ids-users', 'data-tip': 'Display number of users of this data (click to make a single-user copy)', onclick: () => opts.duplicate?.() }, String(opts.users)) : null,
-          h('button', { class: { 'ids-btn': true, on: !!cur.use_fake_user }, 'data-tip': 'Fake User\nSave this data-block even if it has no users', onclick: () => ((cur.use_fake_user = !cur.use_fake_user), changed('Fake User')) }, icon(cur.use_fake_user ? 'fake_user_on' : 'fake_user_off')),
+          h('button', { class: { 'ids-btn': true, on: !!cur.use_fake_user }, 'data-tip': 'Fake User\nSave this data-block even if it has no users', disabled: !!idDecoration(cur.id)?.readonly, onclick: () => app.run('ed.lib_id_fake_user_toggle', { id: cur.id }, { invoke: false }) }, icon(cur.use_fake_user ? 'fake_user_on' : 'fake_user_off')),
           opts.duplicate ? h('button', { class: 'ids-btn', 'data-tip': 'New (duplicate)', onclick: () => opts.duplicate!() }, icon('duplicate')) : null,
           opts.noUnlink ? null : h('button', { class: 'ids-btn', 'data-tip': 'Unlink Data-Block', onclick: () => set(null) }, icon('x')),
         ]
@@ -458,7 +448,16 @@ function meshData(o: ObjectData, me: MeshData): Child {
         me.color_attributes.map((c) => ({ key: c.name, label: c.name, icon: 'group_vcol', right: h('span', { class: 'ul-meta' }, c.domain === 'POINT' ? 'Vertex' : 'Face Corner') })),
         me.active_color_index,
         (i) => ((me.active_color_index = i), app.changed('doc')),
-        { add: () => app.run('geometry.color_attribute_add'), remove: () => app.run('geometry.color_attribute_remove') },
+        {
+          add: () => app.run('geometry.color_attribute_add'),
+          remove: () => app.run('geometry.color_attribute_remove'),
+          rename: (i, name) => {
+            name = name.trim();
+            if (!name || me.color_attributes.some((c, j) => j !== i && c.name === name)) return;
+            me.color_attributes[i].name = name;
+            changed('Rename Color Attribute');
+          },
+        },
       ),
     ]),
     panel('me-remesh', 'Remesh', () => [
@@ -584,7 +583,7 @@ export function activeMaterial(o: ObjectData | null): MaterialData | null {
 function slotOwner(o: ObjectData): { materials: (string | null)[] } | null {
   const doc = app.doc;
   if (!o.data) return null;
-  return (doc.meshes[o.data] ?? doc.curves[o.data] ?? doc.metaballs?.[o.data] ?? doc.hair_curves?.[o.data]) ?? null;
+  return (doc.meshes[o.data] ?? doc.curves[o.data] ?? doc.metaballs?.[o.data] ?? doc.hair_curves?.[o.data] ?? doc.volumes?.[o.data] ?? doc.pointclouds?.[o.data]) ?? null;
 }
 
 registerTab({
@@ -616,6 +615,14 @@ registerTab({
           specials: materialSpecials,
           up: slots.length > 1 ? () => app.run('object.material_slot_move', { direction: 'UP' }) : undefined,
           down: slots.length > 1 ? () => app.run('object.material_slot_move', { direction: 'DOWN' }) : undefined,
+          // renaming a slot renames its material
+          rename: (i, name) => {
+            const m = slots[i] ? doc.materials[slots[i]!] : undefined;
+            name = name.trim();
+            if (!m || !name || name === m.name) return;
+            m.name = uniqueName(doc, name, 'materials');
+            changed('Rename Material');
+          },
           extra: app.doc.mode === 'EDIT' ? h('div', { class: 'btn-row' }, opButton('object.material_slot_assign', 'Assign'), opButton('object.material_slot_select', 'Select'), opButton('object.material_slot_deselect', 'Deselect')) : null,
         },
       ),
@@ -652,11 +659,15 @@ export const materialSurfacePanel: { draw: ((ma: MaterialData) => Child) | null 
 /** Hook for the World ▸ Surface panel (set by the nodes module). */
 export const worldSurfacePanel: { draw: ((w: WorldData) => Child) | null } = { draw: null };
 
+/** Extra Material tab panels shown above Viewport Display (registered by feature modules). */
+export const materialExtraPanels: ((ma: MaterialData) => Child)[] = [];
+
 function materialPanels(ma: MaterialData): Child {
   return [
     panel('ma-preview', 'Preview', () => h('div', { class: 'mat-preview', style: { background: `radial-gradient(circle at 35% 35%, #ffffff88 0, transparent 30%), radial-gradient(circle, ${swatchCss(ma)} 0 60%, transparent 61%)` } }), { closed: true }),
     panel('ma-surface', 'Surface', () => (materialSurfacePanel.draw ? materialSurfacePanel.draw(ma) : h('div', { class: 'prop-note' }, 'Edit the node tree in the Shader Editor.'))),
     (ensureMaterialDefaults(ma), materialSettingsPanel(ma)),
+    ...materialExtraPanels.map((f) => f(ma)),
     panel('ma-display', 'Viewport Display', () => [colorProp(ma, 'diffuse_color', 'Color', { alpha: true }), num(ma, 'metallic', 'Metallic', { min: 0, max: 1, slider: true }), num(ma, 'roughness', 'Roughness', { min: 0, max: 1, slider: true })], { closed: true }),
   ];
 }

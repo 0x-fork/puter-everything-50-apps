@@ -24,6 +24,8 @@ export interface EFace {
   selX?: boolean;
   /** quad split along the other diagonal */
   flip?: boolean;
+  /** marked for line rendering (Mark Freestyle Face) */
+  fsFace?: boolean;
   /** face strength for weighted normals (0 weak, 1 medium, 2 strong) */
   strength?: number;
 }
@@ -45,6 +47,10 @@ export class MeshEdit {
   looseEdges: [number, number][] = [];
   /** Edge/Face select mode: edges whose vertices are selected but which are not selected */
   edgeExcl = new Set<string>();
+  /** edges marked for line rendering (vertex pair keys) */
+  fsEdges = new Set<string>();
+  /** vertices added on marked edges (the edge's ends), so the split parts stay marked */
+  fsMid = new Map<number, [number, number]>();
 
   get vcount() {
     return this.pos.length / 3;
@@ -77,7 +83,9 @@ export class MeshEdit {
         cnormals: cn ? Array.from(cn.subarray(a * 3, b * 3)) : undefined,
         flip: me.quad_flip?.[f] ? true : undefined,
         strength: me.face_strength && me.face_strength.length === me.offsets.length - 1 ? me.face_strength[f] : undefined,
+        fsFace: me.freestyle_face?.[f] ? true : undefined,
       });
+      if (me.freestyle_edge) for (let c = a; c < b; c++) if (me.freestyle_edge[c]) m.fsEdges.add(edgeKey(me.indices[c], me.indices[c + 1 < b ? c + 1 : a]));
     }
     const loose = me.loose_edges;
     if (loose) for (let i = 0; i < loose.length; i += 2) m.looseEdges.push([loose[i], loose[i + 1]]);
@@ -127,6 +135,9 @@ export class MeshEdit {
     me.custom_normals = this.customNormals();
     me.face_strength = this.faces.some((f) => f.strength !== undefined && f.strength !== 1) ? Uint8Array.from(this.faces, (f) => f.strength ?? 1) : undefined;
     me.quad_flip = this.faces.some((f) => f.flip && f.verts.length === 4) ? Uint8Array.from(this.faces, (f) => (f.flip && f.verts.length === 4 ? 1 : 0)) : undefined;
+    me.freestyle_face = this.faces.some((f) => f.fsFace) ? Uint8Array.from(this.faces, (f) => (f.fsFace ? 1 : 0)) : undefined;
+    me.freestyle_edge = this.fsEdges.size ? Uint8Array.from(this.faces.flatMap((f) => f.verts.map((v, i) => (this.fsMarked(v, f.verts[(i + 1) % f.verts.length]) ? 1 : 0)))) : undefined;
+    if (me.freestyle_edge && !me.freestyle_edge.some(Boolean)) me.freestyle_edge = undefined;
     // keep the exact edge/face selection with the new selection array
     const sel = this.sel;
     const faces = new Set<number>();
@@ -194,6 +205,8 @@ export class MeshEdit {
     c.skin = this.skin ? this.skin.slice() : null;
     c.looseEdges = this.looseEdges.map((e) => [e[0], e[1]] as [number, number]);
     c.edgeExcl = new Set(this.edgeExcl);
+    c.fsEdges = new Set(this.fsEdges);
+    c.fsMid = new Map(this.fsMid);
     c.faces = this.faces.map((f) => ({ ...f, verts: [...f.verts], uvs: [...f.uvs], seams: [...f.seams], sharp: [...f.sharp], creases: [...f.creases], colors: f.colors ? [...f.colors] : undefined, cnormals: f.cnormals ? [...f.cnormals] : undefined }));
     return c;
   }
@@ -211,6 +224,13 @@ export class MeshEdit {
   /** Append a vertex interpolated from sources (weights sum to 1). */
   addVert(p: ArrayLike<number>, from: [number, number][] = [], select = 1): number {
     const i = this.vcount;
+    if (this.fsEdges.size && from.length === 2) {
+      const ends = (v: number) => this.fsMid.get(v) ?? [v, v];
+      const a = ends(from[0][0]),
+        b = ends(from[1][0]);
+      const pair = [...new Set([...a, ...b])];
+      if (pair.length === 2 && this.fsEdges.has(edgeKey(pair[0], pair[1]))) this.fsMid.set(i, [pair[0], pair[1]]);
+    }
     this.pos.push(p[0], p[1], p[2]);
     this.sel.push(select);
     this.hide.push(0);
@@ -266,6 +286,7 @@ export class MeshEdit {
       sharp: new Array(n).fill(0),
       creases: new Array(n).fill(0),
       colors: template?.colors ? new Array(n * 4).fill(1) : undefined,
+      fsFace: template?.fsFace,
     };
   }
 
@@ -341,16 +362,34 @@ export class MeshEdit {
     this.compact();
   }
 
+  /** Is the edge u–v marked for line rendering (directly, or as part of a split marked edge)? */
+  fsMarked(u: number, v: number): boolean {
+    if (this.fsEdges.has(edgeKey(u, v))) return true;
+    const a = this.fsMid.get(u) ?? [u, u],
+      b = this.fsMid.get(v) ?? [v, v];
+    const ends = [...new Set([...a, ...b])];
+    return ends.length === 2 && (this.fsMid.has(u) || this.fsMid.has(v)) && this.fsEdges.has(edgeKey(ends[0], ends[1]));
+  }
+
   private remapEdgeExcl(map: number[]) {
-    if (!this.edgeExcl.size) return;
-    const out = new Set<string>();
-    for (const k of this.edgeExcl) {
-      const [a, b] = k.split(':').map(Number);
-      const x = map[a],
-        y = map[b];
-      if (x >= 0 && y >= 0 && x !== y && x !== undefined && y !== undefined) out.add(edgeKey(x, y));
+    const remapSet = (set: Set<string>) => {
+      const out = new Set<string>();
+      for (const k of set) {
+        const [a, b] = k.split(':').map(Number);
+        const x = map[a],
+          y = map[b];
+        if (x >= 0 && y >= 0 && x !== y && x !== undefined && y !== undefined) out.add(edgeKey(x, y));
+      }
+      return out;
+    };
+    if (this.fsEdges.size) this.fsEdges = remapSet(this.fsEdges);
+    if (this.fsMid.size) {
+      const mid = new Map<number, [number, number]>();
+      for (const [k, [a, b]] of this.fsMid) if (map[k] >= 0 && map[a] >= 0 && map[b] >= 0) mid.set(map[k], [map[a], map[b]]);
+      this.fsMid = mid;
     }
-    this.edgeExcl = out;
+    if (!this.edgeExcl.size) return;
+    this.edgeExcl = remapSet(this.edgeExcl);
   }
 
   // -------------------------------------------------------------------------

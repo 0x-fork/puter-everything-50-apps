@@ -1,17 +1,21 @@
 // Outliner: tree of the scene's collections and objects (view layer / scenes), every data-block
 // in the file, or unused data. Selection is kept in sync with object selection; collections and
 // other elements have their own outliner selection.
+import { renameScene, sceneById } from '../scenes/scenes';
+import { switchScene } from '../scenes/switch';
+import { dropTypeFor } from '../modeling/dropops';
 import { h, patch, type Child } from '../ui/h';
 import { icon } from '../ui/icons';
 import { app, type ChangeKind } from '../app/app';
 import { registerEditor, type Area, type Editor } from '../ui/screen';
-import { openMenu, openPopover, promptText, type MenuItem } from '../ui/menu';
+import { openMenu, openPopover, promptText } from '../ui/menu';
 import type { DocumentData, ObjectData } from '../data/types';
 import { uniqueName, setActiveCollection, activeCollection } from '../ops/object';
-import { applyMatrixToObject, fromMatrix4 } from '../eval/transform';
-import { Matrix4, Vector3 } from 'three';
+import { Vector3 } from 'three';
 import { surfaceHit } from '../ops/view3d';
 import { textField } from '../ui/widgets';
+import { findStrip } from '../sequencer/strips';
+import { isReadOnly } from '../library/readonly';
 import {
   buildRows,
   defaultFilter,
@@ -26,12 +30,18 @@ import {
   type Row,
   type TreeState,
 } from './outliner/tree';
-import { moveCollection, moveObjectsToCollection } from './outliner/collections';
+import { moveCollection } from './outliner/collections';
 import { contextMenuFor, emptyMenu, viewMenu, rowBadgeHooks } from './outliner/menus';
 import { filterPopover } from './outliner/filter';
 import { setCurrentOutliner } from './outliner/current';
 import './outliner/icons';
 import './outliner/ops';
+import './outliner/sequence';
+import './outliner/dataapi';
+import './outliner/ops_more';
+import './outliner/scenes';
+import { rowSync } from './outliner/sync';
+import { valueCell, idTypeFilterPopover, overridesFilterPopover, dataApiEditMenu } from './outliner/headers';
 import './outliner/outliner.css';
 
 const MODE_ICON: Record<string, string> = {
@@ -74,14 +84,17 @@ const ROW_H = 22;
 const PAD = 2;
 const VIRTUAL_MIN = 150;
 
-type DragInfo = { kind: 'objects'; ids: string[] } | { kind: 'collection'; id: string } | { kind: 'material'; id: string };
+type DragInfo = { kind: 'objects'; ids: string[] } | { kind: 'collection'; id: string } | { kind: 'material'; id: string } | { kind: 'data'; table: string; id: string } | { kind: 'stack'; item: 'modifier' | 'constraint'; ob: string; id: string };
 type DropZone = 'INTO' | 'BEFORE' | 'AFTER';
 
-const DISPLAY_MODES: [DisplayMode, string, string][] = [
-  ['SCENES', 'Scenes', 'scene_data'],
-  ['VIEW_LAYER', 'View Layer', 'view_layer'],
-  ['BLENDER_FILE', 'Data Blocks', 'file_3d'],
-  ['ORPHAN_DATA', 'Unused Data', 'trash'],
+const DISPLAY_MODES: [DisplayMode, string, string, string][] = [
+  ['SCENES', 'Scenes', 'scene_data', 'Every scene with its view layer tree'],
+  ['VIEW_LAYER', 'View Layer', 'view_layer', 'Collections and objects of the view layer'],
+  ['SEQUENCE', 'Video Sequencer', 'seq_sequencer', 'The strips of the Video Sequencer'],
+  ['BLENDER_FILE', 'Data Blocks', 'file_3d', 'Every data-block of this file and of its linked libraries'],
+  ['DATA_API', 'Data API', 'rna', 'All data and its properties, with their values'],
+  ['LIBRARY_OVERRIDES', 'Library Overrides', 'library_override', 'Library overrides and what they change'],
+  ['ORPHAN_DATA', 'Unused Data', 'trash', 'Data-blocks nothing uses (deleted when the file is saved, unless they have a fake user)'],
 ];
 
 export class Outliner implements Editor {
@@ -146,7 +159,17 @@ export class Outliner implements Editor {
     });
     this.el.addEventListener('pointerenter', () => setCurrentOutliner(this));
     this.list.addEventListener('dragover', (e) => {
-      if (this.drag && !(e.target as HTMLElement).closest('.ol-row')) this.setHint(null);
+      if (!this.drag || (e.target as HTMLElement).closest('.ol-row')) return;
+      // objects with a parent can be dropped on the empty space to clear it
+      if (this.drag.kind === 'objects' && this.drag.ids.some((id) => app.doc.objects[id]?.parent) && (this.displayMode === 'VIEW_LAYER' || this.displayMode === 'SCENES')) {
+        e.preventDefault();
+        this.setHint('Drop to clear parent', e.clientX, e.clientY);
+      } else this.setHint(null);
+    });
+    this.list.addEventListener('drop', (e) => {
+      if (!this.drag || (e.target as HTMLElement).closest('.ol-row')) return;
+      e.preventDefault();
+      this.onDropEmpty();
     });
     setCurrentOutliner(this);
   }
@@ -168,9 +191,10 @@ export class Outliner implements Editor {
           onpointerdown: (e: PointerEvent) => {
             e.preventDefault();
             openMenu(
-              DISPLAY_MODES.map(([v, l, i]) => ({
+              DISPLAY_MODES.map(([v, l, i, d]) => ({
                 label: l,
                 icon: i,
+                description: d,
                 active: this.displayMode === v,
                 action: () => this.setDisplayMode(v),
               })),
@@ -182,6 +206,19 @@ export class Outliner implements Editor {
         icon(dm[2]),
         icon('down_arrow_hlt', 'tiny'),
       ),
+      this.displayMode === 'DATA_API'
+        ? h(
+            'button',
+            {
+              class: 'hdr-menu',
+              onpointerdown: (e: PointerEvent) => {
+                e.preventDefault();
+                openMenu(dataApiEditMenu(), e.currentTarget as HTMLElement);
+              },
+            },
+            'Edit',
+          )
+        : null,
       h(
         'div',
         { class: 'hdr-search' },
@@ -220,6 +257,36 @@ export class Outliner implements Editor {
               onclick: () => app.run('outliner.collection_new', { nested: true }),
             },
             icon('collection_new'),
+          )
+        : null,
+      this.displayMode === 'BLENDER_FILE' || this.displayMode === 'ORPHAN_DATA'
+        ? h(
+            'button',
+            {
+              class: { 'hdr-toggle': true, 'ol-filter-btn': true, on: this.filter.use_filter_id_type },
+              'data-tip': 'Filter\nOnly show one data-block type',
+              onpointerdown: (e: PointerEvent) => {
+                e.preventDefault();
+                openPopover(e.currentTarget as HTMLElement, () => idTypeFilterPopover(this), { width: 220, className: 'ol-filter-pop' });
+              },
+            },
+            icon('filter'),
+            icon('down_arrow_hlt', 'tiny'),
+          )
+        : null,
+      this.displayMode === 'LIBRARY_OVERRIDES'
+        ? h(
+            'button',
+            {
+              class: { 'hdr-toggle': true, 'ol-filter-btn': true, on: this.filter.use_filter_lib_override_system },
+              'data-tip': 'Filter\nHow library overrides are listed',
+              onpointerdown: (e: PointerEvent) => {
+                e.preventDefault();
+                openPopover(e.currentTarget as HTMLElement, () => overridesFilterPopover(this), { width: 230, className: 'ol-filter-pop' });
+              },
+            },
+            icon('filter'),
+            icon('down_arrow_hlt', 'tiny'),
           )
         : null,
       this.displayMode === 'ORPHAN_DATA'
@@ -304,11 +371,18 @@ export class Outliner implements Editor {
   }
 
   isSelected(r: Row): boolean {
+    const sync = rowSync[r.kind];
+    if (sync && this.filter.use_sync_select) return sync.get(r);
     if (r.kind === 'object' && r.ob && this.filter.use_sync_select) return !!app.doc.objects[r.ob.id]?.select;
     return this.sel.has(r.ekey);
   }
 
   setSelected(r: Row, v: boolean) {
+    const sync = rowSync[r.kind];
+    if (sync && this.filter.use_sync_select) {
+      sync.set(r, v);
+      return;
+    }
     if (r.kind === 'object' && r.ob && this.filter.use_sync_select) {
       const ob = app.doc.objects[r.ob.id];
       if (ob) ob.select = v && !ob.hide;
@@ -321,7 +395,12 @@ export class Outliner implements Editor {
 
   deselectAll() {
     this.sel.clear();
-    if (this.filter.use_sync_select) for (const o of Object.values(app.doc.objects)) o.select = false;
+    if (!this.filter.use_sync_select) return;
+    if (this.displayMode === 'SEQUENCE') {
+      for (const r of this.rows) rowSync[r.kind]?.set(r, false);
+      return;
+    }
+    for (const o of Object.values(app.doc.objects)) o.select = false;
   }
 
   isActive(r: Row): boolean {
@@ -357,6 +436,7 @@ export class Outliner implements Editor {
   activate(r: Row) {
     const doc = app.doc;
     this.activeKey = r.ekey;
+    if (rowSync[r.kind]?.activate) return rowSync[r.kind]!.activate!(r);
     if (r.kind === 'collection' && r.id) {
       setActiveCollection(r.id);
       return;
@@ -407,6 +487,11 @@ export class Outliner implements Editor {
     const doc = app.doc;
     const before = this.selectionSignature();
     if (r.ob && (r.kind === 'object' || (this.displayMode !== 'BLENDER_FILE' && this.displayMode !== 'ORPHAN_DATA'))) this.prepareModeSwitch(r.ob);
+    // clicking another scene makes it the active scene
+    if (r.kind === 'scene' && r.id && r.id !== doc.scene.id && sceneById(doc, r.id)) {
+      switchScene(r.id);
+      return;
+    }
     const selectable = (x: Row) => x.kind !== 'group' && x.kind !== 'file' && x.kind !== 'scene' && !(x.kind === 'collection' && x.id === doc.scene.collection && !opts.ctrl);
     if (opts.shift) {
       const a = this.cursorIndex();
@@ -682,6 +767,7 @@ export class Outliner implements Editor {
               )
             : null,
           h('span', { class: 'ol-spacer' }),
+          r.value ? valueCell(r) : null,
           idModes && r.users !== undefined ? this.userCells(r) : null,
           cols.length
             ? h(
@@ -748,7 +834,7 @@ export class Outliner implements Editor {
   private userCells(r: Row): Child {
     const table = r.table;
     const rec = table ? (app.doc as unknown as Record<string, Record<string, { use_fake_user?: boolean }>>)[table]?.[r.id ?? ''] : undefined;
-    const canFake = !!rec && table !== 'objects' && table !== 'collections';
+    const canFake = !!rec && table !== 'objects' && table !== 'collections' && !isReadOnly(rec);
     return h(
       'span',
       { class: 'ol-users' },
@@ -801,6 +887,8 @@ export class Outliner implements Editor {
         holdout: 'holdout',
         indirect: 'indirect_only',
       }[col] as 'exclude';
+      // linked collections only take the view layer toggles
+      if (isReadOnly(c) && (col === 'select' || col === 'viewport' || col === 'render')) return null;
       const inverted = col === 'holdout' || col === 'indirect';
       const raw = !!(c as unknown as Record<string, boolean>)[flag];
       const on = inverted ? raw : !raw;
@@ -832,6 +920,7 @@ export class Outliner implements Editor {
           if (col !== 'enable' && col !== 'holdout' && col !== 'indirect')
             for (const oid of objectsInside(doc, id)) {
               const o = doc.objects[oid];
+              if (isReadOnly(o) && col !== 'hide') continue;
               const okey = {
                 select: 'hide_select',
                 hide: 'hide',
@@ -852,7 +941,7 @@ export class Outliner implements Editor {
     }
     if (r.kind === 'object' && r.ob && (col === 'select' || col === 'hide' || col === 'viewport' || col === 'render')) {
       const ob = doc.objects[r.ob.id];
-      if (!ob) return null;
+      if (!ob || (isReadOnly(ob) && col !== 'hide')) return null;
       const key = (
         {
           select: 'hide_select',
@@ -868,6 +957,7 @@ export class Outliner implements Editor {
         render: ['restrict_render_off', 'restrict_render_on', 'Disable in Renders'],
       }[col];
       const apply = (o: ObjectData, v: boolean) => {
+        if (isReadOnly(o) && key !== 'hide') return;
         o[key] = !v;
         if (!v && (key === 'hide' || key === 'hide_viewport' || key === 'hide_select')) o.select = false;
       };
@@ -1076,8 +1166,9 @@ export class Outliner implements Editor {
 
   private isDraggable(r: Row) {
     if (r.kind === 'object') return true;
-    if (r.kind === 'collection') return r.id !== app.doc.scene.collection && this.displayMode !== 'BLENDER_FILE' && this.displayMode !== 'ORPHAN_DATA';
-    return r.kind === 'material' || (r.kind === 'id' && r.table === 'materials');
+    if (r.kind === 'collection') return r.id !== app.doc.scene.collection && this.displayMode !== 'BLENDER_FILE' && this.displayMode !== 'ORPHAN_DATA' && !isReadOnly(parentOf(app.doc, r.id ?? ''));
+    if ((r.kind === 'modifier' || r.kind === 'constraint') && r.ob && r.id) return !isReadOnly(app.doc.objects[r.ob.id]);
+    return r.kind === 'material' || (r.kind === 'id' && (r.table === 'materials' || r.table === 'worlds' || (!!r.table && !!r.id && !!dropTypeFor(r.table, r.id))));
   }
 
   private onDragStart(e: DragEvent, r: Row) {
@@ -1088,6 +1179,8 @@ export class Outliner implements Editor {
         ids: ids.includes(r.ob.id) ? ids : [r.ob.id],
       };
     } else if (r.kind === 'collection' && r.id) this.drag = { kind: 'collection', id: r.id };
+    else if (r.kind === 'id' && r.id && r.table && r.table !== 'materials') this.drag = { kind: 'data', table: r.table, id: r.id };
+    else if ((r.kind === 'modifier' || r.kind === 'constraint') && r.ob && r.id) this.drag = { kind: 'stack', item: r.kind, ob: r.ob.id, id: r.id };
     else if (r.id) this.drag = { kind: 'material', id: r.id };
     e.dataTransfer?.setData('text/plain', r.label);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copyMove';
@@ -1098,6 +1191,15 @@ export class Outliner implements Editor {
     const d = this.drag;
     const doc = app.doc;
     if (!d) return null;
+    // linked collections cannot take new content (moving a linked collection itself is fine)
+    if (r.kind === 'collection' && r.id && isReadOnly(doc.collections[r.id]) && (d.kind === 'objects' || zone === 'INTO')) return null;
+    if (d.kind === 'collection' && zone !== 'INTO' && r.id && isReadOnly(parentOf(doc, r.id))) return null;
+    if (d.kind === 'stack') {
+      if (r.kind === d.item && r.ob && r.id !== d.id) return r.ob.id === d.ob ? (zone === 'AFTER' ? 'Move after' : 'Move before') : `Copy to "${r.ob.name}"`;
+      if (r.kind === 'object' && r.ob && r.ob.id !== d.ob && !isReadOnly(r.ob)) return `Copy to "${r.ob.name}"`;
+      return null;
+    }
+    if (d.kind === 'objects' && r.kind === 'scene' && this.displayMode === 'SCENES') return 'Add to scene';
     if (d.kind === 'objects') {
       if (r.kind === 'collection' && r.id && this.displayMode !== 'BLENDER_FILE') {
         const parented = d.ids.some((id) => doc.objects[id]?.parent);
@@ -1119,10 +1221,10 @@ export class Outliner implements Editor {
     if (!this.drag) return;
     const el = e.currentTarget as HTMLElement;
     let zone: DropZone = 'INTO';
-    if (this.drag.kind === 'collection' && r.kind === 'collection') {
+    if ((this.drag.kind === 'collection' && r.kind === 'collection') || (this.drag.kind === 'stack' && r.kind === this.drag.item)) {
       const b = el.getBoundingClientRect();
       const f = (e.clientY - b.top) / b.height;
-      zone = f < 0.3 ? 'BEFORE' : f > 0.7 && !r.expanded ? 'AFTER' : 'INTO';
+      zone = this.drag.kind === 'stack' ? (f < 0.5 ? 'BEFORE' : 'AFTER') : f < 0.3 ? 'BEFORE' : f > 0.7 && !r.expanded ? 'AFTER' : 'INTO';
     }
     const action = this.dropAction(r, zone, e.ctrlKey || e.metaKey, e.shiftKey);
     el.classList.remove('drop-into', 'drop-before', 'drop-after');
@@ -1155,41 +1257,18 @@ export class Outliner implements Editor {
     this.drag = null;
     this.setHint(null);
     if (!d || !action) return;
+    if (d.kind === 'stack') {
+      app.run('outliner.datastack_drop', { kind: d.item, object: d.ob, item: d.id, target_object: r.ob?.id ?? '', target_item: r.kind === d.item ? r.id : '', after: zone === 'AFTER' }, { invoke: false });
+      return;
+    }
+    if (d.kind === 'objects' && r.kind === 'scene') {
+      app.run('outliner.scene_drop', { objects: d.ids.join('|'), scene: r.id ?? '' }, { invoke: false });
+      return;
+    }
     if (d.kind === 'objects' && r.kind === 'collection' && r.id) {
-      if (!ctrl && !shift) this.clearParentKeepTransform(d.ids.filter((id) => !d.ids.includes(doc.objects[id]?.parent ?? '')));
-      moveObjectsToCollection(doc, d.ids, r.id, ctrl);
-      app.pushUndo(ctrl ? 'Link to Collection' : 'Move to Collection');
+      app.run('outliner.collection_drop', { objects: d.ids.join('|'), collection: r.id, link: ctrl, keep_parent: shift }, { invoke: false });
     } else if (d.kind === 'objects' && r.kind === 'object' && r.ob) {
-      const parent = r.ob;
-      const pw = app.graph.get(parent.id)?.world.clone() ?? new Matrix4();
-      const parentCols = Object.values(doc.collections)
-        .filter((c) => c.objects.includes(parent.id))
-        .map((c) => c.id);
-      let n = 0;
-      for (const id of d.ids) {
-        if (id === parent.id) continue;
-        const ob = doc.objects[id];
-        if (!ob) continue;
-        let q: string | null = parent.id,
-          cycle = false;
-        while (q) {
-          if (q === id) cycle = true;
-          q = doc.objects[q]?.parent ?? null;
-        }
-        if (cycle) continue;
-        const w = app.graph.get(id)?.world.clone() ?? new Matrix4();
-        ob.parent = parent.id;
-        ob.parent_type = 'OBJECT';
-        ob.matrix_parent_inverse = fromMatrix4(new Matrix4());
-        applyMatrixToObject(ob, pw.clone().invert().multiply(w));
-        // children follow the parent into its collection when they were not sharing one
-        const shared = parentCols.some((c) => doc.collections[c].objects.includes(id));
-        if (!shared && parentCols.length && this.displayMode !== 'BLENDER_FILE')
-          moveObjectsToCollection(doc, [id], r.parentCollection && parentCols.includes(r.parentCollection) ? r.parentCollection : parentCols[0], false);
-        n++;
-      }
-      if (!n) return;
-      app.pushUndo('Drop to Set Parent');
+      app.run('outliner.parent_drop', { children: d.ids.join('|'), parent: r.ob.id, collection: this.displayMode === 'BLENDER_FILE' ? '' : (r.parentCollection ?? '') }, { invoke: false });
     } else if (d.kind === 'collection' && r.kind === 'collection' && r.id) {
       if (!moveCollection(doc, d.id, r.id, zone)) {
         app.report('WARNING', 'Cannot move a collection inside itself');
@@ -1203,16 +1282,13 @@ export class Outliner implements Editor {
     app.changed('doc', 'select');
   }
 
-  private clearParentKeepTransform(ids: string[]) {
-    const doc = app.doc;
-    for (const id of ids) {
-      const ob = doc.objects[id];
-      if (!ob?.parent) continue;
-      const w = app.graph.get(id)?.world;
-      ob.parent = null;
-      ob.matrix_parent_inverse = fromMatrix4(new Matrix4());
-      if (w) applyMatrixToObject(ob, w);
-    }
+  /** Objects dropped below the tree lose their parent. */
+  private onDropEmpty() {
+    const d = this.drag;
+    this.drag = null;
+    this.setHint(null);
+    if (d?.kind !== 'objects' || !d.ids.some((id) => app.doc.objects[id]?.parent)) return;
+    app.run('outliner.parent_clear', { objects: d.ids.join('|') }, { invoke: false });
   }
 
   // ---------------------------------------------------------------------------
@@ -1233,8 +1309,10 @@ export class Outliner implements Editor {
   }
 
   canRename(r: Row) {
+    const rec = r.kind === 'object' && r.ob ? app.doc.objects[r.ob.id] : r.kind === 'collection' && r.id ? app.doc.collections[r.id] : r.table && r.id ? (app.doc as unknown as Record<string, Record<string, unknown>>)[r.table]?.[r.id] : null;
+    if (rec && isReadOnly(rec)) return false;
     if (r.kind === 'collection') return r.id !== app.doc.scene.collection;
-    return r.kind !== 'group' && r.kind !== 'file' && r.kind !== 'modifiers' && r.kind !== 'constraints' && r.kind !== 'vgroups';
+    return !['group', 'file', 'modifiers', 'constraints', 'vgroups', 'library', 'rna', 'override'].includes(r.kind);
   }
 
   rename(r: Row, name: string) {
@@ -1245,13 +1323,20 @@ export class Outliner implements Editor {
       const tables = doc as unknown as Record<string, Record<string, { name: string }>>;
       if (r.kind === 'object' && r.ob) doc.objects[r.ob.id].name = uniqueName(doc, name);
       else if (r.kind === 'collection' && r.collection) doc.collections[r.collection.id].name = uniqueName(doc, name, 'collections');
-      else if (r.kind === 'scene') doc.scene.name = name;
+      else if (r.kind === 'scene') renameScene(doc, sceneById(doc, r.id) ?? doc.scene, name);
       else if (r.kind === 'modifier' && r.ob) {
         const m = doc.objects[r.ob.id]?.modifiers.find((x) => x.id === r.id);
         if (m) m.name = name;
       } else if (r.kind === 'constraint' && r.ob) {
         const c = doc.objects[r.ob.id]?.constraints.find((x) => x.id === r.id);
         if (c) c.name = name;
+      } else if (r.kind === 'strip' && r.path) {
+        const ed = doc.scene.sequence_editor;
+        const st = ed ? findStrip(ed.strips, r.path) : null;
+        if (st && !findStrip(ed!.strips, name)) {
+          if (ed!.active_strip === st.name) ed!.active_strip = name;
+          st.name = name;
+        }
       } else if (r.kind === 'vgroup' && r.ob?.data) {
         const g = doc.meshes[r.ob.data]?.vertex_groups?.find((x) => x.name === r.label);
         if (g) g.name = name;
@@ -1427,6 +1512,16 @@ export class Outliner implements Editor {
 
 let viewportDrag: DragInfo | null = null;
 
+/** The outliner item being dragged (for drop targets in other editors), cleared once dropped. */
+export function outlinerDrag(clear = false): DragInfo | null {
+  const d = viewportDrag;
+  if (clear) viewportDrag = null;
+  return d;
+}
+
+/** The collection that holds collection `id`. */
+const parentOf = (doc: DocumentData, id: string) => Object.values(doc.collections).find((c) => c.children.includes(id));
+
 function viewportAt(e: DragEvent): { el: HTMLElement; pick(x: number, y: number, r?: number): { id: string } | null; unproject(x: number, y: number, d: Vector3): Vector3 } | null {
   const target = e.target as HTMLElement | null;
   if (!target?.closest?.('.view3d')) return null;
@@ -1437,7 +1532,7 @@ function viewportAt(e: DragEvent): { el: HTMLElement; pick(x: number, y: number,
 
 addEventListener('dragover', (e) => {
   const d = viewportDrag;
-  if (!d || (d.kind !== 'collection' && d.kind !== 'material') || !viewportAt(e)) return;
+  if (!d || !viewportAt(e)) return;
   e.preventDefault();
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
 });
@@ -1459,6 +1554,15 @@ addEventListener('drop', (e) => {
     const hit = v.pick(x, y, 4);
     if (hit) app.run('outliner.material_drop', { object: hit.id, material: d.id }, { invoke: false });
     else app.report('WARNING', 'Drop the material on an object');
+  } else if (d.kind === 'objects') {
+    // an object dropped into the view moves under the mouse
+    const ob = app.doc.objects[d.ids[0]];
+    if (ob && app.doc.mode === 'OBJECT') app.run('object.transform_to_mouse', { name: ob.name, drop_x: Math.round(x), drop_y: Math.round(y) }, { invoke: false });
+  } else if (d.kind === 'data') {
+    const rec = (app.doc as unknown as Record<string, Record<string, { name: string }>>)[d.table]?.[d.id];
+    if (!rec) return;
+    if (d.table === 'worlds') app.run('view3d.drop_world', { name: rec.name }, { invoke: false });
+    else if (app.doc.mode === 'OBJECT') app.run('object.data_instance_add', { name: rec.name, type: dropTypeFor(d.table, d.id), drop_x: Math.round(x), drop_y: Math.round(y) }, { invoke: false });
   }
 });
 
