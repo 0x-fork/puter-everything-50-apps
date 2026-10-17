@@ -30,7 +30,7 @@ import { invoke, isLambda, runtime } from './lambda.js';
 import { runQuery } from './query.js';
 import { rowsFromXml } from '../importrange.js';
 import { cachedModel, forecastAt, confidenceAt, statistic } from '../forecast-ets.js';
-import { midpoint, mean as numericMean, sum, product, MIN_NORMAL, flushUnderflow, hasZeroHighWord, squaredDeviations, variance as numericVariance } from '../numeric.js';
+import { maxOf, midpoint, mean as numericMean, sum, product, MIN_NORMAL, flushUnderflow, hasZeroHighWord, squaredDeviations, variance as numericVariance } from '../numeric.js';
 
 /* ---------- Value helpers ---------- */
 
@@ -578,6 +578,32 @@ function indexCriterion(match, range) {
   }
   match.positions = positions;
 }
+
+/**
+ * ROW(A:A) or COLUMN(1:1): the numbers of the rows (columns) a whole column (row) is read to — the
+ * sheet's used area, found without calculating a cell, as an address check must not — standing for
+ * the whole of it, as A:A<>"" does. The two then pair row for row, so LOOKUP(2,1/(A:A<>""),ROW(A:A))
+ * and MAX(IF(A:A<>"",ROW(A:A))) find the last row in use; a million-row array is never built for the
+ * rows past the data, which ROWS counts no more than it does for A:A*2.
+ */
+function wholeLine({ ref }, ctx, axis) {
+  const used = ctx.usedArea ? ctx.usedArea(ref.sheet) : null;
+  const rows = axis === 'rows';
+  const first = rows ? ref.r1 : ref.c1;
+  const n = Math.max(used ? (rows ? used.r2 : used.c2) : -1, first) - first + 1;
+  // The last numbering built is kept, as a range read is shared (and, like one, never written to): a
+  // column of formulas each asking ROW(A:A) gets the one array, and whatever is indexed by its values
+  // array is reused with it. Freezing it cost more than building it afresh.
+  const key = `${axis},${first},${n}`;
+  if (wholeLines[axis]?.key !== key) {
+    const numbers = Array.from({ length: n }, (_, i) => first + i + 1);
+    wholeLines[axis] = { key, values: rows ? numbers.map((v) => [v]) : [numbers] };
+  }
+  const values = wholeLines[axis].values;
+  return rows ? { range: true, values, extent: [ref.r2 - ref.r1 + 1, 1], tall: true }
+    : { range: true, values, extent: [1, ref.c2 - ref.c1 + 1], wide: true };
+}
+const wholeLines = {};
 
 /** The rows and columns of a range that were read: the values it holds, which may stop short of the cells it names. */
 function readWindow(range) {
@@ -1890,7 +1916,20 @@ export const FUNCTIONS = {
 
   /* Text */
   CONCAT: { fn: (args) => { let s = ''; for (const { v } of eachValue(args)) { if (isError(v)) return v; const t = toText(v); if (isError(t)) return t; s += t; if (s.length > MAX_TEXT) return err('#VALUE!'); } return s; } },
-  CONCATENATE: { alias: 'CONCAT' },
+  // CONCATENATE joins single values: an array argument is joined element by element (see LIFTED), so
+  // CONCATENATE(A1:A3," ",B1:B3) spills a joined row per row, where CONCAT runs a range's cells together.
+  CONCATENATE: {
+    fn: (args) => {
+      let s = '';
+      for (const a of args) {
+        const v = scalar(a); if (isError(v)) return v;
+        const t = toText(v); if (isError(t)) return t;
+        s += t;
+        if (s.length > MAX_TEXT) return err('#VALUE!');
+      }
+      return s;
+    },
+  },
   TEXTJOIN: {
     fn: ([delim, ignoreEmpty, ...rest]) => {
       // An array of delimiters is used in turn between the texts, starting over when it runs out.
@@ -2113,15 +2152,19 @@ export const FUNCTIONS = {
       if (isError(i)) return i;
       if (i < 0) return notFound === undefined ? err('#N/A') : notFound;
       const vertical = l.values.length >= (l.values[0]?.length || 0);
+      // A return reference answers with the cells found, as INDEX does, so XLOOKUP(...):XLOOKUP(...)
+      // spans a range and ROW, CELL and ISREF see an address; an array with no address answers values.
+      const ref = r.ref && !r.ref.sheetEnd ? r.ref : null;
+      const found = (values, r1, r2, c1, c2) => ref
+        ? { range: true, values, ref: { ...ref, kind: r1 === r2 && c1 === c2 ? 'cell' : 'range', r1, r2, c1, c2 } }
+        : values.length === 1 && values[0].length === 1 ? values[0][0] : { range: true, values };
       // A two-dimensional return range answers with the whole row (or column).
       if (vertical) {
         const row = r.values[i];
         if (!row) return err('#N/A');
-        return row.length === 1 ? row[0] ?? null : { range: true, values: [row.map((v) => v ?? null)] };
+        return found([row.map((v) => v ?? null)], ref?.r1 + i, ref?.r1 + i, ref?.c1, ref?.c2);
       }
-      const col = r.values.map((row) => row[i]);
-      if (col.length === 1) return col[0] ?? null;
-      return { range: true, values: col.map((v) => [v ?? null]) };
+      return found(r.values.map((row) => [row[i] ?? null]), ref?.r1, ref?.r2, ref?.c1 + i, ref?.c1 + i);
     }, [0]),
     array: true,
   },
@@ -2220,6 +2263,7 @@ export const FUNCTIONS = {
   },
   // ROW(A1:A4) is the array {1;2;3;4}, the classic input to SUMPRODUCT and MOD tricks.
   // Its cap is SEQUENCE's, so the two functions answer the same span the same way.
+  // ROW(A:A) numbers the rows a whole column is read to (see wholeLine).
   ROW: {
     localeContext: false,
     callerContext: args => args.length ? [] : ['row'],
@@ -2232,10 +2276,10 @@ export const FUNCTIONS = {
       }
       if (!isRange(a) || !a.ref) return err('#VALUE!');
       const { r1, r2 } = a.ref;
-      // A whole column keeps answering with its first row, since an address check must never
-      // allocate a million-row array; a written-out span past the cap is #NUM!, as SEQUENCE
-      // answers past its own, rather than the first row again, which reads as a real answer.
-      if (r2 === r1 || a.ref.kind === 'cols') return r1 + 1;
+      if (r2 === r1) return r1 + 1;
+      if (a.ref.kind === 'cols') return wholeLine(a, ctx, 'rows');
+      // A written-out span past the cap is #NUM!, as SEQUENCE answers past its own, rather than
+      // the first row again, which reads as a real answer.
       if (r2 - r1 + 1 > 100000) return err('#NUM!'); // SEQUENCE's cap, so both refuse the same span
       return { range: true, values: Array.from({ length: r2 - r1 + 1 }, (_, i) => [r1 + i + 1]) };
     },
@@ -2253,7 +2297,8 @@ export const FUNCTIONS = {
       }
       if (!isRange(a) || !a.ref) return err('#VALUE!');
       const { c1, c2 } = a.ref;
-      if (c2 === c1 || a.ref.kind === 'rows') return c1 + 1; // a whole row, as ROW answers for a whole column
+      if (c2 === c1) return c1 + 1;
+      if (a.ref.kind === 'rows') return wholeLine(a, ctx, 'cols'); // a whole row, as ROW answers for a whole column
       if (c2 - c1 + 1 > 100000) return err('#NUM!');
       return { range: true, values: [Array.from({ length: c2 - c1 + 1 }, (_, i) => c1 + i + 1)] };
     },
@@ -2589,14 +2634,15 @@ export const FUNCTIONS = {
     }),
   },
   FORECAST: {
-    fn: ([x, ys, xs]) => {
+    liftArgs: [0], // an array of x values forecasts each one
+    fn: overArguments(([x, ys, xs]) => {
       const at = toNumber(x); if (isError(at)) return at;
       return pairStats(xs, ys, (s) => {
         if (!s.sxx) return err('#DIV/0!');
         const slope = flushUnderflow(s.sxy / s.sxx);
         return s.my + flushUnderflow(slope * (at - s.mx));
       });
-    },
+    }, [0]),
   },
   'FORECAST.LINEAR': { alias: 'FORECAST' },
   'FORECAST.ETS': { fn: ([target, values, timeline, seasonality, completion, aggregation]) => etsEach(target, etsModel(values, timeline, seasonality, completion, aggregation), forecastAt) },
@@ -5949,7 +5995,7 @@ function invertMatrix(A) {
   const m = A.map((row, i) => [...row, ...range0(n).map((j) => (i === j ? 1 : 0))]);
   // Singular means a pivot negligible against the matrix's own scale, not against a fixed 1e-12:
   // a matrix of tiny (or huge) numbers is as invertible as one of ordinary ones.
-  const scale = Math.max(...A.flat().map(Math.abs));
+  const scale = maxOf(A.flat().map(Math.abs));
   if (!(scale > 0) || !Number.isFinite(scale)) return null;
   for (let i = 0; i < n; i++) {
     let pivot = i;
@@ -8527,7 +8573,7 @@ const LIFTED = `
 ABS INT TRUNC ROUND ROUNDUP ROUNDDOWN MOD SQRT SQRTPI POWER EXP LN LOG LOG10 SIGN EVEN ODD QUOTIENT
 CEILING CEILING.MATH CEILING.PRECISE ISO.CEILING FLOOR FLOOR.MATH FLOOR.PRECISE MROUND FACT FACTDOUBLE
 DEGREES RADIANS SIN COS TAN ASIN ACOS ATAN ATAN2 SINH COSH TANH ASINH ACOSH ATANH SEC CSC COT SECH CSCH COTH ACOT ACOTH
-LEN LEFT RIGHT MID UPPER LOWER PROPER TRIM CLEAN TEXT VALUE NUMBERVALUE FIND SEARCH SUBSTITUTE REPLACE REPT EXACT
+LEN LEFT RIGHT MID UPPER LOWER PROPER TRIM CLEAN TEXT VALUE NUMBERVALUE FIND SEARCH SUBSTITUTE REPLACE REPT EXACT CONCATENATE
 CHAR CODE UNICHAR UNICODE T N
 YEAR MONTH DAY HOUR MINUTE SECOND WEEKDAY WEEKNUM ISOWEEKNUM DATE TIME DATEVALUE TIMEVALUE EDATE EOMONTH DAYS DATEDIF
 YEARFRAC DAYS360
@@ -8537,7 +8583,7 @@ T.DIST T.DIST.RT T.DIST.2T T.INV T.INV.2T TDIST CHISQ.DIST CHISQ.DIST.RT CHISQ.I
 GAMMA GAMMALN GAMMA.DIST GAMMA.INV BETA.DIST BETA.INV BETADIST WEIBULL.DIST HYPGEOM.DIST HYPGEOMDIST NEGBINOM.DIST NEGBINOMDIST
 CONFIDENCE.NORM CONFIDENCE.T STANDARDIZE PHI GAUSS FISHER FISHERINV ERF ERF.PRECISE ERFC
 COMBIN COMBINA PERMUT PERMUTATIONA RANDBETWEEN
-FIXED DOLLAR ROMAN ARABIC BASE DECIMAL ENCODEURL REGEXMATCH REGEXTEST REGEXREPLACE
+FIXED DOLLAR ROMAN ARABIC BASE DECIMAL ENCODEURL REGEXMATCH REGEXTEST REGEXREPLACE REGEXEXTRACT VALUETOTEXT
 PMT IPMT PPMT FV PV NPER RATE SLN SYD DDB DB VDB EFFECT NOMINAL DOLLARDE DOLLARFR ISPMT PDURATION RRI CUMIPMT CUMPRINC
 TBILLEQ TBILLPRICE TBILLYIELD DISC INTRATE RECEIVED PRICEDISC YIELDDISC PRICE YIELD DURATION MDURATION ACCRINT ACCRINTM
 PRICEMAT YIELDMAT COUPPCD COUPNCD COUPNUM COUPDAYBS COUPDAYS COUPDAYSNC
@@ -8552,5 +8598,17 @@ for (const name of LIFTED) {
   const def = FUNCTIONS[name];
   if (def) { def.lift = true; def.elementwise = true; }
 }
+
+/**
+ * Functions that read every argument's values in turn, so the first error among them is the answer
+ * wherever it lies. A reference argument is read only once the function runs, after the evaluator has
+ * met any error given directly: the evaluator looks back through the arguments before it, so
+ * SUM(A1,NA()) with #DIV/0! in A1 is #DIV/0!, as Excel answers, not the #N/A that came later.
+ */
+const ERRORS_IN_ORDER = `
+SUM AVERAGE MIN MAX PRODUCT MEDIAN STDEV STDEV.P VAR VAR.P MODE MODE.MULT SUMSQ GEOMEAN HARMEAN AVEDEV DEVSQ
+SKEW SKEW.P KURT AVERAGEA MAXA MINA STDEVA STDEVPA VARA VARPA AND OR XOR CONCAT TEXTJOIN
+`.trim().split(/\s+/);
+for (const name of ERRORS_IN_ORDER) FUNCTIONS[name].errorsInOrder = true;
 
 export const FUNCTION_NAMES = Object.keys(FUNCTIONS).sort();

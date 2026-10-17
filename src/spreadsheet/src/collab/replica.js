@@ -24,8 +24,8 @@
  */
 
 import { Workbook, sheetShapeJSON, sameJSON, cloneCell } from '../core/workbook.js';
-import { cellKey, parseKey } from '../core/cell.js';
-import { LINE_PROPS, SHEET_PROPS, BOOK_PROPS, mapCellKey, mapLineKey, mergeRuns, transformStructure, isStructure } from './ops.js';
+import { cellKey, parseKey, cutText } from '../core/cell.js';
+import { LINE_PROPS, SHEET_PROPS, BOOK_PROPS, MAX_LABEL, mapCellKey, mapLineKey, mergeRuns, transformStructure, isStructure } from './ops.js';
 import { applyOps, contentOf, sheetJSON, lineValues } from './apply.js';
 
 const UNDO_LIMIT = 100;
@@ -74,7 +74,8 @@ export class Replica extends EventTarget {
   /**
    * `wb` is the workbook at revision `rev` of the room. `readOnly` (a viewer) takes back every local edit at once.
    * Events: 'local' (a change was made here; send it), 'refused' (an edit a viewer cannot make), 'remote'
-   * (someone else's change was applied), 'history' (what Undo and Redo would do changed).
+   * (someone else's change was applied), 'incoming' ({ ops }: someone else's operations, just applied, before the
+   * workbook announces them or anything is calculated), 'history' (what Undo and Redo would do changed).
    */
   constructor(wb, { rev = 0, readOnly = false } = {}) {
     super();
@@ -485,9 +486,12 @@ export class Replica extends EventTarget {
 
   /* ---------- Receiving ---------- */
 
-  /** The changes not yet in the room's log, in the form to send (on top of revision `rev`). */
+  /**
+   * The changes not yet in the room's log, in the form to send (on top of revision `rev`). A step's name can be
+   * longer than the room keeps ("Show scenario" and a long scenario name): it travels cut to the room's length.
+   */
   outgoing() {
-    return this.pending.map(({ id, label, ops }) => ({ id, label, ops }));
+    return this.pending.map(({ id, label, ops }) => ({ id, label: label == null ? label : cutText(label, MAX_LABEL), ops }));
   }
 
   /**
@@ -505,6 +509,7 @@ export class Replica extends EventTarget {
     let rolled = false, applied = false, structural = false;
     const touched = []; // what was applied, when nothing structural was: the shadow is brought up to date for it alone
     const moved = []; // structural operations as they landed here (past the pending changes), for the view to follow
+    const incoming = []; // everything someone else's changes did
     wb._coalesce(() => {
       for (const rec of list) {
         if (rec.rev !== this.rev + 1) break;
@@ -523,6 +528,7 @@ export class Replica extends EventTarget {
             theirs = past;
           }
           this._applyRemote(ch.ops, rec.username, ch.label);
+          incoming.push(...ch.ops);
           for (const e of [...this.undoStack, ...this.redoStack]) e.ops = this._xform(e.ops, theirs, false)[0];
           applied = true;
           if (ch.ops.some((o) => isStructure(o) || o.t === 'put')) structural = true;
@@ -532,6 +538,7 @@ export class Replica extends EventTarget {
         this.rev = rec.rev;
       }
       if (rolled) this._replay();
+      if (incoming.length) this.dispatchEvent(new CustomEvent('incoming', { detail: { ops: incoming } }));
     });
     if (rolled || structural) this.shadow = this._fullShadow();
     else this._refreshShadow(touched);

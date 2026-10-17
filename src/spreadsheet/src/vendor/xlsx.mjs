@@ -2884,6 +2884,10 @@ function parse_local_file(blob/*:CFBlob*/, csz/*:number*/, usz/*:number*/, o/*:C
 
 	/* [file data] */
 	var data = blob.slice(blob.l, blob.l + _csz);
+	/* Puter Spreadsheet local patch: a local header that leaves the sizes to a data descriptor (flag 8)
+	 * says 0, which inflated without bound; the central directory's size, which the app checks against
+	 * its limits before reading, bounds it instead. */
+	if(!_usz && (flags & 8)) _usz = usz;
 	switch(meth) {
 		case 8: data = _inflateRawSync(blob, _usz); break;
 		case 0: blob.l += _csz; break; // TODO: scan for magic number
@@ -3434,29 +3438,29 @@ function numdate(v/*:number*/)/*:Date|number*/ {
 
 /* ISO 8601 Duration */
 function parse_isodur(s) {
-	var sec = 0, mt = 0, time = false;
-	var m = s.match(/P([0-9\.]+Y)?([0-9\.]+M)?([0-9\.]+D)?T([0-9\.]+H)?([0-9\.]+M)?([0-9\.]+S)?/);
+	/* Puter Spreadsheet local patch: a duration may be negative (LibreOffice writes -PT01H30M00S for a
+	 * negative time), may carry fractional seconds (PT00H01M23.45S) and a day count (P1DT02H00M00S, a
+	 * time past 24 hours); the sign was dropped, every field was read as a whole number, and a day count
+	 * fell through to the month check and refused the file. Years and months still have no fixed length. */
+	var sec = 0, time = false;
+	var m = s.match(/^\s*([-+])?P([0-9\.]+Y)?([0-9\.]+M)?([0-9\.]+D)?(?:T([0-9\.]+H)?([0-9\.]+M)?([0-9\.]+S)?)?\s*$/);
 	if(!m) throw new Error("|" + s + "| is not an ISO8601 Duration");
-	for(var i = 1; i != m.length; ++i) {
+	for(var i = 2; i != m.length; ++i) {
 		if(!m[i]) continue;
-		mt = 1;
-		if(i > 3) time = true;
+		if(i > 4) time = true;
+		var v = parseFloat(m[i]);
 		switch(m[i].slice(m[i].length-1)) {
 			case 'Y':
 				throw new Error("Unsupported ISO Duration Field: " + m[i].slice(m[i].length-1));
-			case 'D': mt *= 24;
-				/* falls through */
-			case 'H': mt *= 60;
-				/* falls through */
+			case 'D': sec += v * 86400; break;
+			case 'H': sec += v * 3600; break;
 			case 'M':
 				if(!time) throw new Error("Unsupported ISO Duration Field: M");
-				else mt *= 60;
-				/* falls through */
-			case 'S': break;
+				sec += v * 60; break;
+			case 'S': sec += v; break;
 		}
-		sec += mt * parseInt(m[i], 10);
 	}
-	return sec;
+	return m[1] == "-" ? -sec : sec;
 }
 
 /* Blame https://bugs.chromium.org/p/v8/issues/detail?id=7863 for the regexide */
@@ -15938,6 +15942,13 @@ function ods_to_csf_formula(f/*:string*/)/*:string*/ {
 				++end;
 				if(replacement == null) { i = end - 1; continue; }
 			} else if(f.slice(i, i + 14) == "COM.MICROSOFT.") { replacement = ""; end = i + 14; }
+			/* Puter Spreadsheet local patch: OpenFormula spells NORMSDIST, CHIDIST, TDIST, FDIST, NORMSINV,
+			 * CHIINV, FINV and CHITEST as LEGACY.* (as LibreOffice writes them), and its intersection operator is
+			 * "!" between two references or parenthesized expressions where Excel's is a space. An error literal
+			 * such as #REF! keeps its "!", as does a sheet name before one ('Data'![.A1]). */
+			else if((i == 0 || !/[\w.]/.test(f.charAt(i - 1))) && (replacement = /^LEGACY\.(?=[A-Za-z]+\s*\()/i.exec(f.slice(i)))) { end = i + replacement[0].length; replacement = ""; }
+			else if(ch == "#" && (replacement = /^#[A-Za-z0-9\/]+[!?]?/.exec(f.slice(i)))) { i += replacement[0].length - 1; continue; }
+			else if(ch == "!" && /[\])]\s*$/.test(f.slice(0, i))) replacement = " ";
 			else if(ch == ";" || ch == "~") replacement = ",";
 			else if(ch == "|") replacement = ";";
 			if(replacement != null) { out.push(f.slice(start, i), replacement); start = end; i = end - 1; }
@@ -15969,11 +15980,17 @@ function csf_to_ods_formula(f/*:string*/)/*:string*/ {
 	// grouping parentheses joins references; calls and arrays use separators.
 	var contexts = f.indexOf(",") == -1 ? null : [];
 	return "of:=" + map_formula_unquoted(f, function(f) {
-		var out = [], start = 0;
+		var out = [], start = 0, operandEnd = -1;
 		for(var i = 0; i < f.length; ++i) {
 			var ch = f.charAt(i), replacement = null, end = i + 1, match;
-			if(/[A-Za-z0-9_$']/.test(ch) && (i == 0 || !/[\w.$\u0080-\uFFFF]/.test(f.charAt(i - 1))) && (match = csf_ods_ref.exec(f.slice(i)))) {
-				replacement = csf_formula_reference(match); end = i + match[0].length;
+			/* Puter Spreadsheet local patch: Excel's intersection operator is the space between two references
+			 * (A1:B3 B1:C3); OpenFormula's is "!". */
+			if(i == operandEnd && /\s/.test(ch)) {
+				while(end < f.length && /\s/.test(f.charAt(end))) ++end;
+				if(f.charAt(end) == "(" || csf_ods_ref.exec(f.slice(end))) replacement = "!";
+				else { i = end - 1; continue; }
+			} else if(/[A-Za-z0-9_$']/.test(ch) && (i == 0 || !/[\w.$\u0080-\uFFFF]/.test(f.charAt(i - 1))) && (match = csf_ods_ref.exec(f.slice(i)))) {
+				replacement = csf_formula_reference(match); end = operandEnd = i + match[0].length;
 			} else if(ch == "'") {
 				match = csf_ods_name.exec(f.slice(i));
 				if(!match) { i = formula_quote_end(f, i) - 1; continue; }
@@ -15990,8 +16007,10 @@ function csf_to_ods_formula(f/*:string*/)/*:string*/ {
 				i = end - 1; continue;
 			} else if(/[A-Za-z_\u0080-\uFFFF]/.test(ch)) {
 				while(end < f.length && /[\w.\u0080-\uFFFF]/.test(f.charAt(end))) ++end;
-				if(f.charAt(end) != "!" || !(match = csf_ods_name.exec(f.slice(i)))) { i = end - 1; continue; }
-				replacement = "'" + match[1] + "'.$$'" + match[2] + "'"; end = i + match[0].length;
+				/* Puter Spreadsheet local patch: the functions OpenFormula spells as LEGACY.* (see ods_to_csf_formula). */
+				if(/^(?:CHIDIST|CHIINV|CHITEST|FDIST|FINV|NORMSDIST|NORMSINV|TDIST)$/i.test(f.slice(i, end)) && /^\s*\(/.test(f.slice(end))) replacement = "LEGACY." + f.slice(i, end);
+				else if(f.charAt(end) != "!" || !(match = csf_ods_name.exec(f.slice(i)))) { i = end - 1; continue; }
+				else { replacement = "'" + match[1] + "'.$$'" + match[2] + "'"; end = i + match[0].length; }
 			} else if((ch >= "0" && ch <= "9") || ch == ".") {
 				match = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(f.slice(i));
 				if(match) { i += match[0].length - 1; continue; }
@@ -16005,6 +16024,7 @@ function csf_to_ods_formula(f/*:string*/)/*:string*/ {
 			else if(ch == ",") replacement = !contexts.length || contexts[contexts.length - 1] == "group" ? "~" : ";";
 			else if(ch == ";") replacement = "|";
 			if(replacement != null) { out.push(f.slice(start, i), replacement); start = end; i = end - 1; }
+			else if(ch == ")") operandEnd = i + 1;
 		}
 		out.push(f.slice(start));
 		return out.join("");

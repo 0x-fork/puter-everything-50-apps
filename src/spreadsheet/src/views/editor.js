@@ -341,6 +341,9 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   ctx.autocorrect = autoCorrector;
   if (!session.signedOut) syncAutoCorrectSettings().catch(() => {});
 
+  // The undo steps of formatting applied while the open entry is typed (see ENTRY_FORMAT_COMMANDS).
+  const entryFormatSteps = new Set();
+  let entryOpen = false;
   const grid = createGrid({
     wb,
     sheetId: wb.activeSheetId,
@@ -366,7 +369,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       for (const f of formulas) wb.setInput(sid, r, f.c, f.input);
     },
     onSelection: notify,
-    onEdit: (e) => { if (e.editing) { endCut(); optionButton?.hide(); } else entryPasted = false; notify(); }, // typing into a cell ends a cut
+    onEdit: (e) => {
+      if (e.editing) { endCut(); optionButton?.hide(); } else entryPasted = false; // typing into a cell ends a cut
+      if (e.editing && !entryOpen) entryFormatSteps.clear();
+      entryOpen = !!e.editing;
+      notify();
+    },
+    // An entry given up takes the formatting applied while it was typed with it.
+    onEditCancel: () => { if (entryFormatSteps.size) wb.discardSteps(entryFormatSteps); entryFormatSteps.clear(); },
     onCommand: (cmd, arg) => run(cmd, arg),
     onFilled: (info) => offerAutoFill(info),
     // A chart's own elements (Chart Design, Format and the Format pane) follow the chart selected on the grid.
@@ -1367,6 +1377,12 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     'borders', 'bg', 'color', 'font', 'fontSize', 'fontStep', 'rotate', 'insertRows', 'insertCols', 'deleteRows', 'deleteCols', 'insertCells',
     'deleteCells', 'clear', 'clearFormat', 'clearAll', 'hide', 'cellStyle']);
   let lastRepeatable = null;
+  /**
+   * The formatting commands that can act while a cell is typed into (Ctrl/Cmd+B, the ribbon), and the undo steps
+   * they recorded during the entry now open: Escape gives up the entry and takes those back with it.
+   */
+  const ENTRY_FORMAT_COMMANDS = new Set(['bold', 'italic', 'underline', 'strike', 'fmt', 'align', 'valign', 'wrap', 'wrapMode', 'indent', 'dec',
+    'borders', 'bg', 'color', 'font', 'fontSize', 'fontStep', 'rotate', 'cellStyle']);
   /** The Power Query Editor, on a query of the workbook or a new one not yet saved. */
   function editQuery(_, opts = {}) {
     if (destroyed) return;
@@ -1427,7 +1443,16 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     }, { section });
   }
 
-  async function run(cmd, arg) {
+  function run(cmd, arg) {
+    if (!ENTRY_FORMAT_COMMANDS.has(cmd) || !grid?.editing) return runCommand(cmd, arg);
+    const mark = wb.historyTop;
+    const result = runCommand(cmd, arg);
+    // A formatting command acts at once; with the entry still open, the steps it recorded belong to that entry.
+    if (grid.editing) for (const step of wb.historySince(mark) || []) entryFormatSteps.add(step);
+    return result;
+  }
+
+  async function runCommand(cmd, arg) {
     // While a script runs the workbook is its alone; one Undo takes back everything it did once it ends.
     if (automate?.running && !AUTOMATE_COMMANDS.has(cmd)) { toast('A script is running. Wait for it to finish, or stop it in the Code Editor', { icon: 'info' }); return; }
     // F4 (and Ctrl+Y with nothing to redo) repeats the last formatting or structural command on the selection now.
@@ -2602,14 +2627,16 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       }
       // A clicked toolbar button holds the focus a browser gave it; every command that changes the sheet hands it back to the grid.
       // Undo and redo say which way the history moves, so the selection kept around a structural step can follow (see `historyMove`).
-      case 'undo': if (!grid.editing) { historyMove = 'undo'; try { wb.undo(); } finally { historyMove = 'push'; } } keepFocus(); return;
-      case 'redo': if (!grid.editing) { historyMove = 'redo'; try { wb.redo(); } finally { historyMove = 'push'; } } keepFocus(); return;
+      // They show what they change too (`revealFrom`).
+      case 'undo': if (!grid.editing) { historyMove = 'undo'; revealFrom = wb.version; try { wb.undo(); } finally { historyMove = 'push'; revealFrom = null; } } keepFocus(); return;
+      case 'redo': if (!grid.editing) { historyMove = 'redo'; revealFrom = wb.version; try { wb.redo(); } finally { historyMove = 'push'; revealFrom = null; } } keepFocus(); return;
       case 'undoSteps': case 'redoSteps': {
         // As undo and redo: the sheet behind an open edit waits for the edit, which is neither thrown away nor committed.
         if (grid.editing) { keepFocus(); return; }
         historyMove = cmd === 'undoSteps' ? 'undo' : 'redo';
+        revealFrom = wb.version;
         let n;
-        try { n = wb[cmd](Number(arg) || 1); } finally { historyMove = 'push'; }
+        try { n = wb[cmd](Number(arg) || 1); } finally { historyMove = 'push'; revealFrom = null; }
         toast(`${cmd === 'undoSteps' ? 'Undid' : 'Redid'} ${n} step${n === 1 ? '' : 's'}`, { icon: cmd === 'undoSteps' ? 'undo' : 'redo', duration: 1500 });
         keepFocus();
         return;
@@ -6068,6 +6095,32 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   function restoreSelection(snap) {
     if (snap && grid.sheetId === snap.sheetId) grid.setRanges(snap.ranges, snap.active);
   }
+  /*
+   * Any other step the Undo and Redo commands take back or bring again shows what it changed, as Excel and Sheets
+   * do: its sheet comes into view and the cells it wrote are selected and scrolled to, so a change made out of
+   * sight is not undone unseen. `revealFrom` is the workbook's version before the step, while those commands run.
+   */
+  let revealFrom = null;
+  function revealStep() {
+    if (revealFrom == null) return;
+    const changes = wb.changesSince(revealFrom) || [];
+    revealFrom = wb.version;
+    const writes = changes.filter((ch) => ch.type === 'cells' && ch.box && ch.sheetId != null);
+    if (!writes.length) return;
+    // Grouped sheets take the same write: the sheet in view, when it is one of them.
+    const sheetId = writes.some((ch) => ch.sheetId === grid.sheetId) ? grid.sheetId : writes.at(-1).sheetId;
+    const sheet = wb.sheet(sheetId);
+    if (!sheet || sheet.hidden || sheet.kind === 'chart') return;
+    const boxes = [];
+    for (const { sheetId: sid, box } of writes) {
+      if (sid === sheetId && !boxes.some((b) => b.r1 === box.r1 && b.c1 === box.c1 && b.r2 === box.r2 && b.c2 === box.c2)) boxes.push({ ...box });
+    }
+    if (sheetId !== wb.activeSheetId) wb.setActiveSheet(sheetId);
+    if (grid.sheetId !== sheetId) return;
+    // A step of many separate writes is shown as the box around them.
+    grid.setRanges(boxes.length > 20 ? [boxes.reduce((a, b) => ({ r1: Math.min(a.r1, b.r1), c1: Math.min(a.c1, b.c1), r2: Math.max(a.r2, b.r2), c2: Math.max(a.c2, b.c2) }))] : boxes);
+    grid.scrollToActive();
+  }
   let lastProtectedToast = 0;
   let lastProtectedKey = null;
   let trackedEdit = false;
@@ -6161,8 +6214,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (offered && (wb.historyTop !== offered.mark || grid.sheetId !== offered.sheetId)) optionButton.hide();
     if (e.detail?.type === 'load') { historyDepth = 0; stepSelections.clear(); }
     else if (e.detail?.type === 'history') {
-      if (historyMove === 'undo') { const step = stepSelections.get(historyDepth); historyDepth--; restoreSelection(step?.before); }
-      else if (historyMove === 'redo') { historyDepth++; restoreSelection(stepSelections.get(historyDepth)?.after); }
+      if (historyMove === 'undo') { const step = stepSelections.get(historyDepth); historyDepth--; if (step) restoreSelection(step.before); else revealStep(); }
+      else if (historyMove === 'redo') { historyDepth++; const step = stepSelections.get(historyDepth); if (step) restoreSelection(step.after); else revealStep(); }
       else { historyDepth++; for (const depth of stepSelections.keys()) if (depth >= historyDepth) stepSelections.delete(depth); } // a new step discards the redo branch
     }
     updatePivotDisplayNotice();

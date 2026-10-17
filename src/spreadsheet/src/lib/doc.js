@@ -122,6 +122,18 @@ function usesExternalContent(wb) {
   }
   return false;
 }
+/**
+ * Did someone else's operations in a shared workbook (see collab/ops.js) bring a formula that could reach out?
+ * Cells are read one by one; a change to any other setting, rarer, has the book scanned (it is applied already).
+ */
+function sharedOpsReachOut(ops, wb) {
+  let settings = false;
+  for (const op of ops) {
+    if (op.t === 'cells') { for (const cell of Object.values(op.v || {})) if (formulaReachesOut(cell?.f)) return true; }
+    else if (op.t === 'props' || op.t === 'book' || op.t === 'put') settings = true;
+  }
+  return settings && usesExternalContent(wb);
+}
 /** Record the decision for a path ('1' allowed, '0' blocked, with the file's id when known); `null` forgets it, for a path that no longer holds this file. */
 function rememberExternal(path, scope, allowed, uid = null) {
   try {
@@ -319,9 +331,12 @@ export class Doc extends EventTarget {
     return P.ensureXlsx(this.name);
   }
 
-  /** File and version operations may still be pending while the book is clean. */
+  /**
+   * File and version operations may still be pending while the book is clean, as may, in a shared workbook
+   * whose changes have all reached the room, the owner's file the next quiet moment is to write.
+   */
   get hasPendingWrites() {
-    return this._saving != null;
+    return this._saving != null || !!this._sharedFileDue;
   }
 
   destroy() {
@@ -471,7 +486,7 @@ export class Doc extends EventTarget {
   setAutoSave(on) {
     setAutoSaveEnabled(!!on);
     // Off, an edit's AutoSave still waiting is dropped too; a retry of a failed save keeps going, as it does after Save.
-    if (!on && !this._timerIsRetry) clearTimeout(this._timer);
+    if (!on && !this._timerIsRetry) { clearTimeout(this._timer); this._sharedFileDue = false; }
     if (on && this.wb.dirty && !session.signedOut) this.save({ auto: true }).catch(() => {});
     this.dispatchEvent(new CustomEvent('autosave', { detail: { on: !!on } }));
   }
@@ -495,6 +510,17 @@ export class Doc extends EventTarget {
       }
       return this._doSave(auto);
     });
+  }
+
+  /**
+   * The connection came back: what AutoSave holds is saved now, and so is a save that failed while offline (one
+   * asked for with AutoSave off included), rather than when its retry comes round. With AutoSave off, other
+   * edits wait for Save.
+   */
+  reconnected() {
+    const failed = this._timerIsRetry && (this.status === 'offline' || this.status === 'error');
+    if (!autoSaveEnabled() && !failed) return Promise.resolve(false);
+    return this.save({ auto: true });
   }
 
   /** Saves and path changes share one queue, including operations queued while another waits. */
@@ -896,12 +922,21 @@ export class Doc extends EventTarget {
   /**
    * The document of a shared workbook: its changes go to everyone through the room as they are made, and
    * saving writes a checkpoint and the .xlsx file (over the owner's file, so it still opens anywhere).
+   *
+   * Outside content is the owner's to allow, as for their own file. Anyone else holds a workbook written by
+   * others, as a file from elsewhere is: one that reaches out asks first, and so does a formula that reaches out
+   * arriving later from someone else (as one pasted does), even after a yes.
    */
   static forRoom(client, { path = null, uid = null } = {}) {
-    const doc = new Doc({ wb: client.wb, name: client.name || UNTITLED, path: client.file?.path ?? path, uid: client.file?.uid ?? uid });
+    const owner = client.user?.uuid === client.owner;
+    const doc = new Doc({ wb: client.wb, name: client.name || UNTITLED, path: client.file?.path ?? path, uid: client.file?.uid ?? uid, trusted: owner || !usesExternalContent(client.wb) });
     doc.collab = client;
     doc._onRoomStatus = () => doc._sharedChanged('room');
     client.addEventListener('status', doc._onRoomStatus);
+    if (!owner) {
+      doc._onRoomIncoming = (e) => { if (doc.wb.externalAllowed && sharedOpsReachOut(e.detail.ops, doc.wb)) doc.wb.setExternalAllowed(false); };
+      client.replica.addEventListener('incoming', doc._onRoomIncoming);
+    }
     doc._setStatus(client.status.pending ? 'saving' : 'saved');
     return doc;
   }
@@ -921,6 +956,7 @@ export class Doc extends EventTarget {
     if (this.isOwner && autoSaveEnabled() && !session.signedOut) {
       clearTimeout(this._timer);
       this._timer = setTimeout(() => this.save({ auto: true }).catch(() => {}), SHARED_FILE_MS);
+      this._sharedFileDue = true;
     }
   }
 
@@ -928,6 +964,7 @@ export class Doc extends EventTarget {
   async _saveShared({ auto = false } = {}) {
     const client = this.collab;
     clearTimeout(this._timer);
+    this._sharedFileDue = false;
     await client.flush();
     await client.settled();
     if (client.replica.pending.length) {
@@ -955,9 +992,12 @@ export class Doc extends EventTarget {
   _leaveRoom() {
     clearTimeout(this._timer);
     this.collab.removeEventListener('status', this._onRoomStatus);
+    if (this._onRoomIncoming) this.collab.replica.removeEventListener('incoming', this._onRoomIncoming);
     this.wb.removeEventListener('change', this._onChange);
     session.removeEventListener('change', this._onSession);
-    this.collab.leave().catch(() => {});
+    // Leaving saves: the file the last changes were waiting a quiet moment to reach is written on the way out.
+    const written = this._sharedFileDue ? this.save({ auto: true }).catch(() => {}) : this._saving?.catch(() => {});
+    Promise.resolve(written).then(() => this.collab.leave()).catch(() => {});
   }
 
   static fromDraft(key) {

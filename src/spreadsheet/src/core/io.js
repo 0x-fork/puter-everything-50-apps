@@ -951,11 +951,16 @@ function formulaShaped(text, value) {
   return read.f != null || typeof read.v === 'string';
 }
 
-/** One range as delimiter-separated text: fields holding the delimiter, quotes, or line breaks are quoted. */
+/**
+ * One range as delimiter-separated text: fields holding the delimiter, quotes, or line breaks are quoted.
+ * A CSV also quotes a field holding a tab, semicolon or pipe, separators the reader's detection weighs,
+ * so a one-column file whose text holds a "; " reopens as the one column it was. A comma stays bare in
+ * a semicolon CSV, where it is the decimal mark (1,5).
+ */
 export function rangeToDelimited(wb, sheetId, range, delim) {
   const sheet = wb.sheet(sheetId);
   if (!sheet) return '';
-  const quoteRe = new RegExp(`["${delim === '\t' ? '\\t' : delim}\\r\\n]`);
+  const quoteRe = delim === '\t' ? /["\t\r\n]/ : delim === ',' ? /["\t,;|\r\n]/ : new RegExp(`["\\t;|\\r\\n${delim}]`);
   const lines = [];
   // Whole columns or rows end where the sheet's content does, not at row 1,048,576 or column XFD.
   const used = range.r2 >= MAX_ROW || range.c2 >= MAX_COL ? wb.usedRange(sheetId) || { r2: range.r1, c2: range.c1 } : null;
@@ -1967,6 +1972,19 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
       }
     }
   }
+  // On the 1904 date system a rule's cells are dates when one of the stored cells it covers is
+  // date-formatted and none carries another number format, as shiftDateNames weighs a name.
+  const dateTargets = date1904 ? (ranges) => {
+    let date = 0, other = 0;
+    for (const [key, cell] of Object.entries(cells)) {
+      const { r, c } = parseKey(key);
+      if (!ranges.some((g) => r >= g.r1 && r <= g.r2 && c >= g.c1 && c <= g.c2)) continue;
+      const kind = dateTimeKind(cell.s, 0), fmt = cell.s?.fmt;
+      if (kind === 'date' || kind === 'datetime') date++;
+      else if (fmt && fmt !== 'general' && fmt !== 'text') other++;
+    }
+    return date > 0 && !other;
+  } : null;
   const frozen = partXml ? nativePart?.frozen : own?.frozen;
   const merges = fileMerges((ws?.['!merges'] || []).filter((m) => m?.s && m?.e).map((m) => ({ r1: m.s.r, c1: m.s.c, r2: m.e.r, c2: m.e.c })));
   return {
@@ -1974,7 +1992,7 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     merges,
     notes,
     ignoredErrors: readXlsxIgnoredErrors(partXml),
-    rules: readXlsxConditionalFormats(partXml, nativeStyles, nativeStyles?.colors || themes, definedNames, { priorities: pivotPriorities }),
+    rules: readXlsxConditionalFormats(partXml, nativeStyles, nativeStyles?.colors || themes, definedNames, { priorities: pivotPriorities, dateTargets }),
     protectedRanges: meta?.sheets?.[name]?.protectedRanges || [],
     scenarios: parseScenariosXml(partXml),
     validations: meta?.sheets?.[name]?.validations || (ws?.['!validations'] || []).map(({ _odsName, ...rule }) => rule),
@@ -2067,7 +2085,7 @@ export function detectDelimiter(src, filename = '') {
     }
     return readable.get(d);
   };
-  let best = ',';
+  let best = preferred;
   let bestScore = -1;
   for (const d of ['\t', ',', ';', '|']) {
     // Count separators outside quotes on each line; a good separator appears on every line, the same number of times.
@@ -2077,11 +2095,14 @@ export function detectDelimiter(src, filename = '') {
       for (const ch of line) { if (ch === '"') quoted = !quoted; else if (!quoted && ch === d) n++; }
       return n;
     });
-    const nonZero = counts.filter((n) => n > 0).length;
-    if (!nonZero) continue;
+    // A separator shows on at least half the lines (the median count is not 0): a "; " in one
+    // line of notes is punctuation, and a file none splits that way is one column, read with the
+    // locale's own separator as Excel reads it there.
     const mode = counts.slice().sort((a, b) => a - b)[Math.floor(counts.length / 2)];
+    if (!mode) continue;
+    const nonZero = counts.filter((n) => n > 0).length;
     const consistent = counts.filter((n) => n === mode).length;
-    const score = nonZero * 2 + consistent + (mode > 0 ? 1 : 0);
+    const score = nonZero * 2 + consistent;
     const tie = score === bestScore && (readableShare(d) > readableShare(best) || (readableShare(d) === readableShare(best) && d === preferred));
     if (score > bestScore || tie) { bestScore = score; best = d; }
   }
@@ -2145,10 +2166,31 @@ function workbookFromText(text, filename) {
  * Parse spreadsheet file bytes (xlsx, xls, csv, ods, ...) into a Workbook.
  * `data` may be an ArrayBuffer, Uint8Array, or Blob.
  */
+// The Windows ANSI code page of each language whose code page is not Windows-1252.
+const LEGACY_ENCODINGS = new Map([
+  ...['pl', 'cs', 'sk', 'hu', 'sl', 'hr', 'ro', 'sq', 'bs'].map((l) => [l, 'windows-1250']),
+  ...['ru', 'uk', 'bg', 'be', 'sr', 'mk', 'kk', 'ky', 'tt', 'mn'].map((l) => [l, 'windows-1251']),
+  ['el', 'windows-1253'], ['tr', 'windows-1254'], ['az', 'windows-1254'], ['he', 'windows-1255'],
+  ...['ar', 'fa', 'ur'].map((l) => [l, 'windows-1256']),
+  ...['lt', 'lv', 'et'].map((l) => [l, 'windows-1257']),
+  ['vi', 'windows-1258'], ['th', 'windows-874'], ['ja', 'shift_jis'], ['ko', 'euc-kr'], ['zh', 'gbk'],
+]);
+
+/** The legacy (ANSI) encoding text files are saved in where a locale is the system's: windows-1252 unless another applies. */
+function legacyEncoding(loc) {
+  const [lang, ...rest] = String(loc || '').toLowerCase().split(/[-_]/);
+  // Traditional Chinese (Taiwan, Hong Kong, Macau) is Big5; Simplified is GBK.
+  if (lang === 'zh' && rest.some((p) => ['tw', 'hk', 'mo', 'hant'].includes(p))) return 'big5';
+  // Serbian in Latin script uses the Central European page.
+  if (lang === 'sr' && rest.includes('latn')) return 'windows-1250';
+  return LEGACY_ENCODINGS.get(lang) || 'windows-1252';
+}
+
 /**
  * Bytes of a text file as a string: UTF-16 by its byte-order mark, otherwise
- * UTF-8, falling back to Windows-1252 when the bytes are not valid UTF-8
- * (the usual case for CSVs saved by older Windows programs).
+ * UTF-8, falling back to the regional format's legacy code page (Windows-1252
+ * in most of the West) when the bytes are not valid UTF-8 (the usual case for
+ * CSVs saved by older Windows programs).
  */
 export function decodeText(bytes) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -2164,6 +2206,12 @@ export function decodeText(bytes) {
     let nonAscii = 0;
     for (const ch of lenient) if (ch > '\x7f' && ch !== '\ufffd') nonAscii++;
     if (nonAscii >= 3 && bad <= Math.max(2, nonAscii / 25)) return lenient;
+    // Excel on Windows saves CSV in the system's ANSI code page, which the regional format's
+    // language stands in for: Shift_JIS in Japan, Windows-1251 in Russia, and so on.
+    const legacy = legacyEncoding(getLocale());
+    if (legacy !== 'windows-1252') {
+      try { return new TextDecoder(legacy).decode(b); } catch { /* a decoder without it reads Windows-1252 */ }
+    }
     try {
       // Some ICU-backed decoders treat Windows-1252 as Latin-1. Repair
       // its C1 range using the WHATWG mapping; conforming decoders are unchanged.
@@ -2202,8 +2250,12 @@ const MAX_UNPACKED_BYTES = 512 * 1024 * 1024;
 /**
  * What the parts of a zip declare they unpack to: `{ largest, total }`, or null when the bytes
  * are not a zip (an .xls, a text file) or its directory cannot be read, where nothing is claimed
- * and the file is read as before. A zip64 directory, which holds sizes this app cannot open
- * anyway, counts as past every limit.
+ * and the file is read as before. A part's local header says so a second time, and the reader
+ * unpacks by that header, so the larger of the two claims counts; a part whose header leaves its
+ * size to a data descriptor after the data (as streaming writers do) is unpacked no further than
+ * the directory says. A zip64 size is read where it is given; a size marked as zip64 without one,
+ * and a part with compressed data that claims to unpack to nothing in both places, count as past
+ * every limit.
  */
 function declaredUnpackedSize(bytes) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -2219,15 +2271,33 @@ function declaredUnpackedSize(bytes) {
   let at = u32(eocd + 16);
   const beyond = { largest: Infinity, total: Infinity };
   if (at === 0xffffffff || count === 0xffff) return beyond;
+  // A zip64 extended-information field (0x0001) in an extra block holds a 64-bit size, which the
+  // reader takes in place of the header's (the field's first eight bytes, as it reads them).
+  const zip64 = (start, length) => {
+    for (let p = start, end = Math.min(start + length, u8.length); p + 4 <= end; p += 4 + u16(p + 2)) {
+      if (u16(p) === 0x0001 && u16(p + 2) >= 8 && p + 12 <= u8.length) return u32(p + 8) * 2 ** 32 + u32(p + 4);
+    }
+    return null;
+  };
   let largest = 0;
   let total = 0;
   for (let i = 0; i < count; i++) {
     if (at < 0 || at + 46 > u8.length || u32(at) !== 0x02014b50) return null;
-    const size = u32(at + 24);
-    if (size === 0xffffffff) return beyond;
+    const compressed = u32(at + 20);
+    const nameLength = u16(at + 28), extraLength = u16(at + 30);
+    // The reader goes to the local header the directory points at and reads its fields there,
+    // whatever its signature, so those are read the same way.
+    const local = u32(at + 42);
+    if (local === 0xffffffff) return beyond;
+    if (local + 30 > u8.length) return null;
+    const header = [u32(at + 24), u32(local + 22)];
+    const wide = [zip64(at + 46 + nameLength, extraLength), zip64(local + 30 + u16(local + 26), u16(local + 28))].filter((n) => n != null);
+    if (header.includes(0xffffffff) && !wide.length) return beyond;
+    const size = Math.max(...header.filter((n) => n !== 0xffffffff), ...wide);
+    if (!size && compressed > 2) return beyond; // an empty part deflates to two bytes
     if (size > largest) largest = size;
     total += size;
-    at += 46 + u16(at + 28) + u16(at + 30) + u16(at + 32);
+    at += 46 + nameLength + extraLength + u16(at + 32);
   }
   return { largest, total };
 }

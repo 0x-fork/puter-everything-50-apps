@@ -18,7 +18,7 @@ import { nativeSparklineDateMismatch, nativeSparklineLocation } from './native-s
 import { importedNativeSparklines } from './native-sparkline-import.js';
 import { packedMoveReferences } from './packed-move-refs.js';
 import { copyNativeSparklines, mapPastedNativeSparklines, replacePastedNativeSparklines } from './native-sparkline-paste.js';
-import { copyValidations, mapPastedValidations, replaceValidations } from './validation-paste.js';
+import { copyValidations, mapPastedValidations, replaceValidations, moveValidations } from './validation-paste.js';
 import { NATIVE_ICON_SETS, nativeIconFor, nativeIconCount } from './native-icons.js';
 import { conditionalRuleGroups, conditionalGroupPieces, distinctConditionalRanges } from './conditional-groups.js';
 import { moveConditionalFormats, conditionalMoveBlocks } from './conditional-move.js';
@@ -81,7 +81,7 @@ import { ARRAY_BUDGET, evaluate, evaluateFormula, isVolatile, paramSpec, resetAr
 import { FUNCTIONS, err, isError, isRange, scalar, compareStoredValues, toText } from './formula/functions.js';
 import { parseDelimited } from './tsv.js';
 import { splitPieces, detectDelimiter, DEFAULT_SPLIT } from './text-split.js';
-import { adjustFormula, adjustRefForInsert, adjustRefForDelete, adjustRefForDeletedLines, deleteMap, renameSheetInFormula, shiftFormula, resolveRelativeName, mapFormulaRefs, parseRefText, refToText, MAX_ROW, MAX_COL, quoteSheet, sheetKey, sameSheetName } from './refs.js';
+import { adjustFormula, adjustRefForInsert, adjustRefForDelete, adjustRefForDeletedLines, deleteMap, renameSheetInFormula, shiftFormula, resolveRelativeName, mapRelativeNameRef, isAbsoluteRef, mapFormulaRefs, parseRefText, refToText, MAX_ROW, MAX_COL, quoteSheet, sheetKey, sameSheetName } from './refs.js';
 import { headerlessTableColumns, normalizeTableHeaderState, headerlessInsertColumns, headerlessDeleteColumns, headerlessJoinColumns, headerlessResizeNames } from './table-header-row.js';
 import { tableStyle, tableRows, normalizeCustomTableStyle, customTableStyleAt, validateTableName, MAX_TABLE_NAME_LENGTH, parseTableSpec, resolveTableSpec, renderTableSpec, renameTableInFormula, tableColumnRenames, renameColumnsInFormula, tableRefsToA1, hasTableRefs } from './tables.js';
 import { tokenize, upperName, isWorkbookNameScope, isExternalFormulaToken } from './formula/tokenizer.js';
@@ -97,7 +97,7 @@ import { explainError } from './errhelp.js';
 import { impliedFormulaStyle } from './implied-format.js';
 import { formulaReachesOut } from './reaches-out.js';
 import { STYLE_KEYS, BORDER_STYLE_KEYS, GRID_RANGE, intersection, rowRuns, readStyleResets, styleResetAt, assignStyleExceptionRegions, compactStyleResets, removeStyleResets, mapStyleResets, shiftStyleResets, permuteStyleResets, moveLineStyleResets, moveStyleResets } from './style-resets.js';
-import { normalizeScenarios, copyScenarios, mapScenarioCells } from './scenarios.js';
+import { normalizeScenarios, copyScenarios, mapScenarioCells, setScenarios } from './scenarios.js';
 import { normalizeQueries, serializeQueries } from './queries.js';
 import { normalizeScripts, serializeScripts } from './scripts.js';
 import { installSheetGroups } from './sheet-group.js';
@@ -364,7 +364,11 @@ function textCollator(caseSensitive) {
   return collators[key];
 }
 
-/** Sort order for one key: blanks and errors last, text by locale (optionally case-sensitive, lowercase first), other values by compareStoredValues. */
+/**
+ * Sort order for one key, as Excel's: ascending runs numbers, text, logicals, errors (all equal), then blanks;
+ * descending reverses all of it but the blanks, which always come last. Text sorts by locale (optionally
+ * case-sensitive, lowercase first), other values by compareStoredValues.
+ */
 function sortComparator(caseSensitive) {
   const empty = (v) => v == null || v === '';
   const collator = textCollator(caseSensitive);
@@ -372,10 +376,12 @@ function sortComparator(caseSensitive) {
     if (empty(a) && empty(b)) return 0;
     if (empty(a)) return 1;
     if (empty(b)) return -1;
+    const dir = ascending ? 1 : -1;
     if (isError(a) && isError(b)) return 0;
-    if (isError(a)) return 1;
-    if (isError(b)) return -1;
-    // Pictures in cells have no order of their own: they follow the values, before errors and blanks, in either direction.
+    if (isError(a)) return dir;
+    if (isError(b)) return -dir;
+    // Pictures in cells have no order of their own: they follow the values, before the blanks in either
+    // direction (and so before the errors ascending, after them descending).
     const picture = (v) => !!v && typeof v === 'object' && typeof v.image === 'string';
     if (picture(a) || picture(b)) return picture(a) === picture(b) ? 0 : picture(a) ? 1 : -1;
     const cmp = typeof a === 'string' && typeof b === 'string' ? collator.compare(a, b) : compareStoredValues(a, b);
@@ -3972,7 +3978,7 @@ export class Workbook extends EventTarget {
       if (!template && (owner === source && move.sourceCell(r, c) || owner === target && move.targetCell(r, c))) return formula;
       return move.follow(formula, owner.name);
     }, 'Move cells');
-    this._rewriteNamedFormulas((formula, name) => move.follow(formula, name.sheet || null), 'Move cells');
+    this._rewriteNamedFormulas((formula, name) => move.follow(formula, name.sheet || null, name.relative === true), 'Move cells');
     // Conditional formats and native sparklines have their own destination move.
     this._rewriteRuleFormulas((formula, owner) => move.follow(formula, owner.name), 'Move cells', { conditional: false, sparklines: false });
     return carried;
@@ -4029,11 +4035,16 @@ export class Workbook extends EventTarget {
     // A 3D span (Sheet1:Two!A1) names the same cells on every sheet between two tabs, so one sheet's
     // moved block cannot take it along; it stays where it is.
     const inSrc = (ref) => !ref.sheetEnd && ref.kind !== 'cols' && ref.kind !== 'rows' && ref.r1 >= src.r1 && ref.r2 <= src.r2 && ref.c1 >= src.c1 && ref.c2 <= src.c2;
-    const follow = (formula, ownerSheet) => mapFormulaRefs(formula, (ref) => {
+    // The cells the block lands on are gone, as in Excel: a reference wholly inside them that the block does not
+    // carry (it is not wholly inside the block) shows #REF!. One only partly over them still names its cells.
+    const inDst = (ref) => !ref.sheetEnd && ref.kind !== 'cols' && ref.kind !== 'rows' && ref.r1 >= dst.r1 && ref.r2 <= dst.r2 && ref.c1 >= dst.c1 && ref.c2 <= dst.c2;
+    // A relative defined name's offsets name different cells from every cell that uses it: only its wholly absolute references follow.
+    const follow = (formula, ownerSheet, relativeName = false) => mapFormulaRefs(formula, (ref) => {
       const target = ref.sheet ?? ownerSheet;
-      if (!sameSheetName(target, sheet.name) || !inSrc(ref)) return ref;
+      if (!sameSheetName(target, sheet.name) || (relativeName && !isAbsoluteRef(ref))) return ref;
       // Absolute references move too: the cell they name has moved.
-      return { ...ref, r1: ref.r1 + dr, r2: ref.r2 + dr, c1: ref.c1 + dc, c2: ref.c2 + dc };
+      if (inSrc(ref)) return { ...ref, r1: ref.r1 + dr, r2: ref.r2 + dr, c1: ref.c1 + dc, c2: ref.c2 + dc };
+      return inDst(ref) ? null : ref;
     });
     this.transaction('Move cells', () => {
       this._moveNativePivots(sheetId, src, sheetId, dst);
@@ -4055,7 +4066,7 @@ export class Workbook extends EventTarget {
         if (!template && owner === sheet && entries.has(cellKey(r, c))) return formula;
         return follow(formula, owner.name);
       }, 'Move cells');
-      const names = this.names.map((n) => ({ ...n, ref: follow(n.ref, n.sheet || null) }));
+      const names = this.names.map((n) => ({ ...n, ref: follow(n.ref, n.sheet || null, n.relative === true) }));
       if (names.some((n, i) => n.ref !== this.names[i].ref)) this._setNames(names, 'Move cells');
       // Tables inside the block keep their name, columns, and templates (which followed above like any
       // formula). They step aside while the cells are written, so their headers leaving and landing are
@@ -4094,14 +4105,24 @@ export class Workbook extends EventTarget {
         const moved = sheet.merges.filter(inside).map((m) => ({ r1: m.r1 + dr, c1: m.c1 + dc, r2: m.r2 + dr, c2: m.c2 + dc }));
         if (kept.length + moved.length !== sheet.merges.length || moved.length) this._setMerges(sheet, [...kept, ...moved], 'Move cells');
       }
-      // Validation rules and chart sources that lie
-      // wholly inside the block travel with it.
-      if (sheet.validations.some((v) => inside(v.range))) this._setValidations(sheet, sheet.validations.map((v) => (inside(v.range) ? { ...v, range: shifted(v.range) } : v)), 'Move cells');
+      // Validation goes with the cells it covers, replacing the destination's as a paste does; chart
+      // sources that lie wholly inside the block travel with it.
+      const validations = moveValidations(sheet.validations, null, src, dst, newId).target;
+      if (validations !== sheet.validations) this._setValidations(sheet, validations, 'Move cells');
       if (sheet.charts.some((ch) => inside(ch.range))) this._setCharts(sheet, sheet.charts.map((ch) => (inside(ch.range) ? { ...ch, range: shifted(ch.range) } : ch)), 'Move cells');
+      this._moveScenarioCells(sheet, inside, shifted);
       this._rewriteRuleFormulas((formula, owner) => follow(formula, owner.name), 'Move cells', { conditional: false });
       this._moveNativeSparklines(sheet, sheet, src, dst);
     });
     return dst;
+  }
+
+  /** Scenario changing cells (and result cells) inside a moved block follow it, as one undo step of the move. */
+  _moveScenarioCells(sheet, inside, shifted) {
+    if (!sheet.scenarios) return;
+    const probe = { scenarios: sheet.scenarios };
+    mapScenarioCells(probe, (m) => (inside(m) ? shifted(m) : m));
+    if (!sameJSON(probe.scenarios, sheet.scenarios)) setScenarios(this, sheet.id, probe.scenarios, 'Move cells');
   }
 
   /** Carry native sparkline destinations with a cut, retaining shared settings.
@@ -4225,10 +4246,16 @@ export class Workbook extends EventTarget {
     if (movingTables.some((t) => sheet.tables.some((o) => (across || !ids.has(o.id)) && overlaps(shifted(t.range), o.range)))) return null;
     // A 3D span stays where it is, as when the block is dragged: it names every sheet between two tabs.
     const inSrc = (ref) => !ref.sheetEnd && ref.kind !== 'cols' && ref.kind !== 'rows' && ref.r1 >= src.r1 && ref.r2 <= src.r2 && ref.c1 >= src.c1 && ref.c2 <= src.c2;
+    // The cells the block lands on are gone, as in Excel: a reference wholly inside them that the block does not
+    // carry shows #REF!; one only partly over them still names its cells (see moveRange).
+    const inDst = (ref, target) => sameSheetName(target, sheet.name) && !ref.sheetEnd && ref.kind !== 'cols' && ref.kind !== 'rows'
+      && ref.r1 >= dst.r1 && ref.r2 <= dst.r2 && ref.c1 >= dst.c1 && ref.c2 <= dst.c2;
     // A reference into the cut block follows it, naming the new sheet when the block changed sheets.
-    const follow = (formula, ownerSheet) => mapFormulaRefs(formula, (ref) => {
+    // A relative defined name's offsets stay put, as they do when the block is dragged.
+    const follow = (formula, ownerSheet, relativeName = false) => mapFormulaRefs(formula, (ref) => {
       const target = ref.sheet ?? ownerSheet;
-      if (!sameSheetName(target, source.name) || !inSrc(ref)) return ref;
+      if (relativeName && !isAbsoluteRef(ref)) return ref;
+      if (!sameSheetName(target, source.name) || !inSrc(ref)) return inDst(ref, target) ? null : ref;
       const moved = { ...ref, r1: ref.r1 + dr, r2: ref.r2 + dr, c1: ref.c1 + dc, c2: ref.c2 + dc };
       if (ref.sheet != null || across) moved.sheet = sheet.name;
       return moved;
@@ -4237,8 +4264,9 @@ export class Workbook extends EventTarget {
     // other cells of the old sheet keep naming that sheet from the new one.
     const carry = (formula) => mapFormulaRefs(formula, (ref) => {
       const target = ref.sheet ?? source.name;
-      if (!sameSheetName(target, source.name)) return ref;
+      if (!sameSheetName(target, source.name)) return inDst(ref, target) ? null : ref;
       if (inSrc(ref)) return { ...ref, r1: ref.r1 + dr, r2: ref.r2 + dr, c1: ref.c1 + dc, c2: ref.c2 + dc, ...(ref.sheet != null ? { sheet: sheet.name } : {}) };
+      if (inDst(ref, target)) return null;
       return across && ref.sheet == null ? { ...ref, sheet: source.name } : ref;
     });
     this.transaction('Move cells', () => {
@@ -4248,7 +4276,7 @@ export class Workbook extends EventTarget {
         if (!template && owner === sheet && r >= dst.r1 && r <= dst.r2 && c >= dst.c1 && c <= dst.c2) return formula; // overwritten below
         return follow(formula, owner.name);
       }, 'Move cells');
-      const names = this.names.map((n) => ({ ...n, ref: follow(n.ref, n.sheet || null) }));
+      const names = this.names.map((n) => ({ ...n, ref: follow(n.ref, n.sheet || null, n.relative === true) }));
       if (names.some((n, i) => n.ref !== this.names[i].ref)) this._setNames(names, 'Move cells');
       // Tables inside the block keep their name, columns, and templates, which keep pointing at what they
       // pointed at as moved formulas do. They step aside while the cells are written, so their headers
@@ -4296,16 +4324,14 @@ export class Workbook extends EventTarget {
       if (across && movedMerges.length) this._setMerges(source, source.merges.filter((m) => !inside(m)), 'Move cells');
       const keptMerges = sheet.merges.filter((m) => !overlapsDst(m) && (across || !inside(m)));
       if (keptMerges.length !== sheet.merges.length || movedMerges.length) this._setMerges(sheet, [...keptMerges, ...movedMerges], 'Move cells');
-      const carryOver = (key, setter) => {
-        const moved = source[key].filter((x) => inside(x.range)).map((x) => ({ ...x, range: shifted(x.range) }));
-        if (!moved.length) return;
-        if (across) {
-          setter(source, source[key].filter((x) => !inside(x.range)));
-          setter(sheet, [...sheet[key], ...moved]);
-        } else setter(sheet, sheet[key].map((x) => (inside(x.range) ? { ...x, range: shifted(x.range) } : x)));
-      };
-      carryOver('validations', (s, list) => this._setValidations(s, list, 'Move cells'));
+      // Validation goes with the cells it covers, the part of a rule outside the block staying behind, and
+      // replaces the destination's, as a paste does.
+      const validations = moveValidations(source.validations, across ? sheet.validations : null, src, dst, newId);
+      if (across && validations.source !== source.validations) this._setValidations(source, validations.source, 'Move cells');
+      if (validations.target !== sheet.validations) this._setValidations(sheet, validations.target, 'Move cells');
       if (!across && sheet.charts.some((ch) => inside(ch.range))) this._setCharts(sheet, sheet.charts.map((ch) => (inside(ch.range) ? { ...ch, range: shifted(ch.range) } : ch)), 'Move cells');
+      // A scenario's cells are its own sheet's: they follow a block moved within the sheet.
+      if (!across) this._moveScenarioCells(sheet, inside, shifted);
       this._rewriteRuleFormulas((formula, owner) => follow(formula, owner.name), 'Move cells', { conditional: false });
       this._moveNativeSparklines(source, sheet, src, dst);
     });
@@ -4338,6 +4364,13 @@ export class Workbook extends EventTarget {
     cells.forEach((row, i) => row.forEach((cell, j) => { if (cell?.array) arrayCells.set(cellKey(i, j), cell); }));
     const sourceArrays = arrayCells.size ? new FixedArrayIndex(arrayCells) : null;
     const filledArrays = new Map();
+    // Merged cells in the source repeat in every copy of it the fill lays down, as a paste tiles them; a
+    // destination merge they cover whole gives way, and one they would cut through refuses the fill.
+    const mergePlan = this._fillMergePlan(sheet, src, tgt, vertical, fillLimit);
+    if (mergePlan === false) return;
+    const covered = mergePlan
+      ? (r, c) => mergePlan.retainedBody(r, c) || mergePlan.kept.some(m => r >= m.r1 && r <= m.r2 && c >= m.c1 && c <= m.c2 && (r !== m.r1 || c !== m.c1))
+      : (r, c) => this._coveredByMerge(sheetId, r, c);
 
     const seriesFor = (list) => {
       const nums = list.map((cell) => cell?.f == null && typeof cell?.v === 'number' ? cell.v : null);
@@ -4431,7 +4464,8 @@ export class Workbook extends EventTarget {
         const r = vertical ? p : src.r1 + k;
         const c = vertical ? src.c1 + k : p;
         // Cells hidden under a merge are never written: a merged cell takes one value, at its top-left.
-        if (!inGrid(r, c, fillLimit) || this._coveredByMerge(sheetId, r, c)) continue;
+        // Those under a merge the fill lays down take the source's covered cells, as a paste gives them.
+        if (!inGrid(r, c, fillLimit) || covered(r, c)) continue;
         const idx = ((offset % n) + n) % n;
         const base = list[idx];
         if (sparkSources.size) {
@@ -4491,8 +4525,8 @@ export class Workbook extends EventTarget {
     }
     for (const a of filledArrays.values()) if (a.count !== a.total) { this._arrayRefused(sheet, a); return; }
     // Sparkline-only cells have no scalar change to report. Preflight the whole
-    // edit before changing their metadata, including array and protection guards.
-    if (sparkTargets.size && (this._gridLocked(sheet) ||
+    // edit before changing their metadata (or laying down merges), including array and protection guards.
+    if ((sparkTargets.size || mergePlan) && (this._gridLocked(sheet) ||
         entries.some(({ r, c }) => this._protectedAt(sheet, r, c)) ||
         this._fixedWritesBlocked(sheet, entries))) {
       this.setCellsWithTableHeaders(sheetId, entries, 'Fill');
@@ -4518,6 +4552,7 @@ export class Workbook extends EventTarget {
       }
       // A fill over a table header renames its column and keeps the headers distinct, as a paste does.
       const changed = this.setCellsWithTableHeaders(sheetId, entries, 'Fill');
+      if (mergePlan?.ranges.length) this._setMerges(sheet, mergePlan.next, 'Fill');
       // Rows filled under a table join it, whether the fill handle was dragged or double-clicked or Ctrl+D
       // pressed; the drag's own extendTableToCover call afterwards finds the table already grown. A fill
       // that wrote nothing (one a protected cell refused) grows no table. The whole target goes over, not
@@ -4525,6 +4560,45 @@ export class Workbook extends EventTarget {
       // Blank native anchors are real filled content even without scalar writes.
       if ((changed || nativeChanged) && tgt.r2 > src.r2) this.extendTableToCover(sheetId, { r1: tgt.r1, c1: tgt.c1, r2: tgt.r2, c2: tgt.c2 });
     });
+  }
+
+  /**
+   * The merges a fill lays down: each merge wholly inside the source block, repeated in every copy of the
+   * block along the fill (copies sit on the source's own grid, so a fill up or left lines up too) where it
+   * lands wholly inside the target. Planned against the sheet's merges as a paste is (planPasteMerges).
+   * Null when there is nothing to lay down; false, said, when the fill must be refused.
+   */
+  _fillMergePlan(sheet, src, tgt, vertical, limit) {
+    const own = sheet.merges.filter(m => m.r1 >= src.r1 && m.c1 >= src.c1 && m.r2 <= src.r2 && m.c2 <= src.c2);
+    if (!own.length) return null;
+    // Rows a filter hides are skipped by the fill, so its copies of the block are not whole: no merge repeats.
+    if (vertical && sheet.filterHidden?.size && [...sheet.filterHidden].some(r => r >= tgt.r1 && r <= tgt.r2 && (r < src.r1 || r > src.r2))) return null;
+    const size = vertical ? src.r2 - src.r1 + 1 : src.c2 - src.c1 + 1;
+    const [start, lo, hi] = vertical ? [src.r1, tgt.r1, tgt.r2] : [src.c1, tgt.c1, tgt.c2];
+    const incoming = [];
+    for (let t = Math.floor((lo - start) / size); start + t * size <= hi; t++) {
+      if (t === 0) continue;
+      const d = t * size;
+      for (const m of own) {
+        const next = vertical ? { ...m, r1: m.r1 + d, r2: m.r2 + d } : { ...m, c1: m.c1 + d, c2: m.c2 + d };
+        if ((vertical ? next.r1 < lo || next.r2 > hi : next.c1 < lo || next.c2 > hi) || next.r2 >= limit.rows || next.c2 >= limit.cols) continue;
+        incoming.push({ r1: next.r1, c1: next.c1, r2: next.r2, c2: next.c2 });
+      }
+    }
+    if (!incoming.length) return null;
+    const plan = planPasteMerges(sheet.merges, incoming);
+    if (plan.error) { this._emit('merge-paste', sheet.id, { reason: plan.error }); return false; }
+    if (this._gridLocked(sheet) || plan.ranges.some(m => this.lockedIn(sheet.id, m))) return false;
+    for (const m of plan.ranges) {
+      const array = this._fixedArrays(sheet).overlapping(m).next().value;
+      if (array) { this._arrayRefused(sheet, array, 'overlap'); return false; }
+      if (sheet.tables.some(t => intersection(m, { ...t.range, r2: tableRows(t).dataEnd }))) {
+        this._emit('merge-paste', sheet.id, { reason: 'table' }); return false;
+      }
+    }
+    // Only the destination merges near the target can cover a filled cell.
+    const kept = plan.remaining.filter(m => intersection(m, tgt));
+    return { ...plan, kept };
   }
 
   /**
@@ -5795,6 +5869,11 @@ export class Workbook extends EventTarget {
         .filter((m) => m[hi] >= m[lo] && (m.r1 !== m.r2 || m.c1 !== m.c2));
       sheet.protectedRanges = sheet.protectedRanges.map((p) => (insideBand(p.range) ? { ...p, range: adjust(p.range) } : p)).filter((p) => p.range[hi] >= p.range[lo]);
       mapScenarioCells(sheet, (m) => (insideBand(m) ? adjust(m) : m));
+      this._mapWatches(sheetId, (r, c) => {
+        if (!inBand(r, c)) return { r, c };
+        const i = moveIndex(axis === 'row' ? r : c);
+        return i == null ? null : axis === 'row' ? { r: i, c } : { r, c: i };
+      });
       sheet.tables = sheet.tables.map((t) => {
         if (!touchesBand(t.range)) return t;
         const range = adjust(t.range);
@@ -5830,15 +5909,18 @@ export class Workbook extends EventTarget {
       // Only references that lie within the band follow the shift.
       this.nativePivots = mapNativePivotRanges(this.nativePivots, sheetId, ref => insideBand(ref)
         ? remove ? adjustRefForDelete(ref, axis, at, n) : adjustRefForInsert(ref, axis, at, n) : ref);
-      const follow = (formula, ownerSheet) => mapFormulaRefs(formula, (ref) => {
+      // A relative defined name's offsets name different cells from every cell that uses it: only its wholly absolute references follow.
+      const follow = (formula, ownerSheet, relativeName = false) => mapFormulaRefs(formula, (ref) => {
         const target = ref.sheet ?? ownerSheet;
         if (!sameSheetName(target, sheet.name)) return ref;
         if (ref.kind === 'cols' || ref.kind === 'rows') return ref;
-        if (!insideBand(ref)) return ref;
-        return remove ? adjustRefForDelete(ref, axis, at, n) : adjustRefForInsert(ref, axis, at, n);
+        const edit = (m) => (!insideBand(m) ? m : remove ? adjustRefForDelete(m, axis, at, n) : adjustRefForInsert(m, axis, at, n));
+        return relativeName ? mapRelativeNameRef(ref, axis, edit, true) : edit(ref);
       });
       for (const s of this.sheets) {
         s.sparklineGroups = mapNativeSparklineReferences(s.sparklineGroups, f => follow(f, s.name));
+        // A chart's series, titles and linked text are references like any formula's.
+        s.charts = s.charts.map(chart => mapChartReferences(chart, f => follow(f, s.name)));
         for (const cell of s.cells.values()) {
           if (cell.f == null) continue;
           cell.f = follow(cell.f, s.name);
@@ -5847,7 +5929,7 @@ export class Workbook extends EventTarget {
           Object.entries(t.calc).map(([c, f]) => [c, follow(f, s.name)]),
         ) });
       }
-      this.names = this.names.map((nm) => ({ ...nm, ref: follow(nm.ref, nm.sheet || null) }));
+      this.names = this.names.map((nm) => ({ ...nm, ref: follow(nm.ref, nm.sheet || null, nm.relative === true) }));
       // A row inserted among a table's data rows by shifting its cells down is a new table row, and
       // gets the calculated columns as one inserted with the row tools does. The templates were
       // adjusted above, so the shift is not applied to the fresh formulas a second time.
@@ -6100,6 +6182,7 @@ export class Workbook extends EventTarget {
       mapPrintAreas(sheet, m => clamp(grow(m)), axis);
       sheet.protectedRanges = sheet.protectedRanges.map((p) => ({ ...p, range: clamp(grow(p.range)) }));
       mapScenarioCells(sheet, (m) => clamp(grow(m)));
+      this._mapWatches(sheetId, (r, c) => (axis === 'row' ? { r: r >= at ? r + n : r, c } : { r, c: c >= at ? c + n : c }));
       sheet.groups[groupKey] = sheet.groups[groupKey].map((g) => {
         const out = { ...g };
         if (g.from >= at) { out.from += n; out.to += n; } else if (g.to >= at) out.to += n;
@@ -6185,7 +6268,10 @@ export class Workbook extends EventTarget {
     let lines = deleteMap(asked.map(({ from, to }) => ({ from: Math.max(0, from), to: Math.min(to, total - 1) })));
     if (!lines.count) return false;
     if (this.pivotLineEditBlocked(sheetId, axis, 0, 0, lines)) return false;
-    const pivotLines = lines; // Keep the full requested deletion when the grid retains one empty line.
+    // References renumber by the whole deletion asked for, as in a grid of fixed size: a reference past the
+    // sheet's extent moves up by the lines deleted above it, and one to the line the sheet keeps when every
+    // line goes is lost, like the rest. The trimmed map below only says what storage loses.
+    const refLines = deleteMap(asked.map(({ from, to }) => ({ from: Math.max(0, from), to: Math.min(to, axis === 'row' ? MAX_ROW : MAX_COL) })));
     for (const a of this._fixedArrays(sheet).ranges) {
       const first = axis === 'row' ? a.r1 : a.c1, last = axis === 'row' ? a.r2 : a.c2;
       const removed = lines.runs.reduce((count, run) => count + Math.max(0, Math.min(last, run.to) - Math.max(first, run.from) + 1), 0);
@@ -6221,9 +6307,13 @@ export class Workbook extends EventTarget {
     this._structural(label || (axis === 'row' ? 'Delete rows' : 'Delete columns'), () => {
       this._removeNativePivots((this.nativePivots?.tables || []).filter(p => {
         const ref = p.owner === sheetId && parseRefText(p.ref || '');
-        return ref && !adjustRefForDeletedLines(ref, axis, pivotLines);
+        return ref && !adjustRefForDeletedLines(ref, axis, refLines);
       }), label || 'Delete lines', true);
-      this.nativePivots = mapNativePivotRanges(this.nativePivots, sheetId, ref => adjustRefForDeletedLines(ref, axis, pivotLines));
+      this.nativePivots = mapNativePivotRanges(this.nativePivots, sheetId, ref => adjustRefForDeletedLines(ref, axis, refLines));
+      this._mapWatches(sheetId, (r, c) => {
+        const i = refLines.move(axis === 'row' ? r : c);
+        return i == null ? null : axis === 'row' ? { r: i, c } : { r, c: i };
+      });
       if (everything) {
         // The one surviving line must not keep the last line's contents.
         const last = total - 1;
@@ -6243,18 +6333,23 @@ export class Workbook extends EventTarget {
         sheet.merges = sheet.merges.filter((m) => !gone(m));
         sheet.rules = sheet.rules.filter((rule) => !gone(rule.range));
         sheet.validations = sheet.validations.filter((v) => !gone(v.range));
-        sheet.styleResets = shiftStyleResets(sheet.styleResets, axis, last, 1, true);
-        sheet.ignoredErrors = shiftRangeFlags(sheet.ignoredErrors, axis, last, 1, true);
         sheet.protectedRanges = sheet.protectedRanges.filter((p) => !gone(p.range));
         mapSheetFilters(sheet, f => gone(f.range) ? null : f);
         if (!sheetFilters(sheet).length) sheet.filterHidden = new Set();
         const groupKey = axis === 'row' ? 'rows' : 'cols';
         sheet.groups[groupKey] = sheet.groups[groupKey].filter((g) => g.to > last);
       }
-      if (!lines.count) { if (axis === 'row') sheet.rows = DEFAULT_ROWS; else sheet.cols = DEFAULT_COLS; return; }
       // Rules, validations and filters are few: they follow the runs one at a time, from the bottom up so
-      // that the runs above keep their numbering, as they would under one deletion after another.
-      for (let i = runs.length - 1; i >= 0; i--) this._adjustLineRules(sheet.name, axis, runs[i].from, runs[i].to - runs[i].from + 1, true);
+      // that the runs above keep their numbering, as they would under one deletion after another. Their
+      // formulas are references and their ranges may run past the sheet's extent: the whole deletion
+      // applies (cleared reset and ignored-error records of the line the sheet keeps go with it).
+      for (let i = refLines.runs.length - 1; i >= 0; i--) this._adjustLineRules(sheet.name, axis, refLines.runs[i].from, refLines.runs[i].to - refLines.runs[i].from + 1, true);
+      if (!lines.count) {
+        if (axis === 'row') sheet.rows = DEFAULT_ROWS; else sheet.cols = DEFAULT_COLS;
+        this._adjustFormulas(sheet.name, axis, refLines.runs[0].from, refLines.count, true, refLines);
+        this._refreshFilters(this.sheets);
+        return;
+      }
       const moved = new Map();
       for (const [key, cell] of sheet.cells) {
         const { r, c } = parseKey(key);
@@ -6401,7 +6496,7 @@ export class Workbook extends EventTarget {
       // Deleting frozen lines shrinks the frozen area by as many of them as were frozen.
       if (axis === 'row') sheet.frozenRows -= lines.before(sheet.frozenRows);
       else sheet.frozenCols -= lines.before(sheet.frozenCols);
-      this._adjustFormulas(sheet.name, axis, runs[0].from, lines.count, true, lines);
+      this._adjustFormulas(sheet.name, axis, refLines.runs[0].from, refLines.count, true, refLines);
       this._refreshFilters(this.sheets);
     });
     return true;
@@ -6470,6 +6565,14 @@ export class Workbook extends EventTarget {
     // A merged block the move would cut through, taking a line out of it or landing lines inside it, is refused, as
     // sorting through one is, rather than dropping the merge; one the moved lines carry whole follows them.
     if (sheet.merges.some(straddles)) return null;
+    // A PivotTable report is one indivisible layout, as for insertions and deletions (pivotLineEditBlocked):
+    // the move may carry it whole or shift it, but not take lines out of it or land lines inside it.
+    for (const pivot of this.nativePivots?.tables || []) {
+      const range = pivot.owner === sheetId && parseRefText(pivot.ref || '');
+      if (!range || !straddles(range)) continue;
+      this._emit('pivot-edit', sheetId, { name: pivot.name, range, reason: 'partial' });
+      return null;
+    }
     // Lines landing inside a protected range grow it over cells nobody may then fill, as an insertion inside
     // one does: refuse and say so, the way moving a protected line away is refused just above. A range the
     // move only shifts keeps the lines it had, and is left alone.
@@ -6482,6 +6585,13 @@ export class Workbook extends EventTarget {
     // Rule and filter formulas are rewritten through their own writers; the transaction folds
     // those steps into this one structural undo entry.
     this.transaction(label, () => this._structural(label, () => {
+      // Reports move whole with their lines (one cut through was refused above); a pivot cache's source range
+      // follows its data as a reference does.
+      this.nativePivots = mapNativePivotRanges(this.nativePivots, sheetId, (ref) => {
+        if (!straddles(ref)) return mapRange(ref);
+        const cut = adjustRefForDelete(ref, axis, from, count);
+        return cut && adjustRefForInsert(cut, axis, landing, count);
+      });
       const moved = new Map();
       for (const [key, cell] of sheet.cells) {
         const { r, c } = parseKey(key);
@@ -6517,16 +6627,20 @@ export class Workbook extends EventTarget {
       sheet.groups[groupKey] = sheet.groups[groupKey]
         .map((g) => { const span = mapSpan(g.from, g.to); return span.contiguous ? { ...g, from: span.lo, to: span.hi } : null; })
         .filter(Boolean);
-      const renumber = (formula, ownerSheet) => mapFormulaRefs(formula, (ref) => {
+      const renumber = (formula, ownerSheet, relativeName = false) => mapFormulaRefs(formula, (ref) => {
         const target = ref.sheet ?? ownerSheet;
         if (!sameSheetName(target, sheet.name)) return ref;
         if (axis === 'row' && ref.kind === 'cols') return ref;
         if (axis === 'col' && ref.kind === 'rows') return ref;
-        if (!straddles(ref)) return mapRange(ref);
-        // A range the block partly overlaps loses the lines that leave it and gains those that
-        // land inside it, as if they were deleted and inserted, rather than growing to span both.
-        const cut = adjustRefForDelete(ref, axis, from, count);
-        return cut && adjustRefForInsert(cut, axis, landing, count);
+        const edit = (m) => {
+          if (!straddles(m)) return mapRange(m);
+          // A range the block partly overlaps loses the lines that leave it and gains those that
+          // land inside it, as if they were deleted and inserted, rather than growing to span both.
+          const cut = adjustRefForDelete(m, axis, from, count);
+          return cut && adjustRefForInsert(cut, axis, landing, count);
+        };
+        // A relative defined name's offsets are not addresses: only its absolute coordinates follow the lines.
+        return relativeName ? mapRelativeNameRef(ref, axis, edit) : edit(ref);
       });
       // A chart, filter, or protected range the block partly overlaps is treated like such a
       // reference: it loses the lines that leave it and gains those that land inside it.
@@ -6590,6 +6704,8 @@ export class Workbook extends EventTarget {
       sheet.rules = sheet.rules.flatMap((rule) => splitRule(rule, 'value'));
       sheet.validations = sheet.validations.flatMap((rule) => splitRule(rule, 'source'));
       sheet.protectedRanges = sheet.protectedRanges.map((p) => ({ ...p, range: moveRect(p.range) }));
+      mapScenarioCells(sheet, moveRect);
+      this._mapWatches(sheetId, (r, c) => (axis === 'row' ? { r: map(r), c } : { r, c: map(c) }));
       sheet.charts = sheet.charts.map((ch) => ({ ...ch, ...mapCellDrawing(ch, p => ({ ...p, [axis === 'row' ? 'r' : 'c']: map(p[axis === 'row' ? 'r' : 'c']) })), range: moveRect(ch.range), anchor: ch.anchorMode === 'absolute' ? ch.anchor : { r: axis === 'row' ? map(ch.anchor.r) : ch.anchor.r, c: axis === 'col' ? map(ch.anchor.c) : ch.anchor.c } }));
       sheet.tables = sheet.tables.map((t) => {
         const range = mapRange(t.range);
@@ -6622,13 +6738,15 @@ export class Workbook extends EventTarget {
       });
       for (const s of this.sheets) {
         s.sparklineGroups = mapNativeSparklineReferences(s.sparklineGroups, f => renumber(f, s.name));
+        // The moved sheet's own charts read its lines as its cell formulas do; charts elsewhere follow below.
+        if (s === sheet) s.charts = s.charts.map(chart => mapChartReferences(chart, f => renumber(f, s.name)));
         if (s === sheet) s.sparklineGroups = mapNativeSparklineDestinations(s.sparklineGroups, mapRange);
         for (const cell of s.cells.values()) if (cell.f != null) cell.f = renumber(cell.f, s.name);
         s.tables = s.tables.map((t) => !t.calc ? t : { ...t, calc: Object.fromEntries(
           Object.entries(t.calc).map(([c, f]) => [c, renumber(f, s.name)]),
         ) });
       }
-      this.names = this.names.map((n) => ({ ...n, ref: renumber(n.ref, n.sheet || null) }));
+      this.names = this.names.map((n) => ({ ...n, ref: renumber(n.ref, n.sheet || null, n.relative === true) }));
       // On other sheets, a conditional-format, validation or filter formula names the moved sheet to
       // read its data: that reference points at the data wherever it now is, so it follows the move
       // however it is spelled, as it follows an insertion, a deletion (adjustBlockRules) and a block
@@ -12003,6 +12121,12 @@ export class Workbook extends EventTarget {
         if (!target) return null;
         return this.spillRangeAt(target.id, ref.r1, ref.c1);
       },
+      // The used area of a sheet, to which a whole column or row is read (see getRangeValues): ROW(A:A)
+      // numbers the rows that read covers without calculating a cell of them. Null for an empty sheet.
+      usedArea: (sheetName) => {
+        const target = byName(sheetName);
+        return target && target.kind !== 'chart' ? this.usedRange(target.id) : null;
+      },
       getRangeValues: (ref) => {
         const target = byName(ref.sheet);
         if (!target || target.kind === 'chart') return [[err('#REF!')]];
@@ -12314,6 +12438,52 @@ export class Workbook extends EventTarget {
     return this.watches.length - before;
   }
 
+  /**
+   * A watch names a cell, as a reference does: a structural edit on its sheet carries it along, and one whose
+   * cell is deleted (or pushed off the grid) goes. `move(r, c)` gives the cell's new { r, c }, or null.
+   * Adding and removing watches is no undo step, so the structural step does not snapshot the list: the
+   * watches keep their identity and the step logs what it did to each (_structural's `_watchMoves`), and its
+   * undo and redo reverse or repeat just that, leaving watches added or removed since alone.
+   */
+  _mapWatches(sheetId, move) {
+    if (!this.watches.some((w) => w.sheetId === sheetId)) return;
+    const log = this._watchMoves;
+    const kept = [];
+    this.watches.forEach((w, index) => {
+      if (w.sheetId !== sheetId) { kept.push(w); return; }
+      const p = move(w.r, w.c);
+      const to = p && p.r >= 0 && p.c >= 0 && p.r <= MAX_ROW && p.c <= MAX_COL ? { r: p.r, c: p.c } : null;
+      if (to && to.r === w.r && to.c === w.c) { kept.push(w); return; }
+      log?.push({ watch: w, index, from: { r: w.r, c: w.c }, to });
+      if (to) { w.r = to.r; w.c = to.c; kept.push(w); }
+    });
+    this.watches = kept;
+    this._announce('watches', sheetId);
+  }
+
+  /** Reverse (undo) or repeat (redo) a structural step's watch moves, on the watches still where the step left them. */
+  _replayWatchMoves(moves, undo) {
+    if (!moves.length) return;
+    let changed = false;
+    const at = (w, p) => w.r === p.r && w.c === p.c;
+    for (const m of undo ? [...moves].reverse() : moves) {
+      const [was, now] = undo ? [m.to, m.from] : [m.from, m.to];
+      const live = this.watches.includes(m.watch);
+      if (was) {
+        // Moved, or deleted, by the step: only a watch still where the step put it (or left it) goes on.
+        if (!live || !at(m.watch, was)) continue;
+        if (now) { m.watch.r = now.r; m.watch.c = now.c; } else this.watches = this.watches.filter((w) => w !== m.watch);
+      } else {
+        // Deleted by the step: undo brings it back, at its old place in the list, unless that cell is watched again.
+        if (live || this.watches.some((w) => w.sheetId === m.watch.sheetId && at(w, now))) continue;
+        m.watch.r = now.r; m.watch.c = now.c;
+        this.watches = [...this.watches.slice(0, m.index), m.watch, ...this.watches.slice(m.index)];
+      }
+      changed = true;
+    }
+    if (changed) this._announce('watches', null);
+  }
+
   removeWatches(list) {
     const drop = new Set(list.map((w) => `${w.sheetId}|${w.r}|${w.c}`));
     const kept = this.watches.filter((w) => !drop.has(`${w.sheetId}|${w.r}|${w.c}`));
@@ -12487,6 +12657,16 @@ export class Workbook extends EventTarget {
     return true;
   }
   redoLabels(n = 10) { return this._future.slice(-n).reverse().map((e) => e.label); }
+  /**
+   * Take back the newest steps while they are among `steps`, leaving none of them to redo: a cell entry given up
+   * with Escape discards the formatting applied while it was typed, as Excel does. How many were taken back.
+   */
+  discardSteps(steps) {
+    let n = 0;
+    while (this._history.length && steps.has(this._history.at(-1)) && this.undo()) { this._future.pop(); n++; }
+    if (n) this._emit('history');
+    return n;
+  }
   /** Undo (or redo) several steps at once. Returns how many were taken. */
   undoSteps(n) { let k = 0; while (k < n && this.undo()) k++; return k; }
   redoSteps(n) { let k = 0; while (k < n && this.redo()) k++; return k; }
@@ -12596,22 +12776,31 @@ export class Workbook extends EventTarget {
       // it is first undone). A tool that inserts a row per group stays linear this way. The
       // capture stays open to the end of the transaction, so the edits between the steps count.
       if (!this._group.structural) {
-        const snap = { capture: this._capture(), before: null, after: null, entry: null, steps: 0 };
-        snap.entry = { label, undo: () => this._restore(snap.before), redo: () => this._restore(snap.after), snapshotCells: 0 };
+        const snap = { capture: this._capture(), before: null, after: null, entry: null, steps: 0, watchMoves: [] };
+        snap.entry = { label, undo: () => { this._restore(snap.before); this._replayWatchMoves(snap.watchMoves, true); },
+          redo: () => { this._restore(snap.after); this._replayWatchMoves(snap.watchMoves, false); }, snapshotCells: 0 };
         this._group.structural = snap;
         this._group.push(snap.entry);
       }
       this._group.structural.steps++;
-      const result = fn();
-      this._changed('structure');
-      return result;
+      const outer = this._watchMoves;
+      this._watchMoves = this._group.structural.watchMoves;
+      try {
+        const result = fn();
+        this._changed('structure');
+        return result;
+      } finally { this._watchMoves = outer; }
     }
     const capture = this._capture();
     const snap = { before: null, after: null };
+    const watchMoves = [];
+    const outer = this._watchMoves;
+    this._watchMoves = watchMoves;
     let result;
     try {
       result = fn();
     } finally {
+      this._watchMoves = outer;
       snap.before = this._settle(capture);
     }
     this._changed('structure');
@@ -12622,8 +12811,9 @@ export class Workbook extends EventTarget {
       undo: () => {
         if (!snap.after) { snap.after = this._snapshot(snap.before.touched); step.snapshotCells += snap.after.cells; }
         this._restore(snap.before);
+        this._replayWatchMoves(watchMoves, true);
       },
-      redo: () => this._restore(snap.after),
+      redo: () => { this._restore(snap.after); this._replayWatchMoves(watchMoves, false); },
       snapshotCells: snap.before.cells,
     };
     this._push(step);

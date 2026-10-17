@@ -58,7 +58,7 @@ The workbook's own Undo would put back whole sheets, including other people's ed
 
 ## Offline and recovery
 
-Every pending change is kept in IndexedDB (`spreadsheet-collab`, one record per room: the revision the changes apply on top of, and the changes). Without a connection the status says **Offline · N changes waiting**; work continues locally. When the connection returns (or the tab becomes visible again) the browser fetches what others did, rebases its changes on it and sends them. After a reload, opening the shared workbook loads the checkpoint at or before the saved revision, applies the log up to it, puts the saved changes back on top, and rebases them through the rest. A change the worker refuses for good (access removed, invalid) is taken back with the later ones, which may build on it, and the person is told.
+Every pending change is kept in IndexedDB (`spreadsheet-collab`, one record per account and room: the revision the changes apply on top of, and the changes). Another account signed in on the same browser never reads them (they would reach the room as its own), and signing out removes the account's. Without a connection the status says **Offline · N changes waiting**; work continues locally. When the connection returns (or the tab becomes visible again) the browser fetches what others did, rebases its changes on it and sends them. After a reload, opening the shared workbook loads the checkpoint at or before the saved revision, applies the log up to it, puts the saved changes back on top, and rebases them through the rest. A change the worker refuses for good (access removed, invalid) is taken back with the later ones, which may build on it, and the person is told.
 
 One tab per shared workbook keeps the outbox; two tabs of the same shared workbook in one browser each send their own changes while open, but only the latest one's unsent changes survive closing both while offline.
 
@@ -90,6 +90,8 @@ The worker enforces roles on every request, independently of the interface:
 - Only the owner manages access, and only the worker's owner creates rooms on it.
 
 Accepted commits return a receipt signed with the room key, binding the room, the revision, the change's digest and its author; peers apply a change sent over a peer link only with a valid receipt and only in the log's order.
+
+Outside content (IMPORT* and WEBSERVICE formulas, the AI, web images) is the owner's to allow in their own workbook. Anyone else holds a workbook others wrote, as with a file from elsewhere: one that reaches out asks before anything is loaded, and a formula that reaches out arriving later from someone else withdraws a yes already given, before the cell is shown.
 
 ## Checkpoints and the file
 
