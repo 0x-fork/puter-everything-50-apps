@@ -205,4 +205,124 @@ describe('shared spaces after a refused edit', () => {
     a.close();
     b.close();
   });
+
+  describe('live signals', () => {
+    let ctx;
+    beforeEach(async () => {
+      ctx = await setup();
+    });
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    /** Records the documents each sync request asks for. */
+    const watchSyncs = (space) => {
+      const calls = [];
+      const real = space.requestFn;
+      space.requestFn = (op, data) => {
+        if (op === 'sync') calls.push({ docs: Object.keys(data.docs), keys: data.keys || null });
+        return real(op, data);
+      };
+      return calls;
+    };
+
+    it('names the saved document, its record and who saved it', async () => {
+      const a = await open(ctx.env, alice);
+      const pa = await a.doc(ctx.root);
+      insertBlock(pa, { text: 'x' });
+      await a.flushAll();
+      const first = ctx.env.data.get(`wk:${ROOM}:ev:signal`);
+      expect(first).toMatchObject({ docs: [ctx.root], session: a.session, by: alice.uuid });
+      expect(first.keys[ctx.root]).toMatch(new RegExp(`^wk:${ROOM}:log:${ctx.root}:`));
+      expect(ctx.env.data.has(first.keys[ctx.root])).toBe(true);
+      insertBlock(pa, { text: 'y' });
+      await a.flushAll();
+      expect(ctx.env.data.get(`wk:${ROOM}:ev:signal`).seq).toBe(first.seq + 1);
+      a.close();
+    });
+
+    it('fetches the named record even when the worker copy predates it', async () => {
+      const a = await open(ctx.env, alice);
+      const pa = await a.doc(ctx.root);
+      // Another worker instance saves an edit this instance has not listed yet.
+      const other = new Y.Doc();
+      Y.applyUpdate(other, Y.encodeStateAsUpdate(pa));
+      const before = Y.encodeStateVector(other);
+      insertBlock(other, { text: 'from elsewhere' });
+      const update = Y.encodeStateAsUpdate(other, before);
+      const at = ctx.env.now;
+      const key = `wk:${ROOM}:log:${ctx.root}:${new Date(at).toISOString()}:${'a'.repeat(16)}`;
+      ctx.env.data.set(key, { id: 'x', author: bob.uuid, username: 'bob', at, update: encode(update) });
+      await a.synchronize();
+      expect(texts(pa)).not.toContain('from elsewhere');
+      await a.synchronize(new Map([[ctx.root, key]]));
+      expect(texts(pa)).toContain('from elsewhere');
+      // Keys outside the document's own log are ignored.
+      const res = await ctx.env.service().call(alice, { op: 'sync', room: ROOM, docs: { tree: null }, keys: { tree: `wk:${ROOM}:meta` } });
+      expect(res.updates.tree).toBeTruthy();
+      a.close();
+    });
+
+    it('reads every record a batch of signals named', async () => {
+      const a = await open(ctx.env, alice);
+      const pa = await a.doc(ctx.root);
+      // Two edits in a row saved through another worker instance.
+      const other = new Y.Doc();
+      Y.applyUpdate(other, Y.encodeStateAsUpdate(pa));
+      const keys = [];
+      for (const [i, text] of ['one', 'two'].entries()) {
+        const before = Y.encodeStateVector(other);
+        insertBlock(other, { text });
+        const key = `wk:${ROOM}:log:${ctx.root}:${new Date(ctx.env.now + i).toISOString()}:${String(i).repeat(16)}`;
+        ctx.env.data.set(key, { id: 'x', author: bob.uuid, username: 'bob', at: ctx.env.now + i, update: encode(Y.encodeStateAsUpdate(other, before)) });
+        keys.push(key);
+      }
+      a.onSignal({ seq: 1, docs: [ctx.root], keys: { [ctx.root]: keys[0] }, session: 'someoneelse0', by: bob.uuid });
+      a.onSignal({ seq: 2, docs: [ctx.root], keys: { [ctx.root]: keys[1] }, session: 'someoneelse0', by: bob.uuid });
+      await wait(200);
+      await a.syncing;
+      expect(texts(pa)).toEqual(['hello', 'one', 'two']);
+      a.close();
+    });
+
+    it('fetches only what a signal names, skips its own saves, and catches up after a gap', async () => {
+      const a = await open(ctx.env, alice);
+      await a.doc(ctx.root);
+      const calls = watchSyncs(a);
+      const from = (seq, extra = {}) => ({ seq, docs: [ctx.root], session: 'someoneelse0', by: bob.uuid, ...extra });
+      // The first signal also stands for any sent before this tab listened.
+      a.onSignal(from(1, { keys: { [ctx.root]: 'k1' } }));
+      await wait(200);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].docs.sort()).toEqual([ctx.root, 'tree'].sort());
+      expect(calls[0].keys).toEqual({ [ctx.root]: ['k1'] });
+      calls.length = 0;
+      a.onSignal(from(2, { keys: { [ctx.root]: 'k2' } }));
+      a.onSignal(from(3, { keys: { [ctx.root]: 'k3' } }));
+      await wait(200);
+      expect(calls).toEqual([{ docs: [ctx.root], keys: { [ctx.root]: ['k2', 'k3'] } }]);
+      calls.length = 0;
+      a.onSignal(from(4, { session: a.session, by: alice.uuid }));
+      a.onSignal(from(5, { docs: ['notopen'] }));
+      await wait(200);
+      expect(calls).toEqual([]);
+      // Someone else naming this tab's session is not skipped.
+      a.onSignal(from(6, { session: a.session }));
+      await wait(200);
+      expect(calls).toEqual([{ docs: [ctx.root], keys: null }]);
+      calls.length = 0;
+      a.onSignal(from(8, { keys: { [ctx.root]: 'k8' } }));
+      await wait(200);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].docs.sort()).toEqual([ctx.root, 'tree'].sort());
+      expect(calls[0].keys).toEqual({ [ctx.root]: ['k8'] });
+      calls.length = 0;
+      // People coming and going refresh the roster, not the documents.
+      a.onSignal({ seq: 9, docs: [] });
+      await wait(200);
+      expect(calls).toEqual([]);
+      // Signals from an older worker carry no numbers, so each fetches everything.
+      a.onSignal({ nonce: 'n', docs: [ctx.root] });
+      await wait(200);
+      expect(calls[0].docs.sort()).toEqual([ctx.root, 'tree'].sort());
+      a.close();
+    });
+  });
 });

@@ -9,7 +9,7 @@
 import { Y, makeDoc, local } from './ydoc.js';
 import { getPage, descendants, pagesOf, PAGE_FIELDS, childrenOf } from './tree.js';
 import { listBlocks, insertBlocks, blocksOf } from './page.js';
-import { listProps, listViews, listRows } from './database.js';
+import { cloneDatabase } from './database.js';
 import { keyBetween } from '../lib/order.js';
 import { uid } from '../lib/ids.js';
 
@@ -80,7 +80,10 @@ export async function importSubtree(from, to, bundle, parent = null, { after = n
   for (const [docId, state] of Object.entries(bundle.docs)) await to.putDoc(docId, state);
   const sibs = childrenOf(to.tree, parent);
   const i = after ? sibs.findIndex((p) => p.id === after) : sibs.length - 1;
-  const order = keyBetween(sibs[i]?.order || '', sibs[i + 1]?.order || '');
+  const lo = sibs[i]?.order || '';
+  const hi = sibs[i + 1]?.order || '';
+  // Siblings can share a key (two people adding at the same spot); go after it.
+  const order = keyBetween(lo, hi > lo ? hi : '');
   local(to.tree, () => {
     for (const p of bundle.pages) {
       const m = new Y.Map();
@@ -109,26 +112,7 @@ export function cloneDocContent(src, dst, idMap) {
       blocks.map(({ id, order, delta, ...rest }) => ({ ...rest, delta: remapDelta(delta, idMap), ...(rest.page ? { page: idMap.get(rest.page) || rest.page } : {}) })),
     );
   }
-  const db = src.getMap('db');
-  if (db.get('props') instanceof Y.Map) {
-    local(dst, () => {
-      const out = dst.getMap('db');
-      const props = new Y.Map();
-      const views = new Y.Map();
-      const rows = new Y.Map();
-      out.set('props', props);
-      out.set('views', views);
-      out.set('rows', rows);
-      for (const { id, ...p } of listProps(src)) props.set(id, p);
-      for (const { id, ...v } of listViews(src)) views.set(id, v);
-      for (const r of listRows(src)) {
-        const m = new Y.Map();
-        m.set('order', r.order);
-        for (const [k, v] of Object.entries(r.values)) m.set(k, v);
-        rows.set(idMap.get(r.id) || r.id, m);
-      }
-    });
-  }
+  cloneDatabase(src, dst, (id) => idMap.get(id) || id);
   return dst;
 }
 
@@ -149,7 +133,9 @@ export async function cloneSubtree(space, rootId, { titleSuffix = ' (copy)', par
   const targetParent = parent === undefined ? root.parent : parent;
   const sibs = childrenOf(space.tree, targetParent);
   const i = sibs.findIndex((p) => p.id === rootId);
-  const order = keyBetween(i >= 0 ? sibs[i].order : sibs.at(-1)?.order || '', i >= 0 ? sibs[i + 1]?.order || '' : '');
+  const lo = (i >= 0 ? sibs[i].order : sibs.at(-1)?.order) || '';
+  const hi = (i >= 0 && sibs[i + 1]?.order) || '';
+  const order = keyBetween(lo, hi > lo ? hi : '');
   local(space.tree, () => {
     const now = Date.now();
     for (const id of ids) {

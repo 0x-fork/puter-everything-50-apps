@@ -300,14 +300,48 @@ describe('structure edge cases', () => {
 
   it('merges table cells typed by two people', async () => {
     const { doc } = mount([{ type: 'table', table: { rows: [['a', 'b'], ['c', 'd']], header: false } }]);
+    const T = await import('../src/data/table.js');
+    const other = new Y.Doc();
+    Y.applyUpdate(other, Y.encodeStateAsUpdate(doc));
     const cells = host.querySelectorAll('td');
     cells[0].textContent = 'mine';
     cells[0].dispatchEvent(new Event('input'));
-    // Someone else changes another cell before the save.
-    const P = await import('../src/data/page.js');
-    const [b] = listBlocks(doc);
-    P.setBlock(doc, b.id, { table: { rows: [['a', 'b'], ['c', 'theirs']], header: false } });
+    // Someone else changes another cell and adds a row before the save.
+    const [b] = listBlocks(other);
+    T.setCells(other, b.id, [{ row: b.table.rowIds[1], col: b.table.colIds[1], text: 'theirs' }]);
+    T.insertRow(other, b.id);
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(other));
+    await tick();
+    expect(host.querySelectorAll('tr')).toHaveLength(3);
     await new Promise((r) => setTimeout(r, 600));
-    expect(listBlocks(doc)[0].table.rows).toEqual([['mine', 'b'], ['c', 'theirs']]);
+    Y.applyUpdate(other, Y.encodeStateAsUpdate(doc));
+    expect(listBlocks(doc)[0].table.rows).toEqual([['mine', 'b'], ['c', 'theirs'], ['', '']]);
+    expect(listBlocks(other)[0].table.rows).toEqual(listBlocks(doc)[0].table.rows);
+  });
+
+  it('undoes typing in a table cell, saved or not, and shows it in that cell', async () => {
+    const { doc } = mount([{ type: 'table', table: { rows: [['a', 'b']], header: false } }]);
+    const cell = () => host.querySelector('td');
+    const undo = () => cell().dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, metaKey: true, bubbles: true }));
+    cell().tabIndex = 0;
+    cell().focus();
+    // Undo right after typing, before the cell saved on its own.
+    cell().textContent = 'typed';
+    cell().dispatchEvent(new Event('input'));
+    undo();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(listBlocks(doc)[0].table.rows).toEqual([['a', 'b']]);
+    expect(cell().textContent).toBe('a');
+    // Undo after it saved, while the caret is still in the cell.
+    cell().textContent = 'again';
+    cell().dispatchEvent(new Event('input'));
+    await new Promise((r) => setTimeout(r, 500));
+    expect(listBlocks(doc)[0].table.rows).toEqual([['again', 'b']]);
+    editor.undo.stopCapturing();
+    undo();
+    await tick();
+    expect(document.activeElement).toBe(cell());
+    expect(listBlocks(doc)[0].table.rows).toEqual([['a', 'b']]);
+    expect(cell().textContent).toBe('a');
   });
 });
