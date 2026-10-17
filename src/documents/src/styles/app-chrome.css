@@ -17,6 +17,8 @@
 .ed-title-details:hover { background: var(--ed-hover); color: var(--ed-ink); }
 .ed-title-popover { display: grid; gap: 10px; min-width: min(300px, 80vw); padding: 2px 4px 4px; }
 .ed-title-location { display: grid; gap: 2px; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+/* Version History, Properties and Rename together are wider than the popover: they wrap rather than push it open. */
+.ed-title-popover > .row { flex-wrap: wrap; }
 
 /* AutoSave switch */
 .ed-autosave { display: inline-flex; align-items: center; gap: 6px; flex: none; padding: 0 6px 0 2px; font-size: 12px; color: var(--ed-ink-2); cursor: default; user-select: none; }
@@ -41,6 +43,9 @@ input:disabled + .ed-switch { opacity: .5; }
 .ed-quick .ed-undo-arrow { width: 14px; height: 28px; border: 0; border-radius: 0 6px 6px 0; background: transparent; color: var(--ed-ink-2); }
 .ed-quick .ed-undo-arrow:hover:not(:disabled) { background: var(--ed-hover); }
 .ed-quick .ed-undo-arrow:disabled { color: var(--ed-ink-3); opacity: .5; }
+/* On a touch screen Undo's history arrow reaches a fingertip, as the ribbon's arrows do: 14px wide and pressed
+   against the 44px Undo, a tap meant for the history undid instead. */
+@media (pointer: coarse) { .ed-quick .ed-undo-arrow { width: 28px; height: 44px; } }
 
 /* The classic menu bar, beside quick access. */
 .ed-header .ed-menubar { display: flex; align-items: center; flex-wrap: nowrap; gap: 0; min-height: 0; height: 30px; margin: 0 0 0 6px; padding: 0 0 0 8px; border-left: 1px solid var(--ed-line); overflow: hidden; }
@@ -141,7 +146,9 @@ input:disabled + .ed-switch { opacity: .5; }
 .ed-status-accessibility { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .ed-status-accessibility[data-state='errors'] { color: var(--ed-danger, #b3261e); }
 @media (max-width: 1100px) { .ed-status-accessibility > span { display: none; } }
-@media (max-width: 900px) { .ed-status-accessibility, .ed-statusbar .ed-status-language { display: none; } }
+/* Below 900px the view buttons go too (the View tab and menu keep them): with them, the zoom controls left the
+   word count cut in half and the spelling button clipped out of sight while still taking focus. */
+@media (max-width: 900px) { .ed-status-accessibility, .ed-statusbar .ed-status-language, .ed-statusbar .ed-status-views { display: none; } }
 
 /* ---- File view ---- */
 .backstage {
@@ -150,9 +157,9 @@ input:disabled + .ed-switch { opacity: .5; }
 }
 .backstage[hidden] { display: none; }
 /* The File view's column: the accent in light themes, a deep blue in dark ones so white text keeps its contrast. */
-:root { --bs-side: var(--ed-accent); }
-@media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { --bs-side: #22395a; } }
-:root[data-theme="dark"] { --bs-side: #22395a; }
+:root { --bs-side: var(--ed-accent); --bs-current: rgba(0, 0, 0, .24); }
+@media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { --bs-side: #22395a; --bs-current: rgba(255, 255, 255, .24); } }
+:root[data-theme="dark"] { --bs-side: #22395a; --bs-current: rgba(255, 255, 255, .24); }
 .bs-side { display: flex; flex-direction: column; gap: 2px; padding: calc(14px + var(--safe-t)) 10px calc(14px + var(--safe-b)) calc(10px + var(--safe-l)); background: var(--bs-side); color: #fff; overflow: auto; }
 .bs-back, .bs-tab {
   display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px; padding: 0 12px; border: 0; border-radius: 7px;
@@ -160,7 +167,8 @@ input:disabled + .ed-switch { opacity: .5; }
 }
 .bs-back { margin-bottom: 10px; font-weight: 600; }
 .bs-back:hover, .bs-tab:hover { background: rgba(255, 255, 255, .14); }
-.bs-tab[aria-selected='true'] { background: rgba(255, 255, 255, .24); font-weight: 600; }
+/* The current section darkens the accent column: a white wash over it left its white name at 3.8:1. */
+.bs-tab[aria-selected='true'] { background: var(--bs-current); font-weight: 600; }
 .bs-tab:focus-visible, .bs-back:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
 .bs-tab svg.ico { --ico-knock: transparent; }
 .bs-side svg { flex: none; }

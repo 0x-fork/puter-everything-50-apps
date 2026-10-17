@@ -343,6 +343,15 @@ export function createImageInteraction(editor) {
     const b = make('button', 'canvas-crop-handle', { type: 'button', 'aria-label': `Crop ${handle}`, 'data-crop': handle });
     listen(b, 'pointerdown', e => { e.stopPropagation(); begin(e, `crop-${handle}`); });
     listen(b, 'mousedown', e => e.preventDefault());
+    // From the keyboard an arrow moves the handle that way, as dragging it would; Enter and Escape finish.
+    listen(b, 'keydown', e => {
+      if (!crop || gesture) return;
+      if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endCrop(e.key === 'Enter'); editor.focus(); return; }
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+      e.preventDefault(); e.stopPropagation();
+      const step = e.shiftKey ? 10 : 1, dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0, dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+      crop.rect = dragCropRect(crop.rect, handle, dx, dy); showCrop();
+    });
     cropFrame.append(b); return b;
   });
   void cropHandles;
@@ -430,9 +439,18 @@ export function createImageInteraction(editor) {
       const step = e.shiftKey ? 10 : 1, dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0, dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
       if (handle) {
         if (!resizable(f.image)) return;
-        if (f.image.aspectLocked === false && (!f.image.retainedDrawing || scenePicture(f.image))) {
-          resizeImage(f.image, resizePatch(f, isCorner(handle) ? resizeImageFrame(f, handle, dx, dy) : resizeFromHandle(f, handle, dx, dy)));
-        } else { const scale = Math.max(.01, 1 + (dx || dy) / Math.max(f.width, f.height)), width = Math.max(1, Math.round(f.image.width * scale)); resizeImage(f.image, { width, height: Math.max(1, Math.round(width * f.image.height / f.image.width)) }); }
+        // An arrow moves the handle that way, as dragging it would: outward grows the drawing, inward
+        // shrinks it, and the opposite side stays put.
+        if (!f.image.retainedDrawing || scenePicture(f.image)) {
+          const preserveAspect = isCorner(handle) ? f.image.aspectLocked !== false : !!f.image.aspectLocked;
+          const resized = isCorner(handle) ? resizeImageFrame(f, handle, dx, dy, { preserveAspect }) : resizeFromHandle(f, handle, dx, dy, { preserveAspect });
+          if (resized.width !== f.image.width || resized.height !== f.image.height) resizeImage(f.image, resizePatch(f, resized));
+        } else {
+          const outward = (handle.includes('e') ? dx : handle.includes('w') ? -dx : 0) || (handle.includes('s') ? dy : handle.includes('n') ? -dy : 0);
+          if (!outward) return;
+          const scale = Math.max(.01, 1 + outward / Math.max(f.width, f.height)), width = Math.max(1, Math.round(f.image.width * scale));
+          resizeImage(f.image, { width, height: Math.max(1, Math.round(width * f.image.height / f.image.width)) });
+        }
       }
       else nudge(f, dx, dy);
     });
@@ -477,6 +495,10 @@ export function createImageInteraction(editor) {
       if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); endCrop(e.key === 'Enter'); return true; }
       if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return false;
       endCrop(true);
+      // A typed character (AltGr ones arrive as Ctrl+Alt) only finishes the crop: carrying on would
+      // type over the selected picture.
+      const character = [...(e.key || '')].length === 1 && !e.metaKey && (!e.ctrlKey || e.altKey && !/^[a-z0-9]$/i.test(e.key));
+      if (character) { e.preventDefault(); return true; }
       return false;
     }
     if (e.key === 'Escape' && extras.length) { setExtras([]); return false; }

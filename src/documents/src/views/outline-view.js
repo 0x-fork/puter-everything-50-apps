@@ -7,7 +7,7 @@
  * Outlining tab and the Navigation pane change levels and order through outline-editing.js, each as one
  * undoable step. Tables appear as one row and are edited in the other views.
  */
-import { el, isComposing, MOD_KEY } from '../ui/dom.js';
+import { el, isComposing, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { outlineRows, outlineUnits, subtreeEnd, moveOutlineBlock, setOutlineLevels, promotedLevel, demotedLevel, BODY_LEVEL } from '../engine/outline-editing.js';
 
 const INDENT = 26;
@@ -281,7 +281,7 @@ export function createOutlineView({ editor, readOnly, error, onState = () => {} 
     return direction < 0 ? rect.top - box.top < rect.height * 0.9 : box.bottom - rect.bottom < rect.height * 0.9;
   }
   function onKey(e, id, text) {
-    if (isComposing(e)) return;
+    if (isComposing(e) || typesCharacter(e)) return;
     const mod = e.ctrlKey || e.metaKey;
     const handled = () => { e.preventDefault(); e.stopPropagation(); };
     if (e.altKey && e.shiftKey && !mod) {
@@ -293,11 +293,12 @@ export function createOutlineView({ editor, readOnly, error, onState = () => {} 
       if (/^Digit[1-9]$/.test(e.code)) { handled(); setShowLevel(Number(e.code.slice(5))); return; }
       if (e.code === 'KeyA') { handled(); setShowLevel(BODY_LEVEL); return; }
     }
-    if (mod && !e.altKey && e.shiftKey && e.code === 'KeyN') { handled(); changeLevel(() => BODY_LEVEL); return; }
-    if (mod && !e.altKey && (e.code === 'KeyZ' || e.code === 'KeyY')) {
+    const code = shortcutCode(e);
+    if (mod && !e.altKey && e.shiftKey && code === 'KeyN') { handled(); changeLevel(() => BODY_LEVEL); return; }
+    if (mod && !e.altKey && (code === 'KeyZ' || code === 'KeyY')) {
       handled();
       const ed = engine(); if (!ed) return;
-      (e.code === 'KeyY' || e.shiftKey ? ed.redo() : ed.undo());
+      (code === 'KeyY' || e.shiftKey ? ed.redo() : ed.undo());
       render(); focusCaret(); return;
     }
     if (e.key === 'Tab' && !mod && !e.altKey) { handled(); changeLevel(e.shiftKey ? promotedLevel : demotedLevel); return; }

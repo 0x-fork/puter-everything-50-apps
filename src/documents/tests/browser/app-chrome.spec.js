@@ -66,9 +66,12 @@ test('the menu bar has the classic menus, moves with the arrow keys and runs com
 test('the File view opens over the editor, edits document properties that save into the file, and exports', async ({ page }, info) => {
   await openEditor(page);
   await text(page).fill('Harbour report\nThe tide was high.');
-  await page.getByRole('button', { name: 'File', exact: true }).click();
+  const fileButton = page.locator('.ribbon-file');
+  await expect(fileButton).toHaveAttribute('aria-expanded', 'false');
+  await fileButton.click();
   const view = page.getByRole('dialog', { name: 'File' });
   await expect(view).toBeVisible();
+  await expect(fileButton).toHaveAttribute('aria-expanded', 'true');
   await expect(view.getByRole('tab', { name: 'Info' })).toHaveAttribute('aria-selected', 'true');
   await expect(view.locator('.bs-facts').last()).toContainText('Words');
   await view.getByRole('textbox', { name: 'Title', exact: true }).fill('Harbour Report');
@@ -79,6 +82,7 @@ test('the File view opens over the editor, edits document properties that save i
   await page.keyboard.press('Escape');
   await expect(view).toBeHidden();
   await expect(text(page)).toBeFocused();
+  await expect(fileButton).toHaveAttribute('aria-expanded', 'false');
   // Export: .docx carries the properties; Markdown and plain text carry the words.
   await page.getByRole('button', { name: 'File', exact: true }).click();
   await view.getByRole('tab', { name: 'Export' }).click();
@@ -213,6 +217,37 @@ test('the status bar counts the selection, picks a language that saves into the 
   expect(strFromU8(unzipSync(readFileSync(path))['word/document.xml'])).toContain('<w:lang w:val="de-DE"/>');
 });
 
+test('the Language list is one tab stop that the arrow keys move through', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('Bonjour');
+  await select(page, 0, 7);
+  await page.locator('.ed-statusbar .ed-status-language').click();
+  const dialog = page.getByRole('dialog', { name: 'Language' });
+  const list = dialog.getByRole('listbox', { name: 'Languages' });
+  await expect(dialog.getByRole('searchbox', { name: 'Search languages' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(list.getByRole('option', { name: /English \(United States\)/ })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  const british = list.getByRole('option', { name: /English \(United Kingdom\)/ });
+  await expect(british).toBeFocused();
+  await expect(british).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('End');
+  await expect(list.getByRole('option').last()).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(list.getByRole('option').first()).toBeFocused();
+  // Every language was its own tab stop, some thirty presses away from OK.
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('checkbox', { name: 'Do not check spelling or grammar' })).toBeFocused();
+  // Down from the search box lands on the chosen language among those it finds.
+  await dialog.getByRole('searchbox', { name: 'Search languages' }).fill('fr');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await expect(list.getByRole('option', { name: /French \(Canada\)/ })).toBeFocused();
+  await dialog.getByRole('button', { name: 'OK' }).click();
+  await select(page, 1, 2);
+  await expect(page.locator('.ed-statusbar .ed-status-language')).toContainText('French (Canada)');
+});
+
 test('the ribbon collapses to its tabs and shows KeyTips for the keyboard', async ({ page }) => {
   await openEditor(page);
   const card = page.locator('.ed-ribbon');
@@ -239,6 +274,27 @@ test('the ribbon collapses to its tabs and shows KeyTips for the keyboard', asyn
   await page.keyboard.press('Escape');
   await page.keyboard.press('Escape');
   await expect(page.locator('.ed-keytip')).toHaveCount(0);
+});
+
+test('command search and KeyTips reach the Draw and Mailings tabs the feature modules add', async ({ page }) => {
+  await openEditor(page);
+  const search = page.getByRole('combobox', { name: 'Search for commands' });
+  const results = page.getByRole('listbox', { name: 'Commands' });
+  await search.click(); await search.fill('highlight merge fields');
+  await expect(results.getByRole('option').first()).toContainText('Mailings');
+  await search.click(); await search.fill('lasso');
+  await expect(results.getByRole('option').first()).toContainText('Lasso Select');
+  await search.press('Enter');
+  await expect(page.locator('#ribbon-tab-draw')).toHaveAttribute('aria-selected', 'true');
+  // KeyTips label every tab, these two among them.
+  await text(page).focus();
+  await page.keyboard.press('Alt');
+  await expect(page.locator('.ed-keytip', { hasText: /^JI$/ })).toBeVisible();
+  await expect(page.locator('.ed-keytip', { hasText: /^M$/ })).toBeVisible();
+  await page.keyboard.press('m');
+  await expect(page.locator('#ribbon-tab-mailings')).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
 });
 
 test('the right-click menu fits a link, and Edit > Links lists and removes links', async ({ page }) => {

@@ -129,6 +129,16 @@ function inherited(el, format) {
   return next;
 }
 
+// Word writes a list item as a paragraph styled mso-list:l0 level1, with its number or bullet as text
+// in a span styled mso-list:Ignore (for browsers without list support). The marker is not content.
+const msoList = el => /mso-list\s*:\s*([^;"']*)/i.exec(el.getAttribute?.('style') || '')?.[1].trim() || '';
+function wordListItem(el) {
+  const level = /^l\d+\s+level(\d+)/i.exec(msoList(el))?.[1];
+  if (!level) return null;
+  const marker = [...el.querySelectorAll('[style]')].find(child => /^ignore$/i.test(msoList(child)))?.textContent.replace(/[\s\u00a0]/g, '') || '';
+  return { kind: /^\(?[0-9a-z]{1,6}[.)]$/i.test(marker) ? 'number' : 'bullet', level: Math.max(0, Math.min(8, Number(level) - 1)) };
+}
+
 function fromForeignHtml(body) {
   const paragraphs = [];
   let current = null;
@@ -163,7 +173,7 @@ function fromForeignHtml(body) {
       append(text, format, context.link);
       return;
     }
-    if (node.nodeType !== 1 || SKIPPED.has(node.tagName)) return;
+    if (node.nodeType !== 1 || SKIPPED.has(node.tagName) || /^ignore$/i.test(msoList(node))) return;
     const tag = node.tagName;
     if (tag === 'BR') { if (!node.classList?.contains('Apple-interchange-newline')) append('\v', format, context.link); return; }
     const next = inherited(node, format);
@@ -183,7 +193,7 @@ function fromForeignHtml(body) {
       if (!['UL', 'OL', 'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'DL', 'BODY'].includes(tag)) {
         const heading = /^H([1-6])$/.exec(tag)?.[1];
         const align = { center: 'center', right: 'right', justify: 'both' }[node.style?.textAlign];
-        start({ styleName: heading ? `Heading ${heading}` : 'Normal', alignment: align || null, list: tag === 'LI' ? ctx.list || { kind: 'bullet', level: 0 } : null });
+        start({ styleName: heading ? `Heading ${heading}` : 'Normal', alignment: align || null, list: tag === 'LI' ? ctx.list || { kind: 'bullet', level: 0 } : wordListItem(node) });
       }
     }
     if (tag === 'LI') ctx.item = current;
@@ -286,13 +296,29 @@ export function pasteFragment(model, fragment) {
   return true;
 }
 
+// Another application's run with only plain values (not bold, black) leaves the destination's formatting.
+const plainForeignRun = run => !run.link && RUN_KEYS.every(key => [undefined, null, false, 'auto'].includes(run.format?.[key]));
+const appliedRuns = (fragment, p) => p.runs.filter(run => run.text && !(fragment.foreign && plainForeignRun(run)));
+
+/**
+ * Whether a paste can carry this fragment's formatting. Every paragraph and formatted run is a command
+ * over the whole document, so formatting megabytes of another application's HTML would hold the page
+ * for minutes; past the limit the text is pasted without it, as a copy of that size here carries none.
+ */
+export function formattedPasteFits(fragment) {
+  let commands = 0;
+  for (const p of fragment?.paragraphs || []) if ((commands += (p.mark ? 1 : 0) + appliedRuns(fragment, p).length) > MAX_RUNS) return false;
+  return true;
+}
+
 function applyFragment(model, fragment, start) {
   const after = start + fragment.paragraphs.reduce((n, p) => n + p.text.length + 1, -1);
   let at = start;
   for (const p of fragment.paragraphs) {
     if (p.mark) { model.select(at); applyParagraph(model, p, !!fragment.foreign); }
     let offset = at;
-    for (const run of p.runs) { if (run.text) applyRun(model, offset, offset + run.text.length, run, !!fragment.foreign); offset += run.text.length; }
+    const applied = new Set(appliedRuns(fragment, p));
+    for (const run of p.runs) { if (applied.has(run)) applyRun(model, offset, offset + run.text.length, run, !!fragment.foreign); offset += run.text.length; }
     at += p.text.length + 1;
   }
   model.select(after);

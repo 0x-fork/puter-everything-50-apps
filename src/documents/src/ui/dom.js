@@ -83,11 +83,74 @@ export function isMod(e) {
   return IS_MAC ? e.metaKey : e.ctrlKey;
 }
 
+/**
+ * The key a shortcut chord names, as a KeyboardEvent code. A letter is the letter the layout types,
+ * as everywhere else on the system: Ctrl+Z is on the key labelled Z with QWERTZ, AZERTY or Dvorak,
+ * not on the key where QWERTY has it. The physical key counts when the key types another script
+ * (Cyrillic, Greek) or Option changes the character; punctuation a layout types on a letter key
+ * (Dvorak's ' where QWERTY has Q) names no letter. Digits and punctuation keep their physical code.
+ */
+export function shortcutCode(e) {
+  const key = String(e?.key || ''), code = e?.code || '';
+  if (/^[a-z]$/i.test(key)) return `Key${key.toUpperCase()}`;
+  if (/^Key[A-Z]$/.test(code) && !e.altKey && [...key].length === 1 && !/\p{L}/u.test(key)) return '';
+  return code;
+}
+
+const TEXT_FIELD = 'textarea, select, [contenteditable]:not([contenteditable="false"]), input:not([type]), input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="url"], input[type="tel"], input[type="password"]';
+/**
+ * Whether a key goes to a text field of the window's own (the search box, a comment, a dialog's or a
+ * pane's input) rather than to the document, so document shortcuts leave it to that field.
+ */
+export function typingElsewhere(target) {
+  return !!target?.matches?.(TEXT_FIELD) && !target.matches('.canvas-input') && !target.closest('.outline-view');
+}
+
+/**
+ * Whether a keydown types a character rather than making a chord. AltGr reaches the page as Ctrl+Alt
+ * on Windows (Polish AltGr+O is ó, French AltGr+0 is @, German AltGr+7 is {), and Option types
+ * characters on a Mac (Option+Shift+D is Î, Option+Shift+hyphen an em dash). Those keys belong to
+ * the text; a Ctrl+Alt or Option chord on the same key gives way to them.
+ */
+export function typesCharacter(e, mac = IS_MAC) {
+  const key = String(e?.key || '');
+  if (!e?.altKey || [...key].length !== 1 || !/\S/u.test(key) || /^[a-z0-9]$/i.test(key)) return false;
+  return mac ? !e.metaKey && !e.ctrlKey : !!e.ctrlKey && !e.metaKey;
+}
+
 /** IME confirmation/cancellation belongs to text composition, not shortcuts. */
 export function isComposing(e) {
   // Some browsers end composition before the final keydown; 229 still marks
   // that event as belonging to the input method.
   return e.isComposing || e.keyCode === 229;
+}
+
+/**
+ * Make a listbox of option buttons one Tab stop: the selected option (the first when none is) takes
+ * Tab, and Up, Down, Home and End move focus to another option and call `select` with it. Returns a
+ * function that puts the Tab stop back on the selected option after the options change.
+ */
+export function listboxKeys(list, select) {
+  const options = () => [...list.querySelectorAll('[role="option"]')].filter(o => !o.disabled && !o.closest('[hidden]'));
+  const settle = (stop = null) => {
+    const all = options();
+    stop ||= all.find(o => o.getAttribute('aria-selected') === 'true') || all[0];
+    for (const o of all) o.tabIndex = o === stop ? 0 : -1;
+    return stop;
+  };
+  list.addEventListener('focusin', e => { const option = e.target.closest?.('[role="option"]'); if (option && list.contains(option)) settle(option); });
+  list.addEventListener('keydown', e => {
+    if (isComposing(e) || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const all = options(), at = all.indexOf(e.target.closest?.('[role="option"]'));
+    const next = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: all.length - 1 }[e.key];
+    if (next === undefined || at < 0) return;
+    e.preventDefault();
+    const option = all[Math.max(0, Math.min(all.length - 1, next))];
+    if (option === all[at]) return;
+    select(option); settle(option); option.focus();
+  });
+  settle();
+  return () => settle();
 }
 
 export function formatBytes(n) {

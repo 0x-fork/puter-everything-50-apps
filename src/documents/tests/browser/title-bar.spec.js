@@ -49,6 +49,10 @@ test('touch screens fit the title bar to its fingertip-sized commands', async ({
       expect(box.height, name).toBeGreaterThanOrEqual(44);
       expect(box.y + box.height, name).toBeLessThanOrEqual(bar.y + bar.height);
     }
+    // Undo's history arrow, pressed against Undo, is wide enough that a tap meant for it does not undo.
+    const arrow = await page.locator('.ed-quick').getByRole('button', { name: 'Undo history' }).boundingBox();
+    expect(arrow.width).toBeGreaterThanOrEqual(24);
+    expect(arrow.height).toBeGreaterThanOrEqual(44);
     // The save status, Search and account button take taps a fingertip high, though drawn smaller.
     const reach = await page.evaluate(() => ['.ed-titlebar .canvas-save-status', '.ed-search', '.ed-header .user-btn'].filter(s => {
       const el = document.querySelector(s), b = el.getBoundingClientRect(), x = b.left + b.width / 2, y = b.top + b.height / 2;
@@ -89,5 +93,56 @@ test('the status bar keeps its zoom controls whole between phone and desktop wid
       return { overflow: bar.scrollWidth > bar.clientWidth, zoomInside: zoom.right <= bar.getBoundingClientRect().right, apart: language.right <= mode.left };
     });
     expect(result, `${width}px`).toEqual({ overflow: false, zoomInside: true, apart: true });
+  }
+});
+
+test('between phone and desktop widths the status bar shows its counts whole instead of clipping them', async ({ page }) => {
+  await openEditor(page, 1440);
+  await text(page).fill('one two three four five six seven eight nine ten eleven twelve');
+  await text(page).evaluate(el => { el.focus(); el.setSelectionRange(0, 7); el.dispatchEvent(new Event('select')); });
+  await expect(page.locator('.ed-word-count')).toHaveText('2 of 12 words');
+  for (const width of [701, 740, 780, 860, 1000]) {
+    await page.setViewportSize({ width, height: 800 });
+    // The view buttons and zoom controls left the word count cut in half and the spelling button clipped out of sight.
+    const cut = await page.evaluate(() => {
+      const left = document.querySelector('.ed-status-left').getBoundingClientRect();
+      return [...document.querySelectorAll('.ed-status-left > *')].filter(n => n.getClientRects().length && n.getBoundingClientRect().right > left.right + 0.5).map(n => n.title || n.textContent.trim());
+    });
+    expect(cut, `${width}px`).toEqual([]);
+  }
+});
+
+test('the zoom slider keeps the keyboard for repeated arrow presses and returns it to the text after a drag', async ({ page }) => {
+  await openEditor(page, 1440);
+  const slider = page.getByRole('slider', { name: 'Zoom slider' });
+  const zoom = () => page.evaluate(() => Math.round(window.__docs.current.view.engine.zoom * 100));
+  await slider.focus();
+  // Each press ends a change; handing focus to the text at the first one sent the next presses into the document.
+  for (const expected of [99, 98, 97]) {
+    await page.keyboard.press('ArrowLeft');
+    await expect.poll(zoom).toBe(expected);
+    await expect(slider).toBeFocused();
+  }
+  const box = await slider.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.3, box.y + box.height / 2, { steps: 4 });
+  await page.mouse.up();
+  await expect(text(page)).toBeFocused();
+});
+
+test('the document details popover holds its fields and buttons inside its frame', async ({ page }) => {
+  for (const width of [820, 1440]) {
+    await openEditor(page, width);
+    await page.getByRole('button', { name: 'Document details' }).click();
+    const popover = page.getByRole('dialog', { name: 'Document' });
+    await expect(popover.getByRole('button', { name: 'Rename' })).toBeVisible();
+    // Version History, Properties and Rename side by side were wider than the popover and spilled past its edge.
+    const spill = await popover.evaluate(panel => {
+      const frame = panel.getBoundingClientRect();
+      return [...panel.querySelectorAll('input, button')].filter(n => { const r = n.getBoundingClientRect(); return r.right > frame.right + 0.5 || r.left < frame.left - 0.5; }).map(n => n.getAttribute('aria-label') || n.textContent);
+    });
+    expect(spill, `${width}px`).toEqual([]);
+    await page.keyboard.press('Escape');
   }
 });

@@ -276,6 +276,93 @@ test('remove background, artistic effects, layout options, compress and rotating
   expect(errors).toEqual([]);
 });
 
+test('alt text typed for one picture stays with it when another object or the text is selected', async ({ page }, info) => {
+  const { input, errors } = await start(page);
+  await insertPicture(page, input);
+  await onTab(page, 'insert');
+  await page.getByLabel('Insert picture file').setInputFiles({ name: 'logo.png', mimeType: 'image/png', buffer: PNG });
+  await expect.poll(async () => (await input.inputValue()).split(OBJECT).length - 1).toBe(2);
+  await onTab(page, 'picture');
+  // The second picture is selected: describe it, then click the first one without saving first.
+  await page.locator('#ribbon-panel-picture').getByRole('button', { name: 'Alt Text', exact: true }).click();
+  const alt = page.getByRole('complementary', { name: 'Alt Text pane' }), description = alt.getByRole('textbox', { name: 'Description' });
+  await expect(alt).toContainText('Picture 2');
+  await description.fill('Second picture');
+  const box = await page.locator('canvas.canvas-page').first().boundingBox();
+  await page.mouse.click(box.x + 136, box.y + 136);
+  await expect(alt).toContainText('Picture 1');
+  await expect(description).toHaveValue('');
+  // A description left in the field when clicking into the text is kept too.
+  await description.fill('First picture');
+  await page.mouse.click(box.x + 600, box.y + 300);
+  await expect(alt).toContainText('Select a picture or shape');
+  await expect.poll(async () => [...(await save(page, info, 'alt-text-owner')).xml('word/document.xml').matchAll(/<wp:docPr [^>]*>/g)].map(m => m[0].match(/descr="([^"]*)"/)?.[1] ?? ''))
+    .toEqual(['First picture', 'Second picture']);
+  expect(errors).toEqual([]);
+});
+
+test('the Layout dialog keeps an untouched size and free rotation exactly, and shows the tab of an invalid field', async ({ page }, info) => {
+  const { input, errors } = await start(page);
+  const ribbon = await insertPicture(page, input);
+  // Rotate freely with the handle (no Shift): a fractional angle.
+  const host = page.locator('.canvas-editor-content');
+  const frame = await host.locator('.canvas-image-frame').first().boundingBox(), handle = await host.getByRole('button', { name: 'Rotate image', exact: true }).boundingBox();
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down(); await page.mouse.move(frame.x + frame.width / 2 + 37, frame.y + frame.height / 2 - 90, { steps: 5 }); await page.mouse.up();
+  const frameXml = xml => [xml.match(/<wp:extent [^>]*>/)[0], xml.match(/<a:xfrm[^>]*>/)[0]];
+  let before;
+  await expect.poll(async () => { before = frameXml((await save(page, info, 'layout-exact-before')).xml('word/document.xml')); return before[1]; }).toMatch(/rot="\d*[1-9]\d{0,3}"/);
+  // A 128 px picture is 1.333… in wide; the dialog shows 1.33 and must not resize it to that.
+  await ribbon.getByRole('button', { name: 'Size and Position…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Layout' });
+  await dialog.getByRole('tab', { name: 'Text Wrapping' }).click();
+  await dialog.getByText('In front of text', { exact: true }).click();
+  await dialog.getByRole('button', { name: 'OK' }).click();
+  await expect(dialog).toBeHidden();
+  const after = frameXml((await save(page, info, 'layout-exact-after')).xml('word/document.xml'));
+  expect(after).toEqual(before);
+  expect(after[0]).toBe('<wp:extent cx="1219200" cy="1219200"/>');
+  // An invalid size entered on the Size tab is pointed out there, whichever tab is showing on OK.
+  await ribbon.getByRole('button', { name: 'Size and Position…' }).click();
+  await dialog.getByRole('tab', { name: 'Size' }).click();
+  await dialog.getByRole('spinbutton', { name: 'Width (in)' }).fill('0');
+  await dialog.getByRole('tab', { name: 'Position' }).click();
+  await dialog.getByRole('button', { name: 'OK' }).click();
+  await expect(dialog.getByRole('tab', { name: 'Size' })).toHaveAttribute('aria-selected', 'true');
+  await expect(dialog.getByRole('spinbutton', { name: 'Width (in)' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  expect(errors).toEqual([]);
+});
+
+test('pictures over the session limits are scaled down on insertion and on Change Picture', async ({ page }, info) => {
+  test.setTimeout(120000);
+  const { input, errors } = await start(page);
+  // A 24-megapixel camera JPEG and a large WebP, drawn in the page.
+  const picture = (type, width, height) => page.evaluate(async ([type, width, height]) => {
+    const canvas = Object.assign(document.createElement('canvas'), { width, height }), g = canvas.getContext('2d');
+    for (let i = 0; i < 60; i++) { g.fillStyle = `hsl(${i * 37 % 360} 70% 50%)`; g.fillRect(i * width / 60, (i * 7 % 10) * height / 10, width / 5, height / 5); }
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, type, 0.9));
+    return [...new Uint8Array(await blob.arrayBuffer())];
+  }, [type, width, height]).then(bytes => Buffer.from(bytes));
+  const size = bytes => bytes[0] === 0x89 ? [bytes.readUInt32BE(16), bytes.readUInt32BE(20)] : (() => {
+    for (let at = 2; at < bytes.length;) { const marker = bytes[at + 1], length = bytes.readUInt16BE(at + 2); if (marker >= 0xc0 && marker <= 0xc2) return [bytes.readUInt16BE(at + 7), bytes.readUInt16BE(at + 5)]; at += 2 + length; }
+  })();
+  await onTab(page, 'insert');
+  await page.getByLabel('Insert picture file').setInputFiles({ name: 'camera.jpg', mimeType: 'image/jpeg', buffer: await picture('image/jpeg', 6000, 4000) });
+  await expect.poll(async () => (await input.inputValue()).split(OBJECT).length - 1).toBe(1);
+  await onTab(page, 'insert');
+  await page.getByLabel('Insert picture file').setInputFiles({ name: 'large.webp', mimeType: 'image/webp', buffer: await picture('image/webp', 4500, 4500) });
+  await expect.poll(async () => (await input.inputValue()).split(OBJECT).length - 1).toBe(2);
+  let { parts } = await save(page, info, 'large-pictures');
+  const media = () => Object.entries(parts).filter(([name]) => name.startsWith('word/media/')).map(([name, bytes]) => [name.split('.').pop(), ...size(Buffer.from(bytes))]).sort();
+  expect(media()).toEqual([['jpg', 4096, 2731], ['png', 4000, 4000]]);
+  // Change Picture takes the same route.
+  await onTab(page, 'picture');
+  await page.getByLabel('Change picture file').setInputFiles({ name: 'camera.jpg', mimeType: 'image/jpeg', buffer: await picture('image/jpeg', 4000, 6000) });
+  await expect.poll(async () => { ({ parts } = await save(page, info, 'large-pictures-changed')); return media(); }).toContainEqual(['jpg', 2731, 4096]);
+  expect(errors).toEqual([]);
+});
+
 test('Picture Format at phone width', async ({ page }) => {
   const { input, errors } = await start(page, { width: 390 });
   await insertPicture(page, input);

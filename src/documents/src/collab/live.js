@@ -52,7 +52,9 @@ export async function joinRoom(link, user) {
   const client = new CollabClient({ transport, user, room: link.room, sendDelay: link.local ? 30 : 150 });
   const joined = await client.connect();
   let base = joined.base || null;
-  if (!base && !link.local) base = decode((await call(sdk(), link.server, { op: 'base', room: link.room })).base);
+  // Joined but unable to open: leave again, or the room keeps being synchronized for an editor that never opened.
+  try { if (!base && !link.local) base = decode((await call(sdk(), link.server, { op: 'base', room: link.room })).base); }
+  catch (error) { await client.close().catch(() => {}); throw error; }
   return { client, base, name: joined.name || 'Shared document', link, role: client.role, ownerName: joined.ownerName };
 }
 
@@ -231,8 +233,9 @@ export class LiveSession extends EventTarget {
     this.engine.setRangeTints?.([], 'collab');
     this.binding.destroy();
     this.client.close(reason).catch(() => {});
-    // A tab that did not write the file keeps the document as a copy of its own from here on.
-    if (!this.saves && !this.local) this.doc.setSaving?.(this.role === 'owner' && !!this.doc.path);
+    // A tab that did not write the file keeps the document as a copy of its own from here on: edits made in it
+    // from now on are its own to save (or to download, between tabs of a browser), and leaving warns about them.
+    if (!this.saves) this.doc.setSaving?.(true);
     this.dispatchEvent(new CustomEvent('ended', { detail: { reason } }));
   }
   destroy() { this.end(null); }

@@ -34,6 +34,7 @@ vi.mock('../src/lib/puter.js', async (importOriginal) => {
 import { publishing, Doc, AUTOSAVE_MS, MAX_AUTOSAVE_MS, RETRY_MS, UNTITLED, needsUnloadWarning, versioning } from '../src/lib/doc.js';
 import * as P from '../src/lib/puter.js';
 import { hwp, paragraph } from './helpers/hwp-fixtures.js';
+import { isStarred, toggleStar } from '../src/lib/starred.js';
 
 const blob = (s) => new Blob([s], { type: P.DOCX_MIME });
 
@@ -230,6 +231,52 @@ describe('Doc', () => {
     await vi.advanceTimersByTimeAsync(RETRY_MS + 5);
     expect(doc.status).toBe('saved');
     expect(P.writeFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('with AutoSave off, writes only on Save: no background, reconnect or post-copy autosave', async () => {
+    const store = new Map();
+    vi.stubGlobal('localStorage', { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) });
+    const doc = new Doc({ name: 'A', path: 'Documents/A.docx', blob: blob('original') });
+    P.__fs.set(doc.path, doc.blob);
+    doc.attach(async () => blob('edited'));
+    doc.setAutosave(false);
+    doc.changed();
+    // What the app does when the page is hidden, the connection returns, or the user signs in.
+    expect(await doc.save({ auto: true })).toBe(false);
+    await vi.advanceTimersByTimeAsync(RETRY_MS + AUTOSAVE_MS);
+    expect(P.writeFile).not.toHaveBeenCalled();
+    expect(doc.dirty).toBe(true);
+    // Edits made while a copy is saved wait for Save too.
+    let release;
+    const exporter = vi.fn().mockReturnValueOnce(new Promise((resolve) => { release = resolve; })).mockResolvedValue(blob('later'));
+    doc.attach(exporter);
+    const copying = doc.saveAs('B');
+    await vi.advanceTimersByTimeAsync(0);
+    doc.changed();
+    release(blob('copy'));
+    expect(await copying).toBeNull();
+    await vi.advanceTimersByTimeAsync(RETRY_MS + AUTOSAVE_MS);
+    expect(await P.__fs.get('Documents/B.docx').text()).toBe('copy');
+    expect(doc.dirty).toBe(true);
+    expect(await doc.save()).toBe(true);
+    expect(await P.__fs.get('Documents/B.docx').text()).toBe('later');
+    expect(await P.__fs.get('Documents/A.docx').text()).toBe('original');
+    doc.destroy();
+  });
+
+  it('holds an autosave while the editor is composing text, without a failed status', async () => {
+    const doc = track(Doc.blank());
+    let composing = true;
+    doc.attach(async () => { if (composing) throw new Error('Finish composing text before saving.'); return blob('v'); }, { busy: () => composing });
+    doc.changed();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 4);
+    expect(P.writeFile).not.toHaveBeenCalled();
+    expect(statuses).toEqual(['unsaved']);
+    composing = false;
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS + 5);
+    expect(statuses).toEqual(['unsaved', 'saving', 'saved']);
+    expect(doc.dirty).toBe(false);
+    doc.destroy();
   });
 
   it('reports offline instead of error when the browser is offline', async () => {
@@ -543,6 +590,19 @@ describe('Doc', () => {
     expect(P.__fs.has('Documents/A.docx')).toBe(false);
     expect(await P.__fs.get('Documents/B.docx').text()).toBe('latest');
     expect(doc.path).toBe('Documents/B.docx');
+    doc.destroy();
+  });
+
+  it('keeps the star of a document renamed from the editor', async () => {
+    const store = new Map();
+    vi.stubGlobal('localStorage', { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) });
+    const doc = new Doc({ name: 'A', path: 'Documents/A.docx', blob: blob('original') });
+    P.__fs.set(doc.path, doc.blob);
+    doc.attach(async () => blob('latest'));
+    toggleStar('Documents/A.docx');
+    expect(await doc.rename('B')).toBeNull();
+    expect(isStarred('Documents/B.docx')).toBe(true);
+    expect(isStarred('Documents/A.docx')).toBe(false);
     doc.destroy();
   });
 

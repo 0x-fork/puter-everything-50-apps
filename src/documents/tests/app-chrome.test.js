@@ -24,6 +24,16 @@ describe('keymap', () => {
     expect(chordOf(key('ShiftLeft', { shiftKey: true }, 'Shift'), false)).toBeNull();
     expect(chordOf(key('Comma', { metaKey: true }, ','), true)).toBe('Mod+Comma');
   });
+  it('names letters as the layout types them, and the physical key for other scripts and Option', () => {
+    // QWERTZ types Z where QWERTY has Y; AZERTY types A where QWERTY has Q.
+    expect(chordOf(key('KeyY', { ctrlKey: true }, 'z'), false)).toBe('Mod+Z');
+    expect(chordOf(key('KeyQ', { metaKey: true, shiftKey: true }, 'A'), true)).toBe('Mod+Shift+A');
+    // Cyrillic types ы on the S key; Option types ˚ on K.
+    expect(chordOf(key('KeyS', { ctrlKey: true }, 'ы'), false)).toBe('Mod+S');
+    expect(chordOf(key('KeyK', { metaKey: true, altKey: true }, '˚'), true)).toBe('Mod+Alt+K');
+    // Dvorak's apostrophe sits where QWERTY has Q: no letter chord.
+    expect(chordOf(key('KeyQ', { ctrlKey: true }, "'"), false)).toBeNull();
+  });
   it('accepts only chords with a modifier, or function keys', () => {
     expect(bindable('Mod+K')).toBe(true);
     expect(bindable('F7')).toBe(true);
@@ -49,6 +59,14 @@ describe('keymap', () => {
     keymap.reset();
     expect(keymap.commandFor('Mod+Shift+C')).toBe('copyFormat');
     expect(localStorage.getItem(KEYMAP_STORE)).toBeNull();
+  });
+  it('leaves AltGr characters to the text', () => {
+    const ran = [];
+    const keymap = createKeymap({ defaults: { pasteSpecial: ['Mod+Alt+V'] }, run: id => { ran.push(id); }, storage: localStorage, mac: false });
+    // Hungarian types @ with AltGr+V, which Windows reports as Ctrl+Alt+V.
+    expect(keymap.handle(key('KeyV', { ctrlKey: true, altKey: true }, '@'))).toBe(false);
+    expect(keymap.handle(key('KeyV', { ctrlKey: true, altKey: true }))).toBe(true);
+    expect(ran).toEqual(['pasteSpecial']);
   });
   it('lets an unavailable command fall through to the document', () => {
     const keymap = createKeymap({ defaults: { pasteFormat: ['Mod+Shift+V'] }, run: () => false, storage: localStorage, mac: false });

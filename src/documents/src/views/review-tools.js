@@ -4,7 +4,7 @@
  * Each contributes ribbon groups (extendTab), classic menu items (extendMenu) and document context
  * menu items (contextMenuItems) through the editor's command object.
  */
-import { isComposing, MOD_KEY } from '../ui/dom.js';
+import { isComposing, MOD_KEY, shortcutCode } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import { openMenu } from '../ui/menu.js';
 import { revisionView } from '../engine/revisions.js';
@@ -176,7 +176,7 @@ export function createReviewTools({ editor, pkg, error, author, review, proofing
     const has = !!editor();
     if (menuId === 'tools') return [
       { label: 'Spelling and Grammar', icon: 'spelling', items: commands.spellingItems() },
-      { label: 'Thesaurus…', icon: 'thesaurus', shortcut: MOD_KEY === 'Cmd' ? 'Option+Cmd+R' : 'Shift+F7', disabled: !has, onSelect: commands.thesaurus },
+      { label: 'Thesaurus…', icon: 'thesaurus', shortcut: 'Shift+F7', disabled: !has, onSelect: commands.thesaurus },
       { label: 'Translate', icon: 'translate', disabled: !has, items: commands.translateItems() },
       { label: 'Language…', icon: 'language', disabled: !ready(), onSelect: languageDialog },
       { separator: true },
@@ -232,8 +232,8 @@ export function createReviewTools({ editor, pkg, error, author, review, proofing
   window.addEventListener('keydown', e => {
     if (e.defaultPrevented || isComposing(e) || !e.target?.matches?.('.canvas-input')) return;
     const mac = MOD_KEY === 'Cmd';
-    if (e.key === 'F7' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey || mac && e.metaKey && e.altKey && !e.shiftKey && e.code === 'KeyR') { e.preventDefault(); commands.thesaurus(); }
-    else if (!mac && e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyG') { e.preventDefault(); commands.wordCount(); }
+    if (e.key === 'F7' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey || mac && e.metaKey && e.altKey && !e.shiftKey && shortcutCode(e) === 'KeyR') { e.preventDefault(); commands.thesaurus(); }
+    else if (!mac && e.ctrlKey && e.shiftKey && !e.altKey && shortcutCode(e) === 'KeyG') { e.preventDefault(); commands.wordCount(); }
   }, { signal: keyAbort.signal });
 
   /** Items for the File menu: the read-only recommendation and protection. */

@@ -173,7 +173,12 @@ export function advancedFind(paragraphs, query, options = {}, context = {}) {
   const spans = paragraphSpans(paragraphs), text = spans.map(s => paragraphText(s.p)).join('\n');
   if (text.length > MAX_DOCUMENT_CHARACTERS) throw new Error('This document is too long to search with these options.');
   const [low, high] = options.within || [0, text.length];
-  const matches = [];
+  const matches = [], graphemes = new Map();
+  // Segment each paragraph once, not once per match, so many matches in a long paragraph stay linear.
+  const startsAt = i => {
+    if (!graphemes.has(i)) { const s = spans[i]; graphemes.set(i, new Set([...inlineSegments(paragraphText(s.p))].map(x => x.index + s.start).concat(s.end))); }
+    return graphemes.get(i);
+  };
   const spanAt = position => { let lo = 0, hi = spans.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (spans[mid].start <= position) lo = mid; else hi = mid - 1; } return lo; };
   const accept = (start, end, groups) => {
     if (start < low || end > high || end <= start) return;
@@ -184,10 +189,9 @@ export function advancedFind(paragraphs, query, options = {}, context = {}) {
       if (!rangeHasFormat(s.p, Math.max(start, s.start) - s.start, Math.min(end, s.end) - s.start, runConditions)) return;
     }
     // Never match half a grapheme or half a picture.
-    const s = spans[first], segments = new Set([...inlineSegments(paragraphText(s.p))].map(x => x.index + s.start).concat(s.end));
-    if (!segments.has(start)) return;
-    const e = spans[last], ends = new Set([...inlineSegments(paragraphText(e.p))].map(x => x.index + e.start).concat(e.end));
-    if (!ends.has(end) && end !== e.end + 1) return;
+    const s = spans[first], e = spans[last];
+    if (!startsAt(first).has(start)) return;
+    if (!startsAt(last).has(end) && end !== e.end + 1) return;
     matches.push({ start, end, paragraph: first, offset: start - s.start, text: text.slice(start, end), ...(groups ? { groups } : {}) });
   };
   if (query) {
@@ -250,18 +254,25 @@ export function replaceAdvanced(model, matches, template, { wildcards = false, f
   model.checkpoint();
   const checkpoint = model.checkpoint;
   model.checkpoint = () => {};
+  // Matches already fall on grapheme boundaries. Selecting through the model
+  // re-segmented the whole edited document per match, making Replace All quadratic.
+  const select = (anchor, focus) => {
+    if (model.hasMacroButtons || model.hasNoteMarks) return model.select(anchor, focus);
+    model.cellBlock = null; model.selection = { anchor, focus };
+    model.typingFormat = {}; model.typingStyle = null; model.typingDirectCleared = false;
+  };
   let first = null;
   try {
     for (let i = matches.length - 1; i >= 0; i--) {
       const m = matches[i], text = texts[i];
       let start = m.start, end = m.end;
       if (!formatOnly && text !== m.text) {
-        model.select(m.start, m.end);
-        model.replace(text);
+        select(m.start, m.end);
+        model.replace(text, { checkpoint: false });
         end = model.selection.focus; start = end - text.length;
       }
       if (end > start) {
-        model.select(start, end);
+        select(start, end);
         if (Object.keys(runPatch).length) {
           const { characterStyle, ...direct } = runPatch;
           if (characterStyle !== undefined) model.setCharacterStyle(characterStyle);

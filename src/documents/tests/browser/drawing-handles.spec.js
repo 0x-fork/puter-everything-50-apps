@@ -87,6 +87,36 @@ test('edge handles resize one side; the rotation handle snaps to 15° with Shift
   expect(await page.evaluate(() => window.errors)).toEqual([]);
 });
 
+test('arrow keys on a resize handle move it as dragging would', async ({ page }) => {
+  await open(page);
+  await select(page, 2);
+  const press = async (handle, key, times = 4) => { const button = host(page).getByRole('button', { name: `Resize image ${handle}`, exact: true }); await button.focus(); for (let i = 0; i < times; i++) await button.press(key); };
+  const before = await state(page, 2);
+  // Up on the top handle grows the picture upward; its bottom stays put.
+  await press('n', 'ArrowUp');
+  const taller = await state(page, 2);
+  expect(taller.width).toBe(before.width);
+  expect(taller.height - before.height).toBeCloseTo(4 * 9525, -2);
+  expect(taller.frame.y + taller.frame.height).toBeCloseTo(before.frame.y + before.frame.height, 1);
+  // Left on the left handle grows it leftward; its right edge stays put.
+  await press('w', 'ArrowLeft');
+  const wider = await state(page, 2);
+  expect(wider.width - taller.width).toBeCloseTo(4 * 9525, -2);
+  expect(wider.frame.x + wider.frame.width).toBeCloseTo(taller.frame.x + taller.frame.width, 1);
+  // Inward shrinks; an arrow along an edge handle's side changes nothing.
+  await press('e', 'ArrowLeft', 2);
+  expect((await state(page, 2)).width - wider.width).toBeCloseTo(-2 * 9525, -2);
+  const steady = await state(page, 2);
+  await press('e', 'ArrowUp', 2);
+  expect(await state(page, 2)).toEqual(steady);
+  // A corner keeps the proportions, growing outward.
+  await press('nw', 'ArrowUp', 1);
+  const corner = await state(page, 2);
+  expect(corner.width).toBeGreaterThan(steady.width);
+  expect(corner.width / corner.height).toBeCloseTo(steady.width / steady.height, 3);
+  expect(await page.evaluate(() => window.errors)).toEqual([]);
+});
+
 test('dragging snaps to the page center with a guide; arrows nudge from the document', async ({ page }) => {
   await open(page);
   await select(page, 1);
@@ -192,6 +222,47 @@ test('crop mode trims from a handle, pans, and Escape cancels', async ({ page })
   await host(page).getByRole('textbox', { name: 'Document text' }).press('Enter');
   const square = await state(page, 1);
   expect(Math.abs(square.width - square.height)).toBeLessThan(9525 * 1.5);
+  expect(await page.evaluate(() => window.errors)).toEqual([]);
+});
+
+test('typing while cropping finishes the crop without replacing the picture', async ({ page }) => {
+  await open(page);
+  await select(page, 1);
+  const before = await state(page, 1), text = () => page.evaluate(() => window.e.model.text);
+  const typed = await text();
+  await page.evaluate(() => window.e.startCrop());
+  await drag(page, host(page).getByRole('button', { name: 'Crop e', exact: true }), -40, 0);
+  await host(page).getByRole('textbox', { name: 'Document text' }).press('x');
+  expect(await page.evaluate(() => window.e.cropActive)).toBe(false);
+  expect(await text()).toBe(typed);
+  const cropped = await state(page, 1);
+  expect(cropped.width).toBeLessThan(before.width);
+  expect(cropped.history).toBe(before.history + 1);
+  expect(await page.evaluate(() => window.errors)).toEqual([]);
+});
+
+test('arrow keys on a crop handle move it as dragging would', async ({ page }) => {
+  await open(page);
+  await select(page, 1);
+  const before = await state(page, 1);
+  await page.evaluate(() => window.e.startCrop());
+  const press = async (handle, key, times = 4) => { const button = host(page).getByRole('button', { name: `Crop ${handle}`, exact: true }); await button.focus(); for (let i = 0; i < times; i++) await button.press(key); };
+  // Left on the right handle trims the right side; Up on it changes nothing.
+  await press('e', 'ArrowLeft');
+  await press('e', 'ArrowUp', 2);
+  // Down on the top handle trims the top.
+  await press('n', 'ArrowDown', 2);
+  expect(await page.evaluate(() => window.e.cropActive)).toBe(true);
+  // Enter on the handle confirms and hands the keyboard back to the document.
+  await host(page).getByRole('button', { name: 'Crop n', exact: true }).press('Enter');
+  expect(await page.evaluate(() => window.e.cropActive)).toBe(false);
+  await expect(host(page).getByRole('textbox', { name: 'Document text' })).toBeFocused();
+  const cropped = await state(page, 1);
+  expect(cropped.width).toBeCloseTo(before.width - 4 * 9525, -2);
+  expect(cropped.height).toBeCloseTo(before.height - 2 * 9525, -2);
+  expect(cropped.frame.x).toBeCloseTo(before.frame.x, 1);
+  expect(cropped.frame.y).toBeCloseTo(before.frame.y + 2, 1);
+  expect(cropped.history).toBe(before.history + 1);
   expect(await page.evaluate(() => window.errors)).toEqual([]);
 });
 

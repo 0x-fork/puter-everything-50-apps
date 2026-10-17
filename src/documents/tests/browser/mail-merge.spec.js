@@ -217,6 +217,99 @@ test('adds an envelope to the document and prints labels from the Labels dialog'
   expect(errors).toEqual([]);
 });
 
+test('Envelopes keeps the delivery address on the envelope page', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/playground.html');
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await expect(input).toHaveValue(/^A small beginning/);
+  const before = await input.inputValue();
+  await page.getByRole('tab', { name: 'Mailings' }).click();
+  await ribbon(page).getByRole('button', { name: 'Envelopes', exact: true }).click();
+  const envelope = page.getByRole('dialog', { name: 'Envelopes' });
+  await envelope.getByRole('textbox', { name: 'Delivery address' }).fill('Rosa Vidal\n1 Pier Rd');
+  // Past the bottom of a 9½ × 4⅛ in envelope: refused with a reason instead of doing nothing.
+  await envelope.getByLabel('Delivery address from top (in)').fill('9');
+  await envelope.getByRole('button', { name: 'Add to Document' }).click();
+  await expect(envelope.getByRole('alert')).toContainText('Place the delivery address on the envelope');
+  // Too far right, the address would wrap letter by letter onto more pages.
+  await envelope.getByLabel('Delivery address from top (in)').fill('2');
+  await envelope.getByLabel('Delivery address from left (in)').fill('9');
+  await envelope.getByRole('button', { name: 'Add to Document' }).click();
+  await expect(envelope.getByRole('alert')).toContainText('Place the delivery address on the envelope');
+  await expect(input).toHaveValue(before);
+  await envelope.getByLabel('Delivery address from left (in)').fill('4');
+  await envelope.getByRole('button', { name: 'Add to Document' }).click();
+  await expect(envelope).toHaveCount(0);
+  await expect(page.locator('canvas.canvas-page')).toHaveCount(2);
+  expect(errors).toEqual([]);
+});
+
+test('Customize Columns names the chosen column for assistive technology', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/playground.html');
+  await expect(page.getByRole('textbox', { name: 'Document text' })).toHaveValue(/^A small beginning/);
+  await page.getByRole('tab', { name: 'Mailings' }).click();
+  await ribbon(page).getByRole('button', { name: 'Select Recipients', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Type a New List…' }).click();
+  await page.getByRole('dialog', { name: 'New Address List' }).getByRole('button', { name: 'Customize Columns…' }).click();
+  const columns = page.getByRole('dialog', { name: 'Customize Columns' }).getByRole('listbox', { name: 'Columns' });
+  await columns.focus();
+  await page.keyboard.press('ArrowDown');
+  const selected = columns.locator('[role="option"][aria-selected="true"]');
+  await expect(selected).toHaveCount(1);
+  const id = await selected.getAttribute('id');
+  expect(id).toBeTruthy();
+  await expect(columns).toHaveAttribute('aria-activedescendant', id);
+  expect(errors).toEqual([]);
+});
+
+test('Mail Merge Recipients keeps keyboard focus when sorting or including every row', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/playground.html');
+  await expect(page.getByRole('textbox', { name: 'Document text' })).toHaveValue(/^A small beginning/);
+  await page.getByRole('tab', { name: 'Mailings' }).click();
+  await ribbon(page).getByRole('button', { name: 'Select Recipients', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Type a New List…' }).click();
+  const grid = page.getByRole('dialog', { name: 'New Address List' });
+  await grid.getByLabel('Last Name, entry 1').fill('Zed');
+  await grid.getByRole('button', { name: 'New Entry' }).click();
+  await grid.getByLabel('Last Name, entry 2').fill('Young');
+  await grid.getByRole('button', { name: 'OK' }).click();
+  await expect(grid).toHaveCount(0);
+  await ribbon(page).getByRole('button', { name: 'Edit Recipient List', exact: true }).click();
+  const recipients = page.getByRole('dialog', { name: 'Mail Merge Recipients' });
+  const sort = recipients.getByRole('button', { name: 'Last Name' });
+  await sort.focus();
+  await page.keyboard.press('Enter');
+  await expect(recipients.getByRole('columnheader', { name: /Last Name/ })).toHaveAttribute('aria-sort', 'ascending');
+  await expect(sort).toBeFocused();
+  const all = recipients.getByLabel('Include all shown recipients');
+  await all.focus();
+  await page.keyboard.press('Space');
+  await expect(all).not.toBeChecked();
+  await expect(all).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
+test('Labels opens its collapsed measurements to show a value that needs fixing', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/playground.html');
+  await expect(page.getByRole('textbox', { name: 'Document text' })).toHaveValue(/^A small beginning/);
+  await page.getByRole('tab', { name: 'Mailings' }).click();
+  await ribbon(page).getByRole('button', { name: 'Labels', exact: true }).click();
+  const labels = page.getByRole('dialog', { name: 'Labels' });
+  await labels.getByRole('textbox', { name: 'Address' }).fill('Sam Lee');
+  const measurements = labels.locator('details.mm-details');
+  await measurements.locator('summary').click();
+  await labels.getByLabel('Labels across').fill('40');
+  await measurements.locator('summary').click();
+  await expect(measurements).not.toHaveAttribute('open', '');
+  await labels.getByRole('button', { name: 'New Document' }).click();
+  await expect(measurements).toHaveAttribute('open', '');
+  await expect(labels.getByLabel('Labels across')).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
 test('prints one copy per recipient and saves email messages when sending is unavailable', async ({ page }, info) => {
   test.setTimeout(120000);
   const errors = [];

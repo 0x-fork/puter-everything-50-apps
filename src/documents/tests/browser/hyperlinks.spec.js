@@ -31,6 +31,40 @@ test('creates links using the keyboard and at an empty caret, validates addresse
   const text = await input.inputValue(), path = await download(page, info, 'new-hyperlinks.docx'); await reopenDocx(page, input, path, text); await choose(input, 'Mail'); await dialog(page, input); await expect(page.getByRole('textbox', { name: 'Link address', exact: true })).toHaveValue('mailto:new@example.com'); await page.getByRole('dialog').getByRole('button', { name: 'Remove link', exact: true }).click(); await expect(page.getByRole('dialog')).toHaveCount(0); await expect(input).toHaveValue(text); await expect((await onTab(page, 'insert')).getByRole('button', { name: 'Insert or edit link', exact: true })).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('the link dialog completes a typed web or email address as typing it in the text would', async ({ page }, info) => {
+  await page.goto('/playground.html'); await page.getByRole('button', { name: 'New', exact: true }).click();
+  const input = page.getByRole('textbox', { name: 'Document text' }); await input.fill('Visit\n');
+  await choose(input, 'Visit'); await dialog(page, input);
+  await page.getByRole('textbox', { name: 'Link address', exact: true }).fill('example.com/docs'); await apply(page);
+  await input.press('ControlOrMeta+End'); await dialog(page, input);
+  await page.getByRole('textbox', { name: 'Link address', exact: true }).fill('joe@example.com'); await apply(page);
+  // With no selection the link shows the address as it was typed.
+  await expect(input).toHaveValue('Visit\njoe@example.com');
+  const rels = strFromU8(unzipSync(readFileSync(await download(page, info, 'completed-links.docx')))['word/_rels/document.xml.rels']);
+  expect(rels).toContain('Target="https://example.com/docs"');
+  expect(rels).toContain('Target="mailto:joe@example.com"');
+});
+
+test('Edit > Links keeps keyboard focus in its list while links are removed', async ({ page }) => {
+  await page.goto('/playground.html'); await page.getByRole('button', { name: 'New', exact: true }).click();
+  const input = page.getByRole('textbox', { name: 'Document text' }); await input.fill('First link and second link');
+  for (const [text, address] of [['First', 'https://a.example.com/'], ['second', 'https://b.example.com/']]) {
+    await choose(input, text); await dialog(page, input);
+    await page.getByRole('textbox', { name: 'Link address', exact: true }).fill(address); await apply(page);
+  }
+  await page.getByRole('menubar', { name: 'Menu bar' }).getByRole('menuitem', { name: 'Edit', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Links…', exact: true }).click();
+  const links = page.getByRole('dialog', { name: 'Links' });
+  await links.getByRole('button', { name: 'Remove', exact: true }).first().focus();
+  await page.keyboard.press('Enter');
+  await expect(links.getByRole('listitem')).toHaveCount(1);
+  await expect(links.getByRole('button', { name: 'Remove', exact: true })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(links.getByRole('listitem')).toHaveCount(0);
+  await expect(links.getByRole('button', { name: 'Close', exact: true }).last()).toBeFocused();
+  await expect(links.getByRole('button', { name: 'Remove All Links' })).toBeDisabled();
+});
+
 test('ordinary clicks select text while modified clicks open wrapped, picture and repeated-header links at zoom', async ({ page }, info) => {
   await stubOpen(page); const errors = []; page.on('pageerror', e => errors.push(e.message)); await page.goto('/playground.html'); await showAllTools(page); await page.getByLabel('Open DOCX file').setInputFiles('public/fixtures/hyperlinks.docx'); const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(/^External hyperlinks/);
   const targets = await page.evaluate(async () => {
@@ -69,7 +103,7 @@ test('previews broken, nested and active-script links as read-only with the orig
 });
 
 test('combining marks and emoji joins remain one linked caret position during native text input', async ({ page }) => {
-  await page.goto('/playground.html'); await showAllTools(page); await page.getByRole('button', { name: 'New', exact: true }).click(); const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(''); await input.fill('a😀😀'); await choose(input, 'a'); await dialog(page, input); await page.getByRole('textbox', { name: 'Link address', exact: true }).fill('https://example.com/combining'); await apply(page); await input.press('ArrowRight'); await page.keyboard.insertText('\u0301'); expect(await input.evaluate(el=>el.selectionStart)).toBe(2); await choose(input,'á'); await expect(page.getByRole('button',{name:'Insert or edit link',exact:true})).toHaveAttribute('aria-pressed','true');
+  await page.goto('/playground.html'); await showAllTools(page); await page.getByRole('button', { name: 'New', exact: true }).click(); const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(''); await input.fill('a😀😀'); await choose(input, 'a'); await dialog(page, input); await page.getByRole('textbox', { name: 'Link address', exact: true }).fill('https://example.com/combining'); await apply(page); await input.press('ArrowRight'); await page.keyboard.insertText('\u0301'); expect(await input.evaluate(el=>el.selectionStart)).toBe(2); await choose(input,'á'); await expect((await onTab(page,'insert')).getByRole('button',{name:'Insert or edit link',exact:true})).toHaveAttribute('aria-pressed','true');
   await input.evaluate(el=>{el.setSelectionRange(2,4);el.dispatchEvent(new Event('select',{bubbles:true}));}); await dialog(page,input); await page.getByRole('textbox',{name:'Link address',exact:true}).fill('https://example.com/emoji'); await apply(page); await input.press('ArrowRight'); await page.keyboard.insertText('\u200d'); await expect(input).toHaveValue('á😀\u200d😀'); expect(await input.evaluate(el=>[el.selectionStart,el.selectionEnd])).toEqual([7,7]); await input.press('ArrowLeft'); expect(await input.evaluate(el=>el.selectionStart)).toBe(2); await input.press('ArrowRight'); expect(await input.evaluate(el=>el.selectionStart)).toBe(7); await page.getByRole('button',{name:'Undo',exact:true}).click(); await expect(input).toHaveValue('á😀😀');
 });
 

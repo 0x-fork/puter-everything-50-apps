@@ -21568,6 +21568,24 @@ around paragraphs) into blank paragraphs, nor adds spaces before table-cell tabs
 Unit and browser suites cover selection, navigation and paste behavior; results
 are unchanged apart from speed.
 
+Formatting a paste still costs one command over the whole document per
+paragraph and formatted run, so the time grows with the square of the paste:
+2,000 paragraphs of web-page HTML took over three seconds and much longer
+pages froze the tab. Another application's plain runs (not bold, black) now
+skip the command they never needed, and a paste that would need more than
+2,000 commands, the limit beyond which a copy here carries no formatting either,
+is inserted as its plain text. Opening an HTML or Markdown file is unchanged.
+Unit tests cover the limit and the plain fallback (2026-10-16).
+
+Word puts a list on the clipboard as paragraphs styled `mso-list:lN levelM`,
+with each number or bullet typed out in a span styled `mso-list:Ignore` for
+browsers without list support. Those markers were pasted as text (a middle
+dot or "1." and a run of no-break spaces) in front of ordinary paragraphs.
+Paste now drops the marker and makes the paragraph a bulleted or numbered list
+item (numbered when the marker reads like 1., a) or iv.) at level M (§17.9);
+the list's own numbering definition is not carried over. Unit tests cover the
+conversion and the paste (2026-10-16).
+
 ### Markdown and HTML import (2026-10-05)
 
 Markdown (.md, with GitHub tables, task lists and strikethrough) and HTML files
@@ -23518,7 +23536,9 @@ claim of full OOXML conformance or of layout fidelity with other consumers.
   (`c:doughnutChart`) and scatter (`c:scatterChart`, `c:crossBetween val="midCat"`) are written,
   read and painted. Charts are inline and in the body only. Data labels, axis titles, secondary axes,
   combined plots and non-Latin labels are not supported (the reader keeps such charts read-only);
-  without an embedded workbook other applications show the chart but cannot edit its data.
+  without an embedded workbook other applications show the chart but cannot edit its data. Edit
+  Chart reads back only literal data; a chart whose categories, values or series names are workbook
+  references (`c:strRef`, `c:numRef`) is kept as it is and not offered for data editing.
 
 ### Header, footer and page numbers (§17.10)
 
@@ -23951,7 +23971,9 @@ grouped.
 - Body properties (§20.1.2.1.1 `wps:bodyPr`): `anchor` (t, ctr, b), `lIns`/`tIns`/`rIns`/`bIns`, `wrap`
   (square/none), `a:spAutoFit`/`a:noAutofit`.
 - WordArt Styles on shape text: run properties in `w:txbxContent` — `w:color` and the w14 effects
-  `w14:shadow`, `w14:textOutline`, `w14:textFill` (MS-DOCX §2.6) in CT_RPr order.
+  `w14:shadow`, `w14:textOutline`, `w14:textFill` (MS-DOCX §2.6) in CT_RPr order, with `w14`
+  declared in `mc:Ignorable` on the text box content (ECMA-376 Part 3 §10.2.1) unless an enclosing
+  element of the drawing already declares it.
 
 ### Validation
 

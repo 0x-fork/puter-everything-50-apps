@@ -90,7 +90,8 @@ import { readNumbering, writeNumbering } from './docx-numbering.js';
 import { validateIndent, normalizeTabStops } from './paragraph-geometry.js';
 import { DEFAULT_PAGE_SETTINGS, validatePageSettings } from './page-settings.js';
 import { checkedLineNumbers } from './line-number-settings.js';
-import { unzipSync, zipSync, strToU8 } from 'fflate';
+import { zipPackage, MAX_PACKAGE_BYTES } from './package-part-paths.js';
+import { unzipSync, strToU8 } from 'fflate';
 import { paragraph, paragraphFormat, runFormat, documentText, paragraphText, PAGINATION_DEFAULTS } from './model.js';
 
 export const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -1081,7 +1082,7 @@ export class DocxPackage {
   }
   static async open(input, { bestEffort = false } = {}) {
     const bytes = input instanceof Uint8Array ? input : new Uint8Array(await input.arrayBuffer());
-    if (bytes.length > 20 * 1024 * 1024) throw new Error('This editor currently opens DOCX files up to 20 MB.');
+    if (bytes.length > MAX_PACKAGE_BYTES) throw new Error('This editor currently opens DOCX files up to 20 MB.');
     let total = 0, count = 0, parts;
     try {
       parts = unzipSync(bytes, { filter: entry => {
@@ -1991,7 +1992,7 @@ export class DocxPackage {
     this.writeNoteSettingsParts(parts);
     invalidateProofingState(parts, this.parts, this.initialProofingFingerprint !== null && this.initialProofingFingerprint !== undefined && proofingFingerprint(paragraphs) !== this.initialProofingFingerprint);
     this.writeCoreProperties(parts);
-    return new Blob([zipSync(parts)], { type: DOCX_TYPE });
+    return new Blob([zipPackage(parts)], { type: DOCX_TYPE });
   }
   /** Document properties (Part 2 §11): the file's values with this session's edits over them. */
   get coreProperties() { return { ...readCoreProperties(this.parts), ...(this.coreEdits || {}) }; }
@@ -2002,6 +2003,9 @@ export class DocxPackage {
     const current = this.coreProperties;
     const changed = Object.entries(edits).filter(([key, value]) => current[key] !== value);
     if (!changed.length) return false;
+    // An unreadable part would make every later save fail; refuse the edit instead.
+    const existing = corePropertiesPath(this.parts);
+    if (existing) try { xml(this.parts[existing]); } catch { throw new Error('This document’s properties part cannot be read, so its properties cannot be changed.'); }
     this.coreEdits = { ...(this.coreEdits || {}), ...Object.fromEntries(changed) };
     return true;
   }

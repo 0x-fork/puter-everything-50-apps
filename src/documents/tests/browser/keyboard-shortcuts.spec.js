@@ -38,9 +38,11 @@ test('paragraph chords set spacing, indents and styles, and move paragraphs', as
   await expect(page.getByRole('combobox', { name: 'Paragraph style' })).toHaveValue('Heading1');
   await input.press('Control+Shift+n');
   await expect(page.getByRole('combobox', { name: 'Paragraph style' })).toHaveValue('Normal');
-  await input.press('Alt+Shift+ArrowUp');
+  // Control+Shift on a Mac, where Option+Shift+Up/Down extends the selection by paragraph.
+  const move = process.platform === 'darwin' ? 'Control+Shift' : 'Alt+Shift';
+  await input.press(`${move}+ArrowUp`);
   await expect(input).toHaveValue('Bravo\nAlpha\nCharlie');
-  await input.press('Alt+Shift+ArrowDown'); await input.press('Alt+Shift+ArrowDown');
+  await input.press(`${move}+ArrowDown`); await input.press(`${move}+ArrowDown`);
   await expect(input).toHaveValue('Alpha\nCharlie\nBravo');
   await input.press('ControlOrMeta+z');
   await expect(input).toHaveValue('Alpha\nBravo\nCharlie');
@@ -51,6 +53,28 @@ test('paragraph chords set spacing, indents and styles, and move paragraphs', as
   await input.press('ControlOrMeta+d');
   await expect(page.getByRole('dialog', { name: 'Font' }).getByLabel('Underline style')).toHaveValue('double');
   expect(errors).toEqual([]);
+});
+
+test('Go To +n counts from the caret when it is before the first target', async ({ page }) => {
+  const input = await newDocument(page, 'Intro text\nHeading A\nbody one\nHeading B\nbody two');
+  for (const heading of ['Heading A', 'Heading B']) { await caretIn(input, heading); await input.press('Control+Alt+1'); }
+  const dialog = page.getByRole('dialog', { name: 'Go To' });
+  for (const [move, heading] of [['+1', 'Heading A'], ['+2', 'Heading B']]) {
+    await caretIn(input, 'Intro');
+    await input.press('F5');
+    await dialog.getByLabel('Go to what').selectOption('heading');
+    await dialog.getByLabel('Enter heading number').fill(move);
+    await dialog.getByRole('button', { name: 'Go To' }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await input.evaluate(el => el.value.slice(el.selectionStart, el.selectionStart + 9))).toBe(heading);
+  }
+  // Nothing comes before the first heading.
+  await caretIn(input, 'Intro');
+  await input.press('F5');
+  await dialog.getByLabel('Go to what').selectOption('heading');
+  await dialog.getByLabel('Enter heading number').fill('-1');
+  await dialog.getByRole('button', { name: 'Go To' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('This document has 2 headings.');
 });
 
 test('Go To jumps to pages, headings and bookmarks, and the Breaks menu inserts a column break', async ({ page }) => {

@@ -3,12 +3,14 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { unzipSync } from 'fflate';
 import { reopenDocx } from './helpers/reopen-docx.js';
-import { showAllTools } from './helpers/editor-tools.js';
+import { showAllTools, onTab } from './helpers/editor-tools.js';
 for(const suffix of ['', '-header', '-plain']) test(`paints native drawing page fields ${suffix} and retains their sources`,async({page},info)=>{
   const header=suffix==='-header',plain=suffix==='-plain',name='shape-page-fields'+suffix,source=`public/fixtures/${name}.docx`,bytes=readFileSync(source);
   const ref=JSON.parse(readFileSync(`tests/fixtures/${name}/reference.json`));
   expect(createHash('sha256').update(bytes).digest('hex')).toBe(ref.sourceSha256);
   expect(createHash('sha256').update(readFileSync(`tests/fixtures/${name}/native.pdf`)).digest('hex')).toBe(ref.pdfSha256);
+  // A full-page fill starts a page's paint. The translucent band that dims the header while the body is
+  // being edited (canvas-story-chrome.js) also starts at the page origin but covers only the header area.
   await page.addInitScript(()=>{
     window.paintedFields={};window.paintedFieldSizes={};const texts=new WeakMap(),bitmaps=new WeakMap(),sizes=new WeakMap(),bitmapSizes=new WeakMap();
     const text=OffscreenCanvasRenderingContext2D.prototype.fillText;
@@ -16,7 +18,7 @@ for(const suffix of ['', '-header', '-plain']) test(`paints native drawing page 
     const transfer=OffscreenCanvas.prototype.transferToImageBitmap;
     OffscreenCanvas.prototype.transferToImageBitmap=function(){const b=transfer.call(this),value=texts.get(this);if(value){bitmaps.set(b,value);bitmapSizes.set(b,sizes.get(this));}return b;};
     const fill=CanvasRenderingContext2D.prototype.fillRect,draw=CanvasRenderingContext2D.prototype.drawImage;
-    CanvasRenderingContext2D.prototype.fillRect=function(x,y,w,h){if(this.canvas.classList.contains('canvas-page')&&x===0&&y===0&&w>600)window.paintedFields[this.canvas.dataset.page]={};return fill.call(this,x,y,w,h);};
+    CanvasRenderingContext2D.prototype.fillRect=function(x,y,w,h){if(this.canvas.classList.contains('canvas-page')&&x===0&&y===0&&w>600&&h>600)window.paintedFields[this.canvas.dataset.page]={};return fill.call(this,x,y,w,h);};
     CanvasRenderingContext2D.prototype.drawImage=function(bitmap,...args){
       if(this.canvas.classList.contains('canvas-page')) {const value=bitmaps.get(bitmap),m=value?.match(/^F([0-7]):\s*(\S+)$/);if(m){(window.paintedFields[this.canvas.dataset.page]||={})['F'+m[1]]=m[2];(window.paintedFieldSizes[this.canvas.dataset.page]||={})['F'+m[1]]=bitmapSizes.get(bitmap);}}
       return draw.call(this,bitmap,...args);
@@ -35,7 +37,7 @@ for(const suffix of ['', '-header', '-plain']) test(`paints native drawing page 
   await input.press('ControlOrMeta+z');await expect(input).toHaveValue(original);await check(ref.pages);expect(unzipSync(readFileSync(await save('undo')))).toEqual(before);
   await reopenDocx(page,input,edited,editedText);await check(ref.pages);
   if(header)return;
-  await input.press('ControlOrMeta+Home');await showAllTools(page);await page.getByRole('button',{name:'Page break',exact:true}).click();
+  await input.press('ControlOrMeta+Home');await showAllTools(page);await(await onTab(page,'insert')).getByRole('button',{name:'Page break',exact:true}).click();
   const moved=ref.pages.map((p,i)=>({...p,F0:i===0?(plain?'iv':'IV'):i===1?(plain?'v':'V'):'8',F1:i===0?(plain?'iv':'IV'):i===1?(plain?'v':'V'):'8',F4:'4',F6:i<2?'3':'1'}));
   await check([{},...moved]);const movedText=await input.inputValue(),movedFile=await save('repaginated');
   await reopenDocx(page,input,movedFile,movedText);await check([{},...moved]);

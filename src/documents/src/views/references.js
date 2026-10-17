@@ -6,7 +6,7 @@
  * on demand, like the rest of the editor's engine.
  */
 import { openMenu } from '../ui/menu.js';
-import { el, MOD_KEY } from '../ui/dom.js';
+import { el, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { createTocCommands } from './references-toc.js';
 import { createNoteCommands } from './references-notes.js';
 import { createCitationCommands } from './references-citations.js';
@@ -407,7 +407,9 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
       Object.assign(input, { type: 'number', step: 0.05, min: 0, max: 22, className: 'canvas-spacing ribbon-number' });
       input.setAttribute('aria-label', `${label} (in)`);
       input.addEventListener('change', () => {
-        const engine = ready(); if (!engine || !input.checkValidity() || input.value === '') { input.reportValidity(); return; }
+        // The arrows step by 0.05, but any distance in range is accepted, as Page Setup accepts it.
+        const v = input.validity;
+        const engine = ready(); if (!engine || input.value === '' || v.badInput || v.rangeOverflow || v.rangeUnderflow) { input.reportValidity(); return; }
         try { engine.finishComposition(); engine.setPageSettings({ [key]: Math.round(Number(input.value) * IN) }); } catch (e) { fail(e); }
       });
       input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.dispatchEvent(new Event('change')); editor()?.focus(); } });
@@ -440,14 +442,15 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
   // Cmd+Option+Shift+I / Alt+Shift+I marks a citation for the table of authorities.
   const keyAbort = new AbortController();
   window.addEventListener('keydown', e => {
-    if (e.defaultPrevented || e.isComposing || !e.target?.matches?.('.canvas-input')) return;
+    if (e.defaultPrevented || e.isComposing || typesCharacter(e) || !e.target?.matches?.('.canvas-input')) return;
     const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
     const chord = mac ? e.metaKey && e.altKey && !e.ctrlKey : e.ctrlKey && e.altKey && !e.metaKey;
     const mark = mac ? e.metaKey && e.altKey && e.shiftKey : e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey;
-    if (chord && !e.shiftKey && e.code === 'KeyF') { e.preventDefault(); notes.insertNote('footnote'); }
-    else if (chord && !e.shiftKey && e.code === (mac ? 'KeyE' : 'KeyD')) { e.preventDefault(); notes.insertNote('endnote'); }
-    else if (mark && e.code === 'KeyX') { e.preventDefault(); indexes.markEntryPanel(); }
-    else if (mark && e.code === 'KeyI') { e.preventDefault(); indexes.markCitationPanel(); }
+    const code = shortcutCode(e);
+    if (chord && !e.shiftKey && code === 'KeyF') { e.preventDefault(); notes.insertNote('footnote'); }
+    else if (chord && !e.shiftKey && code === (mac ? 'KeyE' : 'KeyD')) { e.preventDefault(); notes.insertNote('endnote'); }
+    else if (mark && code === 'KeyX') { e.preventDefault(); indexes.markEntryPanel(); }
+    else if (mark && code === 'KeyI') { e.preventDefault(); indexes.markCitationPanel(); }
     else if (e.key === 'F9' && !e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey) { e.preventDefault(); updateAllFields(); }
   }, { signal: keyAbort.signal });
   return { commands, contextTabs, extendTab, extendMenu, contextMenuItems, fieldAtCaret, activeStoryKind, updateAllFields, lookupPane: lookup.pane, destroy: () => { keyAbort.abort(); lookup.close(); document.querySelectorAll('.ref-panel').forEach(p => p.closePanel?.()); } };

@@ -93,6 +93,16 @@ describe('picture formatting writes DrawingML that reopens editable', () => {
     expect(xml).toMatch(/<wp:docPr id="1" name="Company logo" descr="A logo" title="Logo">/);
     expect(xml).toMatch(/adec:decorative[^>]*val="1"/);
   });
+  it('keeps alt text and names with pasted line breaks or control characters readable', async () => {
+    const { pkg, doc } = await saved();
+    const [picture] = images(doc);
+    // A line break copied from a document is a vertical tab, which XML cannot hold.
+    const next = await edit(pkg, doc, picture, drawing => setDocProperties(drawingParts(drawing).docPr, { description: 'First line\u000bsecond\u0001 line', title: 'Logo\u000c', name: 'Logo\u0007 1' }));
+    expect(next).toMatchObject({ alt: 'First line\nsecond line', name: 'Logo 1' });
+    const { xml, reopened } = await roundTrip(pkg, doc);
+    expect(xml).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/);
+    expect(images(modelOf(reopened))[0]).toMatchObject({ alt: 'First line\nsecond line', name: 'Logo 1' });
+  });
   it('keeps the original picture in its layer and adds the processed copy', async () => {
     const { pkg, doc } = await saved();
     const [picture] = images(doc);
@@ -149,6 +159,19 @@ describe('shape formatting', () => {
     expect(xml).toMatch(/<a:xfrm rot="900000">/);
     expect(xml).toMatch(/anchor="ctr"/);
   });
+  it('declares the w14 text effects of shape text ignorable', async () => {
+    const { pkg, doc } = await saved();
+    const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main', W14 = 'http://schemas.microsoft.com/office/word/2010/wordml', MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+    const effects = drawing => setTextRunEffects(drawingParts(drawing).shape.getElementsByTagNameNS(W, 'txbxContent')[0], { fill: 'C00000', shadow: { distance: 25400, direction: 45, alpha: 0.4 } });
+    await edit(pkg, doc, images(doc)[1], effects);
+    await edit(pkg, doc, images(doc)[1], effects);
+    const { xml } = await roundTrip(pkg, doc);
+    const tree = new DOMParser().parseFromString(xml, 'application/xml'), fill = tree.getElementsByTagNameNS(W14, 'textFill')[0];
+    expect(fill).toBeTruthy();
+    const declared = [];
+    for (let at = fill; at?.nodeType === 1; at = at.parentNode) declared.push(...(at.getAttributeNS(MC, 'Ignorable') || '').split(/\s+/).filter(p => p && at.lookupNamespaceURI(p) === W14));
+    expect(declared).toEqual(['w14']);
+  });
   it('changes the preset and pattern fill', async () => {
     const { pkg, doc } = await saved();
     const next = await edit(pkg, doc, images(doc)[1], drawing => {
@@ -191,4 +214,25 @@ it('drops media that Compress released only when nothing uses it', () => {
   expect(parts['word/media/b.png']).toBeDefined();
   expect(new TextDecoder().decode(parts['word/_rels/document.xml.rels'])).not.toMatch(/rA/);
   expect(new TextDecoder().decode(parts['[Content_Types].xml'])).not.toMatch(/a\.png/);
+});
+
+it('keeps released media that another part still uses however that part is written', () => {
+  const enc = s => new TextEncoder().encode(s);
+  const utf16 = s => new Uint8Array(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(s, 'utf16le')]));
+  const rel = id => `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="${id}" Type="x/image" Target="media/a.png"/></Relationships>`;
+  const parts = {
+    '[Content_Types].xml': enc('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/media/a.png" ContentType="image/png"/></Types>'),
+    'word/_rels/document.xml.rels': enc(rel('rA')), 'word/document.xml': enc('<w:document/>'),
+    // Single-quoted attribute values and UTF-16 parts are ordinary XML.
+    'word/_rels/header1.xml.rels': enc(rel('rH')), 'word/header1.xml': enc("<w:hdr><a:blip r:embed = 'rH'/></w:hdr>"),
+    'word/_rels/footer1.xml.rels': enc(rel('rF')), 'word/footer1.xml': utf16('<w:ftr><a:blip r:embed="rF"/></w:ftr>'),
+    // A relationships part that cannot be read must not stop the save.
+    'customXml/_rels/item1.xml.rels': enc('<Relationships'), 'customXml/item1.xml': enc('<x/>'),
+    'word/media/a.png': png,
+  };
+  pruneReleasedMedia(parts, new Set(['word/media/a.png']));
+  expect(parts['word/media/a.png']).toBeDefined();
+  expect(new TextDecoder().decode(parts['word/_rels/header1.xml.rels'])).toMatch(/rH/);
+  expect(new TextDecoder().decode(parts['word/_rels/footer1.xml.rels'])).toMatch(/rF/);
+  expect(new TextDecoder().decode(parts['[Content_Types].xml'])).toMatch(/a\.png/);
 });

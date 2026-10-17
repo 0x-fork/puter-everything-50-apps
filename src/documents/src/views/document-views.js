@@ -11,7 +11,7 @@
  * browser window, kept in step over a BroadcastChannel) and Split (a second, independently scrolling
  * pane of the same document).
  */
-import { el, isComposing, MOD_KEY } from '../ui/dom.js';
+import { el, isComposing, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { openModal } from '../ui/modal.js';
 import { toast } from '../ui/toast.js';
 import { paintFormattingMarks, formattingMarks } from '../engine/formatting-marks.js';
@@ -181,6 +181,7 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
   function paintThumbnails() {
     const engine = editor();
     if (!engine || thumbStrip.hidden) return;
+    engine.flushPaint?.();
     const pages = engine.canvases, current = engine.caretPageIndex ?? 0;
     while (thumbStrip.children.length > pages.length) thumbStrip.lastChild.remove();
     pages.forEach((source, index) => {
@@ -392,6 +393,8 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
   }
   function paintMirror() {
     const engine = editor(); if (!split || !engine) return;
+    // A long document paints pages off screen later; the mirror copies every page now.
+    engine.flushPaint?.();
     const { pages } = split, sources = engine.canvases;
     pages.className = `view-split-pages ${engine.pages.className.replace('canvas-pages', '')}`;
     pages.style.gap = engine.pages.style.gap;
@@ -525,9 +528,9 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
   // on a Mac). Ctrl+Alt+O stays with the Navigation pane here.
   const keyAbort = new AbortController();
   window.addEventListener('keydown', e => {
-    if (e.defaultPrevented || isComposing(e) || !e.altKey || e.shiftKey || !(MOD_KEY === 'Cmd' ? e.metaKey : e.ctrlKey)) return;
+    if (e.defaultPrevented || isComposing(e) || typesCharacter(e) || !e.altKey || e.shiftKey || !(MOD_KEY === 'Cmd' ? e.metaKey : e.ctrlKey)) return;
     if (!e.target?.closest?.('.canvas-input, .outline-view')) return;
-    const kind = { KeyP: 'print', KeyN: 'draft' }[e.code];
+    const kind = { KeyP: 'print', KeyN: 'draft' }[shortcutCode(e)];
     if (kind && ready()) { e.preventDefault(); setDocumentView(kind); }
   }, { signal: keyAbort.signal });
 

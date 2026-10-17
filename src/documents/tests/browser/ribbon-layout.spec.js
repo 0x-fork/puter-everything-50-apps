@@ -365,3 +365,63 @@ test('on phones the Reviewing Pane is a sheet above the status bar, not over it'
   expect(pane.y + pane.height).toBeLessThanOrEqual(status.y + 1);
   expect(surface.y + surface.height).toBeLessThanOrEqual(pane.y + 1);
 });
+
+test('on a wide touch screen the ribbon grows to its fingertip-high rows instead of clipping them', async ({ browser }) => {
+  for (const viewport of [{ width: 820, height: 1180 }, { width: 1180, height: 820 }]) {
+    const context = await browser.newContext({ viewport, isMobile: true, hasTouch: true });
+    const page = await context.newPage();
+    try {
+      await page.goto('/mock.html#/new');
+      await expect(page.locator('#ribbon-panel-home button[aria-label="Bold"]')).toBeEnabled();
+      for (const name of ['Home', 'Insert', 'References']) {
+        await tab(page, name).click();
+        // Rows of 44px commands in the 72px card cut off the Paste icon and hid Cut and Format Painter.
+        const clipped = await page.evaluate(() => {
+          const panel = [...document.querySelectorAll('.ribbon-panel')].find(p => !p.hidden), box = panel.getBoundingClientRect();
+          return [...panel.querySelectorAll('button, input')].filter(b => { const r = b.getBoundingClientRect(); return r.width && (r.top < box.top - 0.5 || r.bottom > box.bottom + 0.5); }).map(b => b.getAttribute('aria-label') || b.textContent.trim());
+        });
+        expect(clipped, `${name} at ${viewport.width}px`).toEqual([]);
+      }
+      await tab(page, 'Home').click();
+      for (const name of ['Cut', 'Copy', 'Format Painter']) await expect(page.locator('#ribbon-panel-home').getByRole('button', { name, exact: true })).toBeInViewport({ ratio: 1 });
+    } finally { await context.close(); }
+  }
+});
+
+test('on a Mac the Thesaurus tooltip names a chord that opens the Thesaurus, not one that collapses the ribbon', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'MacIntel' }));
+  await openEditor(page);
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await input.fill('Happy people');
+  await input.evaluate(el => { el.focus(); el.setSelectionRange(0, 5); el.dispatchEvent(new Event('select')); });
+  await tab(page, 'Review').click();
+  const title = await page.locator('#ribbon-panel-review').getByRole('button', { name: 'Thesaurus', exact: true }).getAttribute('title');
+  const chord = title.match(/\(([^)]+)\)/)[1];
+  // Cmd+Option+R belongs to Collapse the Ribbon, which takes it first.
+  await input.focus();
+  await page.keyboard.press(chord.replace('Cmd', 'Meta').replace('Option', 'Alt'));
+  await expect(page.getByRole('complementary', { name: 'Thesaurus pane' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Collapse the ribbon' })).toBeAttached();
+});
+
+test('Escape closes a collapsed group\'s drop-down whose commands are all unavailable', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 820, height: 1180 }, isMobile: true, hasTouch: true });
+  const page = await context.newPage();
+  try {
+    await page.goto('/mock.html#/new');
+    await expect(page.locator('#ribbon-panel-home button[aria-label="Bold"]')).toBeEnabled();
+    await tab(page, 'Review').click();
+    // With nothing tracked, every command under Changes is disabled, so the keyboard stays on the group's button.
+    const changes = page.locator('#ribbon-panel-review .ribbon-collapsed[aria-label="Changes"]');
+    await expect(changes).toBeVisible();
+    await changes.focus();
+    await page.keyboard.press('Enter');
+    const flyout = page.locator('.ribbon-flyout');
+    await expect(flyout).toBeVisible();
+    await expect(changes).toHaveAttribute('aria-expanded', 'true');
+    await page.keyboard.press('Escape');
+    await expect(flyout).toHaveCount(0);
+    await expect(changes).toHaveAttribute('aria-expanded', 'false');
+    await expect(changes).toBeFocused();
+  } finally { await context.close(); }
+});

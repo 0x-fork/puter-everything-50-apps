@@ -35,7 +35,7 @@ import { findReplacePanel } from './find-replace.js';
 import { openParagraphGeometry } from './paragraph-geometry.js';
 import { iconEl } from '../ui/icons.js';
 import { openPageSetup } from './page-setup.js';
-import { el, isComposing, MOD_KEY } from '../ui/dom.js';
+import { el, isComposing, MOD_KEY, shortcutCode, typesCharacter, typingElsewhere } from '../ui/dom.js';
 import { createCanvasChrome } from '../ui/canvas-chrome.js';
 import { documentFontAvailable, displayedFont } from '../engine/font-availability.js';
 import { openFontPicker } from './font-picker.js';
@@ -101,6 +101,9 @@ import { createVersionHistory } from './version-history.js';
 import { createAssistantPane } from './assistant-pane.js';
 import { openCompareDialog } from './compare-dialog.js';
 
+/** How long leaving the editor waits for a save before asking what to do. */
+export const FLUSH_STALL_MS = 15000;
+
 /** First canvas milestone. Cloud persistence remains owned by Doc. */
 export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromTemplate, local = false }) {
   const printAbort = new AbortController();
@@ -147,7 +150,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     const editor = engine; if (!editor) return;
     const selection = [...editor.model.range], revision = editor.session.revision;
     try {
-      const text = editor.model.text.slice(...selection), { html } = editor.clipboardData();
+      // The same text and HTML a keyboard copy writes: pictures as their alternative text, not as placeholders.
+      const { text, html } = editor.clipboardData();
       if (html && typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
         await navigator.clipboard.write([new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }), 'text/html': new Blob([html], { type: 'text/html' }) })]);
       } else await navigator.clipboard.writeText(text);
@@ -449,7 +453,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       engine.model.select(target.position); engine.caretAffinity = 'forward'; engine.caretPage = null;
       engine.focus(); engine.revealCaret(); engine.onSelection();
     },
-    pages: () => engine?.canvases || [], currentPage: () => engine?.caretPageIndex ?? 0,
+    pages: () => { engine?.flushPaint?.(); return engine?.canvases || []; }, currentPage: () => engine?.caretPageIndex ?? 0,
     search: text => { try { return engine?.model.findMatches(text, {}) || []; } catch { return []; } },
     text: () => engine?.model.text || '', selectMatch: match => engine?.selectMatch(match), highlight: matches => engine?.setFindHighlights(matches),
     headingActions: () => editorCommands.headingActions || null });
@@ -663,7 +667,10 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       engine?.setZoom(scale); syncZoom();
     },
   };
-  const zoomSlider = el('input.ed-zoom-slider', { type: 'range', min: 10, max: 200, step: 1, value: 100, 'aria-label': 'Zoom slider', oninput: () => zoomControl.set(Number(zoomSlider.value) / 100), onchange: () => engine?.focus() });
+  // A drag hands the keyboard back to the text when it ends; the arrow keys, which end a change at every press, keep it on the slider.
+  let zoomDragged = false;
+  const zoomSlider = el('input.ed-zoom-slider', { type: 'range', min: 10, max: 200, step: 1, value: 100, 'aria-label': 'Zoom slider', oninput: () => zoomControl.set(Number(zoomSlider.value) / 100),
+    onpointerdown: () => { zoomDragged = true; }, onchange: () => { if (zoomDragged) { zoomDragged = false; engine?.focus(); } } });
   const zoomStep = (label, icon, delta) => el('button.icon-btn.ed-zoom-step', { type: 'button', 'aria-label': label, title: label, onclick: () => {
     const now = Math.round((engine?.zoom ?? 1) * 100), next = delta > 0 ? Math.floor(now / 10) * 10 + 10 : Math.ceil(now / 10) * 10 - 10;
     zoomControl.set(Math.max(10, Math.min(200, next)) / 100);
@@ -879,7 +886,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     const sections = [
       { id: 'general', label: 'General', controls: [
         { type: 'choice', label: 'Appearance', options: [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], get: () => currentTheme(), set: mode => session.setTheme(mode) },
-        { type: 'toggle', label: 'Dark page', hint: 'With the dark appearance, show pages dark too. Printing and saving are unaffected.', get: () => darkPage(), set: on => setDarkPage(on), disabled: !isDark() },
+        { type: 'toggle', label: 'Dark page', hint: 'With the dark appearance, show pages dark too. Printing and saving are unaffected.', get: () => darkPage(), set: on => setDarkPage(on), disabled: () => !isDark() },
         { type: 'choice', label: 'Measurement units', hint: 'Rulers, indents, tabs and page setup.', select: true, options: UNITS.map(u => [u.id, u.label]), get: () => recallUnit(), set: unit => { rememberUnit(unit); rulers?.setUnit(unit); } },
         { type: 'choice', label: 'Open documents at', hint: 'Phones and narrow windows always fit the page width.', select: true, options: [['100', '100%'], ['width', 'Page width'], ['page', 'One page']],
           get: () => { const z = recallZoom(); return z?.fit || (z?.value ? String(z.value) : '100'); }, set: v => rememberZoom(v === '100' ? { value: 100 } : { fit: v }) },
@@ -1037,7 +1044,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     location: () => editorCommands.documentLocation().location, size: () => doc.size,
     versions: cloud && versioning.enabled ? () => (doc.path ? listVersions(doc.path) : Promise.resolve([])) : null,
     versionsAvailable: () => !!doc.path,
-    saveVersionNow: () => doc.saveVersionNow(),
+    // A version that could not be written says so, as the Version History pane does.
+    saveVersionNow: () => doc.saveVersionNow().then(v => { if (!v) throw new Error('The version could not be saved.'); toast('Version saved'); }).catch(e => { if (!destroyed) error(e); }),
     restoreVersion: version => restoreVersionFile(version),
     exportAs: kind => editorCommands.exportAs(kind),
     save: () => save(), download, saveTemplate: cloud ? saveTemplate : null, savePdf: () => savePdf(), rename: cloud ? () => { title.focus(); title.select(); } : null,
@@ -1076,7 +1084,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     findSite: cloud ? () => (doc.path && P.canHost() ? findSite(doc.path) : Promise.resolve(null)) : null,
     unpublish: site => unpublishPage(site),
     setEditingMode: mode => editorCommands.setEditingMode(mode), preferences: section => openPreferencesDialog(section),
-    onOpen: () => { engine?.finishComposition(); },
+    // The File button says whether the File view it opens is showing.
+    onOpen: () => { engine?.finishComposition(); root?.querySelector('.ribbon-file')?.setAttribute('aria-expanded', 'true'); },
+    onClose: () => root?.querySelector('.ribbon-file')?.setAttribute('aria-expanded', 'false'),
   });
   // A shared document restored through the room is one undoable change for everyone (version-history.js); otherwise the file is replaced.
   async function restoreVersionFile(version, { confirm = true } = {}) {
@@ -1135,8 +1145,13 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   editorCommands.copyFormat = editCommands.copyFormat = () => { baseCopyFormat(); formatClipboard = true; };
   root.addEventListener('copy', () => { formatClipboard = false; }, true);
   root.addEventListener('cut', () => { formatClipboard = false; }, true);
-  keymap = createKeymap({ defaults: builtInChords, run: id => {
+  // A text field of the window's own (the search box, a comment, a pane's input) keeps its keys for its
+  // own editing: Cmd/Ctrl+Y redoes there and F4 does not repeat a command on the document. Only the
+  // commands that are not about the document's text still run.
+  const FIELD_COMMANDS = /^(app|file|view)\.|^edit\.(findNext|findPrevious|goTo)$/;
+  keymap = createKeymap({ defaults: builtInChords, run: (id, e) => {
     if (backstage.isOpen && !id.startsWith('app.')) return false;
+    if (typingElsewhere(e?.target) && !FIELD_COMMANDS.test(id)) return false;
     if (builtInCommands[id]) return builtInCommands[id]();
     const entry = chrome.entries().find(e => e.id === id);
     if (!entry || entry.disabled) return false;
@@ -1166,8 +1181,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   // K, J and Cmd+Space). Each goes through the toolbar's control, so a command disabled for this selection stays
   // inert, and only while the keyboard is in the document: the same keys mean other things in a field.
   const formattingShortcut = e => {
-    if (!engine || !(e.ctrlKey || e.metaKey) || !host.contains(e.target)) return null;
-    const code = e.code || '', shift = e.shiftKey, alt = e.altKey;
+    if (!engine || !(e.ctrlKey || e.metaKey) || typesCharacter(e) || !host.contains(e.target)) return null;
+    const code = shortcutCode(e), shift = e.shiftKey, alt = e.altKey;
     if (shift && !alt) {
       const chords = { KeyX: strike, KeyA: caps, KeyK: smallCaps, Equal: superscript, Digit8: bullets, Digit7: numbers,
         KeyL: alignmentButtons[0], KeyR: alignmentButtons[2], KeyJ: alignmentButtons[3] };
@@ -1200,10 +1215,10 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f' && engine) { e.preventDefault(); openSearch(); return; }
     // Find and replace: the conventional Ctrl+H; Cmd+H hides the app on a Mac, so there it is Cmd+Shift+H.
-    if (e.code === 'KeyH' && !e.altKey && engine && (MOD_KEY === 'Cmd' ? e.metaKey && e.shiftKey : e.ctrlKey && !e.shiftKey)) { e.preventDefault(); openFind(); return; }
+    if (shortcutCode(e) === 'KeyH' && !e.altKey && engine && (MOD_KEY === 'Cmd' ? e.metaKey && e.shiftKey : e.ctrlKey && !e.shiftKey)) { e.preventDefault(); openFind(); return; }
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === '/') { e.preventDefault(); editorCommands.openShortcuts(); return; }
     if (e.key === 'F7' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && engine) { e.preventDefault(); proofing.openPane(); return; }
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && e.code === 'KeyV' && engine && host.contains(e.target)) { e.preventDefault(); pastePlainText(); return; }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && shortcutCode(e) === 'KeyV' && engine && host.contains(e.target)) { e.preventDefault(); pastePlainText(); return; }
     const action = formattingShortcut(e);
     if (action) { e.preventDefault(); action(); }
   });
@@ -1567,7 +1582,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (!pkg.readOnly) doc.attach(async () => {
       if (engine.composition) throw new Error('Finish composing text before saving.');
       return engine.export(pkg);
-    });
+    }, { busy: () => !!engine?.composition });
     if (pkg.fieldsRecalculated && !pkg.readOnly) doc.changed();
     const previewIssues = [...(pkg.previewIssues || []), ...engine.storyLayout.unsupported.map(issue =>
       `${issue.path}, page ${issue.page + 1}: ${issue.message}`)];
@@ -1614,8 +1629,20 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       engine?.finishComposition();
       if (!doc.dirty && doc.status !== 'saving') return true;
       if (!doc.exporter) return false;
-      try { return await doc.flush(); }
+      // A save that never answers (a stalled connection) must not keep the user in the editor: after a while
+      // leaving asks, as it does after a failed save, and the save itself goes on.
+      const flushing = doc.flush();
+      flushing.catch(() => {});
+      let timer;
+      const stalled = new Promise(resolve => { timer = setTimeout(() => resolve('stalled'), FLUSH_STALL_MS); });
+      try {
+        const saved = await Promise.race([flushing, stalled]);
+        if (saved !== 'stalled') return saved;
+        if (!destroyed) toast('Saving is taking longer than usual. Check your connection.', { icon: 'alert', duration: 8000 });
+        return false;
+      }
       catch (e) { if (!session.signedOut) error(e); return false; }
+      finally { clearTimeout(timer); }
     },
     destroy() {
       drawingTextModal?.close();

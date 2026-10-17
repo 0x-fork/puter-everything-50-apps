@@ -177,6 +177,41 @@ test('Table Properties sets row, column, cell and alt text options in one step',
   expect(await page.evaluate(() => window.__docs.current.view.engine.model.tables[0].caption || '')).toBe('');
 });
 
+test('Table properties applies with a row height that is not a whole or half point', async ({ page }) => {
+  await newTable(page, 2, 2, ['a', 'b', 'c', 'd']);
+  await goToCell(page, 0, 0);
+  // 0.3 in = 21.6 pt, set from the Row height dialog.
+  await (await onTab(page, 'tableLayout')).getByRole('button', { name: 'Row height', exact: true }).click();
+  const height = page.getByRole('dialog', { name: 'Row height', exact: true });
+  await height.getByLabel('Row height setting').selectOption('atLeast');
+  await height.getByLabel('Minimum row height (pt)').fill('21.6');
+  await height.getByRole('button', { name: 'Apply' }).click();
+  await expect(height).toBeHidden();
+  await ribbon(page).getByRole('button', { name: 'Table properties', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Table properties' });
+  await expect(dialog.getByLabel('Row height (pt)')).toHaveValue('21.6');
+  await dialog.getByLabel('Vertical alignment').selectOption('center');
+  await dialog.getByRole('button', { name: 'Apply' }).click();
+  await expect(dialog).toBeHidden();
+  expect(await page.evaluate(() => { const row = window.__docs.current.view.engine.model.tables[0].rows[0]; return [row.minHeight, row.heightRule, row.cells[0].vertical]; })).toEqual([432, 'atLeast', 'center']);
+});
+
+test('the Width spinner shows and sets the width of each selected column', async ({ page }) => {
+  await newTable(page, 3, 2, []);
+  const grid = () => page.evaluate(() => window.__docs.current.view.engine.model.tables[0].grid);
+  const before = await grid();
+  // Two of three equal columns selected: the spinner shows one column's width, not their total.
+  await page.evaluate(() => { const e = window.__docs.current.view.engine, m = e.model, t = m.tables[0]; m.setCellBlock({ tableId: t.id, top: 0, bottom: 1, left: 0, right: 2 }); e.syncInput(); e.paint(); e.onSelection(); });
+  const width = (await onTab(page, 'tableLayout')).getByRole('spinbutton', { name: 'Width (in)' });
+  await expect(width).toHaveValue(String(Number((before[0] / 1440).toFixed(2))));
+  await width.fill('1.5'); await width.press('Enter');
+  await expect.poll(grid).toEqual([2160, 2160, before[2]]);
+  // A merged cell shows the width it covers.
+  await page.evaluate(() => { const e = window.__docs.current.view.engine, m = e.model, t = m.tables[0]; m.setCellBlock({ tableId: t.id, top: 0, bottom: 0, left: 0, right: 2 }); });
+  await (await onTab(page, 'tableLayout')).getByRole('button', { name: 'Merge Cells', exact: true }).click();
+  await expect(width).toHaveValue('3');
+});
+
 test('the Table menu and context menu offer the table commands', async ({ page }) => {
   await newTable(page, 2, 2, ['a', 'b', 'c', 'd']);
   await goToCell(page, 0, 0);

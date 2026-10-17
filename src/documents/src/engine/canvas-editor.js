@@ -2,7 +2,7 @@ import { isNoteStoryKind } from './footnotes.js';
 import { StorySession } from './story-session.js';
 import { decodeShape } from './canvas-shapes.js';
 import { wordPosition, optionWordPosition } from './word-navigation.js';
-import { carriesFormatting, copyFragment, fragmentHtml, htmlFragment, pasteFragment } from './clipboard-fragment.js';
+import { carriesFormatting, copyFragment, fragmentHtml, htmlFragment, pasteFragment, formattedPasteFits } from './clipboard-fragment.js';
 import { showLink } from './link-appearance.js';
 
 export const PASTED_PICTURE = /^image\/(png|jpeg|tiff)$/i;
@@ -16,6 +16,7 @@ import { pageStoryAtPoint } from './page-story-hit.js';
 import { paintImage } from './paint-image.js';
 import { prepareText3dFonts } from './text-3d-fonts.js';
 import { localFontVersion } from './local-fonts.js';
+import { ParagraphMeasureCache } from './paragraph-measure-cache.js';
 import { displayedFont } from './font-availability.js';
 import { preparedScriptMetrics } from './script-font-size.js';
 import { text3dSurface } from './text-3d.js';
@@ -51,6 +52,10 @@ import { positionedImageBounds } from './positioned-images.js';
 import { createImageInteraction } from './image-interaction.js';
 import { paintDecodedImage, imageInfo, decodeImage, decodeImages, validateImageAssets, imageCropRect, inlineImagePaintFrame, normalizedRotation, ANGLE_PER_DEGREE, EMU_PER_PX, isPositionedImage } from './images.js';
 let nextAsset = 0;
+// A document longer than this paints only the pages on screen (and a screenful either side) at
+// once; the rest are painted when they scroll into view, when their pixels are read, or while the
+// browser is idle.
+const EAGER_PAGES = 80;
 // Fields layout writes onto the style objects it measures with; measurement never reads them.
 const LAYOUT_OUTPUT = new Set(['text', 'x', 'start', 'end', 'width', 'contentWidth', 'origin', 'ascent', 'descent', 'lineAscent', 'lineDescent', 'textParts', 'textOffsetX', 'textTransform', 'underline', 'strike', 'background', 'group', 'followingSpace', 'fastSpaces', 'lastSpace', 'spaceMetrics', 'trailingStart', 'numberEnd', 'numberDone', 'decimal', 'hasTextShadow', 'discretionaryOnly', 'colors']);
 
@@ -105,11 +110,16 @@ export class CanvasEditor {
     // of times. Remember each measurement by style and exact text. A style object's key is computed once
     // (layout writes only its own output fields onto it, never ones measurement reads); font changes clear
     // the memory (refreshFonts, deferred script/separator faces, local font access); callers get a copy.
+    // Measured paragraphs follow the same memory: they are dropped whenever measurements are.
+    const measuredParagraphs = new ParagraphMeasureCache();
     let byStyle = new WeakMap(), byKey = new Map(), entries = 0, measuredFonts = localFontVersion();
-    this.measureCache = { clear() { byStyle = new WeakMap(); byKey = new Map(); entries = 0; } };
-    this.measure = (text, style) => {
+    this.measureCache = { clear() { byStyle = new WeakMap(); byKey = new Map(); entries = 0; measuredParagraphs.clear(); } };
+    const checkFonts = () => {
       const fonts = localFontVersion();
       if (fonts !== measuredFonts) { this.measureCache.clear(); measuredFonts = fonts; }
+    };
+    this.measure = (text, style) => {
+      checkFonts();
       let texts = byStyle.get(style);
       if (!texts) {
         const key = JSON.stringify(style, (name, value) => LAYOUT_OUTPUT.has(name) ? undefined : value);
@@ -125,12 +135,17 @@ export class CanvasEditor {
       }
       return { ...result };
     };
+    this.measure.paragraphCache = () => { checkFonts(); return measuredParagraphs; };
     const listen = (node, name, fn) => node.addEventListener(name, fn, { signal: this.abort.signal });
     listen(this.pages, 'pointerdown', e => this.pointerDown(e));
+    // A press anywhere else ends a run of quick presses, as it does natively.
+    listen(document, 'pointerdown', e => { if (!this.pages.contains(e.target)) this.lastPress = null; });
     listen(this.pages, 'pointermove', e => this.pointerMove(e));
     listen(this.pages, 'pointerup', e => this.pointerUp(e));
-    listen(this.pages, 'pointercancel', () => { this.dragging = false; this.dragControl = null; this.imageInteraction.cancel(); });
+    listen(this.pages, 'pointercancel', () => { this.touch = null; this.dragging = false; this.dragControl = null; this.stopAutoScroll(); this.imageInteraction.cancel(); });
     listen(this.pages, 'contextmenu', e => {
+      // A long press opens the menu; lifting that finger is not a tap.
+      this.touch = null;
       e.preventDefault(); const selected=this.model.selectedImage, position = this.point(e, false), normal=this.pointImage;
       this.point({clientX:e.clientX,clientY:e.clientY,altKey:true},false);
       const candidate=this.pointImage, picture=normal || (selected && candidate?.image.id===selected.id ? candidate : null);
@@ -164,6 +179,9 @@ export class CanvasEditor {
     listen(this.input, 'compositionend', () => this.finishComposition());
     listen(this.input, 'select', () => this.nativeSelection());
     listen(this.input, 'keyup', () => this.nativeSelection());
+    // A click in the native text (accessible text mode) moves the caret with no key or select
+    // event; the toolbar's commands must act where it now is.
+    listen(this.input, 'pointerup', () => this.nativeSelection());
     listen(this.input, 'focus', () => this.paint());
     listen(this.input, 'blur', () => { this.finishComposition(); this.paint(); });
     listen(this.input, 'copy', e => this.copy(e, false));
@@ -177,6 +195,17 @@ export class CanvasEditor {
       if (picture) { if (!this.readOnly) this.insertImageFile(picture).catch(error => this.onError(error)); return; }
       this.pasteData(text, e.clipboardData.getData('text/html'));
     });
+    // Moving the window to another display or changing browser zoom changes the device pixel ratio.
+    // Give the page canvases a backing store at the new ratio, so text stays sharp.
+    const watchResolution = () => {
+      const query = typeof matchMedia === 'function' ? matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`) : null;
+      query?.addEventListener('change', () => { if (this.destroyed) return; watchResolution(); this.resizeCanvases(); }, { once: true, signal: this.abort.signal });
+    };
+    watchResolution();
+    // Pages left unpainted by the last paint are painted before they are shown.
+    this.stalePages = new Set();
+    document.addEventListener('scroll', () => this.paintShownPages(), { capture: true, passive: true, signal: this.abort.signal });
+    window.addEventListener('resize', () => this.paintShownPages(), { signal: this.abort.signal });
     this.relayout();
   }
   focus() { this.input.focus({ preventScroll: true }); this.syncInput(); this.paint(); }
@@ -296,7 +325,10 @@ export class CanvasEditor {
     return count;
   }
   execute(action, onFailure, options, quiet = false) {
-    if (this.readOnly || this.viewOnly || this.composition) return;
+    if (this.readOnly || this.viewOnly) return;
+    // A command chosen while an input method composes (Bold on the toolbar) commits the composition
+    // and then applies, rather than being dropped.
+    this.finishComposition();
     try {
       const revision = this.session.revision;
       this.session.run(() => action(), () => {
@@ -467,7 +499,8 @@ export class CanvasEditor {
   insertSectionBreak(type) { const ok = this.execute(() => this.model.insertSectionBreak(type)); this.focus(); return ok; }
   insertPageBreak() { this.execute(() => this.model.insertPageBreak()); this.focus(); }
   travelHistory(direction) {
-    if (this.readOnly || this.viewOnly || this.composition) return;
+    if (this.readOnly || this.viewOnly) return;
+    this.finishComposition();
     // The host can keep history beyond this editor's (changes that reopened the package).
     if (!this.session[direction === 'undo' ? 'history' : 'future'].length && this.onHistoryEnd?.(direction)) return;
     try {
@@ -502,6 +535,7 @@ export class CanvasEditor {
   }
   /** Lay the body and its page stories out for a view (null: the authored pages). */
   computeLayout(view = this.view) {
+    this.measure.paragraphCache?.().nextGeneration();
     const body = this.session.body;
     const stories = view ? viewPageStories(this.pageStories, view.kind) : this.pageStories;
     let layout = layoutDocument(body.paragraphs, this.measure, pageGeometry(body.pageSettings), body.numbering, body.tables, stories, { bestEffort: this.readOnly, drawingLayouts: this.drawingLayouts, ...(!this.readOnly ? { styles: this.model.styles } : {}), ...(view ? { viewGeometry: viewGeometry(view) } : {}) });
@@ -532,6 +566,12 @@ export class CanvasEditor {
       const canvas = document.createElement('canvas');
       canvas.className = 'canvas-page';
       canvas.setAttribute('aria-hidden', 'true');
+      // A page left for later paints itself before anything reads its pixels.
+      for (const name of ['getContext', 'toDataURL', 'toBlob']) canvas[name] = (...args) => {
+        const index = this.canvases?.indexOf(canvas) ?? -1;
+        if (this.stalePages.has(index)) this.paint({ pages: [index] });
+        return HTMLCanvasElement.prototype[name].apply(canvas, args);
+      };
       this.pages.append(canvas);
     }
     this.canvases = [...this.pages.children];
@@ -564,11 +604,16 @@ export class CanvasEditor {
     this.canvases.forEach((canvas, index) => {
       const geometry = this.layout.pages[index] || this.layout.page;
       canvas.dataset.page = index;
-      canvas.style.width = `${geometry.width * this.zoom}px`;
-      canvas.style.height = `${geometry.height * this.zoom}px`;
       const ratio = window.devicePixelRatio || 1;
-      canvas.width = Math.round(geometry.width * this.zoom * ratio);
-      canvas.height = Math.round(geometry.height * this.zoom * ratio);
+      // Assigning a dimension clears and reallocates the canvas even when unchanged, and pages
+      // off screen are repainted only later: keep the backing store of pages that kept their size.
+      const width = Math.round(geometry.width * this.zoom * ratio), height = Math.round(geometry.height * this.zoom * ratio);
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      // Shown at exactly its backing store's size: a fractional page size (A4, fit-width and
+      // slider zooms) would otherwise make the browser resample, and blur, every page.
+      canvas.style.width = `${width / ratio}px`;
+      canvas.style.height = `${height / ratio}px`;
     });
     this.pages.style.gap = `${this.layout.page.gap * this.zoom}px`;
     this.syncInput(); this.paint(); this.onSelection();
@@ -594,8 +639,55 @@ export class CanvasEditor {
     this.paint({ canvases: sheets, printing: true });
     return sheets;
   }
-  paint({ canvases = this.canvases, printing = false } = {}) {
+  /** Indices of the page canvases on screen, with a screenful of margin; every page in a short document. */
+  shownPages() {
+    const all = this.canvases.map((_, index) => index);
+    if (all.length <= EAGER_PAGES) return all;
+    const host = this.host.getBoundingClientRect();
+    const top = Math.max(host.top, 0), bottom = Math.min(host.bottom, window.innerHeight);
+    const left = Math.max(host.left, 0), right = Math.min(host.right, window.innerWidth);
+    const height = Math.max(0, bottom - top), width = Math.max(0, right - left);
+    return all.filter(index => {
+      const r = this.canvases[index].getBoundingClientRect();
+      return r.bottom > top - height && r.top < bottom + height && r.right > left - width && r.left < right + width;
+    });
+  }
+  paintShownPages() {
+    if (this.destroyed || !this.stalePages.size) return;
+    const pages = this.shownPages().filter(index => this.stalePages.has(index));
+    if (pages.length) this.paint({ pages });
+  }
+  /** Paint every page left for later, for callers that read the page canvases' pixels. */
+  flushPaint() {
+    if (!this.destroyed && this.stalePages.size) this.paint({ pages: [...this.stalePages] });
+  }
+  schedulePaint() {
+    if (this.paintTask || !this.stalePages.size || this.destroyed) return;
+    const idle = typeof requestIdleCallback === 'function';
+    const run = deadline => {
+      this.paintTask = null;
+      if (this.destroyed || !this.stalePages.size) return;
+      // Nearest pages first, a couple at a time while the browser has idle time, so typing and
+      // scrolling stay responsive.
+      const shown = this.shownPages(), anchor = shown.length ? shown[0] : 0;
+      const order = [...this.stalePages].sort((a, b) => Math.abs(a - anchor) - Math.abs(b - anchor));
+      do this.paint({ pages: order.splice(0, 2) });
+      while (order.length && deadline && !deadline.didTimeout && deadline.timeRemaining() > 4);
+      this.schedulePaint();
+    };
+    this.paintTask = idle ? { idle, id: requestIdleCallback(run, { timeout: 250 }) } : { idle, id: setTimeout(run, 16) };
+  }
+  paint({ canvases = this.canvases, printing = false, pages = null } = {}) {
     if (this.destroyed || !this.layout) return;
+    let indices = null;
+    if (canvases === this.canvases && !printing) {
+      if (pages) { indices = pages.filter(index => index < canvases.length); for (const index of indices) this.stalePages.delete(index); }
+      else {
+        indices = this.shownPages();
+        const shown = new Set(indices);
+        this.stalePages = new Set(canvases.map((_, index) => index).filter(index => !shown.has(index)));
+      }
+    }
     const [start, end] = this.model.range;
     // A shape selected on its own shows only its frame handles.
     const shapeOnly = end === start + 1 && this.drawingEditor?.canResize(this.model.selectedImage);
@@ -609,8 +701,10 @@ export class CanvasEditor {
     const caret = caretRect(this.selectionLayout, this.model.selection.focus, this.caretAffinity, this.caretPage);
     const found = printing ? [] : this.findHighlightRects();
     const tinted = printing ? [] : this.rangeTintRects();
-    for (let index = 0; index < canvases.length; index++) {
+    for (const index of indices || canvases.keys()) {
       const canvas = canvases[index], ctx = canvas.getContext('2d'), geometry = this.layout.pages[index] || this.layout.page;
+      // A canvas keeps its pixels and drawing state between paints (resizeCanvases keeps unchanged sizes).
+      ctx.reset?.();
       setCanvasFontAlternatives(ctx, this.model.styles.fontAlternatives);
       const scale = canvas.width / geometry.width;
       ctx.setTransform(scale, 0, 0, scale, 0, 0);
@@ -621,9 +715,21 @@ export class CanvasEditor {
       const sectionPage = geometry.pageBorders ? index - (this.layout.pageSections?.indexOf(this.layout.pageSections[index]) ?? 0) : 0;
       const pageBorders = pageBorderStrokes(this.storyLayout.borderMargins?.[index] ? { ...geometry, ...this.storyLayout.borderMargins[index] } : geometry, sectionPage);
       if (geometry.pageBorders?.zOrder === 'back') for (const border of pageBorders) paintParagraphBorder(ctx, border);
+      // Screen cues for the story being edited: the inactive header/footer or body is faded.
+      let storyChrome = null;
+      if (!printing && this.pageStories) {
+        const kindOf = path => this.pageStories.stories[path]?.kind;
+        const activeKind = this.session.path === null ? 'body' : kindOf(this.session.path);
+        const storyLines = this.storyLayout.lines.filter(line => line.page === index);
+        if (activeKind === 'body' ? storyLines.some(line => ['header', 'footer'].includes(kindOf(line.pageStory))) : ['header', 'footer'].includes(activeKind))
+          storyChrome = { bounds: storyBoundaries(geometry, storyLines, kindOf), active: activeKind };
+      }
       // Header/footer stories paint beneath the body. Front/behind text
       // and relative drawing order apply within each story, not across them.
       for (const pageStory of [true, false]) {
+        // Fade the header and footer before the body paints, so body text and drawings that reach
+        // into the margins keep their own colours.
+        if (!pageStory && storyChrome?.active === 'body') paintStoryChrome(ctx, geometry, storyChrome.bounds, 'body');
         const floatingObjects = pageStory ? this.storyLayout.floatingObjects : this.layout.floatingObjects || [];
         const paintFloating = behind => {
           // A hidden drawing (§20.4.2.5) keeps its anchor and place but paints nothing; hidden ink likewise.
@@ -809,13 +915,7 @@ export class CanvasEditor {
         paintText(ctx, { ...label.style, text: label.text, x: label.x, width: label.width }, label.baseline); ctx.restore();
       }
       if (geometry.pageBorders?.zOrder !== 'back') for (const border of pageBorders) paintParagraphBorder(ctx, border);
-      if (!printing && this.pageStories) {
-        const kindOf = path => this.pageStories.stories[path]?.kind;
-        const activeKind = this.session.path === null ? 'body' : kindOf(this.session.path);
-        const storyLines = this.storyLayout.lines.filter(line => line.page === index);
-        if (activeKind === 'body' ? storyLines.some(line => ['header', 'footer'].includes(kindOf(line.pageStory))) : ['header', 'footer'].includes(activeKind))
-          paintStoryChrome(ctx, geometry, storyBoundaries(geometry, storyLines, kindOf), activeKind === 'body' ? 'body' : activeKind);
-      }
+      if (storyChrome && storyChrome.active !== 'body') paintStoryChrome(ctx, geometry, storyChrome.bounds, storyChrome.active);
       if (!printing) for (const overlay of this.overlays) overlay(ctx, index, geometry);
       if (!printing && controlRects) paintControlCarets(ctx, controlRects, index, scale);
       if (!printing && start === end && caret.page === index && document.activeElement === this.input && !this.accessible) {
@@ -827,7 +927,7 @@ export class CanvasEditor {
         });
       }
     }
-    if (!printing) { this.positionInput(caret); this.imageInteraction?.update(); }
+    if (!printing) { this.positionInput(caret); this.imageInteraction?.update(); this.schedulePaint(); }
   }
   positionInput(caret) {
     if (this.accessible) return;
@@ -913,9 +1013,35 @@ export class CanvasEditor {
     const local = line.cellText?.line || line, edge = local.stops.reduce((right, s) => Math.max(right, s.x), -Infinity);
     return x > edge && local.stops.some(s => s.offset === position && s.x === edge) ? { ...caret, side: 'after' } : caret;
   }
-  pointerDown(e) {
-    if (e.button !== 0 || this.composition) return;
+  /**
+   * A finger on the pages may be starting a scroll (touch-action: pan-y), so it does not place the
+   * caret or bring up the keyboard yet: a tap does that when the finger lifts, and a sideways drag,
+   * which never scrolls, selects from where it went down. Pictures take the press at once.
+   */
+  deferTouch(e) {
+    if (e.pointerType !== 'touch' || this.model.selectedImage || this.imageInteraction.active) return false;
+    this.point(e, false);
+    if (this.pointImage) return false;
+    // Scrolling is up to touch-action; this only stops the emulated mouse press from taking focus.
+    e.preventDefault();
+    this.touch = { down: e, x: e.clientX, y: e.clientY };
+    return true;
+  }
+  pointerDown(e, tapped = false) {
+    if (e.button !== 0) return;
+    // A press during composition commits it and goes on to place the caret, as in a native field;
+    // returning would let the press take focus from the document, losing what is typed next.
+    if (this.composition) this.finishComposition();
+    if (!tapped && this.deferTouch(e)) return;
+    this.touch = null;
     this.typingGroup = null; this.deleteGroup = null;
+    // Pointer events carry no click count: a quick second or third press in place counts up, unless the
+    // pages moved in between (a scroll or relayout puts other text under the pointer).
+    const last = this.lastPress, { left, top } = this.pages.getBoundingClientRect();
+    const presses = last && e.timeStamp - last.time < 500 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 5
+      && left === last.left && top === last.top ? last.presses % 3 + 1 : 1;
+    this.lastPress = { time: e.timeStamp, x: e.clientX, y: e.clientY, left, top, presses };
+    this.unit = null;
     e.preventDefault();
     // Crop mode and Shift+click drawing selection take the press first (image-interaction.js).
     if (this.imageInteraction.pointerDown(e)) return;
@@ -967,6 +1093,10 @@ export class CanvasEditor {
         ? selection.controlCaret || (extent && { id: extent.id, side: 'inside' }) : undefined;
       this.model.select(e.shiftKey ? this.model.selection.anchor : position, position,
         anchorCaret || (caret && !restoredOutsideCaret && !sameOffsetCaret ? this.controlPointerCaret(e, position, caret) : caret), extent);
+      // The second press takes the word and the third the paragraph; a drag from there extends by
+      // whole words or paragraphs, as native selection does.
+      const unit = !e.shiftKey && presses > 1 && !this.model.selection.controlCaret && this.textUnit(e, position, presses);
+      if (unit) { this.model.select(unit.start, unit.end); this.unit = { ...unit, presses, model: this.model, path: this.session.path }; }
     }
     const dragSelection = this.model.selection;
     const dragRange = !this.readOnly && !e.shiftKey && dragSelection.anchor === dragSelection.focus &&
@@ -974,16 +1104,45 @@ export class CanvasEditor {
     this.dragControl = dragRange && dragRange.start === dragRange.end
       ? { position, caret: dragSelection.controlCaret, model: this.model, revision: this.session.revision } : null;
     this.dragging = true;
-    this.pages.setPointerCapture(e.pointerId);
+    // A tap is handled as its finger lifts, when there is no pointer left to capture.
+    try { this.pages.setPointerCapture(e.pointerId); } catch { /* released */ }
     this.preferredX = null;
     this.focus(); this.onSelection();
   }
   pointerMove(e) {
+    if (this.touch?.down.pointerId === e.pointerId) {
+      const dx = Math.abs(e.clientX - this.touch.x), dy = Math.abs(e.clientY - this.touch.y);
+      if (dx < 10 || dx <= dy) return;
+      this.pointerDown(this.touch.down, true);
+    }
     if (this.imageInteraction.move(e)) return;
     if (!this.dragging) {
       this.point(e, false);
       this.pages.title = this.pointLink ? `${this.pointLink.link.tooltip || hyperlinkLabel(this.pointLink.link)} (Ctrl/Cmd+click to open)` : '';
       this.pages.style.cursor = this.pointLink && (e.ctrlKey || e.metaKey) ? 'pointer' : '';
+      return;
+    }
+    this.dragTo(e);
+    this.dragPoint = { clientX: e.clientX, clientY: e.clientY, altKey: e.altKey };
+    this.autoScroll();
+  }
+  /** The word (two presses) or paragraph (three) at a pointer position. */
+  textUnit(e, position, presses) {
+    if (presses === 3) {
+      const { index, offset } = locate(this.model.paragraphs, position), start = position - offset;
+      return { start, end: start + paragraphText(this.model.paragraphs[index]).length };
+    }
+    const word = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(this.model.text).containing(this.pointCharacter(e, position));
+    return word ? { start: word.index, end: word.index + word.segment.length } : null;
+  }
+  /** Extend a pointer selection to a point. */
+  dragTo(e) {
+    const unit = this.unit?.model === this.model && this.unit;
+    if (unit) {
+      const position = this.point(e), other = this.textUnit(e, position, unit.presses) || { start: position, end: position };
+      if (other.start < unit.start) this.model.select(unit.end, Math.min(other.start, position));
+      else this.model.select(unit.start, Math.max(other.end, position, unit.end));
+      this.syncInput(); this.paint(); this.onSelection();
       return;
     }
     const position = this.point(e), selection = this.model.selection;
@@ -993,14 +1152,36 @@ export class CanvasEditor {
       this.dragControl.model === this.model && this.dragControl.revision === this.session.revision ? this.dragControl.caret
         : position === selection.anchor ? selection.controlCaret || (extent && { id: extent.id, side: 'inside' }) : undefined, extent);
     this.syncInput(); this.paint(); this.onSelection();
-    const bounds = this.host.getBoundingClientRect();
-    if (e.clientY > bounds.bottom - 30) this.host.scrollTop += 20;
-    else if (e.clientY < bounds.top + 30) this.host.scrollTop -= 20;
   }
+  /**
+   * While a selection drag holds the pointer near or past an edge of the view, keep scrolling (faster
+   * the further out it is) and extend the selection over the text that comes under it, as native
+   * selection does; the pointer need not keep moving.
+   */
+  autoScroll() {
+    const step = () => {
+      const point = this.dragPoint, bounds = this.host.getBoundingClientRect(), edge = 30;
+      const speed = beyond => beyond > 0 ? Math.min(80, 8 + Math.round(beyond / 2)) : 0;
+      const dy = point ? speed(point.clientY - (bounds.bottom - edge)) - speed(bounds.top + edge - point.clientY) : 0;
+      const dx = point ? speed(point.clientX - (bounds.right - edge)) - speed(bounds.left + edge - point.clientX) : 0;
+      if (!this.dragging || this.destroyed || !dx && !dy) { this.stopAutoScroll(); return; }
+      const { scrollTop, scrollLeft } = this.host;
+      this.host.scrollTop += dy; this.host.scrollLeft += dx;
+      if (this.host.scrollTop !== scrollTop || this.host.scrollLeft !== scrollLeft) this.dragTo(point);
+    };
+    if (!this.scrollTimer) { this.scrollTimer = setInterval(step, 30); step(); }
+  }
+  stopAutoScroll() { clearInterval(this.scrollTimer); this.scrollTimer = null; this.dragPoint = null; }
   pointerUp(e) {
+    if (this.touch?.down.pointerId === e.pointerId) {
+      const { down, x, y } = this.touch;
+      this.touch = null;
+      if (Math.hypot(e.clientX - x, e.clientY - y) > 10) return;
+      this.pointerDown(down, true);
+    }
     if (this.imageInteraction.end(e)) return;
     const control = this.dragControl, wasDragging = this.dragging;
-    this.dragging = false; this.dragControl = null;
+    this.dragging = false; this.dragControl = null; this.stopAutoScroll();
     if (!wasDragging || !control || this.readOnly || this.composition ||
       control.model !== this.model || control.revision !== this.session.revision) return;
     const position = this.point(e);
@@ -1043,15 +1224,35 @@ export class CanvasEditor {
       if (storyLine && this.pageStories.stories[storyLine.pageStory].editable) this.editStory(storyLine.pageStory, storyLine.page);
       else if (this.session.path !== null) this.editStory(null);
     }
+    // The second press already took the word, and a drag since extended it word by word.
+    if (this.unit?.presses === 2 && this.unit.model === this.model && this.unit.path === this.session.path) return;
     const pos = this.point(e);
     if (this.pointImage) {
       this.model.select(this.pointImage.start, this.pointImage.end); this.focus(); this.onSelection(); return;
     }
-    const words = new Intl.Segmenter(undefined, { granularity: 'word' });
-    const word = [...words.segment(this.model.text)].find(s => s.index <= pos && pos < s.index + s.segment.length);
+    const word = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(this.model.text).containing(this.pointCharacter(e, pos));
     if (word) { this.model.select(word.index, word.index + word.segment.length); this.focus(); this.onSelection(); }
   }
+  /**
+   * The offset of the character under the pointer. A press resolves to the nearest caret stop, which
+   * for the right half of a letter is the stop after it; the letter is the one between that stop and
+   * its neighbour on the pointer's side.
+   */
+  pointCharacter(e, position) {
+    let line;
+    try { line = lineAtPosition(this.selectionLayout, position, this.caretAffinity, this.caretPage); } catch { return position; }
+    const rect = this.canvases[line.page]?.getBoundingClientRect();
+    if (!rect) return position;
+    let x = (e.clientX - rect.left) / this.zoom;
+    if (line.cellText) x = cellTextLocalPoint(line.cellText.matrix, x, (e.clientY - rect.top) / this.zoom).x;
+    const local = line.cellText?.line || line, stop = nearestStop(local, x);
+    if (!stop || stop.offset !== position || x === stop.x) return position;
+    const side = local.stops.filter(s => x < stop.x ? s.x < stop.x : s.x > stop.x)
+      .reduce((best, s) => !best || Math.abs(s.x - stop.x) < Math.abs(best.x - stop.x) ? s : best, null);
+    return side && side.offset !== position ? Math.min(position, side.offset) : position;
+  }
   selectParagraph(e) {
+    if (this.unit?.presses === 3 && this.unit.model === this.model && this.unit.path === this.session.path) return;
     const pos = this.point(e, false);
     if (this.pointImage) return;
     const { index, offset } = locate(this.model.paragraphs, pos), start = pos - offset;
@@ -1074,6 +1275,10 @@ export class CanvasEditor {
     const top = canvas.offsetTop + caret.y * this.zoom;
     if (top < this.host.scrollTop + 12) this.host.scrollTop = Math.max(0, top - 24);
     if (top + caret.height * this.zoom > this.host.scrollTop + this.host.clientHeight - 12) this.host.scrollTop = top + caret.height * this.zoom - this.host.clientHeight + 24;
+    // Zoomed in, or on a narrow screen, the page is wider than the view: keep the caret in sight sideways too.
+    const left = canvas.offsetLeft + caret.x * this.zoom;
+    if (left < this.host.scrollLeft + 12) this.host.scrollLeft = Math.max(0, left - 24);
+    else if (left > this.host.scrollLeft + this.host.clientWidth - 12) this.host.scrollLeft = left - this.host.clientWidth + 24;
   }
   move(key, shift, word, mod) {
     this.typingGroup = null; this.deleteGroup = null;
@@ -1239,7 +1444,10 @@ export class CanvasEditor {
     }
     const leaveWithTab = e.key === 'Tab' && this.leaveWithTab;
     this.leaveWithTab = false;
-    const mod = e.ctrlKey || e.metaKey, letter = e.code?.replace(/^Key/, '').toLowerCase() || e.key.toLowerCase();
+    // A letter chord follows the letter the layout types (QWERTZ moves Z, AZERTY moves A), and the
+    // physical key only when the layout types another script there.
+    const mod = e.ctrlKey || e.metaKey, typed = e.key || '';
+    const letter = /^[a-z]$/i.test(typed) ? typed.toLowerCase() : [...typed].length === 1 && /\p{L}/u.test(typed) ? /^Key([A-Z])$/.exec(e.code || '')?.[1].toLowerCase() || '' : '';
     if (mod && !e.altKey && !e.shiftKey && (e.code === 'Space' || e.key === ' ')) {
       e.preventDefault(); this.clearDirectTextFormatting(); return;
     }
@@ -1289,6 +1497,9 @@ export class CanvasEditor {
       else if (e.metaKey && ['ArrowUp', 'ArrowDown'].includes(e.key)) this.move(e.key === 'ArrowUp' ? 'Home' : 'End', e.shiftKey, false, true);
       else this.move(e.key, e.shiftKey, e.altKey || e.ctrlKey, mod);
     } else if (['Backspace', 'Delete'].includes(e.key) && !mod && !e.altKey) {
+      // Shift+Delete on a selection is Cut on Windows and Linux; the browser's own key binding sends
+      // the cut event (copy, then delete), or a plain forward delete on a Mac.
+      if (e.key === 'Delete' && e.shiftKey && this.model.range[0] !== this.model.range[1]) return;
       e.preventDefault(); this.deleteText(e.key === 'Backspace' ? -1 : 1);
     }
   }
@@ -1303,6 +1514,9 @@ export class CanvasEditor {
       insertParagraph: () => this.model.insertParagraph(),
       deleteContentBackward: () => this.model.delete(-1),
       deleteContentForward: () => this.model.delete(1),
+      // Cmd+Backspace and Cmd+Fn+Backspace on a Mac. The native field's line is the whole paragraph.
+      deleteSoftLineBackward: () => this.deleteToLineEdge(-1),
+      deleteSoftLineForward: () => this.deleteToLineEdge(1),
       formatBold: () => this.model.toggleBold(),
       formatStrikeThrough: () => this.model.setRunFormat({ strikethrough: this.model.runFormatting.strikethrough === 'single' ? 'none' : 'single' }),
       formatItalic: () => this.model.toggleItalic(), formatUnderline: () => this.model.toggleUnderline(),
@@ -1311,6 +1525,17 @@ export class CanvasEditor {
     };
     if (e.inputType === 'insertText') { e.preventDefault(); this.typeText(actions.insertText, e.data || ''); return; }
     if (actions[e.inputType]) { e.preventDefault(); this.execute(actions[e.inputType]); }
+  }
+  /** Delete from the caret to the start (or end) of its line as laid out, or the selection. */
+  deleteToLineEdge(direction) {
+    const [start, end] = this.model.range;
+    if (start !== end) return this.model.replace('');
+    const line = lineAtPosition(this.selectionLayout, start, this.caretAffinity, this.caretPage);
+    const edge = direction < 0 ? line.start : line.end;
+    // At the edge already, the key deletes what is across it, as Backspace or Delete would.
+    if (edge === start) return this.model.delete(direction);
+    this.model.select(Math.min(start, edge), Math.max(start, edge));
+    return this.model.replace('');
   }
   // Typing continues one undo step until a new word starts.
   // Any other change, caret move, undo or story switch ends it.
@@ -1442,9 +1667,11 @@ export class CanvasEditor {
   /** Paste with the clipboard's formatting where the document can take it, else as plain text. */
   pasteData(text, html = '') {
     const fragment = html && carriesFormatting(this.model) && !this.model.tableContext ? htmlFragment(html) : null;
-    if (fragment && fragment.paragraphs.some(p => p.text) && this.execute(() => pasteFragment(this.model, fragment), () => {}, undefined, true)) return;
+    if (fragment && fragment.paragraphs.some(p => p.text) && formattedPasteFits(fragment) && this.execute(() => pasteFragment(this.model, fragment), () => {}, undefined, true)) return;
     if (text) this.execute(() => this.model.replace(text));
   }
   releaseImages(images) { for (const image of images.values()) if (!this.borrowedImages.has(image)) image.close?.(); images.clear(); }
-  destroy() { this.destroyed = true; this.abort.abort(); this.releaseImages(this.images); this.borrowedImages.clear(); this.host.replaceChildren(); }
+  destroy() {
+    if (this.paintTask) (this.paintTask.idle ? cancelIdleCallback : clearTimeout)(this.paintTask.id);
+    this.destroyed = true; this.stopAutoScroll(); this.abort.abort(); this.releaseImages(this.images); this.borrowedImages.clear(); this.host.replaceChildren(); }
 }

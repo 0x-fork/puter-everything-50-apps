@@ -6,7 +6,8 @@ test('opens best-effort content, blocks every input path and downloads the origi
   await page.goto('/playground.html');
   await openReadOnlyPreview(page, 'public/fixtures/best-effort.docx');
   const input = page.getByRole('textbox', { name: 'Document text' });
-  const expected = 'Best-effort opening\nField result: September 17, 2026\nInserted words\nStill readable after unsupported content.';
+  // Tracked deletions keep their document positions until accepted (docs/conformance.md, Tracked changes).
+  const expected = 'Best-effort opening\nField result: September 17, 2026\nDeleted wordsInserted words\nStill readable after unsupported content.';
   await expect(input).toHaveValue(expected);
   await input.press('ControlOrMeta+a'); await page.keyboard.insertText('Overwrite');
   await input.press('Backspace'); await input.press('ControlOrMeta+b');
@@ -18,11 +19,13 @@ test('opens best-effort content, blocks every input path and downloads the origi
     el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
   });
   await expect(input).toHaveValue(expected);
-  await input.press('ControlOrMeta+f');
-  await page.getByRole('textbox', { name: 'Find text', exact: true }).fill('words');
-  await expect(page.getByRole('button', { name: 'Replace', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Replace all', exact: true })).toBeDisabled();
-  await page.getByRole('button', { name: 'Close find and replace', exact: true }).click();
+  // Ctrl/Cmd+F searches from the Navigation pane; the Find and Replace panel opens with Replace's chord.
+  await input.press(process.platform === 'darwin' ? 'Meta+Shift+h' : 'Control+h');
+  const finder = page.getByRole('search', { name: 'Find and replace' });
+  await finder.getByRole('textbox', { name: 'Find text', exact: true }).fill('words');
+  await expect(finder.getByRole('button', { name: 'Replace', exact: true })).toBeDisabled();
+  await expect(finder.getByRole('button', { name: 'Replace all', exact: true })).toBeDisabled();
+  await finder.getByRole('button', { name: 'Close find and replace', exact: true }).click();
   await page.screenshot({ path: info.outputPath('best-effort.png') });
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download .docx', exact: true }).click();
@@ -53,4 +56,18 @@ test('the read-only notice is a message bar that can be dismissed', async ({ pag
   // The next document's notices start visible again.
   await openReadOnlyPreview(page, 'public/fixtures/best-effort.docx');
   await expect(notice).toBeVisible();
+});
+
+test('the message bar\'s Dismiss button stays visible on its yellow in the dark theme', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.goto('/playground.html');
+  await openReadOnlyPreview(page, 'public/fixtures/best-effort.docx');
+  const ratio = await page.locator('.canvas-message').evaluate(bar => {
+    const rgb = value => value.match(/[\d.]+/g).slice(0, 3).map(Number);
+    const lum = c => c.map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+    const fore = lum(rgb(getComputedStyle(bar.querySelector('.canvas-message-close')).color)), back = lum(rgb(getComputedStyle(bar).backgroundColor));
+    return (Math.max(fore, back) + 0.05) / (Math.min(fore, back) + 0.05);
+  });
+  // The theme's light grey icon measured 1.6:1 on the bar's fixed yellow.
+  expect(ratio).toBeGreaterThanOrEqual(3);
 });

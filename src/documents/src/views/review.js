@@ -3,7 +3,7 @@
  * Threads sit level with their anchors; the active thread's text is tinted more strongly. Every
  * change goes through the editor's transactions, so undo, saving and read-only rules apply.
  */
-import { el, isComposing, relativeTime, MOD_KEY } from '../ui/dom.js';
+import { el, isComposing, relativeTime, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { openMenu } from '../ui/menu.js';
 import { initialsFor } from '../engine/comments.js';
 import { revisionView, revisionAuthors, describeFormatChange } from '../engine/revisions.js';
@@ -317,17 +317,44 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     el('button.btn.btn-sm.wcc-resolve', { type: 'button', title: 'Resolve thread', onclick: () => { run(() => editor().model.setCommentDone(thread.id, true)); refresh(true); } }, 'Resolve'));
     return node;
   }
+  /**
+   * Keep a comment being written on its words while the document changes under it (a collaborator's
+   * edit, the user's own typing, a rewrite on save): the text before and after the change stays put,
+   * so the anchor moves with it instead of the draft and its words being thrown away.
+   */
+  function followDraft(engine) {
+    if (!draft) return;
+    const text = engine.model.text;
+    if (draft.revision === undefined) { draft.revision = engine.model.revision; draft.source = text; return; }
+    if (draft.revision === engine.model.revision) return;
+    const before = draft.source, limit = Math.min(before.length, text.length);
+    let head = 0, tail = 0;
+    while (head < limit && before[head] === text[head]) head++;
+    while (tail < limit - head && before[before.length - 1 - tail] === text[text.length - 1 - tail]) tail++;
+    // Never split a surrogate pair at either edge of the change.
+    if (head > 0 && /[\uD800-\uDBFF]/.test(before[head - 1])) head--;
+    if (tail > 0 && /[\uDC00-\uDFFF]/.test(before[before.length - tail])) tail--;
+    const changedEnd = before.length - tail, delta = text.length - before.length;
+    // A side inside the changed text widens to take in what replaced it.
+    const start = draft.start <= head ? draft.start : draft.start >= changedEnd ? draft.start + delta : head;
+    const end = draft.end <= head ? draft.end : draft.end >= changedEnd ? draft.end + delta : changedEnd + delta;
+    Object.assign(draft, { start: Math.min(start, text.length), end: Math.max(Math.min(start, text.length), Math.min(end, text.length)), revision: engine.model.revision, source: text });
+  }
   function draftCard() {
+    const editorNode = textEditor({ value: draft.value || '', placeholder: 'Start a conversation', submitLabel: 'Post',
+      onSubmit: text => {
+        const engine = editor(); if (engine) followDraft(engine);
+        const { start, end } = draft; draft = null;
+        let id = null;
+        run(() => { id = editor().model.addComment({ ...me(), text, range: [start, end] }); });
+        activeId = id; pinned = true; pinnedRange = editor()?.model.range.join() ?? ''; refresh(true); editor()?.focus();
+      },
+      onCancel: () => { draft = null; activeId = null; refresh(true); editor()?.focus(); } });
+    // The words typed so far belong to the draft, so a rebuilt column shows them again.
+    editorNode.querySelector('textarea').addEventListener('input', e => { if (draft) draft.value = e.target.value; });
     return el('article.ed-comment-card.ed-comment-draft.is-active', { 'aria-label': 'New comment' },
       el('div.wcc-head', {}, avatar(me().author, me().initials), el('div.wcc-meta', {}, el('span.wcc-author', {}, me().author))),
-      textEditor({ placeholder: 'Start a conversation', submitLabel: 'Post',
-        onSubmit: text => {
-          const { start, end } = draft; draft = null;
-          let id = null;
-          run(() => { id = editor().model.addComment({ ...me(), text, range: [start, end] }); });
-          activeId = id; pinned = true; pinnedRange = editor()?.model.range.join() ?? ''; refresh(true); editor()?.focus();
-        },
-        onCancel: () => { draft = null; activeId = null; refresh(true); editor()?.focus(); } }));
+      editorNode);
   }
 
   /* ---- Balloons: deletions and formatting changes in the margin (Show Markup › Balloons) ---- */
@@ -402,8 +429,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       if (activeId !== 'draft') { const at = threadAtCaret(); activeId = at?.id ?? null; }
       pinned = false;
     }
-    if (draft && engine.model.revision !== draft.revision && draft.revision !== undefined) draft = null;
-    if (draft) draft.revision ??= engine.model.revision;
+    followDraft(engine);
     const balloons = balloonChanges();
     const visible = commentsShown && (list.length > 0 || !!draft) || balloons.length > 0;
     if (scroller.classList.contains('has-comment-markup') !== visible) { scroller.classList.toggle('has-comment-markup', visible); positionsKey = ''; queueMicrotask(onShift); }
@@ -537,11 +563,12 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
 
   const keyAbort = new AbortController();
   window.addEventListener('keydown', e => {
-    if (e.defaultPrevented || isComposing(e) || !e.target?.matches?.('.canvas-input')) return;
+    if (e.defaultPrevented || isComposing(e) || typesCharacter(e) || !e.target?.matches?.('.canvas-input')) return;
     // Cmd+Option+A on a Mac, Ctrl+Alt+M elsewhere.
     const mac = MOD_KEY === 'Cmd';
-    if (mac ? e.metaKey && e.altKey && e.code === 'KeyA' : e.ctrlKey && e.altKey && e.code === 'KeyM') { e.preventDefault(); commands.newComment(); }
-    else if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.code === 'KeyE') { e.preventDefault(); commands.toggleTracking(); }
+    const code = shortcutCode(e);
+    if (mac ? e.metaKey && e.altKey && code === 'KeyA' : e.ctrlKey && e.altKey && code === 'KeyM') { e.preventDefault(); commands.newComment(); }
+    else if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && code === 'KeyE') { e.preventDefault(); commands.toggleTracking(); }
   }, { signal: keyAbort.signal });
   const resize = typeof ResizeObserver === 'undefined' ? { observe() {}, disconnect() {} } : new ResizeObserver(() => { positionsKey = ''; refresh(); });
 

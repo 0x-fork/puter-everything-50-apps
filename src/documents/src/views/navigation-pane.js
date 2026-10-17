@@ -98,6 +98,7 @@ export function createNavigationPane(api) {
           oncontextmenu: e => { e.preventDefault(); headingMenu(entry, heading, e); },
           onkeydown: e => {
             if (e.key === 'ContextMenu' || e.shiftKey && e.key === 'F10') { e.preventDefault(); headingMenu(entry, heading, null); }
+            else if (!e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && ['ArrowDown', 'ArrowUp', 'Home', 'End', 'ArrowRight', 'ArrowLeft'].includes(e.key)) { e.preventDefault(); moveInTree(entry, e.key); }
             else if (e.altKey && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && editable()) {
               // Move the section past its neighbour, as dragging would.
               e.preventDefault();
@@ -117,6 +118,26 @@ export function createNavigationPane(api) {
     const here = entries.filter(entry => entry.start <= position).at(-1)?.id;
     for (const button of headingList.querySelectorAll('.nav-heading')) {
       if (here === button.dataset.paragraph) button.setAttribute('aria-current', 'location'); else button.removeAttribute('aria-current');
+    }
+  }
+  /**
+   * The tree's keys: Up and Down (Home, End) move between the headings shown; Right expands a collapsed
+   * heading or goes to its first subheading, Left collapses an expanded one or goes to its parent.
+   */
+  function moveInTree(entry, key) {
+    const shown = [...headingList.querySelectorAll('.nav-heading')], at = shown.findIndex(b => b.dataset.paragraph === entry.id);
+    const focus = button => button?.focus();
+    const index = entries.indexOf(entry), parent = entries[index + 1]?.level > entry.level;
+    if (key === 'ArrowDown') focus(shown[at + 1]);
+    else if (key === 'ArrowUp') focus(shown[at - 1]);
+    else if (key === 'Home') focus(shown[0]);
+    else if (key === 'End') focus(shown.at(-1));
+    else if (key === 'ArrowRight' && parent) {
+      if (collapsed.has(entry.id)) { collapsed.delete(entry.id); renderHeadings(); } else focus(shown[at + 1]);
+    } else if (key === 'ArrowLeft') {
+      if (parent && !collapsed.has(entry.id)) { collapsed.add(entry.id); renderHeadings(); return; }
+      const up = entries.slice(0, index).findLast(e => e.level < entry.level);
+      if (up) focus(headingList.querySelector(`[data-paragraph="${CSS.escape(up.id)}"]`));
     }
   }
   /* ---- Rearranging headings: drag a heading to move its section; its menu changes levels ---- */
@@ -196,11 +217,14 @@ export function createNavigationPane(api) {
     resultEmpty.hidden = !!matches.length;
     resultEmpty.textContent = text ? `We couldn't find what you're looking for. Check the spelling, or try another search.` : 'Search for text in the box above. Matches appear here in context.';
     const body = matches.length ? api.text() : '';
+    // Choosing a result redraws the list; keyboard focus stays on the same row instead of dropping to the page.
+    const focused = [...resultList.querySelectorAll('.nav-result')].indexOf(document.activeElement);
     resultList.replaceChildren(...matches.slice(0, 500).map((match, i) => {
       const start = Math.max(body.lastIndexOf('\n', match.start - 1) + 1, match.start - 40), end = Math.min(...[body.indexOf('\n', match.end), match.end + 60].filter(n => n >= 0));
       return el('li', {}, el('button.nav-result', { type: 'button', 'aria-current': i === current ? 'true' : null, onclick: () => { current = i; api.selectMatch(match); status.textContent = `Result ${i + 1} of ${matches.length}`; renderResults(); } },
         (start > 0 && body[start - 1] !== '\n' ? '…' : '') + body.slice(start, match.start), el('mark', {}, body.slice(match.start, match.end)), body.slice(match.end, end)));
     }));
+    if (focused >= 0) (resultList.querySelectorAll('.nav-result')[Math.min(focused, matches.length - 1)] || search).focus();
   }
   function render() {
     if (node.hidden) return;
@@ -215,7 +239,12 @@ export function createNavigationPane(api) {
     refresh(nextEntries, caret) {
       entries = nextEntries; position = caret;
       if (node.hidden) return;
-      if (search.value) { matches = api.search(search.value); api.highlight(matches); }
+      if (search.value) {
+        matches = api.search(search.value); api.highlight(matches);
+        // The count and the current result follow edits to the document.
+        if (current >= matches.length) current = -1;
+        status.textContent = !matches.length ? 'No matches' : current >= 0 ? `Result ${current + 1} of ${matches.length}` : `${matches.length} result${matches.length === 1 ? '' : 's'}`;
+      }
       render();
     },
     open({ focus = true } = {}) {

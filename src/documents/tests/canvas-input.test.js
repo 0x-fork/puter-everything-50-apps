@@ -330,9 +330,33 @@ it('scales the viewport below 50% without changing layout, selection or edit his
   const layout = editor.layout, snapshot = editor.model.snapshot(), history = [...editor.session.history];
   editor.setZoom(0.35);
   expect(editor.zoom).toBe(0.35); expect(editor.layout).toBe(layout);
-  expect(editor.canvases[0].style.width).toBe(`${layout.pages[0].width * .35}px`);
+  // Shown at its backing store's whole-pixel size (devicePixelRatio 1 here), within half a pixel of the zoomed page.
+  expect(editor.canvases[0].style.width).toBe(`${Math.round(layout.pages[0].width * .35)}px`);
   expect(editor.model.snapshot()).toEqual(snapshot); expect(editor.session.history).toEqual(history);
   expect(editor.input.selectionStart).toBe(1); expect(editor.input.selectionEnd).toBe(4);
   editor.setZoom(NaN); expect(editor.zoom).toBe(.35);
   editor.setZoom(1); expect(editor.layout).toBe(layout); expect(changed).not.toHaveBeenCalled();
+});
+
+it('pastes a long formatted HTML clipboard as plain text instead of formatting it run by run', () => {
+  const lines = Array.from({ length: 1200 }, (_, i) => `Line ${i} bold`);
+  editor.model.select(0, editor.model.text.length);
+  editor.pasteData(lines.join('\n'), lines.map(line => `<p>${line.replace('bold', '<b>bold</b>')}</p>`).join(''));
+  expect(editor.model.text).toBe(lines.join('\n'));
+  expect(editor.model.paragraphs.some(p => p.runs.some(r => r.bold))).toBe(false);
+  expect(editor.session.history).toHaveLength(1);
+  // A small paste keeps its formatting.
+  editor.model.select(0, editor.model.text.length);
+  editor.pasteData('Short bold', '<p>Short <b>bold</b></p>');
+  expect(editor.model.paragraphs[0].runs.find(r => r.text === 'bold')?.bold).toBe(true);
+  expect(errors).not.toHaveBeenCalled();
+});
+
+it('pastes a list copied from Word as list paragraphs', () => {
+  const item = (list, marker, text) => `<p class=MsoListParagraph style='text-indent:-.25in;mso-list:${list}'><![if !supportLists]><span style='mso-list:Ignore'>${marker}<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp; </span></span><![endif]>${text}<o:p></o:p></p>`;
+  editor.model.select(0, editor.model.text.length);
+  editor.pasteData('·\tOne\n·\tTwo', `<body><!--StartFragment-->${item('l0 level1 lfo1', '·', 'One')}${item('l0 level1 lfo1', '·', 'Two')}<!--EndFragment--></body>`);
+  expect(editor.model.text).toBe('One\nTwo');
+  expect(editor.model.paragraphs.map(p => !!p.list)).toEqual([true, true]);
+  expect(errors).not.toHaveBeenCalled();
 });

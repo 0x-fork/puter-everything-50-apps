@@ -1,4 +1,4 @@
-import { el, isComposing, MOD_KEY } from '../ui/dom.js';
+import { el, isComposing, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { commandIconEl } from '../ui/ribbon.js';
 import { applyMultilevelList } from '../engine/list-library.js';
 import { openMenu } from '../ui/menu.js';
@@ -234,6 +234,8 @@ export function createFormatArea({ editor, pkg, error, refresh: refreshChrome = 
     if (!style) return;
     const character = style.type === 'character';
     track(openStyleEditor(style, character ? engine.model.characterStyles : engine.model.paragraphStyles, patch => {
+      // A renamed style must not take another style's name, as a new one may not.
+      if (patch.name && Object.values(engine.model.styles.definitions).some(s => s.id !== id && String(s.name).toLowerCase() === patch.name.trim().toLowerCase())) throw new Error(`A style named “${patch.name.trim()}” already exists. Choose another name.`);
       const ok = character ? engine.editCharacterStyle(id, patch) : engine.editParagraphStyle(id, patch); if (ok) later(); return ok;
     }, character ? engine.model.styles.defaults.run : undefined));
   }
@@ -589,8 +591,8 @@ export function createFormatArea({ editor, pkg, error, refresh: refreshChrome = 
   // has a binding for is left to it.
   const keyAbort = new AbortController();
   window.addEventListener('keydown', e => {
-    if (e.defaultPrevented || isComposing(e) || !e.target?.matches?.('.canvas-input') || !editor() || keyClaimed(e)) return;
-    const mod = MAC ? e.metaKey : e.ctrlKey, code = e.code;
+    if (e.defaultPrevented || isComposing(e) || typesCharacter(e) || !e.target?.matches?.('.canvas-input') || !editor() || keyClaimed(e)) return;
+    const mod = MAC ? e.metaKey : e.ctrlKey, code = shortcutCode(e);
     const act = action => { e.preventDefault(); e.stopPropagation(); action(); };
     // Apply Styles: Cmd/Ctrl+Shift+S where Save As does not use it, and Ctrl+Shift+S on a Mac.
     if ((mod || MAC && e.ctrlKey && !e.metaKey) && !e.altKey && e.shiftKey && code === 'KeyS') return act(applyStylesBox);

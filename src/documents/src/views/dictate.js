@@ -8,7 +8,8 @@ const SPOKEN = [[/\s*\b(new paragraph)\b\s*/gi, '\n'], [/\s*\b(new line)\b\s*/gi
 export function spokenText(transcript) {
   let text = String(transcript);
   for (const [pattern, value] of SPOKEN) text = text.replace(pattern, value);
-  return text.replace(/[ \t]+/g, ' ').trim();
+  // Only spaces are trimmed: a phrase that ends with (or is) a spoken break keeps it.
+  return text.replace(/[ \t]+/g, ' ').replace(/^ | $/g, '');
 }
 /** Join dictated text to what precedes the caret: a space between words, a capital after a sentence. */
 export function joinDictation(before, text) {
@@ -59,13 +60,13 @@ export function createDictation({ editor, readOnly, host, onState = () => {}, er
     try { recognition.start(); } catch (e) { error(e); return false; }
     active = true; banner.hidden = false; interim.textContent = '';
     (host() || document.body).append(banner);
-    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('keydown', onKey);
     onState(true);
     return true;
   }
   function cleanup() {
     active = false; banner.hidden = true; interim.textContent = '';
-    window.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('keydown', onKey);
     recognition = null; onState(false);
   }
   function stop() {
@@ -75,6 +76,7 @@ export function createDictation({ editor, readOnly, host, onState = () => {}, er
     try { current?.stop(); } catch { /* already stopped */ }
     editor()?.focus();
   }
-  const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); stop(); } };
+  // Escape stops listening once nothing else has used it: an open menu or dialog closes first.
+  const onKey = e => { if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); stop(); } };
   return { supported: !!Recognition, get active() { return active; }, start, stop, toggle: () => (active ? stop() : start()), insert, banner, destroy: () => { stop(); banner.remove(); } };
 }

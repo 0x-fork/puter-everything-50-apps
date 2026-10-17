@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { it, expect } from 'vitest';
-import { htmlFragment, fragmentHtml, FRAGMENT_ATTRIBUTE } from '../src/engine/clipboard-fragment.js';
+import { htmlFragment, fragmentHtml, formattedPasteFits, FRAGMENT_ATTRIBUTE } from '../src/engine/clipboard-fragment.js';
 
 const texts = html => htmlFragment(html)?.paragraphs.map(p => p.text);
 
@@ -24,4 +24,26 @@ it('reads its own embedded fragment and ignores a malformed one', () => {
   expect(htmlFragment(fragmentHtml(fragment))).toEqual(fragment);
   const forged = `<div ${FRAGMENT_ATTRIBUTE}="{&quot;paragraphs&quot;:[{&quot;text&quot;:&quot;A&quot;,&quot;runs&quot;:[{&quot;text&quot;:&quot;B&quot;}]}]}"><p>Visible</p></div>`;
   expect(texts(forged)).toEqual(['Visible']);
+});
+
+it('carries formatting into a paste only while that stays a bounded number of commands', () => {
+  const paragraphs = (n, body) => Array.from({ length: n }, (_, i) => `<p>${body(i)}</p>`).join('');
+  expect(formattedPasteFits(htmlFragment(paragraphs(600, i => `Line ${i} <b>bold</b> <i>tail</i>`)))).toBe(true);
+  // Every paragraph and formatted run is a command over the whole document.
+  expect(formattedPasteFits(htmlFragment(paragraphs(800, i => `Line ${i} <b>bold</b> <i>tail</i>`)))).toBe(false);
+  // Another application's plain runs apply nothing, so they cost nothing.
+  expect(formattedPasteFits(htmlFragment(`<p>${Array.from({ length: 3000 }, (_, i) => `<span>w${i} </span>`).join('')}</p>`))).toBe(true);
+});
+
+it('turns Word’s list paragraphs into list items without their typed-out markers', () => {
+  // As Word puts a bulleted, nested and numbered list on the clipboard.
+  const item = (cls, list, font, marker, text) => `<p class=${cls} style='text-indent:-.25in;mso-list:${list}'><![if !supportLists]><span style='font-family:${font}'><span style='mso-list:Ignore'>${marker}<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; </span></span></span><![endif]>${text}<o:p></o:p></p>`;
+  const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office"><head><style><!-- p.MsoListParagraph {margin-left:.5in} --></style></head><body><!--StartFragment-->`
+    + item('MsoListParagraphCxSpFirst', 'l0 level1 lfo1', 'Symbol', '·', 'First item')
+    + item('MsoListParagraphCxSpMiddle', 'l0 level2 lfo1', '"Courier New"', 'o', 'Nested item')
+    + item('MsoListParagraphCxSpLast', 'l1 level1 lfo2', 'Calibri', '1.', 'Numbered <b>item</b>')
+    + `<p class=MsoNormal>After the list<o:p></o:p></p><!--EndFragment--></body></html>`;
+  expect(htmlFragment(html).paragraphs.map(p => [p.text, p.list])).toEqual([
+    ['First item', { kind: 'bullet', level: 0 }], ['Nested item', { kind: 'bullet', level: 1 }],
+    ['Numbered item', { kind: 'number', level: 0 }], ['After the list', null]]);
 });

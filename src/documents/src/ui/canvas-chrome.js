@@ -1,4 +1,4 @@
-import { el, isComposing, MOD_KEY } from './dom.js';
+import { el, isComposing, MOD_KEY, shortcutCode } from './dom.js';
 import { iconEl } from './icons.js';
 import { openMenu, closeMenu } from './menu.js';
 import { openShortcuts } from './shortcuts.js';
@@ -342,7 +342,7 @@ export function createCanvasChrome({ title, status, account, local, controls: c,
   const spellingButton = command('Editor', 'spelling', () => w.spelling?.(), { size: 'large', text: 'Editor', shortcut: 'F7' });
   const spelling = split(spellingButton, { label: 'Spelling options', size: 'large', open: (anchor, e) => openMenu({ anchor, label: 'Spelling options', pointer: !!e?.detail, onClose: e?.detail ? focusEditor : null, items: inDocument(w.spellingItems?.() || []) }) });
   const wordCount = command('Word Count', 'wordCount', () => w.wordCount?.(), { text: 'Word Count' });
-  const thesaurus = command('Thesaurus', 'thesaurus', () => w.thesaurus?.(), { text: 'Thesaurus', shortcut: MOD_KEY === 'Cmd' ? 'Option+Cmd+R' : 'Shift+F7' });
+  const thesaurus = command('Thesaurus', 'thesaurus', () => w.thesaurus?.(), { text: 'Thesaurus', shortcut: 'Shift+F7' });
   when(spellingButton, () => !!w.spelling && !!a.hasDocument?.()); when(spelling.arrow, () => !!w.spellingItems && !!a.hasDocument?.()); when(wordCount, () => !!a.hasDocument?.()); when(thesaurus, () => !!w.thesaurus && !!a.hasDocument?.());
   const review = { id: 'review', label: 'Review', groups: [
     { id: 'proofing', label: 'Proofing', icon: 'spelling', priority: 7, items: [spelling, rows([thesaurus], [wordCount])] },
@@ -526,7 +526,9 @@ export function createCanvasChrome({ title, status, account, local, controls: c,
     c.exportButton.title = 'Download .docx';
     c.exportButton.replaceChildren(commandIconEl('download', 16), el('span', {}, 'Download .docx'));
   }
-  const allTabs = [home, insert, design, layout, references, review, view, tableDesign, tableLayout, picture, shapeFormat, ...moduleTabs];
+  // Every tab the ribbon holds, the feature modules' standard tabs (Draw, Mailings) among them: command search,
+  // Customize Keyboard and the KeyTips list their commands from here.
+  const allTabs = [...standardTabs, tableDesign, tableLayout, picture, shapeFormat, ...moduleTabs];
   let modes = null, titleBar = null;
   const menuContext = { w, c, a, local, kit, focusEditor, inDocument, engineReady, rulers, engine: () => a.engine?.(),
     tableAction, tableOption, shortcut: id => w.shortcutFor?.(id) ?? null, menuAnchor: () => document.activeElement,
@@ -583,7 +585,7 @@ export function createCanvasChrome({ title, status, account, local, controls: c,
     if (mod && !e.altKey && !e.shiftKey && e.code === 'Digit8' && w.toggleMarks) { e.preventDefault(); w.toggleMarks(); }
     else if (e.shiftKey && !mod && !e.altKey && e.key === 'F3' && w.changeCase) { e.preventDefault(); w.changeCase('cycle'); }
     else if (mod && !e.altKey && !e.shiftKey && (e.code === 'BracketRight' || e.code === 'BracketLeft')) { e.preventDefault(); w.growFont?.(e.code === 'BracketRight' ? 1 : -1, 1); }
-    else if (mod && !e.altKey && !e.shiftKey && e.code === 'KeyD' && w.fontDialog) { e.preventDefault(); w.fontDialog(); }
+    else if (mod && !e.altKey && !e.shiftKey && shortcutCode(e) === 'KeyD' && w.fontDialog) { e.preventDefault(); w.fontDialog(); }
   }, { signal: keyAbort.signal });
 
   setContext();
