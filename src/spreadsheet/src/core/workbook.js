@@ -367,11 +367,17 @@ function textCollator(caseSensitive) {
 /**
  * Sort order for one key, as Excel's: ascending runs numbers, text, logicals, errors (all equal), then blanks;
  * descending reverses all of it but the blanks, which always come last. Text sorts by locale (optionally
- * case-sensitive, lowercase first), other values by compareStoredValues.
+ * case-sensitive, lowercase first) without its apostrophes and hyphens, other values by compareStoredValues.
  */
 function sortComparator(caseSensitive) {
   const empty = (v) => v == null || v === '';
   const collator = textCollator(caseSensitive);
+  // Excel's text order ignores apostrophes and hyphens, save that of two texts the same but for a hyphen, the one with it comes last.
+  const bare = (t) => (t.includes('-') || t.includes("'") ? t.replace(/['-]/g, '') : t);
+  const compareText = (a, b) => {
+    const x = bare(a), y = bare(b);
+    return collator.compare(x, y) || (a.length - x.length) - (b.length - y.length);
+  };
   return (a, b, ascending) => {
     if (empty(a) && empty(b)) return 0;
     if (empty(a)) return 1;
@@ -384,7 +390,7 @@ function sortComparator(caseSensitive) {
     // direction (and so before the errors ascending, after them descending).
     const picture = (v) => !!v && typeof v === 'object' && typeof v.image === 'string';
     if (picture(a) || picture(b)) return picture(a) === picture(b) ? 0 : picture(a) ? 1 : -1;
-    const cmp = typeof a === 'string' && typeof b === 'string' ? collator.compare(a, b) : compareStoredValues(a, b);
+    const cmp = typeof a === 'string' && typeof b === 'string' ? compareText(a, b) : compareStoredValues(a, b);
     return ascending ? cmp : -cmp;
   };
 }
@@ -784,13 +790,14 @@ export function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, r
   return sheet;
 }
 
-/* Fill-handle series for names: Jan → Feb, Monday → Tuesday, Q1 → Q2. */
+/* Fill-handle series for names: Jan → Feb, Monday → Tuesday, Q1 → Q2. Quarters go round in Excel's three spellings, Q3, Qtr3 and Quarter3. */
+const quarters = (word) => [1, 2, 3, 4].map((n) => `${word}${n}`);
 const SERIES = [
   ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'],
   ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'],
   ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
   ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'],
-  ['q1', 'q2', 'q3', 'q4'],
+  quarters('q'), quarters('qtr'), quarters('qtr '), quarters('quarter'), quarters('quarter '),
 ];
 
 function applyCase(word, like) {
@@ -1366,6 +1373,16 @@ export class Workbook extends EventTarget {
     const j = this.sheets.findIndex((s) => sheetKey(s.name) === sheetKey(b));
     if (i < 0 || j < 0) return null;
     return this.sheets.slice(Math.min(i, j), Math.max(i, j) + 1).map((s) => s.name);
+  }
+
+  /**
+   * The sheets a 3D span covers, as a structural edit sees them. A grouped edit (sheet-group.js) is made sheet by sheet:
+   * a span over a sheet the edit was already made on has followed it once, and covers nothing more for it.
+   */
+  _editedSpan(a, b) {
+    const names = this.sheetsBetween(a, b);
+    const done = this._groupEditedSheets;
+    return names && done?.length && names.some((name) => done.some((d) => sameSheetName(d, name))) ? [] : names;
   }
 
   uniqueSheetName(base = 'Sheet') {
@@ -3793,20 +3810,25 @@ export class Workbook extends EventTarget {
    * Paste with arithmetic: add, subtract, multiply, or divide each target
    * number by the copied number in the same position (the Paste Special
    * operations). Formulas and text at the target are left alone; a blank
-   * target counts as 0. `values` is a 2D array of numbers (null to skip).
+   * target counts as 0. `values` is a 2D array of numbers (null to skip),
+   * tiled across `target` the way pasteCells tiles a block: one copied
+   * number multiplies every selected cell.
    * Returns the number of cells actually changed, or zero when refused.
    */
-  pasteOperation(sheetId, values, r0, c0, op) {
+  pasteOperation(sheetId, values, r0, c0, op, target = null) {
     const apply = { add: (a, b) => a + b, sub: (a, b) => a - b, mul: (a, b) => a * b, div: (a, b) => (b === 0 ? err('#DIV/0!') : a / b) }[op];
     if (!apply) return 0;
     const sheet = this.sheet(sheetId);
     if (!sheet) return 0;
     const limit = gridLimits(sheet);
+    const h = values.length;
+    const w = values.reduce((width, row) => Math.max(width, row.length), 0);
+    const reps = this.pasteReps(h, w, target);
     const entries = [];
-    values.forEach((row, i) => row.forEach((v, j) => {
+    for (let ry = 0; ry < reps.rows; ry++) for (let rx = 0; rx < reps.cols; rx++) values.forEach((row, i) => row.forEach((v, j) => {
       if (typeof v !== 'number' || !Number.isFinite(v)) return;
-      const r = r0 + i;
-      const c = c0 + j;
+      const r = r0 + ry * h + i;
+      const c = c0 + rx * w + j;
       if (!inGrid(r, c, limit) || this._coveredByMerge(sheetId, r, c)) return;
       const prev = this.getCell(sheetId, r, c);
       if (prev && (prev.f != null || (prev.v != null && typeof prev.v !== 'number'))) return;
@@ -4428,16 +4450,25 @@ export class Workbook extends EventTarget {
     };
 
     // "Item 1", "Item 2", ...: the shared prefix, the first number, its width and the step, or null.
+    // Text whose number ends it, or is an ordinal inside it ("1st Period", counted on as Excel does: "2nd Period").
+    const numbered = (text) => /^(.*?)(\d+)$/.exec(text) || /^(.*?)(\d+)(st|nd|rd|th)(?![\p{L}\p{N}])(.*)$/iu.exec(text);
     const textNumberRun = (list) => {
-      const parts = list.map((cell) => (cell?.f == null && typeof cell?.v === 'string' ? /^(.*?)(\d+)$/.exec(cell.v) : null));
+      const parts = list.map((cell) => (cell?.f == null && typeof cell?.v === 'string' ? numbered(cell.v) : null));
       if (parts.some((m) => !m) || !parts.length) return null;
-      if (!parts.every((m) => m[1] === parts[0][1])) return null;
+      if (!parts.every((m) => m[1] === parts[0][1] && (m[3] == null) === (parts[0][3] == null) && m[4] === parts[0][4])) return null;
       const numbers = parts.map((m) => parseInt(m[2], 10));
       // A number too long to count exactly would repeat the same rounded value; such text is repeated as it is.
       if (numbers.some((v) => v > Number.MAX_SAFE_INTEGER)) return null;
       const step = parts.length > 1 ? numbers[1] - numbers[0] : 1;
       if (parts.length > 1 && (step === 0 || numbers.some((v, i) => i && v - numbers[i - 1] !== step))) return null;
-      return { prefix: parts[0][1], startNum: numbers[0], width: parts[0][2].length, step, count: parts.length };
+      return { prefix: parts[0][1], startNum: numbers[0], width: parts[0][2].length, step, count: parts.length,
+        ordinal: parts[0][3] ?? null, suffix: parts[0][4] ?? '' };
+    };
+    // The ordinal suffix a number takes (1st, 2nd, 3rd, 4th, 11th, 21st), in the case the source's was written in.
+    const ordinalOf = (num, like) => {
+      const n = Math.abs(num), tens = n % 100;
+      const suffix = tens >= 11 && tens <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th';
+      return like === like.toUpperCase() ? suffix.toUpperCase() : suffix;
     };
     const line = (k) => (vertical ? cells.map((row) => row[k]) : cells[k]);
     const lines = vertical ? w : h;
@@ -4460,6 +4491,7 @@ export class Workbook extends EventTarget {
         (p < srcStart ? before : after).push(p);
       }
       const positions = [...before.map((p, i) => [p, i - before.length]), ...after.map((p, i) => [p, i])];
+      let ownCounts; // per source cell, its text and number when it counts on by itself in a mixed block (read once, when needed)
       for (const [p, offset] of positions) {
         const r = vertical ? p : src.r1 + k;
         const c = vertical ? src.c1 + k : p;
@@ -4516,8 +4548,20 @@ export class Workbook extends EventTarget {
             const at = p < srcStart ? -run.count + offset + run.count : run.count - 1 + steps;
             const num = run.startNum + run.step * (p < srcStart ? offset : run.count - 1 + steps);
             // Filled upward the count runs on past zero (Item1, Item0, Item-1); a padded width keeps its digits.
-            cell = { v: `${run.prefix}${num < 0 ? '-' : ''}${String(Math.abs(num)).padStart(run.width, '0')}`, f: null, s: base.s };
+            cell = { v: `${run.prefix}${num < 0 ? '-' : ''}${String(Math.abs(num)).padStart(run.width, '0')}${run.ordinal ? ordinalOf(num, run.ordinal) : ''}${run.suffix}`, f: null, s: base.s };
             void at;
+          } else {
+            // A block mixing such text with other cells: each one whose text before the number is its own in the
+            // block counts on by one with every repeat of the block ("text1, textA" → "text2, textA"), as Excel's does.
+            ownCounts ??= (() => {
+              const parts = list.map((one) => (one?.f == null && typeof one?.v === 'string' ? /^(.*?)(\d+)$/.exec(one.v) : null));
+              return parts.map((m) => (m && parts.filter((o) => o?.[1] === m[1]).length === 1 && Number(m[2]) <= Number.MAX_SAFE_INTEGER ? m : null));
+            })();
+            const own = ownCounts[idx];
+            if (own) {
+              const num = parseInt(own[2], 10) + Math.floor(offset / n) + (p < srcStart ? 0 : 1);
+              cell = { v: `${own[1]}${num < 0 ? '-' : ''}${String(Math.abs(num)).padStart(own[2].length, '0')}`, f: null, s: base.s };
+            }
           }
         }
         entries.push({ r, c, cell: this._replaceCellStyle(sheet, base ? cell : null, r, c) });
@@ -4887,8 +4931,12 @@ export class Workbook extends EventTarget {
     const r2 = Math.min(trimmed.r2, bounds.r2);
     const c2 = Math.min(trimmed.c2, bounds.c2);
     if (r2 < r1 || c2 < c1) return true;
+    // A row hidden by hand or under a collapsed outline stays where it is, as Excel leaves it: the shown rows are
+    // sorted among themselves into the shown places. Rows a filter hides are sorted with the rest and hidden again.
+    const places = [];
+    for (let r = r1; r <= r2; r++) if (!sheet.hiddenRows.has(r)) places.push(r);
     const rows = [];
-    for (let r = r1; r <= r2; r++) {
+    for (const r of places) {
       const cells = [];
       for (let c = c1; c <= c2; c++) cells.push(cloneCell(sheet.cells.get(cellKey(r, c))));
       // A color key sorts rows with that fill first (0) and the rest after (1); a value key sorts by the cell's value.
@@ -4905,7 +4953,7 @@ export class Workbook extends EventTarget {
     const entries = [];
     const notes = [];
     rows.forEach((row, i) => {
-      const r = r1 + i;
+      const r = places[i];
       row.cells.forEach((cell, j) => {
         const c = c1 + j;
         let next = cell;
@@ -4918,12 +4966,13 @@ export class Workbook extends EventTarget {
     });
     this.transaction('Sort', () => {
       if (sheet.styleResets.length) {
-        const movedRows = new Map(rows.map((row, i) => [row.r, r1 + i]));
-        this._setStyleResets(sheet, permuteStyleResets(sheet.styleResets, { r1, r2, c1, c2: trimmed.c2 }, 'row', (r) => movedRows.get(r)), 'Sort');
+        const movedRows = new Map(rows.map((row, i) => [row.r, places[i]]));
+        this._setStyleResets(sheet, permuteStyleResets(sheet.styleResets, { r1, r2, c1, c2: trimmed.c2 }, 'row', (r) => movedRows.get(r) ?? r), 'Sort');
       }
       this.setCells(sheetId, entries, 'Sort');
       this._moveNotes(sheetId, notes);
-      permuteComments(this, sheetId, { r1, r2, c1, c2 }, 'row', new Map(rows.map((row, i) => [row.r, r1 + i])));
+      const sortedRows = new Map(rows.map((row, i) => [row.r, places[i]]));
+      permuteComments(this, sheetId, { r1, r2, c1, c2 }, 'row', (r) => sortedRows.get(r) ?? r);
       this._refilterRearranged(sheet, { r1, r2 }, 'Sort');
     });
     return true;
@@ -4974,8 +5023,11 @@ export class Workbook extends EventTarget {
     // range moves only what is there.
     const r2 = Math.min(n.r2, this._contentBounds(sheet, n).r2);
     if (r2 < r1) return true;
+    // A hidden column stays where it is, as a hidden row does when rows are sorted.
+    const places = [];
+    for (let c = c1; c <= c2; c++) if (!sheet.hiddenCols.has(c)) places.push(c);
     const cols = [];
-    for (let c = c1; c <= c2; c++) {
+    for (const c of places) {
       const cells = [];
       for (let r = r1; r <= r2; r++) cells.push(cloneCell(sheet.cells.get(cellKey(r, c))));
       cols.push({ c, cells, keys: keys.map((k) => this.getValue(sheetId, k.row, c)) });
@@ -4991,7 +5043,7 @@ export class Workbook extends EventTarget {
     const entries = [];
     const notes = [];
     cols.forEach((col, j) => {
-      const c = c1 + j;
+      const c = places[j];
       col.cells.forEach((cell, i) => {
         const r = r1 + i;
         const next = cell?.f != null && col.c !== c ? { ...cell, f: shiftFormula(cell.f, 0, c - col.c) } : cell;
@@ -5002,12 +5054,13 @@ export class Workbook extends EventTarget {
     });
     this.transaction('Sort', () => {
       if (sheet.styleResets.length) {
-        const movedCols = new Map(cols.map((col, i) => [col.c, c1 + i]));
-        this._setStyleResets(sheet, permuteStyleResets(sheet.styleResets, { r1, r2: n.r2, c1, c2 }, 'col', (c) => movedCols.get(c)), 'Sort');
+        const movedCols = new Map(cols.map((col, i) => [col.c, places[i]]));
+        this._setStyleResets(sheet, permuteStyleResets(sheet.styleResets, { r1, r2: n.r2, c1, c2 }, 'col', (c) => movedCols.get(c) ?? c), 'Sort');
       }
       this.setCells(sheetId, entries, 'Sort');
       this._moveNotes(sheetId, notes);
-      permuteComments(this, sheetId, { r1, r2, c1, c2 }, 'col', new Map(cols.map((col, j) => [col.c, c1 + j])));
+      const sortedCols = new Map(cols.map((col, j) => [col.c, places[j]]));
+      permuteComments(this, sheetId, { r1, r2, c1, c2 }, 'col', (c) => sortedCols.get(c) ?? c);
       this._refilterRearranged(sheet, { r1, r2 }, 'Sort');
     });
     return true;
@@ -5828,7 +5881,7 @@ export class Workbook extends EventTarget {
       sheet.ignoredErrors = shiftRangeFlags(sheet.ignoredErrors, axis, at, n, remove, band);
       for (const s of this.sheets) {
         const options = { ownerSheet: s.name, sheetName: sheet.name, axis, at, count: n, remove, bandStart: b1, bandEnd: b2,
-          sheetsBetween: (a, b) => this.sheetsBetween(a, b), newId };
+          sheetsBetween: (a, b) => this._editedSpan(a, b), newId };
         s.rules = adjustBlockRules(s.rules, 'value', options);
         s.validations = adjustBlockRules(s.validations, 'source', options);
         mapSheetFilters(s, f => adjustFilterForEdit(f, options));
@@ -6770,7 +6823,7 @@ export class Workbook extends EventTarget {
   _adjustLineRules(sheetName, axis, at, count, remove) {
     for (const sheet of this.sheets) {
       const options = { ownerSheet: sheet.name, sheetName, axis, at, count, remove,
-        sheetsBetween: (a, b) => this.sheetsBetween(a, b), newId };
+        sheetsBetween: (a, b) => this._editedSpan(a, b), newId };
       if (sameSheetName(sheet.name, sheetName)) {
         sheet.styleResets = shiftStyleResets(sheet.styleResets, axis, at, count, remove);
         sheet.ignoredErrors = shiftRangeFlags(sheet.ignoredErrors, axis, at, count, remove);
@@ -6785,7 +6838,7 @@ export class Workbook extends EventTarget {
   /** `lines`: the deleteMap of a deletion over several runs, so every formula is rewritten once for all of them. */
   _adjustFormulas(sheetName, axis, at, count, remove, lines = null) {
     for (const s of this.sheets) {
-      const adjust = (f) => adjustFormula(f, { ownerSheet: s.name, sheetName, axis, at, count, remove, lines, sheetsBetween: (a, b) => this.sheetsBetween(a, b) });
+      const adjust = (f) => adjustFormula(f, { ownerSheet: s.name, sheetName, axis, at, count, remove, lines, sheetsBetween: (a, b) => this._editedSpan(a, b) });
       s.charts = s.charts.map(chart => mapChartReferences(chart, adjust));
       s.sparklineGroups = mapNativeSparklineReferences(s.sparklineGroups, adjust);
       if (sameSheetName(s.name, sheetName)) s.sparklineGroups = mapNativeSparklineDestinations(s.sparklineGroups, ref =>
@@ -6797,7 +6850,7 @@ export class Workbook extends EventTarget {
       s.tables = s.tables.map((t) => ({ ...t, calc: Object.fromEntries(Object.entries(t.calc || {}).map(([c, f]) => [c, adjust(f)])) }));
     }
     // A name without a sheet reads its unqualified references relative to whichever sheet calls it, so no single edit can move them.
-    this.names = this.names.map((n) => ({ ...n, ref: adjustFormula(n.ref, { ownerSheet: n.sheet || null, sheetName, axis, at, count, remove, relativeName: n.relative === true, sheetsBetween: (a, b) => this.sheetsBetween(a, b) }) }));
+    this.names = this.names.map((n) => ({ ...n, ref: adjustFormula(n.ref, { ownerSheet: n.sheet || null, sheetName, axis, at, count, remove, relativeName: n.relative === true, sheetsBetween: (a, b) => this._editedSpan(a, b) }) }));
   }
 
   setColWidth(sheetId, c, width) {

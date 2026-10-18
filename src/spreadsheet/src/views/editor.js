@@ -4806,7 +4806,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
           return f == null && typeof v === 'number' ? v : null;
         }));
       }
-      const changed = wb.pasteOperation(sheetId, numbers, r, c, mode);
+      const changed = wb.pasteOperation(sheetId, numbers, r, c, mode, grid.range);
       toast(changed ? `${{ add: 'Added to', sub: 'Subtracted from', mul: 'Multiplied', div: 'Divided' }[mode]} ${changed} cell${changed === 1 ? '' : 's'}` : 'No cells changed', { icon: changed ? 'check' : 'info' });
       if (changed) selectBlock(numbers.length, clipboardWidth(numbers), false);
       return;
@@ -5493,7 +5493,12 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const err = await doc.saveAs(name);
     if (destroyed) return;
     if (err) toast(err, { icon: 'alert' });
-    else { toast('Copy saved', { icon: 'cloud' }); refreshTitle(); }
+    else {
+      toast('Copy saved', { icon: 'cloud' });
+      // A shared workbook's copy is no longer shared: it opens again as the file it is.
+      if (room) openPath(doc.path, { reload: true });
+      else refreshTitle();
+    }
   }
 
   async function exportFile(kind) {

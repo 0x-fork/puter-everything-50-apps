@@ -1443,6 +1443,7 @@ export const FUNCTIONS = {
     },
   },
   COUNTBLANK: {
+    tolerant: true, // a cell holding an error is not blank, given alone as in a range, rather than the answer
     fn: (args) => {
       let n = 0;
       for (const v of args) {
@@ -2084,7 +2085,8 @@ export const FUNCTIONS = {
       return x === y;
     },
   },
-  VALUE: { fn: ([a]) => { const v = scalar(a); return typeof v === 'number' ? v : toNumber(v); } },
+  // Text that reads as a number becomes it; a logical value is not such text (N and -- convert it).
+  VALUE: { fn: ([a]) => { const v = scalar(a); return typeof v === 'number' ? v : typeof v === 'boolean' ? err('#VALUE!') : toNumber(v); } },
   CHAR: { fn: ([a]) => { const n = toNumber(a); if (isError(n)) return n; const k = Math.trunc(n); return k < 1 || k > 255 ? err('#VALUE!') : String.fromCharCode(k); } }, // truncated before the range check, as UNICHAR is
   // The code point of the first character, as UNICODE gives it and as LEN and MID count characters (Google Sheets; Excel answers 63 outside its code page), not the first UTF-16 half of an emoji.
   CODE: { fn: ([a]) => { const t = textArg(a); return isError(t) ? t : t === '' ? err('#VALUE!') : t.codePointAt(0); } },
@@ -2109,6 +2111,7 @@ export const FUNCTIONS = {
   VLOOKUP: {
     liftArgs: [0, 2], // an array of lookup values, or of column indexes, answers with an array
     fn: overArguments(([needle, table, colIdx, approx]) => {
+      const key = scalar(needle); if (isError(key)) return key; // a reference to an error cell is that error, as the cell named directly is
       const t = asRange(table);
       const ci = toNumber(colIdx); if (isError(ci)) return ci;
       const k = Math.trunc(ci);
@@ -2124,6 +2127,7 @@ export const FUNCTIONS = {
   HLOOKUP: {
     liftArgs: [0, 2],
     fn: overArguments(([needle, table, rowIdx, approx]) => {
+      const key = scalar(needle); if (isError(key)) return key;
       const t = asRange(table);
       const ri = toNumber(rowIdx); if (isError(ri)) return ri;
       const k = Math.trunc(ri);
@@ -2185,6 +2189,7 @@ export const FUNCTIONS = {
   MATCH: {
     liftArgs: [0],
     fn: overArguments(([needle, lookup, mode]) => {
+      const key = scalar(needle); if (isError(key)) return key;
       const l = asRange(lookup);
       const m = mode === undefined ? 1 : toNumber(mode); if (isError(m)) return m;
       if (!isVector(l)) return err('#N/A');
@@ -3077,7 +3082,7 @@ export const FUNCTIONS = {
       const b = basis === undefined ? 0 : toNumber(basis); if (isError(b)) return b;
       const fromIssue = calcMethod === undefined ? true : toBool(calcMethod); if (isError(fromIssue)) return fromIssue;
       const freq = Math.trunc(f);
-      if (![1, 2, 4].includes(freq) || Math.trunc(b) < 0 || Math.trunc(b) > 4 || i < 0 || fi < 0 || !(i < s)) return err('#NUM!');
+      if (![1, 2, 4].includes(freq) || Math.trunc(b) < 0 || Math.trunc(b) > 4 || i < 0 || fi < 0 || !(Math.trunc(i) < Math.trunc(s))) return err('#NUM!');
       // calc_method FALSE counts from the first interest date once the settlement is past it; TRUE, the default, from the issue.
       const from = Math.trunc(!fromIssue && s > fi ? fi : i);
       const to = Math.trunc(s);
@@ -3103,7 +3108,7 @@ export const FUNCTIONS = {
       const i = toNumber(issue); if (isError(i)) return i;
       const s = toNumber(settlement); if (isError(s)) return s;
       const nums = bondNumbers([[rate, true], [par === undefined ? 1000 : par, true]]); if (isError(nums)) return nums;
-      if (!(i < s)) return err('#NUM!');
+      if (!(Math.trunc(i) < Math.trunc(s))) return err('#NUM!');
       const yf = FUNCTIONS.YEARFRAC.fn([i, s, basis === undefined ? 0 : basis]); if (isError(yf)) return yf;
       return checkNum(nums[1] * nums[0] * yf);
     },
@@ -3114,7 +3119,7 @@ export const FUNCTIONS = {
       const m = toNumber(maturity); if (isError(m)) return m;
       const i = toNumber(issue); if (isError(i)) return i;
       const nums = bondNumbers([[rate, false], [yld, false]]); if (isError(nums)) return nums;
-      if (!(s < m) || !(i < s)) return err('#NUM!');
+      if (!(Math.trunc(s) < Math.trunc(m)) || !(Math.trunc(i) < Math.trunc(s))) return err('#NUM!');
       const b = basis === undefined ? 0 : basis;
       const im = FUNCTIONS.YEARFRAC.fn([i, m, b]); if (isError(im)) return im;
       const sm = FUNCTIONS.YEARFRAC.fn([s, m, b]); if (isError(sm)) return sm;
@@ -3128,7 +3133,7 @@ export const FUNCTIONS = {
       const m = toNumber(maturity); if (isError(m)) return m;
       const i = toNumber(issue); if (isError(i)) return i;
       const nums = bondNumbers([[rate, false], [pr, true]]); if (isError(nums)) return nums;
-      if (!(s < m) || !(i < s)) return err('#NUM!');
+      if (!(Math.trunc(s) < Math.trunc(m)) || !(Math.trunc(i) < Math.trunc(s))) return err('#NUM!');
       const b = basis === undefined ? 0 : basis;
       const im = FUNCTIONS.YEARFRAC.fn([i, m, b]); if (isError(im)) return im;
       const sm = FUNCTIONS.YEARFRAC.fn([s, m, b]); if (isError(sm)) return sm;
@@ -3219,7 +3224,7 @@ export const FUNCTIONS = {
   },
   SEQUENCE: {
     fn: ([rows, cols, start, step]) => {
-      const r = toNumber(rows); if (isError(r)) return r;
+      const r = rows === undefined ? 1 : toNumber(rows); if (isError(r)) return r; // SEQUENCE(,3) is one row
       const c = cols === undefined ? 1 : toNumber(cols); if (isError(c)) return c;
       const s = start === undefined ? 1 : toNumber(start); if (isError(s)) return s;
       const d = step === undefined ? 1 : toNumber(step); if (isError(d)) return d;
@@ -3809,9 +3814,13 @@ export const FUNCTIONS = {
     array: true,
   },
   REGEXREPLACE: {
-    fn: ([text, pattern, replacement]) => {
+    fn: ([text, pattern, replacement, occurrence, caseSensitivity]) => {
       const t = textArg(text); if (isError(t)) return t;
-      const re = regex(pattern, 'g', t); if (isError(re)) return re;
+      // Excel's occurrence: 0 replaces every match, n only the nth, -n the nth from the end; case_sensitivity 1 ignores case.
+      const k = occurrence === undefined ? 0 : toNumber(occurrence); if (isError(k)) return k;
+      const mode = caseSensitivity === undefined ? 0 : toNumber(caseSensitivity); if (isError(mode)) return mode;
+      if (mode !== 0 && mode !== 1) return err('#VALUE!');
+      const re = regex(pattern, mode === 1 ? 'gi' : 'g', t); if (isError(re)) return re;
       const r = textArg(replacement); if (isError(r)) return r;
       // Sheets' replacement syntax: $1 is a group and $0 the whole match; nothing else is special.
       const js = r.replace(/\$(\d+|&|`|'|<|\$)/g, (m, what) => (what === '0' ? '$&' : /^\d+$/.test(what) ? m : `$$${what}`));
@@ -3825,8 +3834,15 @@ export const FUNCTIONS = {
         refs.push(what);
         return '';
       }).length;
+      const nth = Math.trunc(k);
+      let matches = [...t.matchAll(re)];
+      if (nth) {
+        const at = nth > 0 ? nth - 1 : matches.length + nth;
+        if (at < 0 || at >= matches.length) return t; // no such occurrence: the text is unchanged
+        matches = [matches[at]];
+      }
       let length = t.length;
-      for (const m of t.matchAll(re)) {
+      for (const m of matches) {
         length += literal - m[0].length;
         for (const ref of refs) {
           const group = ref === '&' ? m[0] : m[Number(ref)];
@@ -3836,7 +3852,10 @@ export const FUNCTIONS = {
         }
         if (length > MAX_TEXT) return err('#VALUE!');
       }
-      const out = t.replace(re, js);
+      // One occurrence is replaced in place, its lookarounds still seeing the text around it.
+      const one = nth ? new RegExp(re.source, re.flags.replace('g', '') + 'y') : null;
+      if (one) one.lastIndex = matches[0].index;
+      const out = t.replace(one || re, js);
       return out.length > MAX_TEXT ? err('#VALUE!') : out;
     },
   },
@@ -3857,13 +3876,14 @@ export const FUNCTIONS = {
   },
   // A column of text answers with a column of pieces; the delimiter is lifted over by neither, an array there
   // naming alternatives.
+  // Lifted over the text and the instance, match mode and match end; an array of delimiters lists alternatives.
   TEXTBEFORE: {
-    liftArgs: [0],
-    fn: overArguments((args) => textAround(args, true), [0]),
+    liftArgs: [0, 2, 3, 4],
+    fn: overArguments((args) => textAround(args, true), [0, 2, 3, 4]),
   },
   TEXTAFTER: {
-    liftArgs: [0],
-    fn: overArguments((args) => textAround(args, false), [0]),
+    liftArgs: [0, 2, 3, 4],
+    fn: overArguments((args) => textAround(args, false), [0, 2, 3, 4]),
   },
   NUMBERVALUE: {
     fn: ([text, dec, group]) => {
@@ -3951,12 +3971,12 @@ export const FUNCTIONS = {
         case 'Y': return Math.floor(months / 12);
         case 'YM': return months % 12;
         case 'MD': {
-          // Days past the most recent monthly anniversary of the start date.
+          // Days past the most recent monthly anniversary of the start date. A start day the month
+          // before lacks rolls over into the next month, as Excel's does: 31 Jan to 1 Mar 2015 is -2.
           let y = b.y;
           let m = b.d < a.d ? b.m - 1 : b.m;
           if (m < 1) { m = 12; y--; }
-          const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-          return Math.trunc(e) - ymdToSerial(y, m, Math.min(a.d, last));
+          return Math.trunc(e) - ymdToSerial(y, m, a.d);
         }
         case 'YD': {
           const years = Math.floor(months / 12);
@@ -4228,7 +4248,8 @@ export const FUNCTIONS = {
       const vs = asRange(values).values.flat();
       const ds = asRange(dates).values.flat();
       const g = guess === undefined ? 0.1 : toNumber(guess); if (isError(g)) return g;
-      if (vs.length !== ds.length || vs.some((v) => typeof v !== 'number') || ds.some((d) => typeof d !== 'number')) return err('#VALUE!');
+      if (vs.length !== ds.length) return err('#NUM!'); // as XNPV
+      if (vs.some((v) => typeof v !== 'number') || ds.some((d) => typeof d !== 'number')) return err('#VALUE!');
       if (!vs.some((v) => v > 0) || !vs.some((v) => v < 0)) return err('#NUM!');
       const days = ds.map(Math.trunc); // whole days, the dates truncated as XNPV does here
       const d0 = days[0];
@@ -4297,16 +4318,23 @@ export const FUNCTIONS = {
       const fn = args[args.length - 1];
       if (!isLambda(fn)) return err('#VALUE!');
       const arrays = alignWindows(args.slice(0, -1).map(asRange));
+      // A cell of a range is handed over as a reference to it, so MAP(B2:B9,LAMBDA(x,SUM(B2:x))) totals as it goes;
+      // a parameter only operators read (x*2, x>50) takes the value, which is all they see, without building one.
+      const byRef = arrays.map((a, i) => !!a.ref && !a.ref.sheetEnd && !readsValueOnly(fn, fn.params?.[i]));
       const rows = Math.max(...arrays.map((a) => a.values.length));
       const cols = Math.max(...arrays.map((a) => a.values[0]?.length || 0));
       const out = [];
       for (let r = 0; r < rows; r++) {
         const row = [];
         for (let c = 0; c < cols; c++) {
-          const xs = arrays.map((a) => {
+          const xs = arrays.map((a, i) => {
             const rr = a.values.length === 1 ? 0 : r;
             const cc = (a.values[0]?.length || 0) === 1 ? 0 : c;
-            return rr < a.values.length && cc < (a.values[rr]?.length || 0) ? a.values[rr][cc] ?? null : err('#N/A');
+            if (!(rr < a.values.length && cc < (a.values[rr]?.length || 0))) return err('#N/A');
+            const value = a.values[rr][cc] ?? null;
+            if (!byRef[i]) return value;
+            const r1 = a.ref.r1 + rr, c1 = a.ref.c1 + cc;
+            return { range: true, values: [[value]], ref: { ...a.ref, kind: 'cell', r1, r2: r1, c1, c2: c1 } };
           });
           row.push(lambdaScalar(fn, xs));
         }
@@ -5810,6 +5838,11 @@ function groupInputs(rowFields, values, fieldHeaders, filterArray, colFields) {
   if (!keys.length || keys.length !== vals.length || (cols && cols.length !== keys.length)) return err('#VALUE!');
   let mode = fieldHeaders === undefined ? 0 : toNumber(fieldHeaders); if (isError(mode)) return mode;
   mode = Math.trunc(mode); // 1.5 is checked as 1 and read as 1, not checked as 1 and read as neither
+  // Left out, field_headers is automatic: values whose first entry is text above a number have a header
+  // row, shown when there is more than one level of row or column fields.
+  if (fieldHeaders === undefined && typeof vals[0]?.[0] === 'string' && typeof vals[1]?.[0] === 'number') {
+    mode = keys[0].length > 1 || (colFields !== undefined && (more[0].values[0]?.length || 0) > 1) ? 3 : 1;
+  }
   if (![0, 1, 2, 3].includes(mode)) return err('#VALUE!');
   const hasHeaders = mode === 1 || mode === 3;
   const showHeaders = mode === 2 || mode === 3;
@@ -5887,6 +5920,30 @@ function summarize(fn, vals, idx, j) {
   return lambdaScalar(fn, [part, all]);
 }
 const wholeColumns = new WeakMap(); // a GROUPBY's value rows → Map(column → that column as a range), built once per call rather than per group
+
+/**
+ * Whether a LAMBDA's body reads parameter `name` only as an operand of arithmetic, comparison or concatenation
+ * (or as the whole body), where a one-cell reference and its value give the same answer. Anywhere else, a
+ * function's argument, either side of ":", "@" or a nested LET or LAMBDA, the reference itself may matter.
+ */
+function readsValueOnly(fn, name) {
+  if (!fn?.body || typeof name !== 'string') return false;
+  const target = name.toUpperCase();
+  const stack = [[fn.body, null]];
+  while (stack.length) {
+    const [node, parent] = stack.pop();
+    if (node.type === 'call' && node.bare && !node.sheet && node.name.toUpperCase() === target) {
+      const operand = parent == null || parent.type === 'binary' || parent.type === 'percent' || (parent.type === 'unary' && parent.op !== '@');
+      if (!operand) return false;
+      continue;
+    }
+    for (const value of Object.values(node)) {
+      const kids = Array.isArray(value) ? value.flat() : [value];
+      for (const kid of kids) if (kid && typeof kid === 'object' && typeof kid.type === 'string') stack.push([kid, node]);
+    }
+  }
+  return true;
+}
 
 function lambdaScalar(fn, args) {
   const v = invoke(fn, args);
@@ -6154,6 +6211,15 @@ const headerKey = (v) => String(v ?? '').trim().toLowerCase();
  * match (OR down the rows). A cell like ">100", "Ap*", or "West" uses the
  * same matching as COUNTIF; an empty cell matches anything.
  */
+/**
+ * A database criterion as COUNTIF would read it. Plain text finds the values beginning with it, as the
+ * advanced filter's criteria do ("Apple" finds Apple Pie too); ="=Apple" asks for the whole value.
+ */
+function databaseCriterion(v) {
+  if (typeof v !== 'string' || /^[<>=#]/.test(v) || criteriaNumber(v) != null || /^(?:TRUE|FALSE)$/i.test(v)) return v;
+  return `${v}*`;
+}
+
 function dbSelect(db, field, crit, { allowAnyField = false } = {}) {
   const table = asRange(db).values;
   if (table.length < 1) return err('#VALUE!');
@@ -6177,7 +6243,7 @@ function dbSelect(db, field, crit, { allowAnyField = false } = {}) {
       if (v == null || v === '') continue;
       const at = headers.indexOf(headerKey(c[0][j]));
       if (at < 0) return err('#VALUE!');
-      row.push({ at, match: criteriaMatcher(v) });
+      row.push({ at, match: criteriaMatcher(databaseCriterion(v)) });
     }
     tests.push(row);
   }
@@ -7285,7 +7351,7 @@ function cPow(z, n) {
 function discountArgs(settlement, maturity, basis) {
   const s = toNumber(settlement); if (isError(s)) return s;
   const m = toNumber(maturity); if (isError(m)) return m;
-  if (!(s < m)) return err('#NUM!');
+  if (!(Math.trunc(s) < Math.trunc(m))) return err('#NUM!'); // whole days: two times of one day are one date
   const yf = FUNCTIONS.YEARFRAC.fn([s, m, basis === undefined ? 0 : basis]);
   if (isError(yf)) return yf;
   return { s, m, yf, days: Math.trunc(m) - Math.trunc(s) };

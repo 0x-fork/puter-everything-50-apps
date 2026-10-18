@@ -3169,13 +3169,29 @@ export function createGrid(opts) {
     else padTop = (h - lineH) / 2 - 2;
     editor.style.paddingTop = `${Math.max(0, padTop).toFixed(2)}px`;
     editor.style.height = `${h}px`;
+    edit.overflowBelow = 0;
     if (!single) {
       const screenTop = rowY(r) - bandST(r, view);
       const avail = Math.max(h, view.vh - screenTop - 2);
       let needH = lines.length * lineH + padTop + 6;
       if (wrap) needH = Math.max(needH, editor.scrollHeight + 4); // the browser's own wrapping decides
       editor.style.height = `${Math.round(clamp(needH, h, avail))}px`;
+      edit.overflowBelow = needH - avail;
     }
+  }
+
+  /**
+   * Lines typed into a cell low on the screen need more room than there is below it: the sheet scrolls
+   * the cell up (as far as the top of its pane) so they show, as Excel keeps them in view. Only as the
+   * text changes, so scrolling away from the cell mid-edit is not undone.
+   */
+  function revealEditorLines() {
+    if (!edit || edit.sheetId !== sheetId || !(edit.overflowBelow > 0) || topBand(edit.r)) return;
+    const view = viewMetrics();
+    const by = Math.min(edit.overflowBelow, rowY(edit.r) - view.st - frozen.h);
+    if (by < 1) return;
+    scrollViewportTo(view.sl, view.st + by);
+    positionEditor();
   }
 
   function beginEdit({ text = null, mode = 'inplace', focusEditor = true, preserveRichText = text == null } = {}) {
@@ -3205,6 +3221,7 @@ export function createGrid(opts) {
     editor.hidden = false;
     positionEditor();
     if (focusEditor) {
+      revealEditorLines();
       editor.focus({ preventScroll: true });
       editor.setSelectionRange(initial.length, initial.length);
     }
@@ -3226,6 +3243,7 @@ export function createGrid(opts) {
     const spell = spellcheck && !text.startsWith('=');
     if (editor.spellcheck !== spell) editor.spellcheck = spell;
     positionEditor();
+    revealEditorLines();
     renderRefHighlights();
     opts.onEdit?.({ editing: true, text, r: edit.r, c: edit.c });
     updateHints();
@@ -3781,6 +3799,7 @@ export function createGrid(opts) {
   let handlePresses = 0; // presses in a row that landed on the fill handle (a double-click on it needs two)
   let tap = null;  // touch: { r, c, x, y, t, timer }
   let longPressAt = 0; // when a long press last opened the cell menu
+  let pressMenu = false; // the touch still down opened the cell menu: its release is not a tap
   let autoScroll = 0;
 
   function stopAutoScroll() {
@@ -3950,14 +3969,17 @@ export function createGrid(opts) {
       // Touch scrolls; a tap selects, a second tap edits, a long press opens
       // the context menu. Dragging to select is done from the fill handle.
       tap = { r, c, x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
+      pressMenu = false;
       tap.timer = setTimeout(() => {
         if (tap && !tap.moved) {
           tap = null;
           if (edit && !commitEdit()) return;
           // Inside the selection the menu is for the whole of it, as for a right-click: there is no other way to reach it with a finger.
-          if (!selectedAt(r, c)) setSelection(S.single(r, c));
+          // The sheet stays put: the menu opens at the finger and closes when the sheet scrolls under it.
+          if (!selectedAt(r, c)) setSelection(S.single(r, c), { scroll: false });
           if (navigator.vibrate) navigator.vibrate(10);
           longPressAt = Date.now();
+          pressMenu = true;
           opts.onContextMenu?.({ x: e.clientX, y: e.clientY, kind: 'cell' });
         }
       }, LONG_PRESS_MS);
@@ -4327,9 +4349,12 @@ export function createGrid(opts) {
     const leftInset = 2 + (parseFloat(editor.style.paddingLeft) || CELL_TEXT_INSET * zoom);
     const rightInset = 2 + (parseFloat(editor.style.paddingRight) || CELL_TEXT_INSET * zoom);
     const inner = rect.width - leftInset - rightInset;
-    const align = editor.style.textAlign;
+    // Hebrew or Arabic text starts at the right (dir=auto takes 'start' there) and its first letter is the
+    // rightmost, so the distance into it is counted from its right end.
+    const rtl = RTL_LEAD.test(text);
+    const align = editor.style.textAlign === 'start' ? (rtl ? 'right' : 'left') : editor.style.textAlign;
     const start = rect.left + leftInset + (align === 'right' ? Math.max(0, inner - total) : align === 'center' ? Math.max(0, (inner - total) / 2) : 0);
-    const x = clientX - start;
+    const x = rtl ? start + total - clientX : clientX - start;
     let end = 0;
     let before = 0;
     for (const unit of graphemes(text)) {
@@ -4363,7 +4388,8 @@ export function createGrid(opts) {
     if (edit && !commitEdit()) return;
     const { r, c } = cellAtPoint(e.clientX, e.clientY);
     // Inside any selected range (one added with Ctrl/Cmd+click too) the menu is for the whole selection.
-    if (!selectedAt(r, c)) setSelection(S.single(r, c));
+    // A partly visible cell is not scrolled into view: the menu opens at the pointer and a scroll under it closes it.
+    if (!selectedAt(r, c)) setSelection(S.single(r, c), { scroll: false });
     opts.onContextMenu?.({ x: e.clientX, y: e.clientY, kind: 'cell' });
   }
 
@@ -5316,6 +5342,9 @@ export function createGrid(opts) {
   viewport.addEventListener('pointermove', pointerMove);
   viewport.addEventListener('pointerup', pointerUp);
   viewport.addEventListener('pointercancel', cancelDrag);
+  // The menu a long press opened lies under the finger: lifting it must not send the click a tap
+  // does, or that click lands on the menu item under the finger and runs it.
+  viewport.addEventListener('touchend', (e) => { if (pressMenu) { pressMenu = false; e.preventDefault(); } }, { passive: false });
   viewport.addEventListener('pointerleave', () => viewport.classList.remove('can-move'));
   viewport.addEventListener('dblclick', onDoubleClick);
   viewport.addEventListener('contextmenu', onContextMenu);
@@ -5387,7 +5416,16 @@ export function createGrid(opts) {
   rowClip.addEventListener('contextmenu', (e) => headerContextMenu(e, 'row'));
   corner.addEventListener('click', () => { if (edit && !commitEdit()) return; setSelection(S.selectAll(bounds()), { scroll: false }); viewport.focus({ preventScroll: true }); });
 
-  const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => { measureChrome(); rendered.key = null; schedule(); }) : null;
+  // The on-screen keyboard that opens as a cell is typed into shrinks the viewport from below, often over
+  // that very cell: a viewport that got smaller during an edit brings the cell back into view.
+  let viewSize = { w: 0, h: 0 };
+  const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => {
+    measureChrome(); rendered.key = null; schedule();
+    const size = { w: viewport.clientWidth, h: viewport.clientHeight };
+    const shrank = size.w < viewSize.w || size.h < viewSize.h;
+    viewSize = size;
+    if (shrank && edit && edit.sheetId === sheetId) scrollIntoView({ r: edit.r, c: edit.c });
+  }) : null;
   ro?.observe(viewport);
 
   // A workbook can introduce a bundled font after the first render. Discard

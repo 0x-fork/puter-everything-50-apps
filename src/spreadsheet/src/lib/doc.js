@@ -871,6 +871,8 @@ export class Doc extends EventTarget {
       return e?.message || 'Could not save';
     }
     clearTimeout(this._draftTimer);
+    // A shared workbook's copy is a file of the user's own, where work continues: the room is left.
+    if (this.collab) this._leaveRoomForCopy();
     const oldKey = this.draftKey;
     this.path = P.canonicalPath(target, written);
     this.uid = written?.uid || written?.id || null; // another file, with its own decision
@@ -929,7 +931,8 @@ export class Doc extends EventTarget {
    */
   static forRoom(client, { path = null, uid = null } = {}) {
     const owner = client.user?.uuid === client.owner;
-    const doc = new Doc({ wb: client.wb, name: client.name || UNTITLED, path: client.file?.path ?? path, uid: client.file?.uid ?? uid, trusted: owner || !usesExternalContent(client.wb) });
+    // The file as it was opened: the room names it as it was when sharing started, before any rename or move.
+    const doc = new Doc({ wb: client.wb, name: client.name || UNTITLED, path: path ?? client.file?.path ?? null, uid: uid ?? client.file?.uid ?? null, trusted: owner || !usesExternalContent(client.wb) });
     doc.collab = client;
     doc._onRoomStatus = () => doc._sharedChanged('room');
     client.addEventListener('status', doc._onRoomStatus);
@@ -966,6 +969,8 @@ export class Doc extends EventTarget {
     clearTimeout(this._timer);
     this._sharedFileDue = false;
     await client.flush();
+    // What others sent since this browser last asked goes in too: the file is the room's latest, not this copy's.
+    await client.sync().catch(() => {});
     await client.settled();
     if (client.replica.pending.length) {
       this._sharedChanged('room');
@@ -975,7 +980,8 @@ export class Doc extends EventTarget {
     if (!client.canEdit) { this.wb.markClean(); return true; }
     this._setStatus('saving');
     try {
-      const res = await client.checkpoint({ file: true });
+      // The owner's browser tells the room where the file is now, so that it writes there, not where the file was when sharing started.
+      const res = await client.checkpoint({ file: true, ...(this.isOwner && this.path && this.isXlsxPath ? { at: this.file } : {}) });
       // The worker writes the owner's file when Puter lets it; the owner's own browser can always.
       if (this.isOwner && this.path && this.isXlsxPath && !res?.wrote) await P.writeFile(this.path, await workbookToXlsx(this.wb), { overwrite: true });
       this.lastSaved = Date.now();
@@ -998,6 +1004,22 @@ export class Doc extends EventTarget {
     // Leaving saves: the file the last changes were waiting a quiet moment to reach is written on the way out.
     const written = this._sharedFileDue ? this.save({ auto: true }).catch(() => {}) : this._saving?.catch(() => {});
     Promise.resolve(written).then(() => this.collab.leave()).catch(() => {});
+  }
+
+  /**
+   * Saved as a copy, the shared workbook is this document no longer: it stops sharing edits (they would reach the
+   * room, and never the copy), and saves to the copy as any file does. Changes the room has not confirmed stay in
+   * this browser's outbox, sent when the shared workbook is next opened.
+   */
+  _leaveRoomForCopy() {
+    const client = this.collab;
+    clearTimeout(this._timer);
+    this._sharedFileDue = false;
+    client.removeEventListener('status', this._onRoomStatus);
+    if (this._onRoomIncoming) client.replica.removeEventListener('incoming', this._onRoomIncoming);
+    this.collab = null;
+    client.close();
+    client.request({ op: 'leave', session: client.session }).catch(() => {});
   }
 
   static fromDraft(key) {

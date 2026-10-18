@@ -19,6 +19,8 @@ import { sanitizeState } from './server/service.js';
 const CHECKPOINT_EVERY = 50;
 /** And the longest a revision waits for one while people keep editing. */
 const CHECKPOINT_IDLE = 60_000;
+/** A checkpoint that could not be written (offline, say) is tried again after this long, not at every tick. */
+const CHECKPOINT_RETRY = 30_000;
 /** People not heard from for this long are taken off the list. */
 const PEOPLE_TTL = 20_000;
 
@@ -104,6 +106,13 @@ export class RoomClient extends EventTarget {
     // Changes this browser made before and never delivered go back on top of the revision they were made on.
     if (saved?.pending?.length && saved.rev >= loaded.rev && this.canEdit) {
       this.replica.receive(loaded.records.filter((r) => r.rev <= saved.rev));
+      // The log after the checkpoint can be longer than one answer carries: the rest up to that revision is fetched
+      // first, or the changes would be put back too early and moved again by records they were made after.
+      while (this.replica.rev < saved.rev) {
+        const more = (await this.request({ op: 'sync', since: this.replica.rev })).records.filter((r) => r.rev <= saved.rev);
+        if (!more.length) break;
+        this.replica.receive(more);
+      }
       this.replica.restorePending(saved.pending);
       this.replica.receive(loaded.records.filter((r) => r.rev > saved.rev));
     } else {
@@ -140,7 +149,7 @@ export class RoomClient extends EventTarget {
   /* ---------- Synchronizing ---------- */
 
   scheduleSync(delay = 150) {
-    if (this.closed || this.syncTimer) return;
+    if (this.closed || this.halted || this.syncTimer) return;
     this.syncTimer = setTimeout(() => { this.syncTimer = null; this.sync().catch((e) => this.failed(e)); }, delay);
   }
 
@@ -156,7 +165,8 @@ export class RoomClient extends EventTarget {
         if (res.records.length) { this.replica.receive(res.records); await this.persist(); }
         if (this.replica.rev >= res.head || !res.records.length) break;
       }
-      if (this.status.state !== 'error') this.setStatus('connected');
+      // A request the room could not verify (401) is no lasting refusal: one that goes through again ends it.
+      if (this.status.state !== 'error' || this.status.code === 401) this.setStatus('connected');
       this.maybeCheckpoint();
     }).finally(() => { this.syncing = null; });
     return this.syncing;
@@ -185,7 +195,7 @@ export class RoomClient extends EventTarget {
    * one sent alone: the ones before it still arrive.
    */
   flush() {
-    if (this.closed) return Promise.resolve();
+    if (this.closed || this.halted) return Promise.resolve();
     if (this.flushing) { this.flushAgain = true; return this.flushing; }
     clearTimeout(this.retryTimer);
     this.flushing = this.serial(async () => {
@@ -227,7 +237,7 @@ export class RoomClient extends EventTarget {
       this.maybeCheckpoint();
     }).catch((error) => {
       this.failed(error);
-      if (!this.closed && !(error instanceof CollabError && [401, 403, 404, 410].includes(error.status))) {
+      if (!this.closed && !(error instanceof CollabError && [403, 404, 410].includes(error.status))) {
         this.retryTimer = setTimeout(() => this.flush(), this.retryDelay);
         this.retryDelay = Math.min(30_000, this.retryDelay * 2);
       }
@@ -259,17 +269,21 @@ export class RoomClient extends EventTarget {
    * that one browser does it), only while this one has nothing pending (its state is then the room's).
    */
   maybeCheckpoint() {
-    if (!this.canEdit || this.replica.pending.length || this.checkpointing) return;
+    if (!this.canEdit || this.replica.pending.length || this.checkpointing || Date.now() < (this.checkpointAfter ?? 0)) return;
     const due = this.replica.rev - this.lastCheckpoint >= CHECKPOINT_EVERY
       || (this.replica.rev > this.lastCheckpoint && Date.now() - this.lastCheckpointAt > CHECKPOINT_IDLE);
     if (!due) return;
     const editors = [...this.people.values()].filter((p) => canEdit(p.role)).map((p) => p.session);
     if (editors.some((s) => s < this.session)) return;
-    this.checkpoint().catch(() => {});
+    // Packing the whole workbook is not repeated every tick for a room that cannot be reached.
+    this.checkpoint().catch(() => { this.checkpointAfter = Date.now() + CHECKPOINT_RETRY; });
   }
 
-  /** Write a checkpoint now; with `file`, the .xlsx goes with it, for the worker to write over the owner's file. */
-  async checkpoint({ file = false } = {}) {
+  /**
+   * Write a checkpoint now; with `file`, the .xlsx goes with it, for the worker to write over the owner's file. The owner
+   * passes `at`, the file as it is now ({ path, uid }), which the worker writes from then on (it may have been renamed or moved).
+   */
+  async checkpoint({ file = false, at = null } = {}) {
     if (!this.canEdit || this.replica.pending.length) return { ok: false };
     this.checkpointing = true;
     try {
@@ -282,7 +296,7 @@ export class RoomClient extends EventTarget {
         for (let n = 0; n < bytes.length; n += 8192) text += String.fromCharCode(...bytes.subarray(n, n + 8192));
         xlsx = btoa(text);
       }
-      const res = await this.request({ op: 'checkpoint', rev, state, ...(xlsx ? { xlsx } : {}) });
+      const res = await this.request({ op: 'checkpoint', rev, state, ...(xlsx ? { xlsx } : {}), ...(xlsx && at?.path ? { file: { path: at.path, uid: at.uid ?? null } } : {}) });
       this.lastCheckpoint = Math.max(this.lastCheckpoint, rev);
       this.lastCheckpointAt = Date.now();
       return res;
@@ -294,13 +308,13 @@ export class RoomClient extends EventTarget {
   /* ---------- People ---------- */
 
   soonCheckIn() {
-    if (this.closed || this.checkInTimer) return;
+    if (this.closed || this.halted || this.checkInTimer) return;
     this.checkInTimer = setTimeout(() => { this.checkInTimer = null; this.checkIn().catch(() => {}); }, Math.max(100, 1500 - (Date.now() - (this.lastCheckIn || 0))));
   }
 
   /** Renew this session's ticket (with where this person is) and learn who is here. */
   checkIn() {
-    if (this.closed) return Promise.resolve();
+    if (this.closed || this.halted) return Promise.resolve();
     if (this.checkingIn) return this.checkingIn;
     this.checkingIn = (async () => {
       this.keys ??= await keyPair();
@@ -351,8 +365,11 @@ export class RoomClient extends EventTarget {
       if (!record || !Number.isInteger(record.rev) || !Array.isArray(record.changes) || record.user !== ticket.user || !this.roomKey) return false;
       const ok = await verify(this.roomKey, { room: this.room, rev: record.rev, digest: await hash(JSON.stringify(record.changes)), user: ticket.user }, receipt);
       if (!ok) return false;
+      // The receipt covers who made it (by account) and what it changes, not the name sent with it: that is the
+      // room-signed ticket's, so a sender cannot put their change under someone else's name in Show Changes.
+      const signed = { ...record, username: ticket.username };
       this.serial(async () => {
-        if (record.rev === this.replica.rev + 1) { this.replica.receive([record]); await this.persist(); if (this.replica.pending.length) this.flush(); }
+        if (record.rev === this.replica.rev + 1) { this.replica.receive([signed]); await this.persist(); if (this.replica.pending.length) this.flush(); }
         else if (record.rev > this.replica.rev) this.scheduleSync(0);
       }).catch(() => this.scheduleSync(0));
     }
@@ -389,11 +406,15 @@ export class RoomClient extends EventTarget {
   /* ---------- Status ---------- */
 
   failed(error) {
-    if (this.closed) return;
+    if (this.closed || this.halted) return;
     if (error instanceof CollabError && !error.network && [401, 403, 404, 410].includes(error.status)) {
-      this.status = { state: 'error', pending: this.replica?.pending.length ?? 0, message: error.message };
+      this.status = { state: 'error', pending: this.replica?.pending.length ?? 0, message: error.message, code: error.status };
       this.dispatchEvent(new CustomEvent('status'));
-      if (error.status === 410 || error.status === 404 || error.status === 403) this.dispatchEvent(new CustomEvent('closed', { detail: { message: error.message } }));
+      if (error.status === 410 || error.status === 404 || error.status === 403) {
+        // The room is gone for this person: it is said once, and the room is not asked again.
+        this.halt();
+        this.dispatchEvent(new CustomEvent('closed', { detail: { message: error.message } }));
+      }
       return;
     }
     this.status = { state: 'offline', pending: this.replica?.pending.length ?? 0, message: error?.message || 'Offline' };
@@ -412,7 +433,7 @@ export class RoomClient extends EventTarget {
 
   /** The connection came back (or the tab became visible): catch up and send. */
   resume() {
-    if (this.closed) return;
+    if (this.closed || this.halted) return;
     this.sync().then(() => this.flush()).catch((e) => this.failed(e));
     this.checkIn().catch(() => {});
   }
@@ -426,6 +447,21 @@ export class RoomClient extends EventTarget {
     this.peers?.broadcast('leave', {});
     this.close();
     await this.request({ op: 'leave', session: this.session }).catch(() => {});
+  }
+
+  /**
+   * Stop asking the room (it was closed, or this person's access ended): no more polling, check-ins or links. The
+   * workbook stays as it is on screen, and the status says why.
+   */
+  halt() {
+    this.halted = true;
+    for (const t of this.timers) clearInterval(t);
+    clearTimeout(this.syncTimer);
+    clearTimeout(this.retryTimer);
+    clearTimeout(this.presenceTimer);
+    clearTimeout(this.checkInTimer);
+    this.subscription?.off();
+    this.peers?.close();
   }
 
   close() {

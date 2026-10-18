@@ -148,8 +148,11 @@ export class RoomService {
     return stored;
   }
 
-  /** This instance's view of a room, brought up to the latest record anyone wrote. */
-  async load(room) {
+  /**
+   * This instance's view of a room, brought up to the latest record anyone wrote. One refresh reads a thousand
+   * records at most; an instance just started reads on until it reaches `need`, the revision a browser says it has.
+   */
+  async load(room, need = 0) {
     let entry = this.rooms.get(room);
     if (!entry) {
       const cp = await this.kv.get(`ss:${room}:cp`);
@@ -157,7 +160,11 @@ export class RoomService {
       this.rooms.set(room, entry);
       if (this.rooms.size > 16) { const [oldest] = this.rooms.keys(); if (oldest !== room) this.rooms.delete(oldest); }
     }
-    await this.refresh(room, entry);
+    for (let head = -1; head !== entry.head;) {
+      head = entry.head;
+      await this.refresh(room, entry);
+      if (entry.head >= need) break;
+    }
     return entry;
   }
 
@@ -262,7 +269,7 @@ export class RoomService {
       case 'sync': {
         const since = input.since;
         if (!Number.isInteger(since) || since < 0) fail(400, 'Invalid revision.');
-        const entry = await this.load(room);
+        const entry = await this.load(room, since);
         if (since > entry.head) fail(409, 'This copy is ahead of the shared workbook. Open it again.');
         const records = await this.since(room, entry, since);
         const cp = await this.kv.get(`ss:${room}:cp`);
@@ -351,7 +358,7 @@ export class RoomService {
     if (text.length > MAX_CHANGE) fail(413, 'This change is too large to save.');
     try { for (const ch of changes) validateChange(ch); } catch (e) { fail(400, e instanceof OpError ? e.message : 'Invalid change.'); }
     const base = input.base;
-    const entry = await this.load(room);
+    const entry = await this.load(room, Number.isInteger(base) ? base : 0);
     if (!Number.isInteger(base) || base < 0 || base > entry.head) fail(409, 'This copy is ahead of the shared workbook. Open it again.');
     // Someone else's change came first: the browser rebases its changes on it and sends them again.
     if (base < entry.head) return { accepted: false, head: entry.head, records: await this.since(room, entry, base) };
@@ -386,8 +393,8 @@ export class RoomService {
    */
   async checkpoint(room, meta, member, input) {
     if (!canEdit(member.role)) fail(403, 'You can view this shared workbook but not change it.');
-    const entry = await this.load(room);
     const rev = input.rev;
+    const entry = await this.load(room, Number.isInteger(rev) ? rev : 0);
     if (!Number.isInteger(rev) || rev < 0 || rev > entry.head) fail(400, 'Invalid revision.');
     const cp = await this.kv.get(`ss:${room}:cp`);
     let saved = false;
@@ -404,15 +411,24 @@ export class RoomService {
       saved = true;
     }
     let wrote = false;
+    // The owner's file, renamed or moved since sharing started: its owner says where it is now, and it is written there.
+    const moved = member.role === 'owner' && input.file && typeof input.file.path === 'string' && input.file.path && input.file.path.length <= 1024 && input.file.path !== meta.file?.path;
+    if (moved && typeof input.xlsx === 'string') {
+      const latest = await this.kv.get(`ss:${room}:meta`);
+      if (latest && !latest.closed) {
+        meta = { ...latest, file: { path: input.file.path, uid: typeof input.file.uid === 'string' ? input.file.uid.slice(0, 200) : null } };
+        await this.kv.set(`ss:${room}:meta`, meta);
+      }
+    }
     if (typeof input.xlsx === 'string' && meta.file?.path) {
       if (input.xlsx.length > MAX_XLSX) fail(413, 'This workbook is too large to save.');
       const bytes = decode(input.xlsx, MAX_XLSX);
       if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) fail(400, 'Invalid workbook file.');
       const written = await this.kv.get(`ss:${room}:file`);
-      if (!written || rev > written.rev) {
+      if (!written || rev > written.rev || (written.path && written.path !== meta.file.path)) {
         try {
           await this.fs.write(meta.file.path, new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), { overwrite: true, dedupeName: false });
-          await this.kv.set(`ss:${room}:file`, { rev, at: this.now() });
+          await this.kv.set(`ss:${room}:file`, { rev, at: this.now(), path: meta.file.path });
           wrote = true;
         } catch { /* The owner's browser writes the file when it next opens the workbook. */ }
       }
