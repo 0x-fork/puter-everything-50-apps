@@ -6,7 +6,8 @@ import { mainTrack, findClip, allClips } from '../src/model/timeline.js';
 import { createAiToolRunner } from '../src/ui/ai-tool-runner.js';
 import { createAgent, requestMessages, userContent, userText, suggestions, SYSTEM_PROMPT, MAX_ROUNDS } from '../src/media/ai-agent.js';
 import { TOOLS, toolSpecs, changesProject, costly, describeCall, mediaBrief, projectSnapshot } from '../src/media/ai-tools.js';
-import { txt2vidOptions, fitSeconds, videoAspectFor, generateVideo, videoBlobFrom, videoErrorMessage, VIDEO_MODELS } from '../src/media/ai-video.js';
+import { txt2vidOptions, fitSeconds, videoAspectFor, generateVideo, videoBlobFrom, videoErrorMessage, modelForFrames, estimateCents, formatCents, modelSummary, VIDEO_MODELS, DEFAULT_VIDEO_MODEL } from '../src/media/ai-video.js';
+import { txt2imgOptions, IMAGE_MODELS } from '../src/media/imagegen.js';
 import { attachmentKind, attachmentProblem, attachmentsIntro } from '../src/media/ai-attach.js';
 import { aiChatStream, friendlyAiError } from '../src/media/ai-chat.js';
 import { assistState } from '../src/media/edit-assistant.js';
@@ -67,9 +68,14 @@ const call = (name, input, id = `t${++seq}`) => ({ type: 'tool', id, name, input
 describe('AI video generation', () => {
   it('asks the text model without a picture and the image model with one', () => {
     const t = txt2vidOptions({ prompt: 'a fox', model: 'wan', seconds: 30, aspect: '9:16' });
-    expect(t).toEqual({ prompt: 'a fox', model: 'togetherai:wan-ai/wan2.7-t2v', seconds: 15, size: '720x1280' });
+    expect(t).toEqual({ prompt: 'a fox', model: 'togetherai:wan-ai/wan2.7-t2v', seconds: 15, size: '1080x1920' });
+    expect(txt2vidOptions({ prompt: 'a fox', model: 'seedance', aspect: '1:1' }).size).toBe('720x720');
     const i = txt2vidOptions({ prompt: 'it runs', model: 'wan', firstFrame: 'data:image/png;base64,AA', lastFrame: 'data:image/png;base64,BB', sound: false, negativePrompt: 'text', testMode: true });
-    expect(i).toMatchObject({ model: 'togetherai:wan-ai/wan2.7-i2v', input_reference: 'data:image/png;base64,AA', last_frame: 'data:image/png;base64,BB', generate_audio: false, negative_prompt: 'text', test_mode: true, seconds: 5 });
+    expect(i).toMatchObject({ model: 'togetherai:wan-ai/wan2.7-i2v', input_reference: 'data:image/png;base64,AA', last_frame: 'data:image/png;base64,BB', generate_audio: false, negative_prompt: 'text', test_mode: true, seconds: 5, size: '1080p' });
+    // From a picture, only the resolution: a pixel size carries a ratio, which Seedance refuses beside a first frame.
+    expect(txt2vidOptions({ prompt: 'x', model: 'seedance25', aspect: '9:16', firstFrame: 'A' }).size).toBe('1080p');
+    expect(txt2vidOptions({ prompt: 'x', model: 'seedance', firstFrame: 'A', lastFrame: 'B' }).size).toBe('720p');
+    expect(txt2vidOptions({ prompt: 'x', model: 'seedance25', aspect: '9:16' }).size).toBe('1080x1920');
   });
 
   it('fits lengths and shapes to what the model makes', () => {
@@ -79,7 +85,37 @@ describe('AI video generation', () => {
     expect(fitSeconds('wan', undefined)).toBe(5);
     expect(videoAspectFor(1080, 1920).id).toBe('9:16');
     expect(videoAspectFor(1440, 1080).id).toBe('4:3');
-    expect(VIDEO_MODELS.every((m) => m.t2v && m.i2v)).toBe(true);
+    expect(VIDEO_MODELS.every((m) => m.t2v && m.centsPerSecond > 0)).toBe(true);
+    expect(DEFAULT_VIDEO_MODEL).toBe('seedance25');
+    expect(fitSeconds('seedance25', 45)).toBe(30);
+  });
+
+  it('lets a model pick its own length, and hands picture clips to a model that can start from one', () => {
+    const words = txt2vidOptions({ prompt: 'a city at night', model: 'minimaxh3', seconds: 8 });
+    expect(words).toMatchObject({ model: 'togetherai:minimaxai/minimax-h3' });
+    expect(words.seconds).toBeUndefined();
+    const fromPicture = txt2vidOptions({ prompt: 'it moves', model: 'minimaxh3', firstFrame: 'data:image/png;base64,AA' });
+    expect(fromPicture).toMatchObject({ model: 'dreamina-seedance-2-5-260628', input_reference: 'data:image/png;base64,AA', seconds: 5 });
+    expect(modelForFrames('happyhorse11', { first: true })).toMatchObject({ model: { id: 'happyhorse11' }, fallback: false });
+    expect(modelForFrames('happyhorse11', { first: true, last: true })).toMatchObject({ model: { id: 'seedance25' }, fallback: true });
+    expect(txt2vidOptions({ prompt: 'x', model: 'happyhorse11', firstFrame: 'A' }).model).toBe('togetherai:alibaba/happyhorse-1.1-i2v');
+  });
+
+  it('estimates what a clip costs and tells the assistant what the model can do', () => {
+    expect(estimateCents('veo31', 8)).toBe(480);
+    expect(estimateCents('wan', 5)).toBe(10);
+    expect(estimateCents('minimaxh3', 20)).toBe(70);
+    expect(formatCents(480)).toBe('$4.80');
+    expect(formatCents(4)).toBe('4¢');
+    expect(modelSummary('seedance25')).toBe('Seedance 2.5 (4 to 30 s; starts and ends on pictures; about 23¢ a second)');
+    expect(modelSummary('flux3')).toMatch(/words only, clips from a picture are made with Seedance 2.5/);
+  });
+
+  it('asks for the chosen picture model, or lets Puter choose', () => {
+    expect(txt2imgOptions('16:9')).toEqual({ ratio: { w: 16, h: 9 } });
+    expect(txt2imgOptions('1:1', { model: 'gpt-image-2.5' })).toEqual({ ratio: { w: 1, h: 1 }, model: 'gpt-image-2.5-sunburst', quality: 'medium' });
+    expect(txt2imgOptions('1:1', { model: 'nano-banana-2.1' }).model).toBe('gemini-nano-banana-2.1');
+    expect(IMAGE_MODELS[0].model).toBe(null);
   });
 
   it('reads the clip from the saved copy and removes the copy', async () => {
@@ -130,9 +166,12 @@ describe('AI sidebar tools', () => {
 
   it('describes calls as lines, with the prompt and the cost for video', () => {
     expect(describeCall('set_speed', { clips: ['selected'], speed: 2 }).label).toBe('Set the selected clips to 2x speed');
-    const v = describeCall('generate_video', { prompt: 'a fox in the snow', seconds: 6, first_frame: 'gen1' }, { videoModel: 'Wan 2.7' });
+    const v = describeCall('generate_video', { prompt: 'a fox in the snow', seconds: 6, first_frame: 'gen1' }, { videoModel: 'wan' });
     expect(v.label).toBe('Generate a video from a picture (6.0s)');
-    expect(v.detail).toMatch(/"a fox in the snow" Made with Wan 2.7, 6.0s long. Uses Puter credits./);
+    expect(v.detail).toBe('"a fox in the snow" Made with Wan 2.7, 6s long. About 12¢ in Puter credits.');
+    const fallback = describeCall('animate_image', { clip: 'c1', prompt: 'sway' }, { videoModel: 'flux3' });
+    expect(fallback.detail).toBe('"sway" Made with Seedance 2.5 (the chosen model can\'t start from a picture), 5s long. About $1.16 in Puter credits.');
+    expect(describeCall('generate_video', { prompt: 'x' }, { videoModel: 'minimaxh3' }).detail).toMatch(/at the length the model picks. About 70¢/);
     expect(v.costly).toBe(true);
   });
 
@@ -151,14 +190,14 @@ describe('AI sidebar tools', () => {
     const notes = [];
     const r = await runner.run('generate_video', { prompt: 'A fox runs through snow', seconds: 6 }, { note: (n) => notes.push(n), stopped: () => false });
     expect(r.ok).toBe(true);
-    expect(r.content).toMatch(/^Done: made a 5.0s video \(media gen\d+\) and added it as clip \S+ on the base track at 4.0s-9.0s\./);
+    expect(r.content).toMatch(/^Done: made a 5.0s video with Seedance 2.5 \(media gen\d+\) and added it as clip \S+ on the base track at 4.0s-9.0s\./);
     const opts = services.generateVideo.mock.calls[0][0];
-    expect(opts).toMatchObject({ prompt: 'A fox runs through snow', model: 'wan', seconds: 6, aspect: '16:9' });
+    expect(opts).toMatchObject({ prompt: 'A fox runs through snow', model: 'seedance25', seconds: 6, aspect: '16:9' });
     expect(main().clips).toHaveLength(2);
     expect(main().clips[1].type).toBe('video');
     expect(store.history.undoStack).toHaveLength(1);
     expect(r.entry).toBe(store.history.undoStack[0]);
-    expect(notes[0]).toMatch(/Generating 6s of video with Wan 2.7/);
+    expect(notes[0]).toMatch(/Generating 6s of video with Seedance 2.5/);
     expect(ctx.library.imported[0].origin).toBe('ai-video');
     store.undo();
     expect(main().clips).toHaveLength(1);
@@ -199,7 +238,7 @@ describe('AI sidebar tools', () => {
     expect(now.duration).toBe(s(5));
     // The next clip moved along with the longer clip.
     expect(main().clips[1].start).toBe(s(5));
-    expect(services.generateVideo.mock.calls[0][0].seconds).toBe(3);
+    expect(services.generateVideo.mock.calls[0][0].seconds).toBe(4);
     const nope = await runner.run('animate_image', { clip: main().clips[1].id, prompt: 'x' });
     expect(nope.ok).toBe(false);
   });
@@ -217,7 +256,7 @@ describe('AI sidebar tools', () => {
     expect(tr.ok).toBe(true);
     const opts = services.generateVideo.mock.calls[1][0];
     expect(opts.firstFrame && opts.lastFrame).toBeTruthy();
-    expect(opts.seconds).toBe(2);
+    expect(opts.seconds).toBe(4);
     expect(main().clips.map((c) => c.id).indexOf(tr.target.ids[0])).toBe(2);
     expect((await runner.run('generate_transition', { after_clip: b.id })).content).toMatch(/no video or image clip follows/);
   });
@@ -464,7 +503,7 @@ describe('AI sidebar panel', () => {
     panel.open();
     panel.send('add a fox shot');
     await vi.waitFor(() => expect(panel.el.querySelector('.ai-approve')).toBeTruthy());
-    expect(panel.el.querySelector('.ai-approve-detail').textContent).toMatch(/"A red fox in the snow" Made with Wan 2.7, 5.0s long. Uses Puter credits./);
+    expect(panel.el.querySelector('.ai-approve-detail').textContent).toBe('"A red fox in the snow" Made with Seedance 2.5, 5s long. About $1.16 in Puter credits.');
     expect(services.generateVideo).not.toHaveBeenCalled();
     panel.el.querySelector('.ai-approve .btn.primary').click();
     await vi.waitFor(() => expect(panel.el.querySelector('.ai-undo')).toBeTruthy());

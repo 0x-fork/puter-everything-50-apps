@@ -18,7 +18,7 @@ import { makeClip } from '../model/project.js';
 import * as T from '../model/timeline.js';
 import { assistState, resolveClips, projectBrief, secs, stepLabel } from '../media/edit-assistant.js';
 import { describeCall, isEditTool, mediaBrief, clipDetails } from '../media/ai-tools.js';
-import { generateVideo, videoAspectFor, fitSeconds, videoModel, videoFileName, DEFAULT_SECONDS } from '../media/ai-video.js';
+import { generateVideo, videoAspectFor, fitSeconds, videoModel, modelForFrames, videoFileName, DEFAULT_SECONDS } from '../media/ai-video.js';
 import { generateImage, aspectForSize, imageFileName, IMAGE_STYLES, IMAGE_ASPECTS } from '../media/imagegen.js';
 import { editPicture, fitSize } from '../media/restyle.js';
 import { synthesize, speechFile, TTS_VOICES } from '../media/tts.js';
@@ -58,7 +58,8 @@ export async function framePicture(ctx, t) {
  * services replace the slow or paid steps (tests): generateVideo(opts),
  * generateImage(prompt, opts), editPicture(picture, instruction),
  * synthesize(text, voice), picture(clip, time), frame(time), editDeps (for
- * the edit runner), videoModel() -> model id, testMode() -> boolean.
+ * the edit runner), videoModel() and imageModel() -> the chosen model ids,
+ * testMode() -> boolean.
  */
 export function createAiToolRunner(ctx, services = {}) {
   const { store, actions } = ctx;
@@ -69,7 +70,8 @@ export function createAiToolRunner(ctx, services = {}) {
     synthesize: (text, voice, opts) => synthesize(text, voice, opts),
     picture: (clip, time) => clipPicture(ctx, clip, time),
     frame: (time) => framePicture(ctx, time),
-    videoModel: () => 'wan',
+    videoModel: () => 'seedance25',
+    imageModel: () => 'default',
     testMode: () => false,
     ...services,
   };
@@ -223,11 +225,13 @@ export function createAiToolRunner(ctx, services = {}) {
 
   /** Make a video (opts as generateVideo's), import it and put it with put(asset): the tool's result. */
   async function makeVideo(control, { prompt, seconds, aspect, firstFrame, lastFrame, sound, avoid }, label, put) {
-    const model = videoModel(svc.videoModel());
+    // A model that can't start (or end) on a picture hands the clip to one that can.
+    const chosen = videoModel(svc.videoModel());
+    const { model, fallback } = modelForFrames(chosen, { first: Boolean(firstFrame || lastFrame), last: Boolean(firstFrame && lastFrame) });
     const s = store.project.settings;
     const shape = aspect || videoAspectFor(s.width, s.height).id;
     const len = fitSeconds(model, seconds ?? DEFAULT_SECONDS);
-    const made = await generating(control, `Generating ${len}s of video with ${model.label}`,
+    const made = await generating(control, `Generating ${len ? `${len}s of ` : ''}video with ${model.label}`,
       () => svc.generateVideo({ prompt, model: model.id, seconds: len, aspect: shape, firstFrame, lastFrame, sound, negativePrompt: avoid, testMode: svc.testMode() }),
       (r) => keepVideo(r, prompt));
     if (!made) return { skipped: true };
@@ -236,8 +240,9 @@ export function createAiToolRunner(ctx, services = {}) {
     const { entry, value } = oneStep(label, asset, () => put(asset));
     const clip = value?.clip || null;
     if (clip) store.select(clip.id);
-    const length = asset.duration ? secs(asset.duration) : `${len}s`;
-    return ok(`made a ${length} video (media ${asset.id}) and added it ${value?.words || 'to the media library'}.`, { changed: true, entry, target: clip ? { ids: [clip.id], time: clip.start } : null });
+    const length = asset.duration ? secs(asset.duration) : len ? `${len}s` : '';
+    const how = fallback ? ` with ${model.label}, as ${chosen.label} can't ${firstFrame && lastFrame ? 'start and end on pictures' : 'start from a picture'}` : ` with ${model.label}`;
+    return ok(`made a ${length ? `${length} ` : ''}video${how} (media ${asset.id}) and added it ${value?.words || 'to the media library'}.`, { changed: true, entry, target: clip ? { ids: [clip.id], time: clip.start } : null });
   }
 
   // ---- The tools ---------------------------------------------------------------
@@ -332,11 +337,11 @@ export function createAiToolRunner(ctx, services = {}) {
       } catch (err) {
         return fail(err.message);
       }
-      const model = videoModel(svc.videoModel());
-      const shortest = Array.isArray(model.seconds) ? model.seconds[0] : model.seconds.min;
+      const { model } = modelForFrames(svc.videoModel(), { first: true, last: true });
+      const shortest = !model.seconds ? null : Array.isArray(model.seconds) ? model.seconds[0] : model.seconds.min;
       const prompt = `A seamless cinematic transition that morphs the first shot into the second. ${str(a.prompt) || 'Smooth camera movement, continuous motion, no cut.'}`;
       const id = f.clip.id;
-      return makeVideo(control, { prompt, seconds: Number.isFinite(num(a.seconds)) ? num(a.seconds) : shortest, firstFrame: from, lastFrame: to }, 'AI transition', (asset) => place(asset, { place: 'after', afterId: id }));
+      return makeVideo(control, { prompt, seconds: Number.isFinite(num(a.seconds)) ? num(a.seconds) : shortest ?? undefined, firstFrame: from, lastFrame: to }, 'AI transition', (asset) => place(asset, { place: 'after', afterId: id }));
     },
 
     async generate_image(a, control) {
@@ -345,7 +350,7 @@ export function createAiToolRunner(ctx, services = {}) {
       const s = store.project.settings;
       const aspect = IMAGE_ASPECTS.some((x) => x.id === a.aspect) ? a.aspect : aspectForSize(s.width, s.height).id;
       const style = IMAGE_STYLES.some((x) => x.id === a.style) ? a.style : 'none';
-      const made = await generating(control, 'Generating the picture', () => svc.generateImage(prompt, { aspect, style, testMode: svc.testMode() }), async (r) => {
+      const made = await generating(control, 'Generating the picture', () => svc.generateImage(prompt, { aspect, style, model: svc.imageModel(), testMode: svc.testMode() }), async (r) => {
         const asset = await importMade(new File([r.blob], imageFileName(prompt), { type: r.blob.type || 'image/png' }), 'ai-image').catch(() => null);
         if (asset) actions.registerAsset(asset);
       });
@@ -367,7 +372,7 @@ export function createAiToolRunner(ctx, services = {}) {
       } catch (err) {
         return fail(err.message);
       }
-      const made = await generating(control, 'Editing the picture', () => svc.editPicture(got.picture, instruction, { testMode: svc.testMode() }), async () => {});
+      const made = await generating(control, 'Editing the picture', () => svc.editPicture(got.picture, instruction, { model: svc.imageModel(), testMode: svc.testMode() }), async () => {});
       if (!made) return { skipped: true };
       const base = got.clip ? got.clip.name || store.project.assets[got.clip.assetId]?.name : 'Picture';
       const asset = await importMade(new File([made.blob], imageFileName(`${String(base || 'Picture').replace(/\.[a-z0-9]{2,5}$/i, '')} edited`), { type: made.blob.type || 'image/png' }), 'ai-image');

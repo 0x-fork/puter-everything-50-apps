@@ -30,7 +30,8 @@ import { assistState, secs } from '../media/edit-assistant.js';
 import { aiAvailable } from '../media/tts.js';
 import { createAgent, suggestions, userText, APPROVAL_MODES, DEFAULT_APPROVAL } from '../media/ai-agent.js';
 import { describeCall, changesProject, projectSnapshot } from '../media/ai-tools.js';
-import { VIDEO_MODELS, DEFAULT_VIDEO_MODEL, videoModel } from '../media/ai-video.js';
+import { VIDEO_MODELS, DEFAULT_VIDEO_MODEL, modelSummary } from '../media/ai-video.js';
+import { IMAGE_MODELS, DEFAULT_IMAGE_MODEL, imageModel } from '../media/imagegen.js';
 import { aiChatStream, friendlyAiError, tooLongForAi } from '../media/ai-chat.js';
 import { attachmentProblem, attachmentKind, attachmentsTooLarge, formatSize, ATTACH_ACCEPT, MAX_ATTACHMENTS } from '../media/ai-attach.js';
 import { readAttachment } from './ai-attachments.js';
@@ -64,6 +65,7 @@ export function loadAiSettings() {
   return {
     approval: APPROVAL_MODES.some((m) => m.id === s.approval) ? s.approval : DEFAULT_APPROVAL,
     videoModel: VIDEO_MODELS.some((m) => m.id === s.videoModel) ? s.videoModel : DEFAULT_VIDEO_MODEL,
+    imageModel: IMAGE_MODELS.some((m) => m.id === s.imageModel) ? s.imageModel : DEFAULT_IMAGE_MODEL,
     width: Number.isFinite(s.width) ? Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, s.width)) : DEFAULT_WIDTH,
     open: typeof s.open === 'boolean' ? s.open : roomy(),
   };
@@ -102,17 +104,17 @@ export function createAiPanel(ctx, { chat = null, services = {}, readFile = read
 
   const runner = createAiToolRunner(ctx, {
     videoModel: () => settings.videoModel,
+    imageModel: () => settings.imageModel,
     testMode: () => Boolean(ctx.aiTestMode),
     ...services,
   });
-  const modelLabel = () => videoModel(settings.videoModel).label;
 
   const agent = createAgent({
     chat: (messages, options) => chatFn()(messages, options),
     runTool: (name, args, control) => runner.run(name, args, control),
-    describe: (name, args) => describeCall(name, args, { videoModel: modelLabel() }),
+    describe: (name, args) => describeCall(name, args, { videoModel: settings.videoModel }),
     approve: (step) => askApproval(step),
-    snapshot: () => projectSnapshot(assistState(store), { videoModel: modelLabel() }),
+    snapshot: () => projectSnapshot(assistState(store), { videoModel: modelSummary(settings.videoModel), imageModel: imageModel(settings.imageModel).label }),
     settings: () => settings,
   });
 
@@ -210,6 +212,9 @@ export function createAiPanel(ctx, { chat = null, services = {}, readFile = read
       'separator',
       { heading: 'Video model' },
       ...VIDEO_MODELS.map((m) => ({ label: m.label, hint: m.hint, radio: true, checked: settings.videoModel === m.id, onSelect: () => { settings.videoModel = m.id; saveAiSettings(settings); announce(`Video model: ${m.label}`); } })),
+      'separator',
+      { heading: 'Picture model' },
+      ...IMAGE_MODELS.map((m) => ({ label: m.label, hint: m.hint, radio: true, checked: settings.imageModel === m.id, onSelect: () => { settings.imageModel = m.id; saveAiSettings(settings); announce(`Picture model: ${m.label}`); } })),
       'separator',
       { label: 'New chat', icon: 'newChat', onSelect: () => newChat() },
     ], { align: 'end', label: 'Assistant settings' });

@@ -17,52 +17,146 @@ import { errorMessage } from './transcribe.js';
 export const VIDEO_PROMPT_MAX = 1500;
 
 /**
- * The video models offered in the assistant's settings. t2v is used for a
- * clip from words alone, i2v when a first frame goes with it. seconds:
- * the lengths the model makes ({ min, max } or a list of choices).
+ * The video models offered in the assistant's settings, newest and best
+ * first (from Puter's catalog). t2v is used for a clip from words alone,
+ * i2v when a first frame goes with it (null: the model works from words
+ * only, and a clip that starts from a picture is made with
+ * FRAME_FALLBACK instead). endFrame: it can also end on a picture.
+ * seconds: the lengths it makes ({ min, max }, a list of choices, or null
+ * when the model picks). res: the short side asked for. centsPerSecond:
+ * Puter's price, for the estimate shown before a clip is made.
+ *
+ * The ids of the first three models offered (wan, seedance, veo) are kept,
+ * as settings remember them.
  */
 export const VIDEO_MODELS = [
   {
+    id: 'seedance25',
+    label: 'Seedance 2.5',
+    hint: 'Newest, up to 30 s, sound',
+    t2v: 'dreamina-seedance-2-5-260628',
+    i2v: 'dreamina-seedance-2-5-260628',
+    endFrame: true,
+    seconds: { min: 4, max: 30 },
+    res: 1080,
+    centsPerSecond: 23.2,
+  },
+  {
+    id: 'veo31',
+    label: 'Veo 3.1',
+    hint: 'Top quality, sound',
+    t2v: 'togetherai:google/veo-3.1',
+    i2v: 'togetherai:google/veo-3.1',
+    endFrame: true,
+    seconds: [4, 6, 8],
+    res: 1080,
+    centsPerSecond: 60,
+  },
+  {
+    id: 'seedance20',
+    label: 'Seedance 2.0',
+    hint: 'Up to 15 s, sound',
+    t2v: 'dreamina-seedance-2-0-260128',
+    i2v: 'dreamina-seedance-2-0-260128',
+    endFrame: true,
+    seconds: { min: 4, max: 15 },
+    res: 1080,
+    centsPerSecond: 15.2,
+  },
+  {
+    id: 'happyhorse11',
+    label: 'HappyHorse 1.1',
+    hint: 'Starts from a picture',
+    t2v: 'togetherai:alibaba/happyhorse-1.1-t2v',
+    i2v: 'togetherai:alibaba/happyhorse-1.1-i2v',
+    endFrame: false,
+    seconds: null,
+    res: 1080,
+    centsPerSecond: 18,
+  },
+  {
+    id: 'minimaxh3',
+    label: 'MiniMax H3',
+    hint: '2K, from words only',
+    t2v: 'togetherai:minimaxai/minimax-h3',
+    i2v: null,
+    endFrame: false,
+    seconds: null,
+    res: 1080,
+    centsPerSecond: 13.91,
+  },
+  {
+    id: 'flux3',
+    label: 'FLUX 3',
+    hint: 'From words only',
+    t2v: 'togetherai:black-forest-labs/flux-3',
+    i2v: null,
+    endFrame: false,
+    seconds: null,
+    res: 1080,
+    centsPerSecond: 29,
+  },
+  {
     id: 'wan',
     label: 'Wan 2.7',
-    hint: 'Balanced, 2 to 15 seconds',
+    hint: 'Cheapest, 2 to 15 s',
     t2v: 'togetherai:wan-ai/wan2.7-t2v',
     i2v: 'togetherai:wan-ai/wan2.7-i2v',
+    endFrame: true,
     seconds: { min: 2, max: 15 },
-    endFrame: 'i2v',
+    res: 1080,
+    centsPerSecond: 2,
   },
   {
     id: 'seedance',
     label: 'Seedance 2.0 Mini',
-    hint: 'Fast, 4 to 15 seconds',
-    t2v: 'seedance-2-0-mini',
-    i2v: 'seedance-2-0-mini',
+    hint: 'Fast, low cost',
+    t2v: 'dreamina-seedance-2-0-mini-260615',
+    i2v: 'dreamina-seedance-2-0-mini-260615',
+    endFrame: true,
     seconds: { min: 4, max: 15 },
-    endFrame: 'i2v',
+    res: 720,
+    centsPerSecond: 7.6,
   },
   {
     id: 'veo',
     label: 'Veo 3.1 Lite',
-    hint: 'With sound, 4, 6 or 8 seconds',
+    hint: 'With sound, 4, 6 or 8 s',
     t2v: 'togetherai:google/veo-3.1-lite',
     i2v: 'togetherai:google/veo-3.1-lite',
+    endFrame: true,
     seconds: [4, 6, 8],
-    endFrame: 'i2v',
+    res: 720,
+    centsPerSecond: 8,
   },
 ];
-export const DEFAULT_VIDEO_MODEL = 'wan';
+export const DEFAULT_VIDEO_MODEL = 'seedance25';
+/** The model a clip that starts or ends on a picture is made with when the chosen one can't. */
+export const FRAME_FALLBACK = 'seedance25';
 export const DEFAULT_SECONDS = 5;
 
-/** Frame sizes asked for, at 720p, by shape. Models that do not take a size use their own. */
+/** Frame shapes, by their 720p size; models that take no size use their own. */
 export const VIDEO_ASPECTS = [
   { id: '16:9', w: 1280, h: 720 },
   { id: '9:16', w: 720, h: 1280 },
-  { id: '1:1', w: 960, h: 960 },
+  { id: '1:1', w: 720, h: 720 },
   { id: '4:3', w: 960, h: 720 },
   { id: '3:4', w: 720, h: 960 },
 ];
 
 export const videoModel = (id) => VIDEO_MODELS.find((m) => m.id === id) || VIDEO_MODELS[0];
+
+/**
+ * The model a clip is made with: the chosen one, unless the clip starts on a
+ * picture it can't start from (or ends on one it can't end on): then
+ * FRAME_FALLBACK. { model, fallback }.
+ */
+export function modelForFrames(id, { first = false, last = false } = {}) {
+  const m = typeof id === 'string' ? videoModel(id) : id;
+  const needsFirst = first || last;
+  if ((needsFirst && !m.i2v) || (last && !m.endFrame)) return { model: videoModel(FRAME_FALLBACK), fallback: true };
+  return { model: m, fallback: false };
+}
 
 /** The video shape closest to a width and height (a project's frame). */
 export function videoAspectFor(width, height) {
@@ -70,29 +164,55 @@ export function videoAspectFor(width, height) {
   return VIDEO_ASPECTS.reduce((best, a) => (Math.abs(Math.log(a.w / a.h / r)) < Math.abs(Math.log(best.w / best.h / r)) ? a : best), VIDEO_ASPECTS[0]);
 }
 
-/** A length the model makes: the nearest of its choices, or within its range. */
+/** A length the model makes: the nearest of its choices, or within its range; null when the model picks its own. */
 export function fitSeconds(model, seconds) {
   const m = typeof model === 'string' ? videoModel(model) : model;
+  if (!m.seconds) return null;
   const want = Number.isFinite(Number(seconds)) && Number(seconds) > 0 ? Number(seconds) : DEFAULT_SECONDS;
   if (Array.isArray(m.seconds)) return m.seconds.reduce((best, s) => (Math.abs(s - want) < Math.abs(best - want) ? s : best), m.seconds[0]);
   return Math.round(Math.min(m.seconds.max, Math.max(m.seconds.min, want)));
 }
 
+/** About what a clip costs, in US cents, at Puter's price for the model (a model that picks its length is counted at 5 s). */
+export function estimateCents(model, seconds) {
+  const m = typeof model === 'string' ? videoModel(model) : model;
+  return Math.round(m.centsPerSecond * (fitSeconds(m, seconds) ?? DEFAULT_SECONDS));
+}
+
+/** What the assistant is told of the chosen model: "Seedance 2.5 (4 to 30 s; starts and ends on pictures; about 23¢ a second)". */
+export function modelSummary(id) {
+  const m = videoModel(id);
+  const len = !m.seconds ? 'length picked by the model' : Array.isArray(m.seconds) ? `${m.seconds.join(', ')} s` : `${m.seconds.min} to ${m.seconds.max} s`;
+  const frames = !m.i2v ? `words only, clips from a picture are made with ${videoModel(FRAME_FALLBACK).label}` : m.endFrame ? 'starts and ends on pictures' : 'starts from a picture';
+  return `${m.label} (${len}; ${frames}; about ${formatCents(m.centsPerSecond)} a second)`;
+}
+
+/** "$1.16" for 116 cents, "23¢" under a dollar. */
+export const formatCents = (cents) => (cents < 99.5 ? `${Math.max(1, Math.round(cents))}¢` : `$${(cents / 100).toFixed(2)}`);
+
 /**
  * Options for puter.ai.txt2vid. firstFrame and lastFrame are data URIs (or
  * web addresses); a last frame without a first one is sent as the first, as
- * the models need one to end on another.
+ * the models need one to end on another. A model that can't start from a
+ * picture is swapped for FRAME_FALLBACK (modelForFrames). aspect applies to
+ * clips from words alone; one from a picture has the picture's shape.
  */
 export function txt2vidOptions({ prompt, model = DEFAULT_VIDEO_MODEL, seconds, aspect = '16:9', firstFrame = null, lastFrame = null, sound, negativePrompt = '', outputPath = null, testMode = false } = {}) {
-  const m = videoModel(model);
-  const a = VIDEO_ASPECTS.find((x) => x.id === aspect) || VIDEO_ASPECTS[0];
   const first = firstFrame || null;
+  const { model: m } = modelForFrames(model, { first: Boolean(first), last: Boolean(first && lastFrame) });
+  const a = VIDEO_ASPECTS.find((x) => x.id === aspect) || VIDEO_ASPECTS[0];
+  const k = (m.res || 720) / 720;
+  const even = (v) => Math.round((v * k) / 2) * 2;
   const out = {
     prompt: String(prompt || '').trim().slice(0, VIDEO_PROMPT_MAX),
     model: first ? m.i2v : m.t2v,
-    seconds: fitSeconds(m, seconds),
-    size: `${a.w}x${a.h}`,
+    // A clip from a picture takes the picture's shape: only the resolution is asked for. A size in pixels
+    // carries a ratio too, which Seedance refuses beside a first frame ("the output ratio follows the
+    // first-frame image").
+    size: first ? `${m.res || 720}p` : `${even(a.w)}x${even(a.h)}`,
   };
+  const len = fitSeconds(m, seconds);
+  if (len != null) out.seconds = len;
   if (first) out.input_reference = first;
   if (first && lastFrame && m.endFrame) out.last_frame = lastFrame;
   if (typeof sound === 'boolean') out.generate_audio = sound;

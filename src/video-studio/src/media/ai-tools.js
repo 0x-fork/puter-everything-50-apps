@@ -21,7 +21,7 @@
  * shows it.
  */
 import { TOOLS as EDIT_TOOLS, CLIP_WORDS, secs, projectBrief } from './edit-assistant.js';
-import { VIDEO_ASPECTS, VIDEO_PROMPT_MAX } from './ai-video.js';
+import { VIDEO_ASPECTS, VIDEO_PROMPT_MAX, modelForFrames, fitSeconds, estimateCents, formatCents } from './ai-video.js';
 import { IMAGE_ASPECTS, IMAGE_STYLES } from './imagegen.js';
 import { TTS_VOICES } from './tts.js';
 
@@ -222,9 +222,11 @@ const LABELS = {
 /**
  * A call as a line in the chat: { label, detail?, costly }. detail is shown
  * when the call asks to be allowed (the prompt it would send, for one).
- * `videoModel`: the label of the model video calls use.
+ * `videoModel`: the id of the model chosen for video; a video call names the
+ * model it will be made with (another, when the chosen one can't start from a
+ * picture), its length and about what it costs.
  */
-export function describeCall(name, args = {}, { videoModel = '' } = {}) {
+export function describeCall(name, args = {}, { videoModel = null } = {}) {
   const a = args && typeof args === 'object' ? args : {};
   let label;
   try {
@@ -235,8 +237,17 @@ export function describeCall(name, args = {}, { videoModel = '' } = {}) {
   const out = { label: label.charAt(0).toUpperCase() + label.slice(1), costly: costly(name) };
   const prompt = a.prompt || a.instruction || '';
   if (VIDEO_TOOLS.has(name)) {
-    const bits = [videoModel && `with ${videoModel}`, sec(a.seconds) && `${sec(a.seconds)} long`, a.aspect && `${a.aspect}`].filter(Boolean).join(', ');
-    out.detail = [prompt && `"${String(prompt).slice(0, VIDEO_PROMPT_MAX)}"`, bits && `Made ${bits}. Uses Puter credits.`, !bits && 'Uses Puter credits.'].filter(Boolean).join(' ');
+    const frames = name === 'generate_video' ? { first: Boolean(a.first_frame || a.last_frame), last: Boolean(a.first_frame && a.last_frame) } : { first: true, last: name === 'generate_transition' };
+    const parts = [prompt && `"${String(prompt).slice(0, VIDEO_PROMPT_MAX)}"`];
+    if (videoModel) {
+      const { model, fallback } = modelForFrames(videoModel, frames);
+      const shortest = !model.seconds ? null : Array.isArray(model.seconds) ? model.seconds[0] : model.seconds.min;
+      const want = Number.isFinite(num(a.seconds)) ? num(a.seconds) : name === 'generate_transition' ? shortest : undefined;
+      const len = fitSeconds(model, want);
+      const bits = [`with ${model.label}${fallback ? ' (the chosen model can\'t start from a picture)' : ''}`, len ? `${len}s long` : 'at the length the model picks', a.aspect].filter(Boolean).join(', ');
+      parts.push(`Made ${bits}. About ${formatCents(estimateCents(model, want))} in Puter credits.`);
+    } else parts.push('Uses Puter credits.');
+    out.detail = parts.filter(Boolean).join(' ');
   } else if (prompt) out.detail = `"${String(prompt).slice(0, 600)}"`;
   else if (name === 'add_voiceover' && a.text) out.detail = `"${String(a.text).slice(0, 600)}"`;
   return out;
@@ -286,13 +297,15 @@ export function clipDetails(project, clip, track) {
 
 /**
  * The state sent with each message: the date, the project brief (tracks,
- * clips with ids, selection, playhead) and how much media there is.
+ * clips with ids, selection, playhead), how much media there is, and the
+ * models chosen for video and pictures.
  */
-export function projectSnapshot(state, { now = new Date(), videoModel = '' } = {}) {
+export function projectSnapshot(state, { now = new Date(), videoModel = '', imageModel = '' } = {}) {
   const lines = [`Today is ${now.toLocaleDateString('en-CA')}.`, projectBrief(state)];
   const assets = Object.values(state.project.assets || {});
   const unused = assets.filter((a) => !state.project.tracks.some((t) => t.clips.some((c) => c.assetId === a.id)));
   lines.push(`Media library: ${assets.length} item${assets.length === 1 ? '' : 's'}${unused.length ? `, ${unused.length} not on this timeline` : ''} (list_media lists them).`);
   if (videoModel) lines.push(`Video is generated with ${videoModel}.`);
+  if (imageModel) lines.push(`Pictures are generated and edited with ${imageModel}.`);
   return lines.join('\n');
 }

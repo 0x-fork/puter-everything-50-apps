@@ -4,7 +4,7 @@
  * (puter.ai.txt2img with input_image), which draws it again in that style.
  * Only runs when the user presses Restyle; the call is injectable for tests.
  */
-import { imageBlobFrom, imageErrorMessage } from './imagegen.js';
+import { imageBlobFrom, imageErrorMessage, imageModelOptions } from './imagegen.js';
 
 export const RESTYLE_PROMPT_MAX = 600;
 /** Longest side of the picture sent. */
@@ -80,13 +80,13 @@ export function editPrompt(text) {
 
 /**
  * Change a picture as described: { blob }. picture is { blob, width, height }
- * as for restylePicture.
+ * as for restylePicture; model is an IMAGE_MODELS id (media/imagegen.js).
  */
-export async function editPicture(picture, instruction, { testMode = false, txt2img = defaultTxt2img, fetchFn } = {}) {
+export async function editPicture(picture, instruction, { model, testMode = false, txt2img = defaultTxt2img, fetchFn } = {}) {
   const text = editPrompt(instruction);
   if (!text) throw new Error('Describe the change first.');
   if (!picture?.blob) throw new Error('There is no picture to change here.');
-  const options = { ratio: { w: picture.width, h: picture.height }, input_image: await blobToDataUri(picture.blob), ...(testMode ? { test_mode: true } : {}) };
+  const options = { ratio: { w: picture.width, h: picture.height }, input_image: await blobToDataUri(picture.blob), ...imageModelOptions(model), ...(testMode ? { test_mode: true } : {}) };
   let result;
   try {
     result = await txt2img(text, options);
