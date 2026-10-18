@@ -3,7 +3,7 @@
  * Threads sit level with their anchors; the active thread's text is tinted more strongly. Every
  * change goes through the editor's transactions, so undo, saving and read-only rules apply.
  */
-import { el, isComposing, relativeTime, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
+import { el, listItem, isComposing, relativeTime, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { openMenu } from '../ui/menu.js';
 import { initialsFor } from '../engine/comments.js';
 import { revisionView, revisionAuthors, describeFormatChange } from '../engine/revisions.js';
@@ -66,9 +66,9 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       ...changes.map(c => ({ at: c.start, kind: c.move ? (c.type === 'ins' ? 'Moved (to)' : 'Moved (from)') : { ins: 'Inserted', del: 'Deleted', format: 'Formatted' }[c.type] || 'Changed', author: c.author, date: c.date, text: c.type === 'format' ? formatSummary(body, c) : (body.text.slice(c.start, Math.min(c.end, body.text.length)) + (c.end > body.text.length ? '\n' : '')).replace(/\n/g, ' ¶ ').trim(), select: () => { body.select(c.start, Math.min(c.end, body.text.length)); engine.focus(); engine.revealCaret?.(); onChange(); } })),
       ...notes.map(t => ({ at: t.start ?? Infinity, kind: t.root.done ? 'Comment (resolved)' : 'Comment', author: t.root.author, date: t.root.date, text: t.root.text, select: () => selectThread(t) })),
     ].sort((a, b) => a.at - b.at);
-    paneList.replaceChildren(...items.map(item => el('button.review-pane-item', { type: 'button', role: 'listitem', onclick: item.select },
+    paneList.replaceChildren(...items.map(item => listItem(el('button.review-pane-item', { type: 'button', onclick: item.select },
       el('span.review-pane-head', {}, el('strong', {}, item.author || 'Unknown author'), ' ', el('span', {}, item.kind)),
-      el('span.review-pane-text', {}, item.text.replace(/\ufffc/g, '').slice(0, 200) || '(formatting)'))));
+      el('span.review-pane-text', {}, item.text.replace(/\ufffc/g, '').slice(0, 200) || '(formatting)')))));
     if (!items.length) paneList.append(el('p.field-hint', {}, 'No comments or tracked changes.'));
   }
   /** What a formatting change did, e.g. "Bold, Font size 14 pt". */
@@ -204,8 +204,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       if (engine.session.path !== null) engine.editStory(null);
       const body = engine.session.body, [a, b] = body.range;
       // "All shown" leaves the changes of reviewers and kinds hidden by Show Markup alone.
-      const shown = scope === 'shown' ? shownChanges(body.revisions) : null;
-      const ok = run(() => shown ? shown.reverse().reduce((done, r) => body.resolveRevisions(accept, r.start, Math.min(r.end, body.text.length + 1)) || done, false) : scope === 'all' ? body.resolveRevisions(accept) : body.resolveRevisions(accept, a, b));
+      const ok = run(() => scope === 'shown' ? body.resolveRevisions(accept, undefined, undefined, { only: change => shownChanges([change]).length > 0 })
+        : scope === 'all' ? body.resolveRevisions(accept) : body.resolveRevisions(accept, a, b));
       if (!accept && body.formatRejectSkipped) error(new Error('Formatting changes cannot be rejected here yet, so they were kept. Accept them, or change the formatting back by hand.'));
       if (stopTracking) commands.toggleTracking(false);
       if (ok && moveNext) commands.goChange(1, { from: body.range[0] });

@@ -1,5 +1,5 @@
 import { zipSync, strToU8 } from 'fflate';
-import { decodeImages, validateImage, validateImageAssets } from './images.js';
+import { decodeImages, validateImage, validateImageAssets, nextDrawingId as nextStoryDrawingId } from './images.js';
 import { xmlAttributeText } from './text-limits.js';
 
 /**
@@ -43,7 +43,7 @@ export function freshPart(model, packageParts, folder, stem, extension) {
 }
 const images = model => model.paragraphs.flatMap(p => p.runs.filter(r => r.image).map(r => r.image));
 /** The next drawing id (wp:docPr id) for this story, as the model assigns it on insertion. */
-export const nextDrawingId = model => Math.max(0, ...images(model).map(image => image.id)) + 1;
+export const nextDrawingId = model => nextStoryDrawingId(model.paragraphs);
 export const nextDrawingOrder = model => Math.max(0, ...images(model).map(image => image.anchor?.order || 0)) + 1;
 
 /** The `wp:anchor` or `wp:inline` frame around a graphic. anchor: the editor's floating anchor object. */
@@ -54,6 +54,26 @@ export function drawingFrame({ id, name, descr = '', width, height, anchor = nul
   const position = (axis, from, offset, align) => `<wp:position${axis} relativeFrom="${from}">${align ? `<wp:align>${align}</wp:align>` : `<wp:posOffset>${Math.round(offset || 0)}</wp:posOffset>`}</wp:position${axis}>`;
   return `<w:drawing><wp:anchor distT="${anchor.distances?.T ?? 0}" distB="${anchor.distances?.B ?? 0}" distL="${anchor.distances?.L ?? 114300}" distR="${anchor.distances?.R ?? 114300}" simplePos="0" relativeHeight="${anchor.order ?? 1}" behindDoc="${anchor.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1">`
     + `<wp:simplePos x="0" y="0"/>${position('H', anchor.horizontal || 'column', anchor.x, anchor.xAlign)}${position('V', anchor.vertical || 'paragraph', anchor.y, anchor.yAlign)}${extent}<wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}${docPr}<wp:cNvGraphicFramePr/>${graphic}</wp:anchor></w:drawing>`;
+}
+
+const FRAME_WP = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing', FRAME_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+/**
+ * The shape's own frame with the rewritten shape in it: the extent and graphic come from `rebuilt`, while
+ * the frame keeps what the shape is rewritten without (alignment, alt text and title, the decorative mark,
+ * locks, wrapping distances and flags). A position axis the edit moved takes the rebuilt one.
+ */
+export function carriedFrame(original, rebuilt, moved) {
+  const parse = text => new DOMParser().parseFromString(text, 'application/xml');
+  const before = parse(original), after = parse(rebuilt);
+  const frame = doc => [...doc.documentElement.children].find(n => n.namespaceURI === FRAME_WP);
+  const keep = frame(before), next = frame(after);
+  // The original frame stays inline or floating as it was, whichever kind the rebuilt one is.
+  if (!keep || !next) return rebuilt;
+  const own = (parent, ns, name) => [...parent.children].find(n => n.namespaceURI === ns && n.localName === name);
+  const replace = (ns, name) => { const old = own(keep, ns, name), fresh = own(next, ns, name); if (old && fresh) old.replaceWith(before.importNode(fresh, true)); return !!(old && fresh); };
+  if (!replace(FRAME_WP, 'extent') || !replace(FRAME_A, 'graphic')) return rebuilt;
+  for (const [axis, name] of [['x', 'positionH'], ['y', 'positionV']]) if (moved.has(axis)) replace(FRAME_WP, name);
+  return new XMLSerializer().serializeToString(before);
 }
 
 /** Parts that give drawing text the document's styles and theme: its styles part and theme, when present. */
@@ -135,6 +155,8 @@ export async function placeDrawing(editor, fragment, { replace = null, revision 
     return true;
   });
   if (!ok) for (const id of Object.keys(assets)) { delete model.assets[id]; editor.images.get(id)?.close?.(); editor.images.delete(id); }
-  editor.focus(); editor.onSelection?.();
+  // A change made from a pane that keeps the keyboard (Format Picture) leaves focus there; otherwise the document has it.
+  if (!globalThis.document?.activeElement?.closest?.('[data-keeps-focus]')) editor.focus();
+  editor.onSelection?.();
   return ok;
 }

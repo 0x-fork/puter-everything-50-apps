@@ -1,4 +1,4 @@
-import { beforeAll, afterAll, it, expect } from 'vitest';
+import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { zipSync, strToU8 } from 'fflate';
 import { DocxPackage } from '../src/engine/docx.js';
@@ -36,4 +36,101 @@ it.each(['\\* roman', '\\* MERGEFORMAT'])('a general switch %s overrides SEQ hid
   const { model } = await sequenceDocument(['', `\\h ${switches}`, '']);
   updateSequenceFields(model);
   expect(model.text).toBe(`1\n${switches.includes('roman') ? 'ii' : '2'}\n3`);
+});
+
+describe('text typed where a hidden sequence field stands', () => {
+  it('stays the reader\'s text through saving, reopening and Update Fields', async () => {
+    const { createDocx: create, DocxPackage: Package, WRITING_STYLES: writing } = await import('../src/engine/docx.js');
+    const { TextDocument: Doc, paragraph: para } = await import('../src/engine/model.js');
+    const { insertBodyField } = await import('../src/engine/field-results.js');
+    const { updateSequenceFields } = await import('../src/engine/field-update.js');
+    const open = async bytes => { const p = await Package.open(bytes); return new Doc(p.paragraphs, p.pageSettings, p.numbering, p.styles, p.tables, p.assets); };
+    const blank = create([para()], undefined, undefined, undefined, [], {}, writing);
+    const pkg = await Package.open(new Uint8Array(await blank.export().arrayBuffer()));
+    const d = new Doc(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets);
+    d.replace('Chapter 2\nPic2');
+    d.select(9); insertBodyField(d, ' SEQ Figure \\r 0 \\h ', '');
+    const e = await open(new Uint8Array(await pkg.export(d.paragraphs, d.pageSettings, d.numbering, d.styles, d.tables, d.assets).arrayBuffer()));
+    e.select(9); e.replace(' and more');
+    updateSequenceFields(e);
+    expect(e.text).toBe('Chapter 2 and more\nPic2');
+  });
+});
+
+describe('sequence fields Update Fields cannot reproduce', () => {
+  it('keep their cached results, and still count', async () => {
+    const { createDocx: create, DocxPackage: Package, WRITING_STYLES: writing } = await import('../src/engine/docx.js');
+    const { TextDocument: Doc, paragraph: para } = await import('../src/engine/model.js');
+    const { insertBodyField } = await import('../src/engine/field-results.js');
+    const blank = create([para()], undefined, undefined, undefined, [], {}, writing);
+    const pkg = await Package.open(new Uint8Array(await blank.export().arrayBuffer()));
+    const d = new Doc(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets);
+    d.replace('a ');
+    insertBodyField(d, ' SEQ Figure \\s 1 ', '2-1'); d.replace(' b ');
+    insertBodyField(d, ' SEQ Item \\* DollarText ', 'one'); d.replace(' c ');
+    insertBodyField(d, ' SEQ Item \\# "00" ', '02'); d.replace(' d ');
+    insertBodyField(d, ' SEQ Item ', '9');
+    const issues = [];
+    updateSequenceFields(d, { onIssue: issue => issues.push(issue) });
+    expect(d.text).toBe('a 2-1 b one c 02 d 3');
+    expect(issues).toHaveLength(3);
+  });
+});
+
+it.each([['\\* Ordinal', '1st\n2nd\n3rd'], ['\\* CardText', 'one\ntwo\nthree'], ['\\* OrdText \\* FirstCap', 'First\nSecond\nThird'], ['\\* ROMAN \\* Lower', 'i\nii\niii'], ['\\* CardText \\* Upper', 'ONE\nTWO\nTHREE']])('numbers SEQ fields with %s', async (switches, text) => {
+  const { model } = await sequenceDocument([switches, switches, switches]);
+  const issues = [];
+  expect(updateSequenceFields(model, { onIssue: issue => issues.push(issue) })).toBe(3);
+  expect(model.text).toBe(text);
+  expect(issues).toEqual([]);
+});
+
+it('applies a case format to a cross-reference to a bookmark', async () => {
+  const { createDocx: create, DocxPackage: Package, WRITING_STYLES: writing } = await import('../src/engine/docx.js');
+  const { TextDocument: Doc, paragraph: para } = await import('../src/engine/model.js');
+  const { insertBodyField, fieldInstruction } = await import('../src/engine/field-results.js');
+  const blank = create([para()], undefined, undefined, undefined, [], {}, writing);
+  const pkg = await Package.open(new Uint8Array(await blank.export().arrayBuffer()));
+  const d = new Doc(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets);
+  d.replace('hello world. ');
+  d.select(0, 5); d.addBookmark('Greeting');
+  for (const format of ['Upper', 'Caps']) { d.select(d.text.length); insertBodyField(d, fieldInstruction({ name: 'REF', argument: 'Greeting', format }), 'hello'); d.replace(' '); }
+  d.select(d.text.length); insertBodyField(d, ' REF Greeting \\p \\* Upper ', 'above');
+  const issues = [];
+  updateSequenceFields(d, { onIssue: issue => issues.push(issue) });
+  expect(d.text).toBe('hello world. HELLO Hello ABOVE');
+  expect(issues).toEqual([]);
+});
+
+it('lists captions whose label has a space in a table of figures', async () => {
+  const { createDocx: create, DocxPackage: Package, WRITING_STYLES: writing } = await import('../src/engine/docx.js');
+  const { TextDocument: Doc, paragraph: para } = await import('../src/engine/model.js');
+  const { insertCaption } = await import('../src/engine/captions.js');
+  const { insertTableOfContents, figuresOptions } = await import('../src/engine/toc.js');
+  const blank = create([para()], undefined, undefined, undefined, [], {}, writing);
+  const pkg = await Package.open(new Uint8Array(await blank.export().arrayBuffer()));
+  const d = new Doc(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets);
+  d.replace('Chart\nEnd');
+  d.select(1); insertCaption(d, { label: 'My Chart', text: 'Revenue' });
+  d.select(d.text.length);
+  expect(insertTableOfContents(d, { title: null, options: figuresOptions({ label: 'My Chart' }) }).entries).toBe(1);
+});
+
+it('brings a cross-reference up to date in the same Update Fields as its caption', async () => {
+  const { createDocx: create, DocxPackage: Package, WRITING_STYLES: writing } = await import('../src/engine/docx.js');
+  const { TextDocument: Doc, paragraph: para } = await import('../src/engine/model.js');
+  const { insertCaption, insertCrossReference, referenceTargets } = await import('../src/engine/captions.js');
+  const blank = create([para()], undefined, undefined, undefined, [], {}, writing);
+  const pkg = await Package.open(new Uint8Array(await blank.export().arrayBuffer()));
+  const d = new Doc(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets);
+  d.replace('A\nB\nSee ');
+  d.select(0); insertCaption(d, { label: 'Figure', text: 'Alpha' });
+  d.select(d.text.indexOf('B')); insertCaption(d, { label: 'Figure', text: 'Beta' });
+  d.select(d.text.length); insertCrossReference(d, referenceTargets(d).captions.find(c => c.label.includes('Beta')), { show: 'label' });
+  expect(d.text).toContain('See Figure 2');
+  const at = d.text.indexOf('Figure 1: Alpha');
+  d.select(at, at + 'Figure 1: Alpha'.length + 1); d.replace('');
+  updateSequenceFields(d);
+  expect(d.text).toContain('Figure 1: Beta');
+  expect(d.text).toContain('See Figure 1');
 });

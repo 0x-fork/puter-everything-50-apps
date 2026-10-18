@@ -37,7 +37,8 @@ export function parseOutline(text) {
   for (const raw of String(text || '').split(/\r\n|[\n\r\v\f]/)) {
     if (!raw.trim()) continue;
     const indent = raw.match(/^[ \t]*/)[0].replace(/\t/g, '  ').length;
-    const bullet = raw.trim().match(/^[-*•]\s*/)?.[0].length || 0;
+    // A typed bullet is "•", or "-" or "*" followed by a space: "-5% churn" is text, not a bullet.
+    const bullet = raw.trim().match(/^(?:•\s*|[-*]\s+)/)?.[0].length || 0;
     const depth = Math.floor(indent / 2) + (bullet && !indent ? 0 : 0);
     const node = { text: raw.trim().slice(bullet).trim(), children: [] };
     if (!node.text) continue;
@@ -223,5 +224,8 @@ export function parseDiagramDescription(text) {
 
 /** The whole `w:drawing` of a diagram, inline, at the given drawing id. Size in EMU. */
 export function diagramDrawingXml({ layout, items, colors = 'blue', id, width = toEmu(6), height = toEmu(3.25), anchor = null }) {
-  return drawingFrame({ id, name: `Diagram ${id}`, descr: diagramDescription(layout, items, colors), width, height, anchor, graphic: diagramGraphic(layout, items, { width, height, colors }) });
+  // The outline is kept as the diagram's alt text, which is how Edit Diagram reads it back; alt text holds 2,000 characters.
+  const descr = diagramDescription(layout, items, colors);
+  if (descr.length > 2000) throw new Error(`This diagram has too much text: it can hold about ${2000 - descr.length + outlineText(items).length} characters of items. Shorten or remove some items.`);
+  return drawingFrame({ id, name: `Diagram ${id}`, descr, width, height, anchor, graphic: diagramGraphic(layout, items, { width, height, colors }) });
 }

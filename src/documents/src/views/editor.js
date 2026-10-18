@@ -308,7 +308,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const formatArea = createFormatArea({ editor: () => engine, pkg: () => pkg, error, refresh: () => chrome?.refresh(), host: () => host, unit: () => rulers?.unit ?? 'in',
     focus: () => engine?.focus(), openFind: options => openFind(options), finder: () => finder, pageSetup: () => pageSetup.click(), clipboard: { state: () => clipboardState() }, hasKeymap: () => !!keymap, keyClaimed: e => !!keymap?.commandFor(chordOf(e)) });
   // The format area's search covers the body, a selection, and headers and footers (advanced options).
-  const finder = findReplacePanel({ readOnly: () => !!pkg?.readOnly, matches: (text, options) => engine?.model.findMatches(text, options) || [], range: () => engine?.model.range || [0, 0], select: match => engine?.selectMatch(match), highlight: matches => engine?.setFindHighlights(matches), replace: (...args) => engine?.replaceMatches(...args), ...formatArea.findApi, close: () => { find.setAttribute('aria-expanded', 'false'); engine?.focus(); } });
+  const finder = findReplacePanel({ readOnly: () => !!pkg?.readOnly, matches: (text, options) => engine?.model.findMatches(text, options) || [],
+    // What the matches depend on: the document, any change to any of its stories, and the story being edited.
+    version: () => (engine ? [engine, engine.session.revision, engine.session.body.revision, engine.session.path, engine.model] : null), range: () => engine?.model.range || [0, 0], select: match => engine?.selectMatch(match), highlight: matches => engine?.setFindHighlights(matches), replace: (...args) => engine?.replaceMatches(...args), ...formatArea.findApi, close: () => { find.setAttribute('aria-expanded', 'false'); engine?.focus(); } });
   const openFind = (options = {}) => {
     if (!engine) return;
     engine.finishComposition();
@@ -1046,7 +1048,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     versionsAvailable: () => !!doc.path,
     // A version that could not be written says so, as the Version History pane does.
     saveVersionNow: () => doc.saveVersionNow().then(v => { if (!v) throw new Error('The version could not be saved.'); toast('Version saved'); }).catch(e => { if (!destroyed) error(e); }),
-    restoreVersion: version => restoreVersionFile(version),
+    // Replacing the file of a shared document would be undone by the room when it reopens; the room restores it instead.
+    restoreVersion: async version => { if (!collab.live) return restoreVersionFile(version); if (await versionHistory.restore(version)) backstage.close({ focus: true }); },
     exportAs: kind => editorCommands.exportAs(kind),
     save: () => save(), download, saveTemplate: cloud ? saveTemplate : null, savePdf: () => savePdf(), rename: cloud ? () => { title.focus(); title.select(); } : null,
     saveStatus: () => status.getAttribute('aria-label'),
@@ -1243,7 +1246,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     editingAreaLabel.hidden = pkg.readOnly || !areas.length;
     const selectedArea = engine.session.path === null ? '' : JSON.stringify([engine.session.path, engine.storyPage]);
     if (editingArea.value !== selectedArea) editingArea.value = selectedArea;
-    outline.disabled = false; outlinePanel.refresh(engine.outline, engine.model.range[0]);
+    // The headings (each placed on its page) are worked out only while the pane shows them; opening it refreshes them.
+    outline.disabled = false; if (!outlinePanel.node.hidden) outlinePanel.refresh(engine.outline, engine.model.range[0]);
     chrome.setContext(pictures.drawingContext(engine) || (engineApi()?.selectedShape(engine) ? 'shape' : engine.model.selectedImage ? 'image' : engine.model.tableContext ? 'table' : 'paragraph'), [...(['header', 'footer'].includes(references.activeStoryKind()) ? ['headerFooter'] : []), ...(editorCommands.extraContexts?.() || [])]);
     mailings.refresh(); pictures.refresh();
     views.refresh();

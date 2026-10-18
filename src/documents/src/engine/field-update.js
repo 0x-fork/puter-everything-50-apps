@@ -6,7 +6,7 @@ import { bookmarkEntries } from './bookmarks.js';
 import { fieldInstructionTokens } from './docx-page-fields.js';
 import { formatPageNumber } from './page-numbering.js';
 import { formulaResult } from './table-formula.js';
-import { fieldResultPlan } from './field-results.js';
+import { fieldResultPlan, applyGeneralFormat } from './field-results.js';
 import { noteKindOf } from './footnotes.js';
 
 /** The first note reference mark within [start, end]: { kind, id }. */
@@ -25,6 +25,9 @@ function noteMarkIn(paragraphs, start, end) {
 }
 
 const FORMATS = { ARABIC: 'decimal', ROMAN: 'upperRoman', roman: 'lowerRoman', ALPHABETIC: 'upperLetter', alphabetic: 'lowerLetter' };
+// Case conversions of the general formatting switch (§17.16.4.3), applied to the result's text in order.
+const CASES = /^(Upper|Lower|Caps|FirstCap)$/i;
+const withCases = (text, cases) => cases.reduce(applyGeneralFormat, text);
 
 /** Parse a SEQ instruction; a general formatting switch overrides result hiding. */
 export function sequenceInstruction(instruction) {
@@ -32,16 +35,26 @@ export function sequenceInstruction(instruction) {
   try { tokens = fieldInstructionTokens(instruction).slice(1); } catch { return null; }
   const id = tokens[0];
   if (!id || id.startsWith('\\')) return null;
-  const result = { id, format: 'decimal', repeat: false, next: true, reset: null, hidden: false };
+  // `supported` is false for what this evaluator cannot reproduce (chapter numbering, number pictures, number
+  // formats such as CardText or Ordinal): such a field keeps its cached result, though it still counts.
+  const result = { id, format: 'decimal', words: null, cases: [], repeat: false, next: true, reset: null, hidden: false, supported: true };
   let generalFormatting = false;
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i];
-    if (t === '\\*' && tokens[i + 1]) { generalFormatting = true; const f = FORMATS[tokens[i + 1]] ?? FORMATS[tokens[i + 1].toUpperCase()]; if (f) result.format = f; i++; }
+    if (t === '\\*' && tokens[i + 1]) {
+      generalFormatting = true;
+      const name = tokens[i + 1], f = FORMATS[name] ?? FORMATS[name.toUpperCase()];
+      if (f) { result.format = f; result.words = null; }
+      else if (/^(Ordinal|CardText|OrdText)$/i.test(name)) result.words = name;
+      else if (CASES.test(name)) result.cases.push(name);
+      else if (!/^(MERGEFORMAT|CHARFORMAT)$/i.test(name)) result.supported = false;
+      i++;
+    }
     else if (t === '\\c') { result.repeat = true; result.next = false; }
     else if (t === '\\n') result.next = true;
     else if (t === '\\h') result.hidden = true;
     else if (t === '\\r' && /^\d+$/.test(tokens[i + 1] || '')) { result.reset = Number(tokens[i + 1]); i++; }
-    else if (t === '\\s') i++; // Chapter numbering is not evaluated.
+    else { result.supported = false; if (/^\\[s#]$/.test(t)) i++; }
   }
   result.hidden &&= !generalFormatting;
   return result;
@@ -68,14 +81,17 @@ export function fieldUpdatePlan(model, { onIssue = () => {}, notes = null } = {}
       let n = counters.get(seq.id) ?? 0;
       if (seq.reset !== null) n = seq.reset; else if (seq.next) n += 1;
       counters.set(seq.id, n);
-      value = seq.hidden ? '' : formatPageNumber(Math.max(0, n), seq.format);
+      if (!seq.supported) { onIssue({ id: range.field.id, message: 'A SEQ field with chapter numbering, a number picture or this number format keeps its cached result.' }); continue; }
+      value = seq.hidden ? '' : withCases(seq.words ? applyGeneralFormat(String(Math.max(0, n)), seq.words) : formatPageNumber(Math.max(0, n), seq.format), seq.cases);
     } else if (type === 'REF') {
       let tokens; try { tokens = fieldInstructionTokens(range.field.instruction).slice(1); } catch { continue; }
       let relative = false, supported = true;
+      const cases = [];
       for (let i = 1; i < tokens.length; i++) {
         if (tokens[i] === '\\p') relative = true;
         else if (tokens[i] === '\\h') continue; // Existing hyperlink envelopes remain intact.
         else if (tokens[i] === '\\*' && tokens[i + 1]?.toUpperCase() === 'MERGEFORMAT') i++;
+        else if (tokens[i] === '\\*' && CASES.test(tokens[i + 1] || '')) cases.push(tokens[++i]);
         else { supported = false; break; }
       }
       const retain = reason => onIssue({ id: range.field.id, message: `${reason}; its cached result is retained.` });
@@ -85,10 +101,11 @@ export function fieldUpdatePlan(model, { onIssue = () => {}, notes = null } = {}
       if (!bookmark) value = 'Error! Reference source not found.';
       else if (bookmark.start <= range.start && range.start < bookmark.end || range.start < bookmark.start && bookmark.start < range.end) {
         retain('A REF within its source bookmark cannot be refreshed yet'); continue;
-      } else if (relative) value = range.end <= bookmark.start ? 'below' : 'above';
+      } else if (relative) value = withCases(range.end <= bookmark.start ? 'below' : 'above', cases);
       else {
         value = text.slice(bookmark.start, Math.min(bookmark.end, text.length));
         if (bookmark.columnRange || /[\n￼]/.test(value)) { retain('A REF with structural or object content cannot be refreshed yet'); continue; }
+        value = withCases(value, cases);
       }
     } else if (type === '=') value = formulaResult(model, range.field.instruction, range.cellId || null);
     else if (type === 'NOTEREF' && notes) {
@@ -113,15 +130,24 @@ export function fieldUpdatePlan(model, { onIssue = () => {}, notes = null } = {}
 
 /** Apply the plan inside one editor transaction; returns the number of fields updated. */
 export function updateSequenceFields(model, options) {
-  const changes = fieldUpdatePlan(model, options);
   const tracking = model.trackChanges; model.trackChanges = false;
+  const updated = new Set();
   try {
-    for (const { range, text } of [...changes].reverse()) {
-      model.select(range.start, range.end);
-      model.typingFormat = {}; model.typingStyle = null; model.typingDirectCleared = false;
-      model.replace(text, { checkpoint: false });
+    // A cross-reference shows the text of what it refers to, which a SEQ field in this same pass may change:
+    // plan again after applying, until nothing changes (a few passes; references do not refer to references).
+    for (let pass = 0; pass < 3; pass++) {
+      let applied = 0;
+      for (const { range, text } of [...fieldUpdatePlan(model, pass ? { ...options, onIssue: () => {} } : options)].reverse()) {
+        // A result never spans a paragraph mark: replacing one that does would merge paragraphs.
+        if (model.text.slice(range.start, range.end).includes('\n')) continue;
+        model.select(range.start, range.end);
+        model.typingFormat = {}; model.typingStyle = null; model.typingDirectCleared = false;
+        model.replace(text, { checkpoint: false });
+        updated.add(range.field.id); applied++;
+      }
+      if (!applied) break;
     }
   } finally { model.trackChanges = tracking; }
-  if (changes.length) model.didChange();
-  return changes.length;
+  if (updated.size) model.didChange();
+  return updated.size;
 }

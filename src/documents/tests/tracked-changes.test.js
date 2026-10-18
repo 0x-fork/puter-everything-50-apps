@@ -2,9 +2,12 @@ import { beforeAll, afterAll, it, expect, describe, vi } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 import { DocxPackage, createDocx } from '../src/engine/docx.js';
-import { TextDocument, paragraph } from '../src/engine/model.js';
+import { TextDocument, paragraph, boundaries } from '../src/engine/model.js';
 import { revisionRanges, revisionDisplay } from '../src/engine/revisions.js';
 import { pasteFragment } from '../src/engine/clipboard-fragment.js';
+import { insertBodyField } from '../src/engine/field-results.js';
+import { bodyFieldRanges } from '../src/engine/body-fields.js';
+import { insertCrossReference, referenceTargets } from '../src/engine/captions.js';
 
 let dom;
 beforeAll(() => { dom = new JSDOM(); globalThis.DOMParser = dom.window.DOMParser; globalThis.XMLSerializer = dom.window.XMLSerializer; });
@@ -225,4 +228,115 @@ describe('tracked change edge cases', () => {
     model.trackChanges = true;
     expect((await open(await save(pkg, model))).pkg.trackRevisions).toBe(true);
   });
+});
+
+describe('a tracked edit that joins two characters into one', () => {
+  it('leaves the caret after the whole character, so Delete removes only the next one', () => {
+    const doc = new TextDocument([paragraph('Intro paragraph.'), paragraph('Second \u{1F1F8}tail')]);
+    doc.trackChanges = true; doc.revisionAuthor = 'Me';
+    const at = doc.text.indexOf('\u{1F1F8}');
+    doc.select(at); doc.replace('\u{1F1FA}'); // completes the flag 🇺🇸
+    expect(doc.selection.focus).toBe(at + 4);
+    expect(boundaries(doc.text)).toContain(doc.selection.focus);
+    doc.delete(1);
+    expect(revisionRanges(doc.paragraphs).filter(r => r.type === 'del').map(r => doc.text.slice(r.start, r.end))).toEqual(['t']);
+  });
+  it('after Accept joins two halves, Delete does not reach back to the document start', () => {
+    const doc = new TextDocument([paragraph('First paragraph.'), paragraph('Flag \u{1F1FA}X\u{1F1F8} end')]);
+    doc.trackChanges = true; doc.revisionAuthor = 'Reviewer';
+    const x = doc.text.indexOf('X'); doc.select(x, x + 1); doc.replace('');
+    doc.trackChanges = false; doc.select(x);
+    doc.resolveRevisions(true, x, x + 1);
+    expect(boundaries(doc.text)).toContain(doc.selection.focus);
+    doc.delete(1);
+    expect(doc.text).toBe('First paragraph.\nFlag \u{1F1FA}\u{1F1F8}end');
+  });
+  it('a caret left inside a character moves after it before Delete', () => {
+    const doc = new TextDocument([paragraph('Keep this.'), paragraph('a\u{1F1FA}\u{1F1F8}b')]);
+    const at = doc.text.indexOf('\u{1F1FA}') + 2;
+    doc.selection = { anchor: at, focus: at };
+    doc.delete(-1);
+    expect(doc.text).toBe('Keep this.\nab');
+  });
+});
+
+describe('fields inserted over a selection with Track Changes on', () => {
+  it('Insert Field wraps exactly the new result, after the struck-out selection', () => {
+    const pkg = createDocx([paragraph('Due OLD today')]);
+    const doc = new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables);
+    doc.trackChanges = true; doc.revisionAuthor = 'Me';
+    doc.select(4, 7); insertBodyField(doc, ' DATE \\@ "yyyy" ', '2026');
+    const range = bodyFieldRanges(doc.paragraphs)[0];
+    expect(doc.text.slice(range.start, range.end)).toBe('2026');
+    expect(revisionRanges(doc.paragraphs).map(r => [r.type, doc.text.slice(r.start, r.end)])).toEqual([['del', 'OLD'], ['ins', '2026']]);
+  });
+  it('a cross-reference marks the text it replaces as deleted', () => {
+    const pkg = createDocx([paragraph('Heading target'), paragraph('See OLD here')]);
+    const doc = new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables);
+    doc.select(0, 14); doc.addBookmark('Target');
+    doc.trackChanges = true; doc.revisionAuthor = 'Me';
+    doc.select(19, 22);
+    insertCrossReference(doc, referenceTargets(doc).bookmarks[0], { show: 'text' });
+    expect(revisionRanges(doc.paragraphs).map(r => [r.type, doc.text.slice(r.start, r.end)])).toEqual([['del', 'OLD'], ['ins', 'Heading target']]);
+    const range = bodyFieldRanges(doc.paragraphs)[0];
+    expect(doc.text.slice(range.start, range.end)).toBe('Heading target');
+  });
+});
+
+
+describe('Replace over tracked text with Track Changes off', () => {
+  it('writes the new text as plain text, not as part of the found text\'s insertion or deletion', async () => {
+    const { pkg, model } = await open(trackedDocx({ track: false }));
+    expect(model.trackChanges).toBe(false);
+    expect(model.replaceMatches('removed', 'gone', {}, true)).toBe(1);
+    expect(model.replaceMatches('added', 'joined', {}, true)).toBe(1);
+    // The rest of the original changes stay (the deleted space before "removed", the inserted paragraph mark).
+    expect(summary(model).map(([, , text]) => text).join('|')).not.toMatch(/gone|joined/);
+    const xml = strFromU8(unzipSync(await save(pkg, model))['word/document.xml']);
+    const parsed = new DOMParser().parseFromString(xml, 'application/xml');
+    expect(['ins', 'del'].flatMap(tag => [...parsed.getElementsByTagNameNS(W, tag)]).map(e => e.textContent).join('|')).not.toMatch(/gone|joined/);
+    expect(model.text).toContain('Keep joined gone end.');
+  });
+});
+
+describe('resolving the changes of one paragraph', () => {
+  const setup = async () => {
+    const { StorySession } = await import('../src/engine/story-session.js');
+    const pkg = createDocx([paragraph('Hello world'), paragraph('Hi')]);
+    const model = new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets, { trackChanges: true });
+    const session = new StorySession(model, null);
+    model.revisionAuthor = 'Other';
+    session.run(m => { m.select(12, 14); m.setRunFormat({ bold: true }); });
+    model.revisionAuthor = 'Me';
+    session.run(m => { m.select(2); m.setParagraphFormat({ alignment: 'center' }); });
+    session.run(m => { m.select(5); m.replace(' big'); });
+    return { model, session };
+  };
+  const others = model => model.revisions.filter(r => r.author === 'Other').map(r => [r.type, model.text.slice(r.start, r.end)]);
+  it('leaves another reviewer\'s change in the next paragraph when its paragraph is rejected', async () => {
+    const { model, session } = await setup();
+    session.run(m => m.resolveRevisions(false, 0, model.text.indexOf('\n') + 1));
+    expect(model.text).toBe('Hello world\nHi');
+    expect(others(model)).toEqual([['format', 'Hi']]);
+    expect(model.paragraphs[1].runs.some(r => r.bold)).toBe(true);
+  });
+  it('leaves it when Reject is pressed with the caret inside an insertion', async () => {
+    const { model, session } = await setup();
+    session.run(m => m.resolveRevisions(false, 7, 7));
+    expect(model.paragraphs[1].runs.some(r => r.bold)).toBe(true);
+    expect(others(model)).toEqual([['format', 'Hi']]);
+  });
+});
+
+it.each([true, false])('resolves only the changes Show Markup shows (accept=%s), leaving a hidden reviewer\'s', async accept => {
+  const { StorySession } = await import('../src/engine/story-session.js');
+  const pkg = createDocx([paragraph('Hello world'), paragraph('Second')]);
+  const body = new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets, { trackChanges: true });
+  const session = new StorySession(body, null);
+  body.revisionAuthor = 'Bea';
+  session.run(m => { m.select(5); m.replace(' big'); });
+  body.revisionAuthor = 'Al';
+  session.run(m => { m.select(2); m.setParagraphFormat({ alignment: 'center' }); });
+  session.run(m => m.resolveRevisions(accept, undefined, undefined, { only: change => change.author !== 'Bea' }));
+  expect(body.revisions.map(r => [r.type, r.author, body.text.slice(r.start, r.end)])).toEqual([['ins', 'Bea', ' big']]);
 });

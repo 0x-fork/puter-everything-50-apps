@@ -57,6 +57,15 @@ export class StorySession {
   run(action, validate = () => {}, { record = true } = {}) {
     const before = this.capture(), model = this.model;
     model.formatTrackingSuppressed = false;
+    // The session keeps `before` for undo, and the model's own undo entries are dropped when the command
+    // ends. Commands still push one (some mark or remove their own), but it need not copy the document:
+    // that copy, of the whole document, was made and thrown away on every keystroke.
+    const ownCheckpoint = Object.hasOwn(model, 'checkpoint') ? model.checkpoint : null;
+    model.checkpoint = function () {
+      this.history.push({ selection: { ...this.selection } });
+      if (this.history.length > 100) this.history.shift();
+      this.future = [];
+    };
     try {
       const result = action(model);
       if (this.path !== before.path) throw new Error('A text command cannot switch page stories.');
@@ -77,6 +86,8 @@ export class StorySession {
     } catch (error) {
       this.restore(before); this.model.revision = before.revision;
       throw error;
+    } finally {
+      if (ownCheckpoint) model.checkpoint = ownCheckpoint; else delete model.checkpoint;
     }
   }
   travel(from, to, validate) {
@@ -105,9 +116,11 @@ export class StorySession {
     if (!this.definition) return this.definition;
     if (this.sectionRevision !== this.body.revision) {
       const source = this.definition.sections;
-      if (source.length === 1) this.sectionDefinition = this.definition;
+      // A file with one section keeps its definition only while the body has one too: a section break
+      // inserted since makes another section, which takes its headers, footers and notes from the file's.
+      if (source.length === 1 && !this.body.paragraphs?.some(p => p.sectionEnd)) this.sectionDefinition = this.definition;
       else {
-        const indices = this.body.paragraphs.filter(p => p.sectionEnd).map((p, i) => p.sectionSourceIndex ?? i);
+        const indices = this.body.paragraphs.filter(p => p.sectionEnd).map((p, i) => Math.min(p.sectionSourceIndex ?? i, source.length - 1));
         indices.push(source.length - 1);
         this.sectionDefinition = indices.length === source.length && indices.every((index, i) => index === i)
           ? this.definition : { ...this.definition, sections: indices.map(index => source[index]) };

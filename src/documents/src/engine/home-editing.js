@@ -51,7 +51,8 @@ export function convertCase(text, mode, sentenceStart = true) {
       start = false;
     }
     if (mode === 'sentence' && /[.!?\n\f\v]/.test(ch)) start = true;
-    wordStart = !(letter || /[\p{N}'’]/u.test(ch));
+    // A combining mark (a decomposed accent) belongs to the letter before it, as digits and apostrophes stay in a word.
+    wordStart = !(letter || /[\p{N}\p{M}'’]/u.test(ch));
     return out;
   }).join('');
 }
@@ -68,7 +69,7 @@ function sentenceStartsAt(text, position) {
  */
 export function changeCase(model, mode) {
   let [start, end] = model.range;
-  const text = model.text;
+  const text = model.text, caretOnly = start === end;
   if (start === end) {
     const word = wordAt(text, start);
     if (!word) return false;
@@ -84,7 +85,7 @@ export function changeCase(model, mode) {
       const a = Math.max(start, at), b = Math.min(end, at + run.text.length);
       if (a < b && !objectRun(run)) {
         const next = run.text.slice(0, a - at) + converted.slice(a - start, b - start) + run.text.slice(b - at);
-        if (next !== run.text) changes.push([p, index, next]);
+        if (next !== run.text) changes.push([p, index, next, a, b]);
       }
       at += run.text.length;
     });
@@ -92,6 +93,18 @@ export function changeCase(model, mode) {
   }
   if (!changes.length) return false;
   model.checkpoint();
+  if (model.trackChanges) {
+    // A tracked case change is the old text deleted and the new inserted, run by run with each run's own
+    // formatting; from the last, so the positions of those before it still hold.
+    let added = 0;
+    for (const [, , , a, b] of changes.reverse()) {
+      model.select(a, b);
+      model.replace(converted.slice(a - start, b - start), { checkpoint: false });
+      added += b - a;
+    }
+    model.select(caretOnly ? end + added : start, end + added);
+    return true;
+  }
   for (const [p, index, next] of changes) p.runs[index] = { ...p.runs[index], text: next };
   const { anchor, focus } = model.selection;
   model.didChange();
@@ -187,6 +200,17 @@ function sortKey(text, type) {
   return value;
 }
 
+/** Where each range (bookmark, comment or editing permission) starting or ending in these paragraphs has its edges. */
+function rangeEdges(paragraphs) {
+  const edges = new Map();
+  for (const p of paragraphs) for (const marker of p.bookmarks || []) {
+    if (marker.edge !== 'start' && marker.edge !== 'end') continue;
+    if (!edges.has(marker.id)) edges.set(marker.id, {});
+    edges.get(marker.id)[marker.edge] = p;
+  }
+  return [...edges.values()];
+}
+
 /**
  * Sort the selected paragraphs by their text. Paragraphs
  * without a key (empty, or no number/date for those types) go first when ascending.
@@ -196,10 +220,14 @@ export function sortParagraphs(model, { type = 'text', descending = false, caseS
   if (!SORT_TYPES.includes(type)) throw new Error('Choose Text, Number or Date.');
   const targets = model.selectedParagraphs;
   if (targets.length < 2) throw new Error('Select two or more paragraphs to sort.');
+  // A reorder is not a change Track Changes can show here; done untracked, reviewers would never see it.
+  if (model.trackChanges) throw new Error('Sorting cannot be tracked. Turn off Track Changes to sort these paragraphs.');
   if (targets.some(p => p.cellId)) throw new Error('Sorting table rows is not supported yet. Select paragraphs outside a table.');
   if (targets.some(p => p.sectionEnd || p.blockControls?.length || p.frame || p.fieldMarkers?.length)) throw new Error('These paragraphs contain a section break, content control, frame or field and cannot be reordered.');
   const first = model.paragraphs.indexOf(targets[0]);
   if (targets.some((p, i) => model.paragraphs[first + i] !== p)) throw new Error('Select adjacent paragraphs to sort.');
+  // Reordered, a range from one of them to another could end before it starts: the document could not be saved.
+  if (rangeEdges(targets).some(({ start, end }) => start && end && start !== end)) throw new Error('A bookmark or comment runs from one of these paragraphs into another, so they cannot be sorted.');
   // The final paragraph of a document sorts like any other; a trailing empty paragraph stays last.
   const collator = new Intl.Collator(undefined, { sensitivity: caseSensitive ? 'case' : 'base', numeric: true });
   const keyed = targets.map((p, index) => ({ p, index, key: sortKey(paragraphText(p), type) }));
@@ -231,6 +259,8 @@ export function moveParagraphs(model, direction) {
   if (!neighbour || !targets.every(movable) || !movable(neighbour)) return false;
   // The document's final paragraph mark stays last: moving into the last place keeps it.
   if (direction > 0 && last + 1 === model.paragraphs.length - 1 && !paragraphText(neighbour).length) return false;
+  // A range between the moved paragraphs and the one they pass would end before it starts once they swap.
+  if (rangeEdges([...targets, neighbour]).some(({ start, end }) => start && end && (start === neighbour) !== (end === neighbour))) return false;
   const [anchor, focus] = [model.selection.anchor, model.selection.focus];
   const shift = (paragraphText(neighbour).length + 1) * (direction < 0 ? -1 : 1);
   model.checkpoint();

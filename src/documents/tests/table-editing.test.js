@@ -1,6 +1,7 @@
 import { beforeAll, afterAll, it, expect, describe } from 'vitest';
 import { JSDOM } from 'jsdom';
-import { unzipSync, strFromU8 } from 'fflate';
+import { unzipSync, zipSync, strToU8, strFromU8 } from 'fflate';
+import { readFileSync } from 'node:fs';
 import { DocxPackage, createDocx, WRITING_STYLES } from '../src/engine/docx.js';
 import { TextDocument, paragraph, paragraphText } from '../src/engine/model.js';
 import { tableCells, verticalMerges, rowGrid, documentBlocks } from '../src/engine/tables.js';
@@ -352,4 +353,57 @@ describe('table commands', () => {
     expect(shape(doc)[0]).toBe('a0:2 a1 a2');
     valid(doc);
   });
+});
+
+describe('cells holding a nested table', () => {
+  const withNested = () => {
+    const { pkg, doc } = tableDocument(2, 2);
+    const outer = doc.tables[0];
+    doc.selectCell(outer.rows[0].cells[0].id); doc.select(doc.selection.focus);
+    doc.insertTable(2, 2, 3000);
+    return { pkg, doc, outer };
+  };
+  it('clears them, nested table included, with the Delete key', () => {
+    const { doc, outer } = withNested();
+    doc.setCellBlock({ tableId: outer.id, top: 0, bottom: 0, left: 0, right: 2 });
+    expect(T.clearCells(doc)).toBe(true);
+    expect(doc.tables).toHaveLength(1);
+    expect(() => documentBlocks(doc.paragraphs, doc.tables)).not.toThrow();
+    expect(doc.paragraphs.filter(p => p.cellId).map(paragraphText)).toEqual(['', '', 'b0', 'b1']);
+  });
+  it('deletes them, shifting the cells below up', () => {
+    const { pkg, doc, outer } = withNested();
+    doc.setCellBlock({ tableId: outer.id, top: 0, bottom: 0, left: 0, right: 2 });
+    expect(T.deleteCells(doc, { shift: 'up' })).toBe(true);
+    expect(doc.tables).toHaveLength(1);
+    expect(doc.paragraphs.filter(p => p.cellId).map(paragraphText)).toEqual(['b0', 'b1', '', '']);
+    expect(() => pkg.export(doc.paragraphs, doc.pageSettings, doc.numbering, doc.styles, doc.tables)).not.toThrow();
+  });
+});
+
+it('gives an inserted row no copy of its neighbour\'s paragraph identifier', async () => {
+  // Word writes w14:paraId on rows; an inserted row copies the row it was inserted from.
+  const parts = unzipSync(readFileSync('public/fixtures/table-headers.docx'));
+  let n = 0x100;
+  parts['word/document.xml'] = strToU8(strFromU8(parts['word/document.xml']).replace(/<w:tr>/g, () => `<w:tr w14:paraId="${(n++).toString(16).toUpperCase().padStart(8, '0')}" w14:textId="77777777">`));
+  const pkg = await DocxPackage.open(zipSync(parts)), doc = open(pkg);
+  doc.setCellBlock({ tableId: doc.tables[0].id, top: 0, bottom: 0, left: 1, right: 3 });
+  expect(T.insertRows(doc)).toBe(true);
+  const xml = strFromU8(unzipSync(new Uint8Array(await pkg.export(doc.paragraphs, doc.pageSettings, doc.numbering, doc.styles, doc.tables).arrayBuffer()))['word/document.xml']);
+  const ids = [...xml.matchAll(/<w:tr [^>]*w14:paraId="([0-9A-F]+)"/g)].map(m => m[1]);
+  expect(ids.length).toBe(n - 0x100);
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+it.each(['row', 'column', 'table'])('deletes a comment anchored in a deleted %s, keeping the others', kind => {
+  const { doc } = tableDocument(2, 2, ['Before']);
+  const keep = doc.text.indexOf('Before');
+  doc.select(keep, keep + 6); doc.addComment({ author: 'C', text: 'about before' });
+  const at = doc.text.indexOf('b1');
+  doc.select(at, at + 2); const id = doc.addComment({ author: 'C', text: 'about b1' });
+  doc.replyToComment(id, { author: 'D', text: 'reply' });
+  doc.select(at + 1);
+  expect(doc.deleteTablePart(kind)).toBe(true);
+  expect(doc.comments.map(c => c.text)).toEqual(['about before']);
+  expect(doc.commentList.every(c => c.start !== null)).toBe(true);
 });

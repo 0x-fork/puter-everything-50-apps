@@ -2197,7 +2197,10 @@ export class DocxPackage {
       });
     }
     if (this.hasPlainTextControls) blocks = documentBlocks(paragraphs, tables);
-    if (!section && (!this.originals.size || JSON.stringify(withoutHyphenation(pageSettings)) !== JSON.stringify(withoutHyphenation(this.initialPageSettings)))) { section = make('sectPr'); body.append(section); }
+    // A body without its final section properties gets them when there is something to record there: changed
+    // page settings, or a header, footer, different first page or page numbering added since it was opened.
+    if (!section && (!this.originals.size || JSON.stringify(withoutHyphenation(pageSettings)) !== JSON.stringify(withoutHyphenation(this.initialPageSettings))
+      || this.createdStories.length || this.titlePages.size || this.pageNumberings.size)) { section = make('sectPr'); body.append(section); }
     // Sections keep their source properties; a new section break copies those of the section it splits.
     const sourceSections = new Map(this.paragraphs.filter(p => p.sectionEnd).map(p => [p.sectionProperties, p.sectionEnd]));
     const finalSource = { xml: section && this.originals.size ? serializeFragment(section) : null, settings: this.initialPageSettings };
@@ -2224,6 +2227,18 @@ export class DocxPackage {
     if (this.pageNumberings.size) writePageNumbering(outputSections, this.pageNumberings, sectionOrder);
     // These are cached renderer hints, not author-inserted breaks; edits invalidate them.
     for (const hint of [...doc.getElementsByTagNameNS(W, 'lastRenderedPageBreak')]) hint.remove();
+    // A comment's reference can sit in an unchanged paragraph away from its range, whose source XML is reused:
+    // drop references to comments deleted since opening (and the run that only carried one).
+    if (comments) {
+      const kept = new Set(comments.map(c => c.id)), deleted = new Set(JSON.parse(this.initialComments ?? '[]').map(c => c.id).filter(id => !kept.has(id)));
+      if (deleted.size) for (const reference of [...doc.getElementsByTagNameNS(W, 'commentReference')]) {
+        let id; try { id = BigInt(reference.getAttributeNS(W, 'id')).toString(); } catch { continue; }
+        if (!deleted.has(id)) continue;
+        const run = reference.parentNode;
+        reference.remove();
+        if (run?.namespaceURI === W && run.localName === 'r' && ![...run.children].some(n => !(n.namespaceURI === W && n.localName === 'rPr'))) run.remove();
+      }
+    }
     bindImageNamespaces(doc);
     bindHyperlinkNamespaces(doc);
     // Retained/relative drawing fragments can carry local extension aliases too.

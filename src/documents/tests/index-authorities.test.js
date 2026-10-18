@@ -8,6 +8,8 @@ import { layoutDocument } from '../src/engine/layout.js';
 import { pageGeometry } from '../src/engine/page-settings.js';
 import { pageLookup } from '../src/engine/page-lookup.js';
 import { parseEntry, entryInstruction, markEntry, markAllEntries, writeIndex, indexFields, parseIndexInstruction, indexInstruction } from '../src/engine/index-entries.js';
+import { insertCaption } from '../src/engine/captions.js';
+import { updateSequenceFields } from '../src/engine/field-update.js';
 import { parseAuthority, markAuthority, markAllAuthorities, writeTableOfAuthorities, tableFields, authorities } from '../src/engine/authorities.js';
 
 let dom;
@@ -25,6 +27,45 @@ async function setup(text) {
 }
 
 describe('index entries and generated indexes', () => {
+  it('marks all matches as one change, with the caret at the first', async () => {
+    const { d } = await setup(Array.from({ length: 300 }, (_, i) => `Paragraph ${i} mentions alpha and Roe v. Wade here.`).join('\n'));
+    let checkpoints = 0, changes = 0;
+    const checkpoint = d.checkpoint.bind(d), didChange = d.didChange.bind(d);
+    d.checkpoint = (...args) => { checkpoints++; return checkpoint(...args); };
+    d.didChange = (...args) => { changes++; return didChange(...args); };
+    expect(markAllEntries(d, 'alpha', { main: 'alpha' })).toBe(300);
+    expect([checkpoints, changes]).toEqual([1, 1]);
+    expect(d.range).toEqual([d.text.indexOf('alpha') + 5, d.text.indexOf('alpha') + 5]);
+    expect(markAllAuthorities(d, { long: 'Roe v. Wade, 410 U.S. 113 (1973)', short: 'Roe v. Wade', category: 1 })).toBe(300);
+    expect([checkpoints, changes]).toEqual([2, 2]);
+    const marks = bodyFieldRanges(d.paragraphs).filter(r => r.field.type === 'TA');
+    expect(marks.filter(r => / \\l /.test(r.field.instruction)).map(r => r.start)).toEqual([d.text.indexOf('Roe v. Wade') + 'Roe v. Wade'.length]);
+    // Marking again finds every match already marked.
+    expect(markAllEntries(d, 'alpha', { main: 'alpha' })).toBe(0);
+    expect(checkpoints).toBe(2);
+  });
+
+  it('marks an entry at the start of a field beside that field, so its numbering still updates', async () => {
+    const { pkg, d } = await setup('A\nB\nC');
+    for (const [at, text] of [['A', 'One'], ['B', 'Two'], ['C', 'Three']]) { d.select(d.text.indexOf(at)); insertCaption(d, { label: 'Figure', text }); }
+    // The selection ends where the second caption's number field starts.
+    const s = d.text.indexOf('Figure 2');
+    d.select(s, s + 'Figure '.length);
+    markEntry(d, { main: 'Figure' });
+    d.select(s + 'Figure 2: Two\nFigure 3'.length - 1);
+    markAuthority(d, { long: 'Smith v. Jones', category: 1 });
+    expect(bodyFieldRanges(d.paragraphs).filter(r => ['XE', 'TA'].includes(r.field.type)).map(r => r.parentId || null)).toEqual([null, null]);
+    const reopened = model(await DocxPackage.open(await save(pkg, d)));
+    expect(bodyFieldRanges(reopened.paragraphs).filter(r => r.parentId).map(r => r.field.type)).toEqual([]);
+    for (const doc of [d, reopened]) {
+      const a = doc.text.indexOf('Figure 1: One');
+      doc.select(a, a + 'Figure 1: One'.length + 1); doc.replace('');
+      updateSequenceFields(doc);
+      expect(doc.text).toContain('Figure 1: Two');
+      expect(doc.text).toContain('Figure 2: Three');
+    }
+  });
+
   it('parses and writes XE instructions with levels, escapes and switches', () => {
     const instruction = entryInstruction({ main: 'Ratio: golden', sub: 'proof', bold: true, crossReference: 'See also Fibonacci' });
     expect(instruction).toBe(' XE "Ratio\\\\: golden:proof" \\t "See also Fibonacci" \\b ');

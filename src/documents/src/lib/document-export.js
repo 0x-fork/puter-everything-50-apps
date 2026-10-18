@@ -5,7 +5,7 @@
  * fields, headers and footers, notes and comments do not.
  */
 import { documentBlocks } from '../engine/tables.js';
-import { listKind } from '../engine/numbering.js';
+import { listKind, listMarkers } from '../engine/numbering.js';
 
 const OBJECT = '￼';
 const escapeHtml = text => String(text).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -30,10 +30,40 @@ function blocksOf(model) {
   catch { return model.paragraphs.filter(p => !p.cellId).map(paragraph => ({ type: 'paragraph', paragraph })); }
 }
 const paragraphOf = block => block.paragraph;
+/** Each numbered item's number at its level, as the document shows it (continued lists and start values included). */
+function itemNumbers(model) {
+  const numbers = new Map();
+  try {
+    listMarkers(model.paragraphs, model.numbering).forEach((marker, i) => {
+      const p = model.paragraphs[i], value = marker?.counters[p.list.level];
+      if (Number.isSafeInteger(value) && value >= 0) numbers.set(p, value);
+    });
+  } catch { /* Items count from 1 within each list instead. */ }
+  return numbers;
+}
+const listLevel = p => Math.max(0, Math.min(8, p.list?.level || 0));
+/**
+ * A table's rows as lists of cell texts, one per grid column: a merged cell's text stands in its first
+ * column and row, and the columns and rows it also covers (and cells a row leaves out) are empty, so
+ * every later cell stays under its own heading.
+ */
+const tableRows = (block, cellText) => block.rows.map(row => {
+  const cells = Array(row.gridBefore || 0).fill('');
+  for (const cell of row.cells) cells.push(cell.rowSpan === 0 ? '' : cellText(cell), ...Array(Math.max(0, (cell.span || 1) - 1)).fill(''));
+  return cells.concat(Array(row.gridAfter || 0).fill(''));
+});
+/**
+ * A cell's text: its paragraphs joined by `lineBreak`, and a table nested in it flattened in place, its
+ * cells joined by `cellBreak` and its rows by `lineBreak`, since neither format can nest one table in another.
+ */
+const cellText = (cell, paragraphText, cellBreak, lineBreak) => cell.content.map(c => c.type === 'table'
+  ? tableRows(c, inner => cellText(inner, paragraphText, cellBreak, lineBreak)).map(row => row.filter(Boolean).join(cellBreak)).filter(Boolean).join(lineBreak)
+  : paragraphText(c.paragraph)).join(lineBreak);
 
 /* ---- HTML ---- */
 function runHtml(run, heading = false) {
-  let html = escapeHtml(runText(run)).replace(/\v/g, '<br>').replace(/\f/g, '');
+  // Line, page and column breaks all start a new line: a web page has no pages or columns to break.
+  let html = escapeHtml(runText(run)).replace(/[\v\f\u000e]/g, '<br>');
   if (!html) return '';
   if (run.verticalAlign === 'superscript') html = `<sup>${html}</sup>`;
   if (run.verticalAlign === 'subscript') html = `<sub>${html}</sub>`;
@@ -45,28 +75,42 @@ function runHtml(run, heading = false) {
   if (link) html = `<a href="${escapeHtml(link)}">${html}</a>`;
   return html;
 }
-function blocksHtml(blocks, model) {
-  let html = '', list = null;
-  const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
+function blocksHtml(blocks, model, numbers = itemNumbers(model)) {
+  // The open lists, outermost first; each holds an open item a deeper list nests in.
+  let html = '';
+  const lists = [];
+  const closeList = () => { const { tag } = lists.pop(); html += `</li></${tag}>`; };
+  const closeLists = () => { while (lists.length) closeList(); };
   for (const block of blocks) {
     if (block.type === 'table') {
-      closeList();
+      closeLists();
       html += '<table>' + block.rows.map(row => '<tr>' + row.cells.filter(cell => cell.rowSpan !== 0).map(cell => {
         const span = (cell.span || 1) > 1 ? ` colspan="${cell.span}"` : '';
         const rows = cell.rowSpan > 1 ? ` rowspan="${cell.rowSpan}"` : '';
-        return `<td${span}${rows}>${blocksHtml(cell.content.map(c => c.type ? c : { type: 'paragraph', ...c }), model)}</td>`;
+        return `<td${span}${rows}>${blocksHtml(cell.content.map(c => c.type ? c : { type: 'paragraph', ...c }), model, numbers)}</td>`;
       }).join('') + '</tr>').join('') + '</table>';
       continue;
     }
     const p = paragraphOf(block);
     const kind = kindOf(p, model.numbering), tag = kind === 'bullet' ? 'ul' : kind ? 'ol' : null;
-    if (tag !== list) { closeList(); if (tag) { html += `<${tag}>`; list = tag; } }
+    if (!tag) closeLists();
+    else {
+      const depth = listLevel(p);
+      while (lists.length && lists.at(-1).depth > depth) closeList();
+      if (lists.at(-1)?.depth === depth && lists.at(-1).tag !== tag) closeList();
+      if (lists.at(-1)?.depth === depth) html += '</li>';
+      else {
+        const start = tag === 'ol' ? numbers.get(p) ?? 1 : 1;
+        html += `<${tag}${start !== 1 ? ` start="${start}"` : ''}>`;
+        lists.push({ tag, depth });
+      }
+    }
     const level = headingLevel(p, model.styles);
     const inner = p.runs.map(run => runHtml(run, !!level)).join('') || '<br>';
     const align = ['center', 'right', 'both'].includes(p.alignment) ? ` style="text-align:${p.alignment === 'both' ? 'justify' : p.alignment}"` : '';
-    html += tag ? `<li${align}>${inner}</li>` : level ? `<h${level}${align}>${inner}</h${level}>` : `<p${align}>${inner}</p>`;
+    html += tag ? `<li${align}>${inner}` : level ? `<h${level}${align}>${inner}</h${level}>` : `<p${align}>${inner}</p>`;
   }
-  closeList();
+  closeLists();
   return html;
 }
 
@@ -91,11 +135,20 @@ ${body}
 }
 
 /* ---- Markdown ---- */
-const mdEscape = text => text.replace(/([\\`*_[\]#<>|])/g, '\\$1');
+// Text keeps its characters on reading back: emphasis, code, link, heading, HTML and table punctuation, a
+// strikethrough tilde, and an ampersand that would start a character reference are escaped.
+const mdEscape = text => text.replace(/([\\`*_[\]#<>|~])/g, '\\$1').replace(/&(?=#\d+;|#x[\da-f]+;|[a-z][a-z\d]*;)/gi, '\\&');
+// A line of text that starts like a block (a list item, a thematic break, a setext underline or indented
+// code) would become one; the punctuation is escaped and indentation's first space written as a reference.
+const escapeLineStart = line => line.replace(/^(?: {4,}|\t)/, space => `&#${space.charCodeAt(0)};${space.slice(1)}`)
+  .replace(/^( {0,3})([-+=])/, '$1\\$2').replace(/^( {0,3}\d{1,9})([.)])/, '$1\\$2');
+// Breaks stand as NUL (which document text cannot hold) until the paragraph knows how its lines break.
+const BREAK = '\0';
 function runMarkdown(run, heading = false) {
-  let text = mdEscape(runText(run)).replace(/\v/g, '  \n').replace(/\f/g, '');
+  let text = mdEscape(runText(run)).replace(/[\v\f\u000e]/g, BREAK);
   if (!text.trim()) return text;
-  const [, lead, core, trail] = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
+  // Breaks at a run's edges stay outside its emphasis markers, as spaces do.
+  const [, lead, core, trail] = /^([\s\0]*)([\s\S]*?)([\s\0]*)$/.exec(text);
   let out = core;
   if (run.strikethrough && run.strikethrough !== 'none') out = `~~${out}~~`;
   if (run.italic) out = `*${out}*`;
@@ -103,35 +156,48 @@ function runMarkdown(run, heading = false) {
   if (run.verticalAlign === 'superscript') out = `<sup>${out}</sup>`;
   if (run.verticalAlign === 'subscript') out = `<sub>${out}</sub>`;
   const link = safeLink(run);
-  if (link) out = `[${out}](${link.replace(/[()\s]/g, encodeURIComponent)})`;
+  if (link) out = `[${out}](${link.replace(/[()\s|]/g, encodeURIComponent)})`;
   return lead + out + trail;
 }
-const paragraphMarkdown = (p, heading = false) => p.runs.map(run => runMarkdown(run, heading)).join('').replace(/\n/g, ' ');
+/** A paragraph's Markdown, its line, page and column breaks written as `lineBreak`. */
+// A break at either end of a paragraph has no line to start: Markdown would show a backslash there.
+const paragraphMarkdown = (p, heading = false, lineBreak = '\\\n') => p.runs.map(run => runMarkdown(run, heading)).join('').replace(/^\0+|\0+$/g, '')
+  .split(BREAK).map(escapeLineStart).join(heading ? ' ' : lineBreak);
 function blocksMarkdown(blocks, model) {
-  const out = []; let counter = 0, previousList = null;
+  const out = [], numbers = itemNumbers(model);
+  // The open list levels, outermost first: where each level's markers start and its items' text begins.
+  let lists = [], previousList = null;
   for (const block of blocks) {
     if (block.type === 'table') {
-      const rows = block.rows.map(row => row.cells.filter(cell => cell.rowSpan !== 0).map(cell =>
-        cell.content.filter(c => !c.type).map(c => paragraphMarkdown(c.paragraph)).join('<br>').replace(/\|/g, '\\|') || ' '));
+      // Text already escapes its pipes (and link targets encode theirs), so none ends a cell early.
+      const rows = tableRows(block, cell => cellText(cell, p => paragraphMarkdown(p, false, '<br>'), ' \\| ', '<br>')).map(row => row.map(text => text || ' '));
       if (rows.length) {
         const width = Math.max(...rows.map(r => r.length));
         const pad = r => [...r, ...Array(width - r.length).fill(' ')];
         out.push(['| ' + pad(rows[0]).join(' | ') + ' |', '|' + ' --- |'.repeat(width), ...rows.slice(1).map(r => '| ' + pad(r).join(' | ') + ' |')].join('\n'));
       }
-      previousList = null;
+      previousList = null; lists = [];
       continue;
     }
     const p = block.paragraph, kind = kindOf(p, model.numbering), level = headingLevel(p, model.styles);
     const text = paragraphMarkdown(p, !!level);
     if (kind) {
-      counter = previousList === kind ? counter + 1 : 1;
-      const indent = '  '.repeat(Math.max(0, Math.min(8, p.list?.level || 0)));
-      const line = `${indent}${kind === 'bullet' ? '-' : `${counter}.`} ${text}`;
+      // A deeper item is indented to its parent item's text, which nests it under that item.
+      const depth = listLevel(p);
+      while (lists.length && lists.at(-1).depth > depth) lists.pop();
+      let list = lists.at(-1);
+      if (list?.depth !== depth) { list = { depth, indent: list ? list.content : 0, kind: null, number: 0 }; lists.push(list); }
+      const number = numbers.get(p) ?? (list.kind === kind ? list.number + 1 : 1);
+      Object.assign(list, { kind, number });
+      const marker = kind === 'bullet' ? '-' : `${number}.`, indent = ' '.repeat(list.indent);
+      list.content = list.indent + marker.length + 1;
+      // A line after a break is indented to the item's text, so it stays in the item.
+      const line = `${indent}${marker} ${text.replace(/\n/g, `\n${' '.repeat(list.content)}`)}`;
       if (previousList) out[out.length - 1] += `\n${line}`; else out.push(line);
       previousList = kind;
       continue;
     }
-    previousList = null;
+    previousList = null; lists = [];
     if (level) out.push(`${'#'.repeat(level)} ${text.trim()}`);
     else if (text.trim()) out.push(text);
   }
@@ -147,8 +213,8 @@ export function documentPlainText(model) {
   const lines = [];
   const walk = blocks => {
     for (const block of blocks) {
-      if (block.type === 'table') { for (const row of block.rows) lines.push(row.cells.filter(c => c.rowSpan !== 0).map(cell => cell.content.filter(c => !c.type).map(c => c.paragraph.runs.map(runText).join('')).join(' ')).join('\t')); continue; }
-      lines.push(block.paragraph.runs.map(runText).join('').replace(/\v/g, '\n').replace(/\f/g, ''));
+      if (block.type === 'table') { for (const row of tableRows(block, cell => cellText(cell, p => p.runs.map(runText).join('').replace(/[\v\f\u000e]/g, ' '), ' ', ' '))) lines.push(row.join('\t')); continue; }
+      lines.push(block.paragraph.runs.map(runText).join('').replace(/[\v\f\u000e]/g, '\n'));
     }
   };
   walk(blocksOf(model));

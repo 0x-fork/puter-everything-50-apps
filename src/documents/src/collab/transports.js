@@ -14,7 +14,7 @@
  * WorkerTransport  a room on the owner's Puter worker (server/service.js).
  */
 import * as Y from 'yjs';
-import { canComment, canEdit, PRESENCE_TTL, encode, decode } from './protocol.js';
+import { canComment, canEdit, PRESENCE_TTL, MAX_UPDATE, encode, decode } from './protocol.js';
 
 const refused = (status, message) => Object.assign(new Error(message), { status });
 
@@ -52,6 +52,7 @@ export class MemoryHub {
         hub.presence.set(state.session, state);
         hub.deliver(() => hub.broadcastPresence());
       },
+      state() { return Y.encodeStateAsUpdate(hub.doc); },
       async leave() { hub.peers.delete(me.handlers); if (me.session) hub.presence.delete(me.session); hub.broadcastPresence(); },
       setOnline(online) { me.online = online; me.handlers.online?.(online); if (online) hub.broadcastPresence(); },
       setRole(next) { me.role = next; me.handlers.role(next); },
@@ -81,9 +82,12 @@ export function checkCommentOnly(doc, update) {
     for (const op of delta) { const a = JSON.stringify(Object.entries(op.attributes).sort()); for (const ch of String(op.insert)) out += `${ch}\u0001${a}\u0002`; }
     return out;
   };
-  const before = flatten(strip(scratch.getText('body'))), parts = JSON.stringify(scratch.getMap('parts').toJSON()), meta = JSON.stringify(scratch.getMap('meta').toJSON()), assets = [...scratch.getMap('assets').keys()].join();
+  const before = flatten(strip(scratch.getText('body'))), parts = JSON.stringify(scratch.getMap('parts').toJSON()), meta = JSON.stringify(scratch.getMap('meta').toJSON());
+  // Pictures are bytes and descriptions under their ids: replacing one keeps its id, so any write counts.
+  let assets = false;
+  scratch.getMap('assets').observe(() => { assets = true; });
   Y.applyUpdate(scratch, update);
-  const ok = before === flatten(strip(scratch.getText('body'))) && parts === JSON.stringify(scratch.getMap('parts').toJSON()) && meta === JSON.stringify(scratch.getMap('meta').toJSON()) && assets === [...scratch.getMap('assets').keys()].join();
+  const ok = !assets && before === flatten(strip(scratch.getText('body'))) && parts === JSON.stringify(scratch.getMap('parts').toJSON()) && meta === JSON.stringify(scratch.getMap('meta').toJSON());
   scratch.destroy();
   if (!ok) throw refused(403, 'You can comment on this shared document but not change it.');
 }
@@ -159,6 +163,8 @@ export class BroadcastRoom {
     this.post({ type: 'update', update: encode(update) });
   }
   presence(state) { this.lastPresence = state; this.post({ type: 'presence', state }); }
+  /** What the room holds, as far as this tab knows. */
+  state() { return this.doc ? Y.encodeStateAsUpdate(this.doc) : null; }
   /** Sharing stopped: the other tabs keep their copies and stop receiving changes. */
   stop() { this.post({ type: 'closed' }); }
   async leave() {
@@ -178,7 +184,7 @@ export class BroadcastRoom {
  */
 export class WorkerTransport {
   /** call(op, input) performs a signed request (api.js). */
-  constructor({ call, room, token = null }) { this.call = call; this.room = room; this.token = token; this.vector = null; }
+  constructor({ call, room, token = null }) { this.call = call; this.room = room; this.token = token; this.vector = null; this.maxUpdate = MAX_UPDATE; }
   async join(handlers) {
     this.handlers = handlers;
     this.session = handlers.session;
@@ -204,11 +210,19 @@ export class WorkerTransport {
       if (res.role && res.role !== this.role) { this.role = res.role; this.handlers.role(res.role); }
       const update = decode(res.update || '');
       if (update.length > 2) {
-        const before = Y.encodeStateVector(this.doc);
-        Y.applyUpdate(this.doc, update);
-        if (JSON.stringify([...before]) !== JSON.stringify([...Y.encodeStateVector(this.doc)])) this.handlers.update(update);
+        // Every answer repeats the room's deletions, which a state vector does not record: pass the update on
+        // only when it inserted or deleted something this copy did not have, deletions alone included.
+        let changed = false;
+        const onUpdate = () => { changed = true; };
+        this.doc.on('update', onUpdate);
+        try { Y.applyUpdate(this.doc, update); } finally { this.doc.off('update', onUpdate); }
+        if (changed) this.handlers.update(update);
       }
-      if (res.roster) this.handlers.presence(res.roster);
+      if (res.roster) {
+        // The worker stamps presence with its own clock; the client ages it by this computer's.
+        const skew = Number.isFinite(res.serverTime) ? Date.now() - res.serverTime : 0;
+        this.handlers.presence(res.roster.map(p => (Number.isFinite(p.at) ? { ...p, at: p.at + skew } : p)));
+      }
       this.schedule(res.roster?.some(p => p.session !== this.session) ? 1000 : 3000);
     } catch (error) {
       if (error.status === 403 || error.status === 404 || error.status === 410) { this.left = true; this.handlers.closed(error.message); return; }
@@ -221,6 +235,8 @@ export class WorkerTransport {
     Y.applyUpdate(this.doc, update);
     this.schedule(50);
   }
+  /** The room's accepted changes this connection has received. */
+  state() { return this.doc ? Y.encodeStateAsUpdate(this.doc) : null; }
   presence(state) {
     this.lastPresence = state;
     // Presence rides on the next synchronization; a moved caret asks for one soon.

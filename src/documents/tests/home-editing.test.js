@@ -185,3 +185,78 @@ describe('Move paragraphs', () => {
     expect(moveParagraphs(doc, -1)).toBe(false);
   });
 });
+
+describe('reordering paragraphs that a bookmark or comment spans', () => {
+  const doc = () => {
+    const d = new TextDocument([paragraph('cherry'), paragraph('banana'), paragraph('apple'), paragraph('')]);
+    d.select(2, 10); d.addBookmark('Span'); // from inside "cherry" into "banana"
+    d.select(14, 17); d.addComment({ author: 'A', text: 'on apple' }); // within "apple"
+    return d;
+  };
+  const saveable = d => createDocx(d.paragraphs).export(d.paragraphs, d.pageSettings, d.numbering, d.styles, d.tables, {}, {}, d.comments);
+  it('refuses Sort rather than end a range before it starts', () => {
+    const d = doc(), before = d.text;
+    d.select(0, d.text.length - 1);
+    expect(() => sortParagraphs(d)).toThrow(/cannot be sorted/);
+    expect(d.text).toBe(before);
+  });
+  it('refuses to move a paragraph past the one its range continues into, and moves it past others', () => {
+    const d = doc();
+    d.select(0, 3);
+    expect(moveParagraphs(d, 1)).toBe(false);
+    d.select(d.text.indexOf('apple'));
+    expect(moveParagraphs(d, -1)).toBe(true);
+    expect(d.text).toBe('cherry\napple\nbanana\n');
+    expect(() => saveable(d)).not.toThrow();
+  });
+  it('still sorts paragraphs whose ranges stay inside one paragraph', () => {
+    const d = new TextDocument([paragraph('cherry'), paragraph('banana'), paragraph('apple')]);
+    d.select(7, 13); d.addBookmark('Inside');
+    d.select(0, d.text.length);
+    expect(sortParagraphs(d)).toBe(true);
+    expect(d.text).toBe('apple\nbanana\ncherry');
+  });
+});
+
+describe('Change Case and Sort with Track Changes on', () => {
+  const tracked = text => { const d = new TextDocument([paragraph(text)]); d.trackChanges = true; d.revisionAuthor = 'Me'; return d; };
+  const changes = d => {
+    const out = []; let at = 0;
+    for (const p of d.paragraphs) for (const r of p.runs) { if (r.revision) out.push([r.revision.type, r.text]); at += r.text.length; }
+    return out;
+  };
+  it('marks the old text deleted and the new text inserted, keeping each run\'s formatting', () => {
+    const d = new TextDocument([paragraph('hello world')]);
+    d.select(0, 5); d.toggleBold();
+    d.trackChanges = true; d.revisionAuthor = 'Me';
+    d.select(3, 8);
+    expect(changeCase(d, 'upper')).toBe(true);
+    expect(changes(d)).toEqual([['del', 'lo'], ['ins', 'LO'], ['del', ' wo'], ['ins', ' WO']]);
+    expect(d.paragraphs[0].runs.filter(r => r.revision?.type === 'ins').map(r => !!r.bold)).toEqual([true, false]);
+    expect(d.text).toBe('helloLO wo WOrld');
+    // The selection covers the changed text, deletions and insertions.
+    expect(d.range).toEqual([3, 13]);
+    d.undo();
+    expect(d.text).toBe('hello world');
+    expect(changes(d)).toEqual([]);
+  });
+  it('changes the word at the caret and leaves the caret after it', () => {
+    const d = tracked('one two');
+    d.select(5);
+    expect(changeCase(d, 'upper')).toBe(true);
+    expect(changes(d)).toEqual([['del', 'two'], ['ins', 'TWO']]);
+    expect(d.range).toEqual([10, 10]);
+  });
+  it('refuses Sort, which it could not show as a tracked change', () => {
+    const d = new TextDocument([paragraph('b'), paragraph('a')]);
+    d.trackChanges = true;
+    d.select(0, d.text.length);
+    expect(() => sortParagraphs(d)).toThrow(/Track Changes/);
+    expect(d.text).toBe('b\na');
+  });
+});
+
+it('keeps a word whole across a decomposed accent in Title Case', () => {
+  expect(convertCase('étude café ok', 'title')).toBe('Étude Café Ok');
+  expect(convertCase('étude café ok', 'title').normalize('NFC')).toBe('Étude Café Ok');
+});

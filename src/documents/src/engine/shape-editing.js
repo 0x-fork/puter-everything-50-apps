@@ -1,7 +1,8 @@
 import { buildShape, buildTextShape, shapeParams, SHAPE_PRESETS, EMU_PER_INCH, DEFAULT_SHAPE_STYLE, LINE_PRESETS } from './authored-shapes.js';
 import { decodeShape } from './canvas-shapes.js';
 import { canResizeRetainedPicture } from './picture-resize.js';
-import { validateImage } from './images.js';
+import { validateImage, nextDrawingId } from './images.js';
+import { carriedFrame } from './inserted-drawings.js';
 
 /**
  * Inserting and editing preset shapes on a canvas editor. A shape is a drawing whose DrawingML this
@@ -11,7 +12,7 @@ import { validateImage } from './images.js';
 let counter = 0;
 const freshAssetId = model => { let id; do id = `drawing:canvas-shape-${++counter}`; while (model.assets[id]); return id; };
 const images = model => model.paragraphs.flatMap(p => p.runs.filter(r => r.image).map(r => r.image));
-const nextImageId = model => Math.max(0, ...images(model).map(image => image.id)) + 1;
+const nextImageId = model => nextDrawingId(model.paragraphs);
 const nextOrder = model => Math.max(0, ...images(model).map(image => image.anchor?.order || 0)) + 1;
 
 async function prepare(editor, params) {
@@ -87,13 +88,18 @@ export async function updateShape(editor, patch) {
   const { image, params } = selected, model = editor.model, revision = editor.session.revision;
   const width = patch.width ?? image.width, height = LINE_PRESETS.has(params.preset) ? 0 : patch.height ?? image.height;
   if (!(width > 0) || !(height > 0 || LINE_PRESETS.has(params.preset)) || width > 22 * EMU_PER_INCH || height > 22 * EMU_PER_INCH) throw new Error('Shape sizes must be greater than 0 and at most 22 inches.');
+  // An axis the edit places at an offset no longer follows the alignment or percentage it had.
+  const moved = new Set(['x', 'y'].filter(axis => patch.anchor?.[axis] !== undefined));
   const anchor = image.anchor ? { ...image.anchor, ...(patch.anchor || {}) } : undefined;
+  if (anchor) for (const axis of moved) { delete anchor[`${axis}Align`]; delete anchor[`${axis}Percentage`]; }
   const next = { ...params, ...Object.fromEntries(['fill', 'line', 'lineWidth'].filter(key => key in patch).map(key => [key, patch[key]])),
     id: image.id, name: image.name, width: Math.round(width), height: Math.round(height), anchor, assetId: freshAssetId(model) };
   const { image: built, asset, bitmap } = await prepare(editor, next);
   if (editor.destroyed || revision !== editor.session.revision || editor.model.selectedImage !== image) { bitmap.close?.(); throw new Error('The shape changed before the edit could be applied. Try again.'); }
   register(editor, next.assetId, asset, bitmap);
-  const replacement = { ...built, alt: image.alt };
+  // The drawing keeps everything about it but its shape: alt text, title, flags and alignment, in the model and in its XML.
+  const replacement = { ...image, assetId: built.assetId, width: built.width, height: built.height, ...(built.flatLine ? { flatLine: built.flatLine } : {}),
+    ...(anchor ? { anchor } : {}), shell: carriedFrame(image.shell, built.shell, moved) };
   const ok = editor.execute(() => {
     const model = editor.model;
     model.checkpoint();

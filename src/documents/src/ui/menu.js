@@ -40,6 +40,10 @@ const EDITOR_CHROME = '.ed-workspace, .ribbon-flyout';
 const HOVER_OPEN_MS = 90;
 const HOVER_CLOSE_MS = 220;
 
+/** An item is unavailable when disabled, or when it opens a written-out submenu none of whose commands can run. */
+const unavailable = (item) => !!item.disabled || (!!item.items?.length
+  && item.items.every((child) => !child || child.separator || child.header || child.note || unavailable(child)));
+
 let chain = []; // the open menus, the outermost first
 let noteSequence = 0;
 let reclosed = null; // { anchor, until }: a menu the pointer just closed by pressing its own anchor
@@ -155,7 +159,7 @@ export function openMenu({ anchor, items, x = null, y = null, align = 'start', l
   /** Open the submenu on `item`, or leave the one already showing alone. */
   function openChild(button, item, { focus }) {
     const at = depth();
-    if (at === -1 || item.disabled) return;
+    if (at === -1 || unavailable(item)) return;
     // Right or Enter on an item whose submenu the mouse already opened moves into it.
     if (chain[at + 1]?.anchor === button) { if (focus) focusIn(chain[at + 1].panel, 0); return; }
     closeFrom(at + 1, { focus: false });
@@ -194,11 +198,11 @@ export function openMenu({ anchor, items, x = null, y = null, align = 'start', l
       'aria-keyshortcuts': item.shortcut ? ariaKeyshortcuts(item.shortcut) : null,
       'aria-haspopup': opensChild ? item.popupRole || 'menu' : null,
       'aria-expanded': opensChild ? 'false' : null,
-      disabled: !!item.disabled,
+      disabled: unavailable(item),
       tabindex: -1,
       className: `menu-item${item.danger ? ' danger' : ''}${item.checked ? ' checked' : ''}`,
       onclick: () => {
-        if (item.disabled) return;
+        if (unavailable(item)) return;
         if (opensChild) { openChild(btn, item, { focus: true }); return; }
         closeFrom(0);
         item.onSelect?.();
@@ -234,7 +238,8 @@ export function openMenu({ anchor, items, x = null, y = null, align = 'start', l
   // it back to whatever had it.
   const opener = parent >= 0 ? anchor : (document.activeElement instanceof HTMLElement ? document.activeElement : anchor);
   document.body.append(menu);
-  position(menu, anchor, x, y, align, parent >= 0 ? chain[parent].panel : null);
+  const parentPanel = parent >= 0 ? chain[parent].panel : null;
+  position(menu, anchor, x, y, align, parentPanel);
 
   function dispose({ focus = true } = {}) {
     const at = depth();
@@ -256,7 +261,11 @@ export function openMenu({ anchor, items, x = null, y = null, align = 'start', l
   if (pointer) menu.focus();
   else if (focusFirst && focusables(menu).length) focusIn(menu, 0);
   else if (focusFirst) menu.focus();
-  return { close: () => { const at = depth(); if (at !== -1) closeFrom(at); }, menu };
+  return {
+    close: () => { const at = depth(); if (at !== -1) closeFrom(at); }, menu,
+    /** Place the menu again for content that changed size after it opened (a list filled in later). */
+    reposition: () => { if (depth() === -1) return; menu.style.maxHeight = ''; menu.style.overflowY = ''; position(menu, anchor, x, y, align, parentPanel); },
+  };
 }
 
 function focusables(menu) {

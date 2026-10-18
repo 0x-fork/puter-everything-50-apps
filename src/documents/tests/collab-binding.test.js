@@ -120,12 +120,48 @@ describe('co-editing binding', () => {
     expect(owner.engine.session.body.comments?.map(c => c.text)).toEqual(['Why?']);
   });
 
+  it('keeps both comments when two people comment at once', async () => {
+    const { hub, people: [ann, bob] } = await room('Alpha beta gamma delta');
+    hub.pause();
+    ann.engine.execute(m => { m.select(0, 5); m.addComment({ author: 'Ann', text: 'Check Alpha' }); });
+    bob.engine.execute(m => { m.select(17, 22); m.addComment({ author: 'Bob', text: 'Check delta' }); });
+    await settle();
+    hub.resume();
+    await settle();
+    for (const person of [ann, bob]) {
+      const comments = person.engine.session.body.comments;
+      expect(comments.map(c => c.text).sort()).toEqual(['Check Alpha', 'Check delta']);
+      // Ids stay whole numbers that fit Word's 32-bit comment ids.
+      expect(comments.every(c => /^\d+$/.test(c.id) && Number(c.id) < 2 ** 31)).toBe(true);
+    }
+    // Once the session ends, numbering starts from the lowest free id again.
+    ann.binding.destroy();
+    expect(ann.engine.session.body.commentIdFloor).toBeUndefined();
+  });
+
   it('refuses text changes from a commenter on the server side', () => {
     const doc = createSharedDoc(editorState({ session: { body: new TextDocument([paragraph('abc')]), storyEdits: {} } }));
     const copy = new Y.Doc(); Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
     const vector = Y.encodeStateVector(copy);
     copy.getText('body').insert(0, 'x');
     expect(() => checkCommentOnly(doc, Y.encodeStateAsUpdate(copy, vector))).toThrow(/comment/);
+  });
+
+  it('refuses a commenter replacing a shared picture under its existing id', () => {
+    const doc = createSharedDoc(editorState({ session: { body: new TextDocument([paragraph('abc')]), storyEdits: {} } }));
+    doc.getMap('assets').set('img@1', new Uint8Array([1, 2, 3]));
+    doc.getMap('assets').set('img@1#', JSON.stringify({ type: 'image/png', description: 'Logo' }));
+    for (const write of [map => map.set('img@1', new Uint8Array([6, 6, 6])), map => map.set('img@1#', JSON.stringify({ type: 'image/png', description: 'Spoof' }))]) {
+      const copy = new Y.Doc(); Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
+      const vector = Y.encodeStateVector(copy);
+      write(copy.getMap('assets'));
+      expect(() => checkCommentOnly(doc, Y.encodeStateAsUpdate(copy, vector))).toThrow(/comment/);
+    }
+    // A comment alone still passes.
+    const copy = new Y.Doc(); Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
+    const vector = Y.encodeStateVector(copy);
+    copy.getMap('comments').set('1000', JSON.stringify({ id: '1000', text: 'Nice' }));
+    expect(() => checkCommentOnly(doc, Y.encodeStateAsUpdate(copy, vector))).not.toThrow();
   });
 
   it('keeps changes made offline and sends them when the connection returns', async () => {
