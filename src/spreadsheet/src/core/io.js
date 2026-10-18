@@ -56,7 +56,9 @@ import { exportNamedTableReferences } from './export-named-formulas.js';
 import { err, isError } from './formula/functions.js';
 import { parseDelimited } from './tsv.js';
 import { parseInput, refineImpliedFormat, localeInfo, getLocale } from './format.js';
-import { cellsToHtml, copyMergeLayout } from './clipboard.js';
+import { cellsToHtml, copyMergeLayout, parseHtmlClipboard, cellsFromHtmlRows } from './clipboard.js';
+import { odsCellStyle, odsCellPaints, odsRunStyle } from './ods-cell-styles.js';
+import { htmlTableRows } from './html-table.js';
 import { reconcileConditionalFormats } from './xlsx-condformat-reconcile.js';
 import { prepareXlsxValidationLists } from './xlsx-validation.js';
 import { sheetFilters, sameFilterRange, filterRangeKey, mapSheetFilters } from './sheet-filters.js';
@@ -342,7 +344,8 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
     // from rows/columns. The sidecar separately preserves which fields actually belong to the cell.
     const style = lineFormats ? wb.styleAt(sheet.id, r, c) : cell.s;
     const numFmt = style?.fmt && style.fmt !== 'general' ? numFmtOf(style) : null;
-    if (empty && !cell.hyperlink && !numFmt && (ods || !cell.s)) continue;
+    // An .ods carries a blank cell only for what shows on it: a fill or a border.
+    if (empty && !cell.hyperlink && !numFmt && (ods ? !odsCellPaints(style) : !cell.s)) continue;
     // A formatted empty cell can also be occupied by a spilled result. A
     // formula too deep to parse has no value to cache and travels as typed.
     const value = unlessTooDeep(() => (cell.f != null || empty ? wb.getValue(sheet.id, r, c) : cell.v), null);
@@ -361,6 +364,11 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
     else { out.t = 's'; out.v = fitText(text(value)); }
     if (!ods && out.t === 's' && cell.richText && typeof value === 'string' && !unparsed) {
       out.richText = normalizeRichText(cell.richText, value, out.v.length);
+    }
+    // An .ods spells a rich-text cell's runs as text:spans; text the writer had to change (a control character) keeps none.
+    if (ods && out.t === 's' && cell.richText && typeof value === 'string' && !unparsed && out.v === value) {
+      const runs = normalizeRichText(cell.richText, value);
+      if (runs) out.odsRuns = runs;
     }
     if (cell.f != null && !unparsed && !deferredForOds) {
       // Native XLSX tables own these references: keeping them live preserves
@@ -381,6 +389,7 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
     }
     if (numFmt) out.z = numFmt;
     if (!ods) { out.s = style; if (empty) out.z ||= 'General'; }
+    else if (style) out.odsStyle = style;
     const link = unlessTooDeep(() => wb.linkAt(sheet.id, r, c), null);
     if (cell.hyperlink) out.l = { Target: cell.hyperlink };
     else if (link) out.l = { Target: link.url };
@@ -392,7 +401,7 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
     const addr = X.utils.encode_cell({ r, c });
     const style = { ...(lineFormats ? wb._lineStyle(sheet, r, c) : null), ...wb.spillAt(sheet.id, r, c)?.style, ...wb.getCell(sheet.id, r, c)?.s };
     const numFmt = numFmtOf(style);
-    if (ws[addr]) { ws[addr].z = numFmt; if (!ods) ws[addr].s = style; continue; }
+    if (ws[addr]) { ws[addr].z = numFmt; if (!ods) ws[addr].s = style; else ws[addr].odsStyle = style; continue; }
     const out = {};
     if (isError(value)) { out.t = 'e'; out.v = fileErrorCode(value); }
     else if (value == null) { out.t = 's'; out.v = ''; }
@@ -401,6 +410,7 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
     else { out.t = 's'; out.v = fitText(text(value)); }
     out.z = numFmt;
     if (!ods) out.s = style;
+    else out.odsStyle = style;
     ws[addr] = out;
     if (r > maxR) maxR = r;
     if (c > maxC) maxC = c;
@@ -819,6 +829,17 @@ function buildBook(X, wb, { meta = true, odsSettings = false, ods = false, histo
   }
   const extra = meta || odsSettings ? collectMeta(wb, structuredNames, { ods: odsSettings, fileSheets: book.Sheets, history }) : null;
   if (extra && odsSettings) book.PuterSettings = extra;
+  // LibreOffice reads frozen panes, tab colours and the open sheet from its own view settings.
+  if (ods) {
+    const sheets = {};
+    for (const sheet of wb.sheets) {
+      const color = typeof sheet.color === 'string' && /^#[\da-f]{6}$/i.test(sheet.color) ? sheet.color : null;
+      if (sheet.frozenRows || sheet.frozenCols || color) sheets[sheet.name] = { frozenRows: sheet.frozenRows, frozenCols: sheet.frozenCols, ...(color ? { tabColor: color } : {}) };
+    }
+    // A book that opens on its first sheet, with nothing frozen or coloured, needs no view settings.
+    const active = wb.sheets.indexOf(wb.activeSheet) > 0 ? wb.activeSheet.name : null;
+    if (active || Object.keys(sheets).length) book.OdsView = { active, sheets };
+  }
   if (extra && meta) {
     // A user worksheet may have the usual sidecar name. Keep its name and
     // references intact, and choose an unused name for our own sheet.
@@ -1094,24 +1115,25 @@ const TABLE_STYLE_COLORS = ['gray', 'blue', 'orange', 'gray', 'orange', 'blue', 
 function nativeTables(X, ws, definedNames, customStyles) {
   const tables = [];
   for (const xml of ws?.['!tableXml'] || []) {
-    const open = xml.match(/<table\s[^>]*>/)?.[0];
+    // Tags may carry a namespace prefix (<x:table>, as files written with the Open XML SDK spell them).
+    const open = xml.match(/<(?:\w+:)?table\s[^>]*>/)?.[0];
     const name = decodeXlsxString(xmlAttr(open, 'displayName') || xmlAttr(open, 'name'));
     const ref = xmlAttr(open, 'ref')?.replace(/\$/g, '');
     if (!name?.trim() || !ref || !/^[A-Z]{1,3}\d+:[A-Z]{1,3}\d+$/i.test(ref)) continue;
     // headerRowCount="0": the Header Row is turned off, and the column names live in tableColumn alone.
     const headerless = xmlAttr(open, 'headerRowCount') === '0', columnNames = [];
     const range = X.utils.decode_range(ref.toUpperCase());
-    const styleInfo = xml.match(/<tableStyleInfo\s[^>]*>/)?.[0];
+    const styleInfo = xml.match(/<(?:\w+:)?tableStyleInfo\s[^>]*>/)?.[0];
     const styleName = xmlAttr(styleInfo, 'name');
     const customStyle = customStyles?.get(styleName);
     const styleIndex = Number(styleName?.match(/(\d+)$/)?.[1] || 0);
     const calc = {}, calcArray = {}, scalarColumns = new Set();
     let column = 0;
-    for (const m of xml.matchAll(/<tableColumn\s[^>]*?(?:\/>|>([\s\S]*?)<\/tableColumn>)/g)) {
-      if (headerless) columnNames.push(decodeXlsxString(xmlAttr(m[0].match(/<tableColumn\s[^>]*?\/?>/)?.[0], 'name') || '') || null);
-      const formula = m[1]?.match(/(<calculatedColumnFormula(?:\s[^>]*)?>)([\s\S]*?)<\/calculatedColumnFormula>/);
+    for (const m of xml.matchAll(/<(\w+:)?tableColumn\s[^>]*?(?:\/>|>([\s\S]*?)<\/\1tableColumn>)/g)) {
+      if (headerless) columnNames.push(decodeXlsxString(xmlAttr(m[0].match(/<(?:\w+:)?tableColumn\s[^>]*?\/?>/)?.[0], 'name') || '') || null);
+      const formula = m[2]?.match(/(<(\w+:)?calculatedColumnFormula(?:\s[^>]*)?>)([\s\S]*?)<\/\2calculatedColumnFormula>/);
       if (formula) {
-        const f = fromFileFormula(unescapeXml(formula[2]), definedNames);
+        const f = fromFileFormula(unescapeXml(formula[3]), definedNames);
         const array = ['1', 'true'].includes(xmlAttr(formula[1], 'array'));
         calc[column] = array ? f : intersectTableFormula(f);
         if (array) calcArray[column] = true;
@@ -1119,8 +1141,8 @@ function nativeTables(X, ws, definedNames, customStyles) {
       }
       column++;
     }
-    const autoFilter = xml.match(/<autoFilter\b[^<>]*(?:\/>|>[\s\S]*?<\/autoFilter>)/)?.[0];
-    const filter = xmlAttr(autoFilter?.match(/<autoFilter\b[^<>]*>/)?.[0], 'ref')?.replace(/\$/g, '');
+    const autoFilter = xml.match(/<(\w+:)?autoFilter\b[^<>]*(?:\/>|>[\s\S]*?<\/\1autoFilter>)/)?.[0];
+    const filter = xmlAttr(autoFilter?.match(/<(?:\w+:)?autoFilter\b[^<>]*>/)?.[0], 'ref')?.replace(/\$/g, '');
     tables.push({
       name: name.trim(),
       range: { r1: range.s.r, c1: range.s.c, r2: range.e.r, c2: range.e.c },
@@ -1624,8 +1646,21 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
   const deferredArrays = new Map();
   let usedR = -1;
   let usedC = -1;
+  // A cell past the grid's last row or column (a SpreadsheetML, SYLK or web-page table can place one
+  // anywhere) has nowhere to be shown, and saved it would make a file that neither Excel nor this app
+  // opens again. It is counted, as a delimited file's are, so the import can say what did not fit.
+  let beyondRows = 0;
+  let beyondCols = 0;
+  let countedRow = -1;
   for (const { r, c, addr, cell: src } of storedCells(X, ws)) {
     if (!src) continue;
+    if (r > MAX_ROW || c > MAX_COL) {
+      if (src.v != null || src.f != null) {
+        if (r > MAX_ROW && r !== countedRow) { countedRow = r; beyondRows++; }
+        if (c > MAX_COL) beyondCols = Math.max(beyondCols, c - MAX_COL);
+      }
+      continue;
+    }
     // Inside an array formula's block only the top-left cell holds the
     // formula; keep the other cells' formats, but recompute their values.
     const spillResult = src.F && !src.f;
@@ -1740,11 +1775,15 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     // distinguish it from a missing/stub cell. Preserve its type on import.
     else if (src.v != null && (src.v !== '' || ['s', 'str', 'inlineStr'].includes(src.t))) cell.v = String(src.v);
     if (cell.f == null && typeof cell.v === 'string') {
-      const rich = readXlsxRichText(src.r, cell.v, nativeStyles?.colors, baseFont);
+      const rich = src.odsRuns ? normalizeRichText(src.odsRuns.map((run) => ({ text: run.t, s: run.p ? odsRunStyle(run.p) : {} })), cell.v)
+        : readXlsxRichText(src.r, cell.v, nativeStyles?.colors, baseFont);
       if (rich) cell.richText = rich;
     }
     if (fromZ && !reconcileStyle) cell.s = { ...(cell.s || {}), ...fromZ };
     if (bg) cell.s = { ...(cell.s || {}), bg };
+    // An .ods cell style's font, fill, borders and alignment; this app's own files carry their styles in the sidecar.
+    const odsLook = !own && !partXml && src.odsProps ? odsCellStyle(src.odsProps) : null;
+    if (odsLook) cell.s = { ...(cell.s || {}), ...odsLook };
     // Normal text formatting alone must not create a cell for a missing
     // shared string, an uncached external formula, or a blank spill result.
     if (font && (reconcileStyle || cell.v != null || cell.f != null || fontIndex || src.l?.Target || font.nativeFill)) cell.s = { ...(cell.s || {}), ...font };
@@ -1995,6 +2034,7 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
   const merges = fileMerges((ws?.['!merges'] || []).filter((m) => m?.s && m?.e).map((m) => ({ r1: m.s.r, c1: m.s.c, r2: m.e.r, c2: m.e.c })));
   return {
     name,
+    ...(beyondRows || beyondCols ? { beyond: { rows: beyondRows, cols: beyondCols } } : {}),
     merges,
     notes,
     ignoredErrors: readXlsxIgnoredErrors(partXml),
@@ -2002,7 +2042,7 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     protectedRanges: meta?.sheets?.[name]?.protectedRanges || [],
     scenarios: parseScenariosXml(partXml),
     validations: meta?.sheets?.[name]?.validations || (ws?.['!validations'] || []).map(({ _odsName, ...rule }) => rule),
-    color: own?.color || part?.color || (!own && partXml ? xlsxColor(partXml.match(/<tabColor\b[^>]*>/)?.[0], nativeStyles?.colors || themes) : null),
+    color: own?.color || part?.color || (!own && partXml ? xlsxColor(partXml.match(/<(?:\w+:)?tabColor\b[^>]*>/)?.[0], nativeStyles?.colors || themes) : null),
     protected: own ? !!own.protected : !!part?.protected,
     groups: own ? own.groups || null : fileGroups(ws, filtered),
     outlineSettings: readXlsxOutlineSettings(partXml),
@@ -2169,6 +2209,57 @@ function workbookFromText(text, filename) {
 }
 
 /**
+ * A web page's table (an .html file, or an .xls that is a saved web page, as bank statements and
+ * report exports often are) read as a paste of it is, where the browser can parse HTML: its
+ * character references, number formats (mso-number-format, "@" keeping 00123 as text, the percent
+ * in 50%), links, fonts, fills and merged cells come through. Text shaped like a formula stays
+ * text, as the library's reader leaves it. Null for a page of several tables, which the library
+ * reads as one sheet each, and for a table larger than a paste may be, which it reads as before.
+ */
+/** The table a one-cell table wraps (its cell's text being that table's), or null. */
+function wrappedHtmlTable(table) {
+  const rows = htmlTableRows(table);
+  if (rows.length !== 1) return null;
+  const cells = [...rows[0].children].filter((child) => child.tagName === 'TD' || child.tagName === 'TH');
+  const inner = cells.length === 1 ? cells[0].querySelector('table') : null;
+  const squeeze = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+  return inner && squeeze(cells[0].textContent) === squeeze(inner.textContent) ? inner : null;
+}
+
+function workbookFromHtml(text) {
+  if (typeof DOMParser === 'undefined') return null;
+  const opening = text.slice(0, 2048).replace(/<!--[\s\S]*?(?:-->|$)/g, '').trimStart().toLowerCase();
+  // An XML spreadsheet (SpreadsheetML, a flat .ods), SYLK and DIF are markup of other kinds.
+  if (opening.startsWith('<?mso-application') || (opening.startsWith('<?xml') && !/<html[\s>]/.test(opening)) || !opening.startsWith('<')) return null;
+  let doc;
+  try { doc = new DOMParser().parseFromString(text, 'text/html'); } catch { return null; }
+  const tables = [...doc.querySelectorAll('table')].filter((t) => !t.parentElement?.closest('table'));
+  if (tables.length !== 1) return null;
+  // A table whose one cell only wraps another is read as that inner table, as a paste reads it; one that lays
+  // out tables in its cells is several tables, which the library reads one sheet each.
+  let table = tables[0];
+  for (let inner = wrappedHtmlTable(table); inner; inner = wrappedHtmlTable(inner)) table = inner;
+  if (table.querySelector('table')) return null;
+  const parsed = parseHtmlClipboard(text, '');
+  if (!parsed?.rows) return null;
+  const { rows, merges = [] } = parsed;
+  const cells = {};
+  let width = 0;
+  for (const { i, j, cell } of cellsFromHtmlRows(rows)) {
+    if (!cell) continue;
+    cells[cellKey(i, j)] = cell.f != null ? { ...cell, v: rows[i][j].text, f: null } : cell;
+    width = Math.max(width, j + 1);
+  }
+  const wb = new Workbook({
+    sheets: [{ name: 'Sheet1', rows: Math.min(MAX_ROW + 1, Math.max(100, rows.length + 20)), cols: Math.min(MAX_COL + 1, Math.max(26, width + 6)), cells, merges }],
+  });
+  // The page's column widths are not read: fit them to the data on open, as for delimited text.
+  wb.fitColumnsOnOpen = wb.sheets.map((s) => s.id);
+  wb.dirty = false;
+  return wb;
+}
+
+/**
  * Parse spreadsheet file bytes (xlsx, xls, csv, ods, ...) into a Workbook.
  * `data` may be an ArrayBuffer, Uint8Array, or Blob.
  */
@@ -2242,7 +2333,10 @@ function sniffFileKind(b) {
   const head = b.subarray(0, 1024);
   for (const byte of head) if (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x0c) return 'binary';
   const text = new TextDecoder().decode(head).replace(/^﻿/, '').trimStart();
-  return /^(?:<\?xml\b|<\?mso-application\b|<!doctype\s+html\b|<html\b|<head\b|<body\b|<meta\b|<table\b|ID;P|TABLE\r?\n0,1)/i.test(text) ? 'markup' : 'text';
+  if (/^(?:<\?xml\b|<\?mso-application\b|<!doctype\s+html\b|<html\b|<head\b|<body\b|<meta\b|<table\b|ID;P|TABLE\r?\n0,1)/i.test(text)) return 'markup';
+  // A saved web page can open with a comment (browsers write "<!-- saved from url=... -->" first), a
+  // stylesheet or a <div> before its table: markup from its first character that names a page's element.
+  return text.startsWith('<') && /<(?:html|head|body|table|meta|style|script|div)\b/i.test(text) ? 'markup' : 'text';
 }
 
 // A zip's central directory says what each part unpacks to before any of it is unpacked. A
@@ -2308,6 +2402,41 @@ function declaredUnpackedSize(bytes) {
   return { largest, total };
 }
 
+// Excel's Save As offers "Strict Open XML Spreadsheet", whose parts name ISO 29500's Strict namespaces
+// (http://purl.oclc.org/ooxml/...) in place of the transitional ones every reader here knows. The package
+// is otherwise the same, so it is read with each Strict name replaced by its transitional twin.
+const STRICT = /http:\/\/purl\.oclc\.org\/ooxml\/(spreadsheetml|drawingml|officeDocument|schemaLibrary)\/(\w+)(\/\w+)?/g;
+const STRICT_DOCUMENT = { relationships: 'relationships', extendedProperties: 'extended-properties', customProperties: 'custom-properties', docPropsVTypes: 'docPropsVTypes', sharedTypes: 'sharedTypes', math: 'math', bibliography: 'bibliography' };
+const STRICT_RELATIONSHIPS = { extendedProperties: 'extended-properties', customProperties: 'custom-properties' };
+const transitionalName = (all, group, name, tail = '') => {
+  if (group === 'officeDocument') {
+    if (!STRICT_DOCUMENT[name]) return all;
+    const type = tail.slice(1);
+    return `http://schemas.openxmlformats.org/officeDocument/2006/${STRICT_DOCUMENT[name]}${tail && name === 'relationships' ? `/${STRICT_RELATIONSHIPS[type] || type}` : tail}`;
+  }
+  return `http://schemas.openxmlformats.org/${group}/2006/${name}${tail}`;
+};
+
+/** Whether a zip is a Strict Open XML package: its package relationships name the Strict main document. */
+function strictPackage(X, bytes, book) {
+  let rels = book?.files?.['_rels/.rels']?.content;
+  if (!book) { try { rels = X.CFB.find(X.CFB.read(bytes, { type: 'array' }), '/_rels/.rels')?.content; } catch { return false; } }
+  return !!rels && new TextDecoder().decode(rels).includes('http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument');
+}
+
+/** A Strict package's bytes with every Strict namespace and relationship type in its transitional spelling. */
+function transitionalPackage(X, bytes) {
+  const zip = X.CFB.read(bytes, { type: 'array' });
+  for (const entry of zip.FileIndex) {
+    if (!entry.content?.length || !/\.(?:xml|rels|vml)$/i.test(entry.name)) continue;
+    const text = new TextDecoder().decode(entry.content);
+    if (!text.includes('http://purl.oclc.org/ooxml/')) continue;
+    entry.content = new TextEncoder().encode(text.replace(STRICT, transitionalName));
+    entry.size = entry.content.length;
+  }
+  return new Uint8Array(X.CFB.write(zip, { type: 'array', fileType: 'zip' }));
+}
+
 /**
  * The reason a file could not be read, worded for the person opening it. The library names its own
  * internals ("Bad compressed size: 0 != 358" for a download cut short, "Unknown Namespace" for a Word
@@ -2340,6 +2469,10 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
     text.fitColumnsOnOpen = text.sheets.map((s) => s.id);
     return text;
   }
+  if (kind === 'markup') {
+    const page = workbookFromHtml(decodeText(bytes));
+    if (page) return page;
+  }
   const unpacked = declaredUnpackedSize(bytes);
   if (unpacked && (unpacked.largest > MAX_PART_BYTES || unpacked.total > MAX_UNPACKED_BYTES)) {
     const mb = (n) => `${Math.round(n / (1024 * 1024))} MB`;
@@ -2351,9 +2484,18 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
   // cleanup also removes matching text from strings and sheet names.
   // bookFiles keeps the inflated parts, from which the sheet state the reader leaves in the XML is read.
   let book;
+  const readOptions = { type: 'array', cellNF: true, cellDates: false, cellStyles: true, sheetStubs: true, xlfn: true, bookFiles: true };
   try {
-    book = X.read(bytes, { type: 'array', cellNF: true, cellDates: false, cellStyles: true, sheetStubs: true, xlfn: true, bookFiles: true });
-  } catch (e) { throw readFailure(e); }
+    book = X.read(bytes, readOptions);
+  } catch (e) {
+    // A Strict file's parts can stop the reader before it says what the package is.
+    const transitional = strictPackage(X, bytes, null) && transitionalPackage(X, bytes);
+    if (!transitional) throw readFailure(e);
+    try { book = X.read(transitional, readOptions); } catch (again) { throw readFailure(again); }
+  }
+  if (strictPackage(X, bytes, book)) {
+    try { book = X.read(transitionalPackage(X, bytes), readOptions); } catch (e) { throw readFailure(e); }
+  }
   const fileFormat = recoveredFormat(X);
   const partOf = sheetParts(book);
   // The reader keeps quiet about a sheet whose part it could not parse and
@@ -2458,8 +2600,20 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
         if (chartSheet) sheet.gridlines = false;
       }
       if (!chartSheet && partOf(n)) sheet.background = readXlsxBackground(book, n, partOf(n));
+      // Another program's .ods says its frozen panes and tab colour in LibreOffice's view settings.
+      const odsView = !meta?.sheets?.[n] && book.OdsView?.sheets?.[n];
+      if (odsView) {
+        if (odsView.frozenRows) sheet.frozenRows = odsView.frozenRows;
+        if (odsView.frozenCols) sheet.frozenCols = odsView.frozenCols;
+        if (odsView.tabColor && !sheet.color) sheet.color = odsView.tabColor;
+      }
       return { ...sheet, hidden: hidden.has(n) || isVeryHidden || visibility === 'hidden', veryHidden: isVeryHidden };
     });
+  // What each sheet held past the grid, counted as for a delimited file: rows added up, columns at their widest.
+  const beyond = sheets.reduce((sum, sheet) => {
+    if (sheet.beyond) { sum.rows += sheet.beyond.rows; sum.cols = Math.max(sum.cols, sheet.beyond.cols); delete sheet.beyond; }
+    return sum;
+  }, { rows: 0, cols: 0 });
   const pivotRulePriorities = new Map();
   for (const sheet of sheets) {
     const nativeRules = sheet.rules;
@@ -2644,9 +2798,11 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
     });
   }
   const tab = Number(xlsxAttr(view, 'activeTab'));
-  const activeName = typeof meta?.active === 'string' ? meta.active : Number.isInteger(tab) && tab >= 0 ? book.SheetNames[tab] : null;
+  const activeName = typeof meta?.active === 'string' ? meta.active : Number.isInteger(tab) && tab >= 0 ? book.SheetNames[tab]
+    : typeof book.OdsView?.active === 'string' ? book.OdsView.active : null;
   const active = activeName ? wb.sheetByName(renamed.get(activeName) || activeName) : null;
   if (active && !active.hidden) wb.activeSheetId = active.id;
+  if (beyond.rows || beyond.cols) wb.importTruncated = beyond;
   wb.dirty = false;
   return wb;
 }

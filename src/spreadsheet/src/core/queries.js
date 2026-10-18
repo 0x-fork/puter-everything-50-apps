@@ -27,9 +27,11 @@ export const STEP_NAMES = {
   removeDuplicates: 'Removed Duplicates', replaceValues: 'Replaced Value', splitColumn: 'Split Column by Delimiter', addIndex: 'Added Index',
   groupBy: 'Grouped Rows', keepFirst: 'Kept First Rows', keepLast: 'Kept Last Rows', removeFirst: 'Removed Top Rows', removeLast: 'Removed Bottom Rows',
   removeBlankRows: 'Removed Blank Rows', merge: 'Merged Queries', fillDown: 'Filled Down', fillUp: 'Filled Up', transformText: 'Transformed Text',
-  duplicateColumn: 'Duplicated Column', reorderColumns: 'Reordered Columns', removeErrors: 'Removed Errors',
+  duplicateColumn: 'Duplicated Column', reorderColumns: 'Reordered Columns', removeErrors: 'Removed Errors', addTextColumn: 'Inserted Text',
 };
 const TEXT_OP_NAMES = { lower: 'Lowercased Text', upper: 'Uppercased Text', proper: 'Capitalized Each Word', trim: 'Trimmed Text', clean: 'Cleaned Text' };
+/** The column Add Column ▸ Format adds is named after the format, as Power Query names it. */
+export const TEXT_COLUMN_NAMES = { lower: 'lowercase', upper: 'UPPERCASE', proper: 'Capitalize Each Word', trim: 'Trim', clean: 'Clean' };
 export const FILTER_OPS = {
   equals: 'equals', notEquals: 'does not equal', beginsWith: 'begins with', notBeginsWith: 'does not begin with', endsWith: 'ends with',
   notEndsWith: 'does not end with', contains: 'contains', notContains: 'does not contain', gt: 'is greater than', gte: 'is greater than or equal to',
@@ -104,7 +106,7 @@ function normalizeStep(raw) {
       step.join = raw.join === 'or' ? 'or' : 'and';
       step.conditions = (Array.isArray(raw.conditions) ? raw.conditions : []).slice(0, 50).map((c) => {
         if (!isObj(c)) return null;
-        if (c.op === 'in') return { op: 'in', values: (Array.isArray(c.values) ? c.values : []).slice(0, 100000).map(normalizeValue) };
+        if (c.op === 'in' || c.op === 'notIn') return { op: c.op, values: (Array.isArray(c.values) ? c.values : []).slice(0, 100000).map(normalizeValue) };
         if (!FILTER_OPS[c.op]) return null;
         return { op: c.op, value: normalizeValue(c.value) };
       }).filter(Boolean);
@@ -138,6 +140,10 @@ function normalizeStep(raw) {
       break;
     case 'fillDown': case 'fillUp': step.columns = names(raw.columns); break;
     case 'transformText': step.columns = names(raw.columns); step.op = TEXT_OP_NAMES[raw.op] ? raw.op : 'trim'; break;
+    case 'addTextColumn':
+      step.column = str(raw.column, 1024); step.op = TEXT_OP_NAMES[raw.op] ? raw.op : 'trim';
+      step.as = str(raw.as, 1024) || TEXT_COLUMN_NAMES[step.op];
+      break;
     case 'duplicateColumn': step.column = str(raw.column, 1024); step.as = str(raw.as, 1024); break;
     default: break;
   }
@@ -146,7 +152,9 @@ function normalizeStep(raw) {
 
 function normalizeLoad(raw) {
   if (!isObj(raw) || raw.kind !== 'table') return { kind: 'connection' };
-  return { kind: 'table', table: str(raw.table, 255), ...(typeof raw.sheet === 'string' ? { sheet: str(raw.sheet, 31) } : {}) };
+  // `columns`: the query's own columns as last loaded, which tells them from columns added to the table by hand.
+  return { kind: 'table', table: str(raw.table, 255), ...(typeof raw.sheet === 'string' ? { sheet: str(raw.sheet, 31) } : {}),
+    ...(Array.isArray(raw.columns) ? { columns: names(raw.columns).slice(0, 16384) } : {}) };
 }
 
 export function normalizeQuery(raw) {
@@ -576,9 +584,19 @@ function textOf(v) {
   return typeof v === 'string' ? v : null;
 }
 
+/** The keys of a list condition's values, worked out once per condition rather than once per row. */
+const listKeys = new WeakMap();
+const keysOf = (cond) => {
+  let keys = listKeys.get(cond);
+  if (!keys) listKeys.set(cond, keys = new Set(cond.values.map(keyOf)));
+  return keys;
+};
+
 function matches(cond, v, type) {
   const { op } = cond;
-  if (op === 'in') return cond.values.some((x) => keyOf(x) === keyOf(v));
+  // The values ticked in a column's filter list (in), or those cleared when the list did not hold them all (notIn).
+  if (op === 'in') return keysOf(cond).has(keyOf(v));
+  if (op === 'notIn') return !keysOf(cond).has(keyOf(v));
   if (op === 'isNull') return v == null;
   if (op === 'notNull') return v != null;
   if (op === 'isBlank') return v == null || v === '';
@@ -606,7 +624,8 @@ function matches(cond, v, type) {
 
 function aggregate(op, values, type) {
   if (op === 'count') return values.length;
-  if (op === 'countDistinct') return new Set(values.map(keyOf)).size;
+  // Count Distinct Rows counts the group's distinct rows, every column compared (Table.RowCount(Table.Distinct(_))).
+  if (op === 'countDistinct') return new Set(values.map((row) => row.map(keyOf).join('\u0001'))).size;
   const nums = values.filter((v) => typeof v === 'number');
   if (op === 'min' || op === 'max') {
     const present = values.filter((v) => v != null && !isErr(v));
@@ -739,7 +758,8 @@ export function applyStep(table, step, refs = {}) {
     }
     case 'groupBy': {
       const keys = step.keys.map((n) => colIndex(table, n));
-      const aggs = step.aggregations.map((a) => ({ ...a, i: a.op === 'count' ? -1 : colIndex(table, a.column) }));
+      // Count Rows and Count Distinct Rows read the group's whole rows, not one column.
+      const aggs = step.aggregations.map((a) => ({ ...a, i: a.op === 'count' || a.op === 'countDistinct' ? -1 : colIndex(table, a.column) }));
       const groups = new Map();
       for (const r of rows) {
         const k = keys.map((i) => keyOf(r[i])).join('\u0001');
@@ -772,6 +792,13 @@ export function applyStep(table, step, refs = {}) {
     case 'transformText': {
       const idx = step.columns.map((n) => colIndex(table, n)), fn = TEXT_OPS[step.op];
       return { columns, types, rows: rows.map((r) => { const out = r.slice(); for (const i of idx) if (typeof r[i] === 'string') out[i] = fn(r[i]); return out; }) };
+    }
+    case 'addTextColumn': {
+      // Add Column ▸ Format: a new text column holding the column's text in that format; the column itself stays.
+      const i = colIndex(table, step.column), fn = TEXT_OPS[step.op];
+      const name = uniqueNames([...columns, step.as]).at(-1);
+      const shown = (v) => (v == null || isErr(v) ? v ?? null : fn(typeof v === 'string' ? v : displayValue(v, types[i])));
+      return { columns: [...columns, name], types: [...types, 'text'], rows: rows.map((r) => [...r, shown(r[i])]) };
     }
     case 'duplicateColumn': {
       const i = colIndex(table, step.column);
@@ -857,7 +884,7 @@ export function stepNames(query) {
   const counts = new Map();
   return ['Source', ...query.steps.map((s) => {
     if (s.name) return s.name;
-    const base = s.type === 'transformText' ? TEXT_OP_NAMES[s.op] : STEP_NAMES[s.type];
+    const base = s.type === 'transformText' ? TEXT_OP_NAMES[s.op] : s.type === 'addTextColumn' ? `Inserted ${TEXT_OP_NAMES[s.op]}` : STEP_NAMES[s.type];
     const n = counts.get(base) || 0;
     counts.set(base, n + 1);
     return n ? `${base}${n}` : base;
@@ -900,7 +927,8 @@ export function stepFormula(query, index) {
         contains: (v) => `Text.Contains([${step.column}], ${val(v)})`, notContains: (v) => `not Text.Contains([${step.column}], ${val(v)})`,
         isNull: () => `[${step.column}] = null`, notNull: () => `[${step.column}] <> null`, isBlank: () => `[${step.column}] = null or [${step.column}] = ""`,
         notBlank: () => `[${step.column}] <> null and [${step.column}] <> ""` };
-      const parts = step.conditions.map((c) => (c.op === 'in' ? `List.Contains(${`{${c.values.map(val).join(', ')}}`}, [${step.column}])` : fn[c.op](c.value)));
+      const list = (c) => `List.Contains({${c.values.map(val).join(', ')}}, [${step.column}])`;
+      const parts = step.conditions.map((c) => (c.op === 'in' ? list(c) : c.op === 'notIn' ? `not ${list(c)}` : fn[c.op](c.value)));
       return `= Table.SelectRows(${prev}, each ${parts.join(` ${step.join} `) || 'true'})`;
     }
     case 'sortRows': return `= Table.Sort(${prev},{${step.keys.map((k) => `{${q(k.column)}, Order.${k.desc ? 'Descending' : 'Ascending'}}`).join(', ')}})`;
@@ -925,6 +953,10 @@ export function stepFormula(query, index) {
     case 'transformText': {
       const fn = { lower: 'Text.Lower', upper: 'Text.Upper', proper: 'Text.Proper', trim: 'Text.Trim', clean: 'Text.Clean' }[step.op];
       return `= Table.TransformColumns(${prev},{${step.columns.map((c) => `{${q(c)}, ${fn}, type text}`).join(', ')}})`;
+    }
+    case 'addTextColumn': {
+      const fn = { lower: 'Text.Lower', upper: 'Text.Upper', proper: 'Text.Proper', trim: 'Text.Trim', clean: 'Text.Clean' }[step.op];
+      return `= Table.AddColumn(${prev}, ${q(step.as)}, each ${fn}([${step.column}]), type text)`;
     }
     case 'duplicateColumn': return `= Table.DuplicateColumn(${prev}, ${q(step.column)}, ${q(step.as || `${step.column} - Copy`)})`;
     case 'merge': {
@@ -965,22 +997,42 @@ export function sheetNameFor(wb, queryName) {
 }
 
 /** The cells for a result: the header row, then each row (an error becomes an empty cell). */
-export function resultCells(table, r0, c0) {
+export function resultCells(table, r0, c0, at = null) {
   const entries = [];
   let errors = 0;
-  table.columns.forEach((name, j) => entries.push({ r: r0, c: c0 + j, cell: { v: name, f: null } }));
+  // `at` places each of the result's columns at an offset of its own (columns of the table's between them).
+  const col = (j) => c0 + (at ? at[j] : j);
+  table.columns.forEach((name, j) => entries.push({ r: r0, c: col(j), cell: { v: name, f: null } }));
   table.rows.forEach((row, i) => row.forEach((v, j) => {
     if (isErr(v)) errors++;
     if (v == null || isErr(v)) return;
     const cell = { v, f: null };
     if (table.types[j] === 'date' && typeof v === 'number') cell.s = { fmt: 'date' };
-    entries.push({ r: r0 + 1 + i, c: c0 + j, cell });
+    entries.push({ r: r0 + 1 + i, c: col(j), cell });
   }));
   return { entries, errors };
 }
 
+/** Does any cell of a range hold something: a value, a formula, or part of a spilled result? */
+function occupied(wb, sheetId, range) {
+  const sheet = wb.sheet(sheetId);
+  for (const [key, cell] of sheet.cells) {
+    if (!cell || ((cell.v == null || cell.v === '') && cell.f == null)) continue;
+    const [r, c] = key.split(',').map(Number);
+    if (r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2) return true;
+  }
+  for (const a of wb._ensureSpills(sheet).anchors.values()) {
+    if (a.r <= range.r2 && a.r + a.rows - 1 >= range.r1 && a.c <= range.c2 && a.c + a.cols - 1 >= range.c1) return true;
+  }
+  return false;
+}
+
+const blockedMessage = (direction) => (direction === 'left'
+  ? 'A column the query no longer gives could not be taken out of the table (a PivotTable, a protected sheet, merged cells or an array formula is in the way).'
+  : `The refreshed data needs more ${direction === 'down' ? 'rows' : 'columns'}, but the cells ${direction === 'down' ? 'below' : 'beside'} the table could not be moved (a PivotTable, a protected sheet, merged cells or an array formula is in the way).`);
+
 /**
- * Write a query's result into the workbook as a table: a new sheet named after the query, or at `at`
+ * Write a query's result into the workbook as a table:a new sheet named after the query, or at `at`
  * ({ sheetId, r, c }), or over the table it loaded before (a refresh), resized to the new rows and columns.
  * Returns { sheetId, tableId, rows, errors } or { error }.
  */
@@ -992,18 +1044,74 @@ export function loadResult(wb, query, table, { at = null } = {}) {
   const label = existing ? 'Refresh' : 'Load query';
   wb.transaction(label, () => {
     if (existing) {
-      const { sheet, table: t } = existing;
+      const { sheet } = existing;
+      let t = existing.table;
       const { r1, c1 } = t.range;
-      const next = { r1, c1, r2: r1 + Math.max(1, height), c2: c1 + table.columns.length - 1 };
-      wb.clearRange(sheet.id, { r1: r1 + 1, c1: t.range.c1, r2: t.range.r2, c2: t.range.c2 });
-      if (next.c2 < t.range.c2) wb.clearRange(sheet.id, { r1, c1: next.c2 + 1, r2: r1, c2: t.range.c2 });
-      if (next.r2 !== t.range.r2 || next.c2 !== t.range.c2) {
+      // Columns added to the table by hand (a calculated Total beside the query's columns) are the table's own, as in
+      // Excel: a refresh keeps them, their formulas and values, and lays the query's columns out around them. They are
+      // told apart by the columns the query loaded last time; a table loaded before that was recorded keeps its
+      // calculated columns. Columns the query no longer gives are taken out of the table, so the rest close up.
+      const resultNames = new Set(table.columns);
+      const loaded = query.load?.columns;
+      const handmade = (names, tt) => names.map((n, i) => !resultNames.has(n) && (loaded ? !loaded.includes(n) : tt.calc?.[i] != null));
+      let names = wb.tableColumns(sheet.id, t);
+      let own = handmade(names, t);
+      const keep = own.some(Boolean);
+      if (keep) {
+        for (let i = names.length - 1; i >= 0; i--) {
+          if (own[i] || resultNames.has(names[i])) continue;
+          if (!wb.deleteCells(sheet.id, { r1: t.range.r1, c1: t.range.c1 + i, r2: t.range.r2, c2: t.range.c1 + i }, 'left')) { result = { error: blockedMessage('left') }; return; }
+          t = wb.tableById(sheet.id, t.id);
+        }
+        names = wb.tableColumns(sheet.id, t);
+        own = handmade(names, t);
+      }
+      const layout = keep ? [...names, ...table.columns.filter((n) => !names.includes(n))] : table.columns;
+      const at = keep ? table.columns.map((n) => layout.indexOf(n)) : null;
+      const old = { ...t.range };
+      const next = { r1, c1, r2: r1 + Math.max(1, height), c2: c1 + layout.length - 1 };
+      // A table that grows makes room for its new rows and columns, as Excel's refresh inserts cells for new
+      // data: what stands beside or below it (a note, a total, another table) moves along instead of being
+      // written over. Nothing has changed yet when the cells cannot move, so the refresh stops there.
+      const right = { r1, c1: old.c2 + 1, r2: Math.max(old.r2, next.r2), c2: next.c2 };
+      if (next.c2 > old.c2 && occupied(wb, sheet.id, right) && !wb.insertCells(sheet.id, right, 'right')) { result = { error: blockedMessage('right') }; return; }
+      const below = { r1: old.r2 + 1, c1, r2: next.r2, c2: Math.max(old.c2, next.c2) };
+      if (next.r2 > old.r2 && occupied(wb, sheet.id, below) && !wb.insertCells(sheet.id, below, 'down')) { result = { error: blockedMessage('down') }; return; }
+      if (next.r2 !== old.r2 || next.c2 !== old.c2) {
         let problem = null;
         if (!wb.resizeTable(sheet.id, t.id, next, { onInvalid: (m) => { problem = m; } })) { result = { error: problem || 'The table could not be resized for the new data.' }; return; }
       }
-      const { entries, errors } = resultCells(table, r1, c1);
+      if (keep) {
+        // The query's columns are written afresh; the table's own keep their cells, but for the rows it no longer has.
+        for (const p of at) if (p < names.length) wb.clearRange(sheet.id, { r1: r1 + 1, c1: c1 + p, r2: old.r2, c2: c1 + p });
+        if (old.r2 > next.r2) own.forEach((mine, p) => { if (mine) wb.clearRange(sheet.id, { r1: next.r2 + 1, c1: c1 + p, r2: old.r2, c2: c1 + p }); });
+        // Rows the table gained take its calculated columns' formulas, as rows typed under a table do.
+        for (let r = old.r2 + 1; r <= next.r2; r++) wb._fillCalculatedRow(sheet, wb.tableById(sheet.id, t.id), r);
+      } else {
+        wb.clearRange(sheet.id, { r1: r1 + 1, c1: old.c1, r2: old.r2, c2: old.c2 });
+        if (next.c2 < old.c2) wb.clearRange(sheet.id, { r1, c1: next.c2 + 1, r2: r1, c2: old.c2 });
+      }
+      const { entries, errors } = resultCells(table, r1, c1, at);
+      // The cells keep the formatting given to them (a currency, bold, a date format), as Excel's refresh preserves
+      // cell formatting; a row the table gains takes its column's formatting from the last row it had.
+      // The formatted cells are gathered in one pass over the sheet's cells, by column, rather than looked up one by
+      // one: a refresh of 100,000 rows writes 600,000 cells, few of them formatted, or whole columns alike.
+      const formatted = new Map();
+      for (const [key, cell] of sheet.cells) {
+        if (!cell?.s) continue;
+        const comma = key.indexOf(','), r = Number(key.slice(0, comma)), c = Number(key.slice(comma + 1));
+        if (r < r1 || r > old.r2 || c < c1 || c > next.c2) continue;
+        if (!formatted.has(c)) formatted.set(c, []);
+        formatted.get(c)[r - r1] = cell.s;
+      }
+      const lastRow = old.r2 > r1 ? old.r2 - r1 : null;
+      if (formatted.size) for (const e of entries) {
+        const column = formatted.get(e.c);
+        const kept = column && (column[e.r - r1] || (e.r > old.r2 && lastRow != null ? column[lastRow] : null));
+        if (kept) e.cell.s = e.cell.s && !kept.fmt ? { ...kept, ...e.cell.s } : kept;
+      }
       wb.setCells(sheet.id, entries, label);
-      query.load = { kind: 'table', table: t.name, sheet: sheet.name, tableId: t.id };
+      query.load = { kind: 'table', table: t.name, sheet: sheet.name, tableId: t.id, columns: [...table.columns] };
       result = { sheetId: sheet.id, tableId: t.id, rows: height, errors };
       return;
     }
@@ -1018,12 +1126,14 @@ export function loadResult(wb, query, table, { at = null } = {}) {
     if (wb.sheet(sheetId).tables.some((t) => !(range.r2 < t.range.r1 || range.r1 > t.range.r2 || range.c2 < t.range.c1 || range.c1 > t.range.c2))) {
       result = { error: 'The data would overlap another table. Choose another location.' }; return;
     }
+    // Loading over cells that hold something would write over them without a word: the location must be empty.
+    if (at && occupied(wb, sheetId, range)) { result = { error: 'There is data where the table would go. Choose an empty location, or a new worksheet.' }; return; }
     const { entries, errors } = resultCells(table, r0, c0);
     wb.setCells(sheetId, entries, label);
     const name = tableNameFor(wb, query.name);
     const tableId = wb.addTable(sheetId, range, { name });
     if (!tableId) { result = { error: 'A table could not be created there.' }; return; }
-    query.load = { kind: 'table', table: name, sheet: wb.sheet(sheetId).name, tableId };
+    query.load = { kind: 'table', table: name, sheet: wb.sheet(sheetId).name, tableId, columns: [...table.columns] };
     result = { sheetId, tableId, rows: height, errors };
   });
   if (result && !result.error) {

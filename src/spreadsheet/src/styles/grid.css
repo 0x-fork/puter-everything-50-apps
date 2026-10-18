@@ -309,6 +309,9 @@
 }
 
 .cell.rot .rot-text { display: inline-block; white-space: pre; line-height: 1.2; transform-origin: center; }
+/* Angled text: the box of its turned bounds is what the cell aligns; the text turns about its centre inside it. */
+.cell.rot .rot-bounds { position: relative; flex: none; }
+.cell.rot .rot-bounds > .rot-text { position: absolute; left: 50%; top: 50%; }
 .cell.rot.vert .rot-text { writing-mode: vertical-rl; }
 .cell.rot.vert.up .rot-text { transform: rotate(180deg); }
 .cell .cf-icon { display: inline-block; flex: none; margin-right: 5px; font-size: 0.8em; line-height: 1; letter-spacing: -1px; }
@@ -458,6 +461,9 @@
 
 /* Scrolled under a frozen pane, which lets pointer events through, the handle must not take the press or show its crosshair. */
 .fill-handle.under-pane { pointer-events: none; }
+/* Zoomed far out the cells are smaller than the handle's hit area: it keeps to the handle drawn, leaving the
+   neighbouring cells to their own clicks. */
+.fill-handle.tight::after { inset: 0; }
 
 .fill-preview {
   border: 1.5px dashed var(--accent-strong);
@@ -512,8 +518,10 @@
   user-select: none;
   will-change: transform;
   outline: none;
-  touch-action: none; /* a finger moves the box; the browser must not scroll the sheet with it instead */
 }
+/* A finger moves a selected box; the browser must not scroll the sheet with it instead. One not selected
+   lets the finger scroll the sheet, and a tap selects it (see chartPointerDown). */
+.chart-box.selected { touch-action: none; }
 .chart-body { position: absolute; inset: 0; overflow: hidden; border-radius: var(--r-sm); }
 .chart-body svg { display: block; width: 100%; height: 100%; font-family: var(--font); }
 .image-box { background: transparent; }
@@ -564,6 +572,9 @@
   touch-action: none;
 }
 .chart-box.selected .chart-resize { display: block; }
+/* A protected sheet's objects do not move or resize (see chartPointerDown): no corner to drag, no move cursor. */
+.grid.protected .chart-box.selected .chart-resize { display: none; }
+.grid.protected .chart-box { cursor: default; }
 
 .ref-layer,
 .hl-layer {

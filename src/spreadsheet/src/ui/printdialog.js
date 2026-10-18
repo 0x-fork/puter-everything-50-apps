@@ -5,7 +5,7 @@
 
 import { el, fieldId, isComposing } from './dom.js';
 import { openModal, fieldAlert } from './modal.js';
-import { printSheet, PRINT_DEFAULTS, PAPER_SIZES, MARGINS, supportsPageMarginBoxes, sheetPrintPrefs, printSettingsFromPrefs, printableWidth, printableHeight } from './print.js';
+import { printSheet, printFolder, PRINT_DEFAULTS, PAPER_SIZES, MARGINS, supportsPageMarginBoxes, sheetPrintPrefs, printSettingsFromPrefs, printableWidth, printableHeight } from './print.js';
 import { toast } from './toast.js';
 import { rangeName, colName } from '../core/cell.js';
 import { parseRefText } from '../core/refs.js';
@@ -13,6 +13,7 @@ import { getLocale } from '../core/format.js';
 import * as S from '../core/selection.js';
 import { accountStorageKey } from '../lib/account-storage.js';
 import { createPrintPreview } from './print-preview.js';
+import { resolvedAbsolutePath } from '../lib/puter.js';
 
 const STORAGE_KEY = 'spreadsheet:print';
 
@@ -98,11 +99,18 @@ export function openPrintDialog(ctx) {
   const titleInputs = ['titleRows', 'titleCols'].map((key, i) => el('input.input', {
     type: 'text', value: prefs[key]?.map(n => i ? colName(n) : n + 1).join(':') || '',
     'aria-label': i ? 'Columns to repeat at left' : 'Rows to repeat at top', placeholder: i ? 'A:C' : '1:3',
-    oninput: () => { titleError.clear(); sync(); },
+    oninput: (e) => {
+      titleError.clear();
+      // The preview repeats the lines as they are typed; one that does not read yet changes nothing until Print says why.
+      const text = e.target.value.trim(), ref = text ? parseRefText(text) : null;
+      if (!text) prefs[key] = null;
+      else if (ref && !ref.sheet && !ref.sheetEnd && ref.kind === (i ? 'cols' : 'rows')) prefs[key] = i ? [ref.c1, ref.c2] : [ref.r1, ref.r2];
+      sync();
+    },
   }));
   const titleFields = el('div.field', {}, el('div.row.row-2', {}, titleInputs.map((input, i) =>
     el('label.field', {}, el('span.field-label', {}, i ? 'Columns to repeat at left' : 'Rows to repeat at top'), input))), titleError.alert);
-  const paperSel = el('select.input', { 'aria-label': 'Paper size', onchange: () => { prefs.paper = paperSel.value; } },
+  const paperSel = el('select.select', { 'aria-label': 'Paper size', onchange: () => { prefs.paper = paperSel.value; } },
     ...PAPER_SIZES.map(([k, label]) => el('option', { value: k }, label)));
   paperSel.value = PAPER_SIZES.some(([k]) => k === prefs.paper) ? prefs.paper : 'letter';
   const marginBoxes = supportsPageMarginBoxes();
@@ -174,7 +182,9 @@ export function openPrintDialog(ctx) {
     preview?.refresh();
   }
   // Beside the choices, the pages as they will print, following each change (not for a chart sheet, which is one page).
-  const preview = chartSheet ? null : createPrintPreview({ wb: ctx.wb, sheetId, docName: ctx.doc?.name, getPrefs: () => prefs, getRange: () => range });
+  // The folder the file is in, for &[Path] in the header or footer.
+  const filePath = printFolder(resolvedAbsolutePath(ctx.doc?.path));
+  const preview = chartSheet ? null : createPrintPreview({ wb: ctx.wb, sheetId, docName: ctx.doc?.name, filePath, getPrefs: () => prefs, getRange: () => range });
 
   const controller = new AbortController();
   let preparing = false;
@@ -221,7 +231,7 @@ export function openPrintDialog(ctx) {
     button.disabled = true;
     button.textContent = 'Preparing…';
     content.setAttribute('aria-busy', 'true');
-    const ok = await printSheet(ctx.wb, sheetId, ctx.doc?.name, { ...prefs, range: area === 'selection' ? range : null, signal: controller.signal });
+    const ok = await printSheet(ctx.wb, sheetId, ctx.doc?.name, { ...prefs, range: area === 'selection' ? range : null, filePath, signal: controller.signal });
     preparing = false;
     button.disabled = false;
     button.textContent = 'Print';

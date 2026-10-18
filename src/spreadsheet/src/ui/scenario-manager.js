@@ -5,12 +5,14 @@
 import { el, fieldId } from './dom.js';
 import { openModal, fieldAlert } from './modal.js';
 import { toast } from './toast.js';
-import { parseInput } from '../core/format.js';
+import { parseInput, editText } from '../core/format.js';
 import { cellsText, parseChangingCells, saveScenario, deleteScenario, showScenario, mergeScenarios, createScenarioSummary,
   currentValues, scenarioProblem, MAX_CHANGING_CELLS } from '../core/scenarios.js';
 
 const today = () => new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'numeric', day: 'numeric' });
-const valueText = (v) => (typeof v === 'boolean' ? (v ? 'TRUE' : 'FALSE') : v == null ? '' : String(v));
+/** A stored value as the Values step shows it: as a cell opened for editing would, so it reads back as itself in
+ * the regional format (1,5 where the decimal mark is a comma, text that looks like a number with its apostrophe). */
+const valueText = (v) => editText(v == null || v === '' ? null : { v, f: null });
 
 /** Selected cells as the changing cells a new scenario starts with. */
 function selectionCells(ctx) {
@@ -195,7 +197,8 @@ export function openScenarioManager(ctx) {
     sync(s.name);
   };
   buttons.add = el('button.btn', { type: 'button', onclick: () => openScenarioEditor(ctx, null, { onDone: (name) => sync(name) }) }, 'Add…');
-  buttons.delete = el('button.btn', { type: 'button', onclick: () => { const s = selected(); if (s && deleteScenario(wb, sheetId, s.name)) sync(); } }, 'Delete');
+  // Deleting the last scenario turns Delete off and hides the list: the focus goes on to Add rather than to the page.
+  buttons.delete = el('button.btn', { type: 'button', onclick: () => { const s = selected(); if (s && deleteScenario(wb, sheetId, s.name)) { sync(); if (buttons.delete.disabled) (listBox.hidden ? buttons.add : listBox).focus(); } } }, 'Delete');
   buttons.edit = el('button.btn', { type: 'button', onclick: () => { const s = selected(); if (s) openScenarioEditor(ctx, s, { onDone: (name) => sync(name) }); } }, 'Edit…');
   buttons.merge = el('button.btn', { type: 'button', onclick: () => openMerge(ctx, () => sync()) }, 'Merge…');
   buttons.summary = el('button.btn', { type: 'button', onclick: () => openSummary(ctx, () => modal.close()) }, 'Summary…');
@@ -208,7 +211,8 @@ export function openScenarioManager(ctx) {
       el('span.field-label', {}, 'Changing cells:'), cellsOut,
       el('span.field-label', {}, 'Comment:'), commentOut),
     el('div.row.row-end', {}, buttons.show, el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Close')));
-  const modal = openModal({ title: 'Scenario Manager', content, initialFocus: listBox, onClose: () => ctx.grid?.focus?.() });
+  // The list and buttons are set before the dialog opens, so the focus starts on a control that is shown and on.
   sync();
+  const modal = openModal({ title: 'Scenario Manager', content, initialFocus: listBox.hidden ? buttons.add : listBox, onClose: () => ctx.grid?.focus?.() });
   return { ...modal, select: (name) => sync(name), refresh: () => sync() };
 }

@@ -47,7 +47,7 @@ import { createComments, COMMENT_COMMANDS } from '../ui/comments.js';
 import { copyThreads, pasteThreads } from '../core/comments.js';
 import { pageBreaks, pagesOf, insertBreaks, removeBreaks, hasBreakAt, moveBreak, moveAreaEdge } from '../ui/pagebreaks.js';
 import { createPageLayout } from '../ui/page-layout.js';
-import { consolidate } from '../core/consolidate.js';
+import { consolidate, consolidationSource } from '../core/consolidate.js';
 import { openConsolidateDialog } from '../ui/consolidatedialog.js';
 import { attachKeyTips } from '../ui/keytips.js';
 import { createFormulaBar } from '../ui/formulabar.js';
@@ -63,7 +63,7 @@ import { createStatusBar } from '../ui/statusbar.js';
 import { createFindBar } from '../ui/findbar.js';
 import { openPrintDialog, currentPrintPrefs } from '../ui/printdialog.js';
 import { installSheetFontLoading } from '../ui/sheet-fonts.js';
-import { installPrintFallback } from '../ui/print.js';
+import { installPrintFallback, printFolder } from '../ui/print.js';
 import { openNamesManager } from '../ui/names.js';
 import { openCreateNamesDialog } from '../ui/createnames.js';
 import { conditionalFormattingItems, openQuickRuleDialog, presetRule, clearRules } from '../ui/condformat-quick.js';
@@ -122,7 +122,7 @@ import { openTextToColumnsDialog } from '../ui/textcolumnsdialog.js';
 import { openProtectedRanges } from '../ui/protect.js';
 import { openColumnStats } from '../ui/colstats.js';
 import { cellStyle } from '../core/cellstyles.js';
-import { definitionFor, stylePatch, customStyleNamed, builtinOverride } from '../core/custom-cell-styles.js';
+import { definitionFor, stylePatch, styleFromPreset, customStyleNamed, builtinOverride } from '../core/custom-cell-styles.js';
 import { openCellStylesGallery, openStyleDialog, openMergeStylesDialog, saveCellStyle, deleteCellStyle } from '../ui/cellstyles-ui.js';
 import { autoOutline, clearOutline, applyOutlineStyles } from '../core/auto-outline.js';
 import { openOutlineSettings } from '../ui/outline-settings.js';
@@ -528,7 +528,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const summary = el('div.filter-summary');
     // Filter by condition: any comparison the conditional-formatting rules know.
     const CONDITIONS = RULE_TYPES.filter((t) => !t.scale && !t.rangeWide && !t.date && !t.databar && !t.bands && !t.icons);
-    const condSelect = el('select.input.filter-cond', { 'aria-label': 'Condition' },
+    const condSelect = el('select.select.filter-cond', { 'aria-label': 'Condition' },
       el('option', { value: '' }, 'No condition'),
       ...CONDITIONS.map((t) => el('option', { value: t.value }, t.label)));
     const condValue = el('input.input', { type: 'text', 'aria-label': 'Condition value', placeholder: 'Value', autocomplete: 'off' });
@@ -1118,7 +1118,9 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   /** Merge a style patch into every selected range, the rows a filter hides left out. */
   function styleRanges(label, patch) {
     if (nativeStyleRanges(patch)) return;
-    return eachRange(label, (rg, skipRow, sheetId) => wb.applyStyle(sheetId, rg, patch, { skipRow }), { skipRows: true });
+    // Uncapped, as Format Cells applies a patch: the workbook formats whole columns and rows as their default
+    // and visits only the cells it stores, so a column chosen by its header is formatted all the way down.
+    return eachRange(label, (rg, skipRow, sheetId) => wb.applyStyle(sheetId, rg, patch, { skipRow }), { skipRows: true, cap: false });
   }
 
   function fittedStyleRanges(label, patch, fit = true) {
@@ -1130,7 +1132,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       eachRange(label, (rg, _, sid) => {
         wb.applyStyle(sid, rg, patch);
         fitRanges(sid, [rg]);
-      });
+      }, { cap: false });
     });
   }
 
@@ -1818,13 +1820,29 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // it comes applies its preset. Either way the cells keep the style's name, to follow it when it changes.
         const own = definitionFor(wb, arg);
         const builtIn = own ? null : themedPreset(cellStyle(arg), wb) || themedCellStylePatch(arg, wb);
-        const preset = own ? { label: own.name, ...stylePatch(own) } : builtIn && { ...builtIn, patch: { ...builtIn.patch, cellStyle: arg === 'normal' ? null : builtIn.label } };
+        // Normal resets every part (number, alignment, font, border, fill, protection), as Excel's does and as a
+        // modified Normal already did: the preset's own patch named only some keys, leaving a cell's font family,
+        // number format and alignment behind.
+        const preset = own ? { label: own.name, ...stylePatch(own) }
+          : arg === 'normal' && builtIn ? (({ patch, borders }) => ({ ...builtIn, patch: { ...patch, cellStyle: null }, borders }))(stylePatch(styleFromPreset(builtIn)))
+            : builtIn && { ...builtIn, patch: { ...builtIn.patch, cellStyle: builtIn.label } };
         if (!preset) return;
+        // What Normal resets takes the sheet's default look (its font, size and vertical alignment) rather than
+        // none: a bare null masks the default, so the cell drew in the grid's fallback font, vertically centred.
+        const normal = own ? own.builtin === 'normal' : arg === 'normal';
+        const patchFor = (sid) => {
+          if (!normal) return preset.patch;
+          const base = wb.defaultStyle(wb.sheet(sid)) || {};
+          return Object.fromEntries(Object.entries(preset.patch).map(([k, v]) => [k, v == null && k !== 'cellStyle' && base[k] != null ? base[k] : v]));
+        };
         const borders = (preset.borders || []).map(b => ({ ...b, color: b.color ?? null, style: b.style ?? 'thin' }));
-        if (!nativeFormatRanges((sid, ranges) => formatNativePivotStyleAndBorders(wb, new Map([[sid, ranges]]), preset.patch, borders,
+        // A pivot table's cells keep the preset's own reset, which its report formats can carry.
+        const pivotPatch = !own && arg === 'normal' && builtIn ? { ...builtIn.patch, cellStyle: null } : preset.patch;
+        const pivotBorders = !own && arg === 'normal' && builtIn ? (builtIn.borders || []).map(b => ({ ...b, color: b.color ?? null, style: b.style ?? 'thin' })) : borders;
+        if (!nativeFormatRanges((sid, ranges) => formatNativePivotStyleAndBorders(wb, new Map([[sid, ranges]]), pivotPatch, pivotBorders,
           { maxCells: MAX_FORMAT_CELLS, defaultSize: 13 }), { cap: false })) {
           wb.transaction(`Cell style: ${preset.label}`, () => eachRange('Cell style', (rg, _, sid) => {
-            wb.applyStyle(sid, rg, preset.patch);
+            wb.applyStyle(sid, rg, patchFor(sid));
             for (const b of borders) wb.applyBorders(sid, rg, b.kind, b);
           }, { cap: false, nativeScope: true }));
         }
@@ -1985,7 +2003,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         const range = grid.range;
         if (wb.pivotBlockEditBlocked(sheetId, range, arg === 'left' ? 'col' : 'row', true)) { keepFocus(); return; }
         if (!wb.deleteCells(sheetId, range, arg === 'left' ? 'left' : 'up')) {
-          if (!wb.isProtected(sheetId)) toast('That shift would split a table or remove its header', { icon: 'info' });
+          // Name what stood in the way, as Insert cells does; a protected cell or an array formula among those
+          // deleted has said so already.
+          const problem = wb.isProtected(sheetId) ? null : shiftProblem(sheetId, range, arg === 'left' ? 'col' : 'row', true);
+          if (problem) toast(problem, { icon: 'info', duration: 4000 });
           return;
         }
         grid.setSelection(S.fromRange(range, grid.active), { scroll: false });
@@ -2978,7 +2999,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
           if (allowedByRule(wb.validateValue(sheetId, r, c, spilled))) wb.setCells(sheetId, [{ r, c, cell: { v: spilled, f: null, s: wb.getCell(sheetId, r, c)?.s ?? aboveStyle } }], 'Copy value above');
         } else if (allowedByRule(wb.validateValue(sheetId, r, c, above.v))) {
           // A value comes down with its formatting, as a copy would bring it.
-          wb.pasteCells(sheetId, wb.copyRange(sheetId, { r1: r - 1, c1: c, r2: r - 1, c2: c }), r, c, { r: r - 1, c });
+          wb.pasteCells(sheetId, wb.copyRange(sheetId, { r1: r - 1, c1: c, r2: r - 1, c2: c }, { sameBook: true }), r, c, { r: r - 1, c });
         }
         keepFocus();
         return;
@@ -3099,14 +3120,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!arg?.refs) { openConsolidateDialog(ctx); return; }
         const sources = arg.refs.map((text) => {
           const at = resolveRangeText(text);
-          if (!at) return null;
-          const rows = [];
-          for (let r = at.range.r1; r <= Math.min(at.range.r2, at.range.r1 + 5000); r++) {
-            const row = [];
-            for (let c = at.range.c1; c <= Math.min(at.range.c2, at.range.c1 + 500); c++) { const v = wb.getValue(at.sheetId, r, c); row.push(v && typeof v === 'object' ? null : v); }
-            rows.push(row);
-          }
-          return rows;
+          return at ? consolidationSource(wb, at.sheetId, at.range) : null;
         }).filter(Boolean);
         const table = consolidate(sources, arg);
         if (!table) { toast('There was nothing to consolidate in those references', { icon: 'info', duration: 3000 }); return; }
@@ -4296,7 +4310,11 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       values[i].push(copied);
       return wb.getDisplay(grid.sheetId, r, c, value);
     }));
-    const cells = all ? wb.copyRange(grid.sheetId, range) : wb.copyCells(grid.sheetId, rows, cols);
+    // Pasted here, the cells carry what they show in this workbook; the HTML for another workbook or app also pins
+    // the complete font a book with its own Normal font implies (bold off, black ink), which pasted here would
+    // turn an error's red ink black and outlive a later change of the book's look.
+    const cells = all ? wb.copyRange(grid.sheetId, range, { sameBook: true }) : wb.copyCells(grid.sheetId, rows, cols, { sameBook: true });
+    const outward = !wb.normalStyle ? cells : all ? wb.copyRange(grid.sheetId, range) : wb.copyCells(grid.sheetId, rows, cols);
     // When the anchor is copied, spill slots stay empty in the embedded cells so the formula can
     // spill again. The HTML's number-format hints still need the format those results display.
     let styles = null;
@@ -4332,7 +4350,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const conditionalFormats = wb.copyConditionalFormats(grid.sheetId, rows, cols);
     const nativeSparklines = wb.copyNativeSparklines(grid.sheetId, rows, cols);
     const validations = wb.copyValidations(grid.sheetId, rows, cols);
-    const html = cellsToHtml(texts, cells, looks, values, all ? origin : null, { styles, mergeLayout, conditionalFormats, validations, nativeSparklines, externalWorkbooks: wb.externalWorkbooks, sourceWorkbook: workbookPathUri(P.resolvedAbsolutePath?.(doc.path)), colorPalette: wb.colorPalette, normalFill: wb.nativeNormalFill, indentUnit: grid.indentUnit })
+    const html = cellsToHtml(texts, outward, looks, values, all ? origin : null, { styles, mergeLayout, conditionalFormats, validations, nativeSparklines, externalWorkbooks: wb.externalWorkbooks, sourceWorkbook: workbookPathUri(P.resolvedAbsolutePath?.(doc.path)), colorPalette: wb.colorPalette, normalFill: wb.nativeNormalFill, indentUnit: grid.indentUnit })
       .replace('<table', `<table data-spreadsheet-copy="${copyId}"`);
     clip = { cells, values, notes, nativeSparklines, nativePivots: wb.copyNativePivots(grid.sheetId, rows, cols), conditionalFormats, validations, merges: mergeLayout.ranges, sourceMerges: mergeLayout.sources, partialMerge: mergeLayout.partial, origin, sheetId: grid.sheetId, text: toDelimited(texts, '\t'), html, copyId, range, rows, cols, visibleOnly: !all && !multi, multi: !!multi,
       // A cut moves its cells when it is pasted, once: until then
@@ -4389,7 +4407,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   function finishCut(sheetId, r, c, cells) {
     const from = clip.cut;
     if (!wb.sheet(from.sheetId)) return undefined;
-    const now = from.all ? wb.copyRange(from.sheetId, from.range) : wb.copyCells(from.sheetId, from.rows, from.cols);
+    const now = from.all ? wb.copyRange(from.sheetId, from.range, { sameBook: true }) : wb.copyCells(from.sheetId, from.rows, from.cols, { sameBook: true });
     if (!sameCells(now, cells)) return undefined;
     if (from.all) return wb.placeMoved(sheetId, r, c, cells, from);
     if (clip.partialMerge) {
@@ -4572,6 +4590,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     return own(html);
   }
 
+  /** Is the clipboard one cell: a copy of one cell here, or another app's text with no tab or line between values? */
+  function pastesOneCell(text, html, internal) {
+    if (internal) return clip.cells.length === 1 && clip.cells[0]?.length === 1;
+    if (html && /<t[dh][\s>][\s\S]*<t[dh][\s>]/i.test(html)) return false;
+    const body = text.replace(/\r?\n$/, '');
+    return body !== '' && !/[\t\r\n]/.test(body);
+  }
+
   function applyPaste(text, options = {}) {
     if (wb.sheet(grid.sheetId)?.kind === 'chart') { statusBar?.announce('Choose a worksheet to paste cells'); return; }
     if (!oneRange('paste into')) return; // a paste lands in one range; several selected would take it in the last alone
@@ -4586,6 +4612,15 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       return;
     }
     const internal = isInternal(text, html);
+    // Whole columns, rows or the whole sheet take a copied block tiled as far as the sheet reaches, not to the
+    // grid's last row and column: one cell tiled over every cell of a selected sheet (17 billion) froze the tab.
+    const whole = grid.range;
+    if (whole.r2 >= MAX_ROW || whole.c2 >= MAX_COL) {
+      const extent = wb.sheet(grid.sheetId), used = wb.usedRange(grid.sheetId);
+      const reach = (lo, hi, max, size, usedEnd) => (hi >= max ? Math.max(lo, size - 1, usedEnd ?? lo) : hi);
+      const clipped = { ...whole, r2: reach(whole.r1, whole.r2, MAX_ROW, extent.rows, used?.r2), c2: reach(whole.c1, whole.c2, MAX_COL, extent.cols, used?.c2) };
+      grid.setSelection(S.fromRange(clipped, { ...grid.active }), { scroll: false });
+    }
     const label = internal && clip.cut && mode === 'all' ? 'Move cells' : pasteLabel(special);
     // The pasted block and any table expansion it triggers are one action.
     const sheetId = grid.sheetId;
@@ -4597,7 +4632,21 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     // clipped bounds, and skipped blanks, rather than guessing from a range.
     wb.addEventListener('change', onProtection);
     pasting = true;
+    // One copied cell pasted over a filtered list goes into the rows on show, as Fill Down does and as in Excel,
+    // rather than into the rows the filter hides: each run of shown rows takes it in turn, as one step.
+    const runs = !(internal && clip.cut) && !special.transpose && !special.insert && pastesOneCell(text, html, internal) ? shownRuns(grid.range, sheetId) : null;
     try {
+      if (runs && (runs.length !== 1 || runs[0].r1 !== grid.range.r1 || runs[0].r2 !== grid.range.r2)) {
+        const whole = { ...grid.range }, active = { ...grid.active };
+        return wb.transaction(label, () => {
+          for (const run of runs) {
+            grid.setSelection(S.fromRange(run, { r: run.r1, c: run.c1 }), { scroll: false });
+            applyPasteContents(text, { html, special }, () => refused, internal);
+            if (refused) break;
+          }
+          grid.setSelection(S.fromRange(whole, active), { scroll: false });
+        });
+      }
       return wb.transaction(label, () => applyPasteContents(text, { html, special }, () => refused, internal));
     } finally {
       pasting = false;
@@ -6099,7 +6148,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   // Page Layout view lays the sheet out as its printed pages; the view is the sheet's own (sheet.viewMode).
   const sheetViewMode = () => wb.sheet(grid.sheetId)?.viewMode || 'normal';
   const pageLayout = createPageLayout({
-    wb, fileName: () => doc.name, redraw: () => grid.redraw(), focusGrid: () => grid.focus(),
+    wb, fileName: () => doc.name, filePath: () => printFolder(P.resolvedAbsolutePath(doc.path)), redraw: () => grid.redraw(), focusGrid: () => grid.focus(),
     commit: (id, patch) => { wb.setPrintSettings(id, { ...(wb.sheet(id).printSettings || normalizePrintSettings({})), ...patch }); notify(); },
   });
   let pageViewKey = null;
@@ -6316,7 +6365,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   // The browser's own Print command (File > Print) prints the sheet the way Ctrl+P does, not the app chrome.
   const uninstallPrint = installPrintFallback(() => {
     if (grid.editing) grid.commitEdit();
-    return { wb, sheetId: grid.sheetId, docName: doc.name, opts: currentPrintPrefs(wb.sheet(grid.sheetId)) };
+    return { wb, sheetId: grid.sheetId, docName: doc.name, opts: { ...currentPrintPrefs(wb.sheet(grid.sheetId)), filePath: printFolder(P.resolvedAbsolutePath(doc.path)) } };
   });
   const stopSheetFonts = installSheetFontLoading(wb, () => grid.sheetId);
   // Signing out with edits that cannot be saved is refused by the account menu; no leave dialog here.

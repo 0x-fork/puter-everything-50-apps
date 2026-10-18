@@ -151,13 +151,18 @@ const HEADER_H = 20; // the column-letters row, set explicitly so objects can be
 
 /**
  * Header and footer text uses the tokens Excel writes: &[Page], &[Pages],
- * &[Date], &[Time], &[Tab] (the sheet name), and &[File] (the document
- * name), or their short forms &P &N &D &T &A &F. &L, &C, and &R start the
- * left, center, and right sections; text before any section code is
- * centered. && is a literal ampersand.
+ * &[Date], &[Time], &[Tab] (the sheet name), &[File] (the document
+ * name) and &[Path] (the folder it is in), or their short forms &P &N &D &T
+ * &A &F &Z. &L, &C, and &R start the left, center, and right sections; text
+ * before any section code is centered. && is a literal ampersand.
  */
-const TOKEN_RE = /&&|&\[([Pp]age|[Pp]ages|PAGE|PAGES|[Dd]ate|DATE|[Tt]ime|TIME|[Tt]ab|TAB|[Ff]ile|FILE)\]|&([PNDTAF])(?![a-z])/g;
-const SHORT_TOKENS = { P: 'Page', N: 'Pages', D: 'Date', T: 'Time', A: 'Tab', F: 'File' };
+const TOKEN_RE = /&&|&\[([Pp]age|[Pp]ages|PAGE|PAGES|[Dd]ate|DATE|[Tt]ime|TIME|[Tt]ab|TAB|[Ff]ile|FILE|[Pp]ath|PATH)\]|&([PNDTAFZ])(?![a-z])/g;
+const SHORT_TOKENS = { P: 'Page', N: 'Pages', D: 'Date', T: 'Time', A: 'Tab', F: 'File', Z: 'Path' };
+
+/** The folder of a file at an absolute `path`, as &[Path] prints it ("/user/Documents/"); empty for a file not saved yet. */
+export function printFolder(path) {
+  return typeof path === 'string' && path.startsWith('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+}
 const SECTION_RE = /&&|&([LCR])/g;
 
 /** The text as a list of { text } and { token } parts, in order. */
@@ -204,6 +209,7 @@ function tokenText(token, info) {
     case 'Time': return now.toLocaleTimeString(getLocale(), { hour: '2-digit', minute: '2-digit' });
     case 'Tab': return info.tab || '';
     case 'File': return info.file || '';
+    case 'Path': return info.path || '';
     case 'Page': return info.page != null ? String(info.page) : '';
     case 'Pages': return info.pages != null ? String(info.pages) : '';
     default: return '';
@@ -1128,7 +1134,9 @@ function printObjectContent(node, wb, sheetId, obj, w, h) {
     // A linked picture prints the cells it shows now; a styled picture prints its frame and shadow.
     const target = obj.pictureRef && linkedPictureTarget(wb, sheetId, obj.pictureRef);
     const live = target && rangePicture(wb, target.sheetId, target.range);
-    const shown = live ? { ...obj, src: svgDataUrl(live.svg), srcRect: null, fillRect: null } : obj;
+    // The picture turns and flips with its frame, about its centre, as on the sheet.
+    const shown = { ...obj, ...(live ? { src: svgDataUrl(live.svg), srcRect: null, fillRect: null } : {}), rotation: 0, flipH: false, flipV: false };
+    if (obj.rotation || obj.flipH || obj.flipV) node.style.transform = `rotate(${obj.rotation || 0}deg) scale(${obj.flipH ? -1 : 1}, ${obj.flipV ? -1 : 1})`;
     if (pictureStyled(obj)) {
       const frame = el('div', { style: { position: 'absolute', inset: '0', boxSizing: 'border-box', ...pictureFrameCss(obj) } });
       if (obj.shape) frame.style.overflow = 'hidden';
@@ -1256,7 +1264,7 @@ export function buildPrintRoot(wb, sheetId, docName, opts = {}) {
       const regularText = { header: String(p.header || '').trim(),
         footer: String(p.footer || '').trim() || (p.native ? '' : marginBoxes ? 'Page &[Page] of &[Pages]' : '&[Date]') };
       const { header, footer } = printPageText({ ...p, ...regularText }, 0);
-      const info = { file: docName || 'Spreadsheet', tab: sh.name, now, palette: wb.colorPalette, normalFont: wb.normalFont };
+      const info = { file: docName || 'Spreadsheet', path: o.filePath || '', tab: sh.name, now, palette: wb.colorPalette, normalFont: wb.normalFont };
       const showSheetName = wb.sheets.length > 1 || sheets.length > 1;
       const i = pageRules.length;
       const section = el('section.print-section', { className: i > 0 ? 'print-section page-break' : 'print-section' });
@@ -1428,9 +1436,17 @@ export function preparePrintRoot(root) {
       // Header variants continue across sheets and print areas,
       // independently of an explicit starting value for the printed number.
       // Count every preceding page, including sheets without variant text.
-      const pages = chart ? [sheet] : paginatePrintColumns(sheet, { width, height, overflowRight: margins.right,
-        overflowBottom: margins.bottom, headers: opts.headers, pageOrder: opts.pageOrder,
-        force: numberPages || !!sheet.querySelector('.has-print-borders') });
+      // Laid out on screen the section is as wide as the window, not the paper: a sheet narrower than the
+      // page, whose table fills the page's width, stretched to the window's and was cut into pages of a few
+      // widened columns each. It is measured at the width it prints at, as the fitting above measures it.
+      const flowWidth = section.style.width;
+      section.style.width = `${width}px`;
+      let pages;
+      try {
+        pages = chart ? [sheet] : paginatePrintColumns(sheet, { width, height, overflowRight: margins.right,
+          overflowBottom: margins.bottom, headers: opts.headers, pageOrder: opts.pageOrder,
+          force: numberPages || !!sheet.querySelector('.has-print-borders') });
+      } finally { section.style.width = flowWidth; }
       if (!pages) continue;
       // These fragments already own their page breaks. Let oversized paint
       // reach the physical edge: Chromium otherwise clips it at the CSS page

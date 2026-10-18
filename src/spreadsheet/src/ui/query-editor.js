@@ -13,7 +13,7 @@ import { toast } from './toast.js';
 import { icon } from './icons.js';
 import {
   evaluateQuery, sourceTable, stepNames, stepFormula, saveQuery, loadedTable, refreshQuery, queryNameProblem, uniqueQueryName,
-  displayValue, keyOf, parseTyped, detectedTypeStep, initialSteps, TYPES, TYPE_LABELS, TYPE_MARKS, FILTER_OPS, AGGREGATIONS, JOIN_KINDS, PREVIEW_ROWS, sourceSummary,
+  displayValue, keyOf, parseTyped, detectedTypeStep, initialSteps, TYPES, TYPE_LABELS, TYPE_MARKS, FILTER_OPS, AGGREGATIONS, JOIN_KINDS, PREVIEW_ROWS, sourceSummary, TEXT_COLUMN_NAMES,
 } from '../core/queries.js';
 import { queryIo, cellNode, loadNew, openImportData, urlProblem, fitQueryTables } from './get-data.js';
 import { maxOf } from '../core/numeric.js';
@@ -40,7 +40,7 @@ function formDialog({ title, fields, submit, okLabel = 'OK', wide = false }) {
   return modal;
 }
 const field = (label, control, extra = null) => el('label.field', {}, el('span.field-label', {}, label), control, extra);
-const select = (label, options, value) => el('select.input', { 'aria-label': label }, options.map(([v, text]) => el('option', { value: v, selected: v === value }, text)));
+const select = (label, options, value) => el('select.select', { 'aria-label': label }, options.map(([v, text]) => el('option', { value: v, selected: v === value }, text)));
 
 export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
   const { wb } = ctx;
@@ -135,7 +135,7 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
     return el('span.pq-rb-split', {}, face, arrow);
   };
   const group = (label, ...controls) => el('div.pq-rgroup', { role: 'group', 'aria-label': label }, el('div.pq-rgroup-controls', {}, ...controls), el('div.pq-rgroup-label', {}, label));
-  const typeSelect = el('select.input.pq-type-select', { 'aria-label': 'Data Type', onchange: () => { if (needCols()) changeType(selected, typeSelect.value); } },
+  const typeSelect = el('select.select.pq-type-select', { 'aria-label': 'Data Type', onchange: () => { if (needCols()) changeType(selected, typeSelect.value); } },
     TYPES.map((t) => el('option', { value: t }, TYPE_LABELS[t])));
   const typeField = el('label.pq-rb-field', {}, el('span', {}, 'Data Type:'), typeSelect);
   const TABS = {
@@ -183,7 +183,7 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
         btn('Index Column', 'indexColumn', null, { large: true, menu: () => [
           { label: 'From 0', onSelect: () => addIndex(0, 1) }, { label: 'From 1', onSelect: () => addIndex(1, 1) },
           { label: 'Custom…', onSelect: () => customIndex() }] })),
-      group('From Text', btn('Format', 'text', null, { large: true, menu: () => textMenu() })),
+      group('From Text', btn('Format', 'text', null, { large: true, menu: () => textMenu(true) })),
     ],
   };
   const drawRibbon = () => {
@@ -196,8 +196,9 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
     typeSelect.value = selected.length ? typeOf(selected[0]) : 'any';
     typeSelect.disabled = !selected.length;
   };
-  const textMenu = () => [['lower', 'lowercase'], ['upper', 'UPPERCASE'], ['proper', 'Capitalize Each Word'], ['trim', 'Trim'], ['clean', 'Clean']]
-    .map(([op, label]) => ({ label, onSelect: () => needCols() && addStep({ type: 'transformText', columns: selected.slice(), op }) }));
+  // Transform ▸ Format changes the selected columns; Add Column ▸ Format adds a formatted copy of the first beside them.
+  const textMenu = (adding = false) => [['lower', 'lowercase'], ['upper', 'UPPERCASE'], ['proper', 'Capitalize Each Word'], ['trim', 'Trim'], ['clean', 'Clean']]
+    .map(([op, label]) => ({ label, onSelect: () => needCols() && addStep(adding ? { type: 'addTextColumn', column: selected[0], op, as: TEXT_COLUMN_NAMES[op] } : { type: 'transformText', columns: selected.slice(), op }) }));
 
   /* ---------- Steps ---------- */
   async function addStep(step, { replacePrevious = false } = {}) {
@@ -350,7 +351,8 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
     const addAgg = (name = 'Count', op = 'count', column = cols[0]) => {
       const opSel = select('Operation', Object.entries(AGGREGATIONS), op);
       const colSel = colSelect(column, 'Column');
-      const sync = () => { colSel.disabled = opSel.value === 'count'; };
+      // Count Rows and Count Distinct Rows take the whole group's rows, so they have no column, as in Power Query.
+      const sync = () => { colSel.disabled = opSel.value === 'count' || opSel.value === 'countDistinct'; };
       opSel.addEventListener('change', sync); sync();
       aggsHost.append(el('div.pq-group-row', {}, el('input.input', { type: 'text', value: name, 'aria-label': 'New column name' }), opSel, colSel,
         el('button.icon-btn', { type: 'button', 'aria-label': 'Remove aggregation', html: icon('x', 14), onclick: (e) => { if (aggsHost.children.length > 1) e.currentTarget.parentElement.remove(); } })));
@@ -365,7 +367,7 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
       const keys = [...keysHost.querySelectorAll('select')].map((s) => s.value);
       const aggregations = [...aggsHost.children].map((row) => {
         const [name, op, column] = row.querySelectorAll('input, select');
-        return { name: name.value.trim() || AGGREGATIONS[op.value], op: op.value, column: column.value };
+        return { name: name.value.trim() || AGGREGATIONS[op.value], op: op.value, column: column.disabled ? '' : column.value };
       });
       addStep({ type: 'groupBy', keys: [...new Set(keys)], aggregations });
       return null;
@@ -416,7 +418,7 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
   function filterDialog(column, op = null) {
     const type = typeOf(column);
     const prev = previous();
-    const existing = prev?.type === 'filterRows' && prev.column === column && prev.conditions.every((c) => c.op !== 'in') ? prev : null;
+    const existing = prev?.type === 'filterRows' && prev.column === column && prev.conditions.every((c) => c.op !== 'in' && c.op !== 'notIn') ? prev : null;
     const ops = [...filtersFor(type), 'isNull', 'notNull'].map((o) => [o, FILTER_OPS[o]]);
     const values = [...new Set((table()?.rows || []).map((r) => r[table().columns.indexOf(column)]).filter((v) => v != null).map((v) => displayValue(v, type)))].slice(0, 200);
     const listId = `pq-values-${Math.random().toString(36).slice(2)}`;
@@ -449,7 +451,7 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
     const cols = table()?.columns || [];
     const leftSel = select('Matching column in this query', cols.map((c) => [c, c]), selected[0] || cols[0]);
     const otherSel = select('Second query', others.map((o) => [o.name, o.name]), others[0].name);
-    const rightSel = el('select.input', { 'aria-label': 'Matching column in the second query' });
+    const rightSel = el('select.select', { 'aria-label': 'Matching column in the second query' });
     const kindSel = select('Join Kind', Object.entries(JOIN_KINDS), 'leftOuter');
     const expandHost = el('div.pq-checklist');
     const note = el('p.field-hint');
@@ -580,8 +582,10 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
     for (const r of t.rows) { const k = keyOf(r[i]); if (!counts.has(k)) counts.set(k, r[i]); }
     const values = [...counts.values()].slice(0, 1000);
     const prev = previous();
-    const kept = prev?.type === 'filterRows' && prev.column === column && prev.conditions.length === 1 && prev.conditions[0].op === 'in' ? new Set(prev.conditions[0].values.map(keyOf)) : null;
-    const boxes = values.map((v) => el('input', { type: 'checkbox', checked: kept ? kept.has(keyOf(v)) : true }));
+    const list = prev?.type === 'filterRows' && prev.column === column && prev.conditions.length === 1 && ['in', 'notIn'].includes(prev.conditions[0].op) ? prev.conditions[0] : null;
+    const listed = list && new Set(list.values.map(keyOf));
+    const ticked = (v) => (!list ? true : list.op === 'in' ? listed.has(keyOf(v)) : !listed.has(keyOf(v)));
+    const boxes = values.map((v) => el('input', { type: 'checkbox', checked: ticked(v) }));
     boxes.forEach((b, n) => { b._value = values[n]; });
     const all = el('input', { type: 'checkbox', checked: boxes.every((b) => b.checked), onchange: () => { for (const b of boxes) if (!b.closest('label').hidden) b.checked = all.checked; } });
     const search = el('input.input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search values', oninput: () => {
@@ -613,8 +617,14 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
         el('button.btn.btn-primary', { type: 'button', onclick: () => {
           const keep = boxes.filter((b) => b.checked).map((b) => b._value);
           closePopup();
-          if (keep.length === boxes.length && !truncated) return;
-          filterBy(column, [{ op: 'in', values: keep }]);
+          if (keep.length === boxes.length) return;
+          // The list is read after this column's filter, so what that filter left out stays out. A list cut short at
+          // 1,000 values names the ones cleared rather than the ones kept, so the values it did not show stay, as in
+          // Power Query.
+          const cleared = boxes.filter((b) => !b.checked).map((b) => b._value), gone = new Set(cleared.map(keyOf));
+          if (list?.op === 'in') filterBy(column, [{ op: 'in', values: list.values.filter((v) => !gone.has(keyOf(v))) }]);
+          else if (truncated || list?.op === 'notIn') filterBy(column, [{ op: 'notIn', values: [...(list?.values || []), ...cleared] }]);
+          else filterBy(column, [{ op: 'in', values: keep }]);
         } }, 'OK'),
         el('button.btn', { type: 'button', onclick: () => closePopup() }, 'Cancel')));
     root.append(popup);

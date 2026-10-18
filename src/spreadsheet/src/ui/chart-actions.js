@@ -14,8 +14,8 @@ import { fontKeyFor } from '../core/format.js';
 import { openChartTypeDialog } from './chart-type-dialog.js';
 import { openSelectDataDialog } from './chart-select-data.js';
 
-const DRAWN = new Set(['image', 'text', 'slicer', 'scroll', 'smartart']);
-/** Is this object a chart (not a picture, text box, slicer or form control)? */
+const DRAWN = new Set(['image', 'text', 'slicer', 'timeline', 'scroll', 'smartart']);
+/** Is this object a chart (not a picture, text box, slicer, timeline or form control)? */
 export const isChartObject = obj => !!obj && !DRAWN.has(obj.type);
 
 /** The chart the Chart Design and Format tabs act on: the selected one, or a chart sheet's own. */
@@ -123,7 +123,7 @@ export function openMoveChartDialog(ctx, chart) {
   const objRadio = el('input', { type: 'radio', name: 'move-chart', value: 'object', checked: true });
   const nameInput = el('input.input', { type: 'text', value: chartSheetName(wb), 'aria-label': 'New sheet name', maxlength: 31 });
   const sheets = wb.sheets.filter(s => !s.hidden && !s.veryHidden);
-  const select = el('select.input', { 'aria-label': 'Object in' }, ...sheets.map(s => el('option', { value: s.id, selected: s.id === ctx.sheetId() }, s.name)));
+  const select = el('select.select', { 'aria-label': 'Object in' }, ...sheets.map(s => el('option', { value: s.id, selected: s.id === ctx.sheetId() }, s.name)));
   const error = el('p.field-error', { role: 'alert', hidden: true });
   const sync = () => { nameInput.disabled = !newRadio.checked; select.disabled = newRadio.checked; };
   newRadio.addEventListener('change', sync); objRadio.addEventListener('change', sync);
