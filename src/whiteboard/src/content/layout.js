@@ -103,6 +103,7 @@ export function createBuilder({
   baseOrder = 0,
   signal,
   decode,
+  convert,
 }) {
   if (room <= 0) throw Error("A board can contain up to 5,000 objects.");
   const frames = [],
@@ -123,10 +124,29 @@ export function createBuilder({
     if (!src) {
       if (source.bytes.length > IMAGE_BYTES)
         return (skip("Images larger than 5 MB"), null);
-      if (!encoded.has(source.bytes))
-        encoded.set(source.bytes, dataURL(source.bytes, source.mime));
-      src = encoded.get(source.bytes);
-    } else if (src.length > (IMAGE_BYTES * 4) / 3 + 64)
+      // A GIF or BMP picture is added as a PNG copy, as when dropped on the
+      // board; without the browser to draw one, it is not supported.
+      const copied = ["image/gif", "image/bmp"].includes(source.mime);
+      if (copied && !convert)
+        return (
+          skip(
+            "Images in unsupported formats",
+            1,
+            source.mime.slice(6).toUpperCase(),
+          ),
+          null
+        );
+      if (!encoded.has(source.bytes)) {
+        const url = dataURL(source.bytes, source.mime);
+        encoded.set(
+          source.bytes,
+          copied ? convert(url).catch(() => null) : url,
+        );
+      }
+      src = await encoded.get(source.bytes);
+      if (!src) return (skip("Images that could not be read"), null);
+    }
+    if (src.length > (IMAGE_BYTES * 4) / 3 + 64)
       return (skip("Images larger than 5 MB"), null);
     if (added + src.length > IMPORT_IMAGES)
       return (skip("Images beyond the 100 MB one import can add"), null);
@@ -293,7 +313,12 @@ export function createBuilder({
     attachment: (file, bytes) => budget(() => attachment(file, bytes)),
     finish,
     skip,
-    note: (t, c) => budget(() => note(t, ctx, c)),
+    note: (t, c) =>
+      budget(() => {
+        if (String(t ?? "").length > NOTE_TEXT)
+          skip("Sticky notes shortened to 20,000 characters");
+        return note(t, ctx, c);
+      }),
     heading: (t) => budget(() => heading(t, ctx)),
     table: (c) => budget(() => table(c, ctx)),
   };
@@ -383,14 +408,32 @@ export async function layoutDocument(model, options) {
   } else if (model.kind === "document") {
     // The highest heading level present starts frames; deeper headings stay
     // inside as bold text. A document title (level 0) above its sections
-    // stays as text, so the sections still become frames.
+    // stays as text, so the sections still become frames. A heading that
+    // opens the document and is the only one at its level, as a Markdown
+    // file's # title is, is a title too, so the level below forms frames.
     // A loop, not a spread: a long document can hold more headings than a
     // call can take arguments.
     let top = Infinity,
+      next = Infinity,
+      tops = 0,
       titled = false;
     for (const x of model.blocks)
-      if (x.type === "heading" && x.level === 0) titled = true;
-      else if (x.type === "heading" && x.level < top) top = x.level;
+      if (x.type !== "heading") continue;
+      else if (x.level === 0) titled = true;
+      else if (x.level < top) {
+        next = top;
+        top = x.level;
+        tops = 1;
+      } else if (x.level === top) tops++;
+      else if (x.level < next) next = x.level;
+    const [lead] = model.blocks;
+    if (
+      tops === 1 &&
+      next < Infinity &&
+      lead?.type === "heading" &&
+      lead.level === top
+    )
+      top = next;
     if (top === Infinity && titled) top = 0;
     let section = { title, units: attach ? [unit(attach, true)] : [] };
     const sections = [section];
@@ -447,6 +490,8 @@ export async function layoutDocument(model, options) {
     const units = attach ? [unit(attach, true)] : [];
     for (const page of model.pages) {
       check(signal);
+      if (page.omittedTexts)
+        b.skip("Paragraphs beyond 40 on a page", page.omittedTexts);
       const image = page.skipped
         ? (b.skip("Pages too detailed to import as images"), null)
         : await b.image(page, 480);

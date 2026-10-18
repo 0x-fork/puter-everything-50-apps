@@ -8,7 +8,12 @@ import { canonicalLanguage } from "./accessibility/language-tag.js";
 import { appendRun, sliceTextRuns, textSegments } from "./rich-text.js";
 import { tableCellContent } from "./table-language.js";
 import { addTranslations, t } from "./i18n.js";
-import { contentBoxes, readableTiles, pageItems } from "./export.js";
+import {
+  contentBoxes,
+  readableTiles,
+  pageItems,
+  regionData,
+} from "./export.js";
 
 addTranslations({
   "Board image": "Image du tableau",
@@ -177,7 +182,7 @@ function noteLines(content) {
   return lines;
 }
 function regionNoteContent(region) {
-  return region.items
+  return regionData(region)
     .filter((i) => !["image", "pen"].includes(i.type) || i.alt)
     .filter((i) => i.type !== "frame" || i.text !== region.name)
     .sort((a, b) => a.y - b.y || a.x - b.x)
@@ -192,6 +197,18 @@ function base64Bytes(dataURL) {
     bytes = new Uint8Array(binary.length);
   for (let n = 0; n < binary.length; n++) bytes[n] = binary.charCodeAt(n);
   return bytes;
+}
+// A slide's picture as PNG bytes, encoded by the browser away from the
+// page where it can: written out as text at once, it took four fifths of a
+// large board's export, a frozen page for seconds.
+async function pngBytes(canvas) {
+  const blob =
+    typeof canvas.toBlob === "function" &&
+    (await new Promise((resolve) => canvas.toBlob(resolve, "image/png")));
+  // A browser whose files cannot be read as bytes writes it out as text.
+  return typeof blob?.arrayBuffer === "function"
+    ? new Uint8Array(await blob.arrayBuffer())
+    : base64Bytes(canvas.toDataURL("image/png"));
 }
 
 // The slides for a region. A frame is one slide, as slides are drawn. A
@@ -274,7 +291,7 @@ export async function exportPPTX(
             .replace("{row}", tile.row)
             .replace("{column}", tile.col)
         : region.name || t("Frame"),
-      png: base64Bytes(canvas.toDataURL("image/png")),
+      png: await pngBytes(canvas),
       notes: regionNoteContent(
         tile
           ? {

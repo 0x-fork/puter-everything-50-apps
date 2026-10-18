@@ -367,6 +367,8 @@ const pairs = {
   "Central idea": "Idée centrale",
   "New idea": "Nouvelle idée",
   "Untitled node": "Nœud sans titre",
+  "Unlock “{name}” first: the mind map’s layout moves it.":
+    "Déverrouillez d’abord « {name} » : la disposition de la carte mentale le déplace.",
   "Mind map controls": "Options de la carte mentale",
   "Move mind map branch": "Déplacer une branche de carte mentale",
   "Move branch earlier": "Avancer la branche",
@@ -970,6 +972,8 @@ const pairs = {
     "Tableau partagé injoignable. Il reste en lecture seule jusqu’à la reconnexion.",
   "Setting up sharing…": "Configuration du partage…",
   "Uploading the board…": "Envoi du tableau…",
+  "Uploading images · {count} left, waiting for the board's server…":
+    "Envoi des images · encore {count}, en attente du serveur du tableau…",
   "This can take a few seconds. You can close this and look around; editing resumes once sharing is ready.":
     "Cela peut prendre quelques secondes. Vous pouvez fermer cette fenêtre et explorer le tableau ; la modification reprendra une fois le partage prêt.",
   "Sharing is ready. Select Share board to invite people.":
@@ -1021,6 +1025,8 @@ const pairs = {
     "Ce contenu du presse-papiers n’est pas pris en charge.",
   "Paste up to 20,000 characters at a time.":
     "Collez jusqu’à 20 000 caractères à la fois.",
+  "This text is at its length limit, so the end of what was added was left out.":
+    "Ce texte a atteint sa longueur maximale : la fin de ce qui a été ajouté a été omise.",
   "Could not read this file.": "Impossible de lire ce fichier.",
   "This image could not be read.": "Cette image n’a pas pu être lue.",
   "Add up to 20 files and 50 MB at a time.":
@@ -2034,6 +2040,9 @@ export function objectNameContent(i) {
     end--;
   return text.slice(0, end);
 }
+// An untitled frame is named by its place in the frame order, "Frame 3",
+// as new frames are, so that it can be told apart and searched for.
+export const untitledFrame = (n) => `${t("Frame")} ${n + 1}`;
 // "Sticky note: Idea", or in French "note adhésive : Idée", with the space
 // French sets before a colon. The kind stays as written, since the name is
 // also used within sentences.

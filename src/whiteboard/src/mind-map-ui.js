@@ -1,7 +1,8 @@
 import { fold } from "./libraries.js";
-import { item, validateBoard, bounds, MAX_OBJECTS } from "./model.js";
+import { item, validateBoard, bounds, truncate, MAX_OBJECTS } from "./model.js";
 import { language, t } from "./i18n.js";
 import { planMindReparent } from "./mind-map-drag.js";
+import { inferMovedParents } from "./scene.js";
 import { mindAncestors, visibleMindItems } from "./mind-visibility.js";
 import {
   mindIndex,
@@ -20,22 +21,42 @@ export function createMindMapUI(api) {
     api
       .board()
       .items.map((i) => (i.mindMap ? { ...i, mindMap: { ...i.mindMap } } : i));
+  // The objects `next` changes or adds.
+  function changes(next, before) {
+    return next.filter((i) => {
+      const old = before.get(i.id);
+      return (
+        !old ||
+        ["x", "y", "order", "mindMap", "mindCollapsed", "parentId"].some(
+          (k) => JSON.stringify(i[k]) !== JSON.stringify(old[k]),
+        )
+      );
+    });
+  }
+  // Laying a map out again moves its other nodes too, so a locked one there
+  // refuses the change. The refusal names it: the lock also protects the
+  // nodes above it, so a selection holding no locked object is refused too.
+  function refusePinned(patch, before) {
+    const pinned = patch.map((i) => before.get(i.id)).find((i) => i?.locked);
+    if (pinned)
+      throw Error(
+        t("Unlock “{name}” first: the mind map’s layout moves it.").replace(
+          "{name}",
+          () =>
+            truncate(pinned.text?.replace(/\s+/g, " ").trim(), 60) ||
+            t("Untitled node"),
+        ),
+      );
+  }
   function commit(next, selected, edit = false, overview = false) {
     const board = api.board(),
       before = new Map(board.items.map((i) => [i.id, i]));
     if (next.length > MAX_OBJECTS)
       throw Error("A board can contain at most 5,000 objects.");
     validateBoard({ ...board, items: next });
-    const patch = next.filter((i) => {
-      const old = before.get(i.id);
-      return (
-        !old ||
-        ["x", "y", "order", "mindMap", "mindCollapsed"].some(
-          (k) => JSON.stringify(i[k]) !== JSON.stringify(old[k]),
-        )
-      );
-    });
+    const patch = changes(next, before);
     if (!patch.length) return true;
+    refusePinned(patch, before);
     if (
       !api.canEdit(
         new Set(patch.filter((i) => before.has(i.id)).map((i) => i.id)),
@@ -49,9 +70,11 @@ export function createMindMapUI(api) {
           old.x = i.x;
           old.y = i.y;
           if (i.order !== undefined) old.order = i.order;
-          old.mindMap = { ...i.mindMap };
+          if (i.mindMap) old.mindMap = { ...i.mindMap };
           if (i.mindCollapsed !== undefined)
             old.mindCollapsed = i.mindCollapsed;
+          if (i.parentId) old.parentId = i.parentId;
+          else delete old.parentId;
         } else board.items.push(i);
       }
       api.select(new Set([selected]));
@@ -92,11 +115,10 @@ export function createMindMapUI(api) {
       const next = working(),
         index = mindIndex(next),
         selected = index.nodes.get(id);
-      if (!selected || !api.canEdit(new Set([id]))) return;
+      if (!selected || !api.canEdit(new Set())) return;
       const parent = sibling
         ? index.nodes.get(selected.mindMap.parent) || selected
         : selected;
-      if (!api.canEdit(new Set([parent.id]))) return;
       for (const node of [parent, ...mindAncestors(next, parent.id)])
         if (node.mindCollapsed) node.mindCollapsed = false;
       const root = mindRoot(index, parent.id),
@@ -121,6 +143,13 @@ export function createMindMapUI(api) {
         },
       });
       next.push(node);
+      // In a map laid out automatically, a sibling goes right after the
+      // node it is added beside, and the later siblings move along a place.
+      if (sibling && parent !== selected && root.mindMap.auto) {
+        const rows = [...children];
+        rows.splice(rows.indexOf(selected) + 1, 0, node);
+        rows.forEach((i, k) => (i.order = k + 1));
+      }
       if (root.mindMap.auto) applyMindLayout(next, root.id);
       else {
         // Lay out a temporary branch to choose a non-overlapping insertion point
@@ -141,6 +170,12 @@ export function createMindMapUI(api) {
           if (i.mindMap.direction === node.mindMap.direction)
             node[axis] = Math.max(node[axis], i[axis] + i[size] + 28);
       }
+      // A locked node the new one would move is named before the nodes it
+      // protects are refused.
+      const before = new Map(api.board().items.map((i) => [i.id, i]));
+      refusePinned(changes(next, before), before);
+      if (!api.canEdit(new Set([id])) || !api.canEdit(new Set([parent.id])))
+        return;
       commit(next, node.id, true);
     });
   }
@@ -215,12 +250,15 @@ export function createMindMapUI(api) {
   }
   function reparent(id, target) {
     if (!api.canEdit(new Set([id, ...(target ? [target] : [])]))) return false;
-    return commit(
-      planMindReparent(api.board(), id, target).items,
-      id,
-      false,
-      true,
-    );
+    // The branch belongs to the frame it now lies in, as when it is dragged
+    // to its new parent; one left in its old frame would go with that frame.
+    const next = planMindReparent(api.board(), id, target).items.map((i) => ({
+      ...i,
+    }));
+    inferMovedParents(next, mindBranch(mindIndex(next), id), {
+      skip: api.concealed?.(),
+    });
+    return commit(next, id, false, true);
   }
   function moveDialog() {
     const id = source()?.id;

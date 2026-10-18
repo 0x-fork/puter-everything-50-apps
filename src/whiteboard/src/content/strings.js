@@ -166,6 +166,8 @@ addTranslations({
     "Objets au-delà de la limite de 5 000 par tableau",
   "Cells shortened to 2,000 characters":
     "Cellules raccourcies à 2 000 caractères",
+  "Sticky notes shortened to 20,000 characters":
+    "Notes adhésives raccourcies à 20 000 caractères",
   "Rows beyond the imported range": "Lignes hors de la plage importée",
   "Columns beyond the imported range": "Colonnes hors de la plage importée",
   "Rows or columns beyond 1,000 rows and 120 columns":
@@ -174,6 +176,7 @@ addTranslations({
     "Lignes ou colonnes au-delà de 5 000 lignes et 500 colonnes",
   "Empty sheets": "Feuilles vides",
   "Pages beyond the imported range": "Pages hors de la plage importée",
+  "Paragraphs beyond 40 on a page": "Paragraphes au-delà de 40 par page",
   "Pages too detailed to import as images":
     "Pages trop détaillées pour être importées en images",
   // Errors

@@ -418,6 +418,89 @@ function mathText(node) {
       text += mathText(c);
   return text;
 }
+// A Word symbol (w:sym) names a character of a font, which symbol fonts
+// keep at F020 to F0FF. Those whose meaning is clear are shown as Unicode;
+// any other stands as a replacement mark, so the text shows something was
+// there.
+const WINGDINGS = {
+  0x4a: "☺",
+  0x4c: "☹",
+  0x6c: "●",
+  0x6e: "■",
+  0x6f: "☐",
+  0x76: "❖",
+  0x9f: "•",
+  0xa1: "○",
+  0xa7: "▪",
+  0xd8: "➢",
+  0xdf: "←",
+  0xe0: "→",
+  0xe1: "↑",
+  0xe2: "↓",
+  0xe8: "➔",
+  0xef: "⇦",
+  0xf0: "⇨",
+  0xf1: "⇧",
+  0xf2: "⇩",
+  0xfb: "✗",
+  0xfc: "✓",
+  0xfd: "☒",
+  0xfe: "☑",
+};
+// The Symbol font's Greek letters, A to Z and a to z, and its common signs.
+const SYMBOL_UPPER = "ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟΠΘΡΣΤΥςΩΞΨΖ",
+  SYMBOL_LOWER = "αβχδεφγηιϕκλμνοπθρστυϖωξψζ";
+const SYMBOL = {
+  0x22: "∀",
+  0x24: "∃",
+  0x27: "∋",
+  0x2a: "∗",
+  0x2d: "−",
+  0x40: "≅",
+  0x5c: "∴",
+  0x5e: "⊥",
+  0x7e: "∼",
+  0xa3: "≤",
+  0xa5: "∞",
+  0xab: "↔",
+  0xac: "←",
+  0xad: "↑",
+  0xae: "→",
+  0xaf: "↓",
+  0xb0: "°",
+  0xb1: "±",
+  0xb3: "≥",
+  0xb4: "×",
+  0xb7: "•",
+  0xb8: "÷",
+  0xb9: "≠",
+  0xbb: "≈",
+  0xd6: "√",
+  0xdb: "⇔",
+  0xdc: "⇐",
+  0xde: "⇒",
+  0xe5: "∑",
+};
+function wordSymbol(sym) {
+  const code = parseInt(attr(sym, NS.w, "char") || "", 16);
+  if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff) return "";
+  if (code < 0xf000 || code > 0xf0ff)
+    return code < 0xd800 || code > 0xdfff ? String.fromCodePoint(code) : "";
+  const font = (attr(sym, NS.w, "font") || "").trim().toLowerCase(),
+    low = code & 0xff;
+  let text;
+  if (font === "wingdings") text = WINGDINGS[low];
+  else if (font === "symbol") {
+    text = SYMBOL[low];
+    if (low >= 0x41 && low <= 0x5a) text = SYMBOL_UPPER[low - 0x41];
+    else if (low >= 0x61 && low <= 0x7a) text = SYMBOL_LOWER[low - 0x61];
+    // Its other characters in the plain range, digits and most
+    // punctuation, are themselves.
+    else if (!text && low >= 0x20 && low < 0x7f && low !== 0x60)
+      text = String.fromCharCode(low);
+  }
+  return text || "\ufffd";
+}
 function wordText(node) {
   let text = "";
   const visit = (n) => {
@@ -442,6 +525,7 @@ function wordText(node) {
       else if (name === "tab") text += "\t";
       else if (name === "br" || name === "cr") text += "\n";
       else if (name === "noBreakHyphen") text += "-";
+      else if (name === "sym") text += wordSymbol(c);
       // Tracked deletions and the old place of moved text are not content,
       // nor is the reading guide shown above ruby text.
       else if (
@@ -845,6 +929,11 @@ const BUILTIN_NUMBERS = new Map([
   [38, "#,##0_);(#,##0)"],
   [39, "#,##0.00_);(#,##0.00)"],
   [40, "#,##0.00_);(#,##0.00)"],
+  // Accounting, as Excel shows them in an English (United States) locale.
+  [41, '_(* #,##0_);_(* \\(#,##0\\);_(* "-"_);_(@_)'],
+  [42, '_("$"* #,##0_);_("$"* \\(#,##0\\);_("$"* "-"_);_(@_)'],
+  [43, '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)'],
+  [44, '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)'],
 ]);
 // A format's sections (positive;negative;zero;text), split outside quotes,
 // brackets and escapes.
@@ -869,11 +958,12 @@ function sections(code) {
 // and ?), thousands separators and scaling commas, percentages, literal text
 // and currency symbols, with sections for negative numbers and zero.
 // Formats it does not cover (scientific, fractions, conditions, text) give
-// null, and the number is shown as General shows it.
+// null, and the number is shown as General shows it. A fourth section shows
+// text, which a number never uses, as in Excel's Accounting formats.
 function numberFormat(code) {
   const parts = sections(code);
   if (
-    parts.some((part) => {
+    parts.slice(0, 3).some((part) => {
       const plain = part.replace(/"[^"]*"|\\.|_.|\*./g, "");
       return /\[[<>=]|[eE][+-]|\/|@|general/i.test(plain);
     })

@@ -713,6 +713,16 @@ test("timeline models and generated timeline frames are valid, linked, and acces
   assert.ok(dates.length > 1);
   assert.ok(dates.every((d) => !overlaps(d, today)));
   assert.ok(today.y + today.h <= frame.y + frame.h);
+  // On the timeline's last day, "Today" still ends inside the frame.
+  for (const day of ["2026-10-11", "2026-10-24"]) {
+    const late = timelineItems(b, collectTasks(b, { today: day }), {
+      today: day,
+    });
+    const label = late.items.find(
+      (i) => i.type === "text" && i.text === "Today",
+    );
+    assert.ok(label.x + label.w <= late.frame.x + late.frame.w, day);
+  }
   assert.ok(items.some((i) => i.type === "text" && i.text === "Bob Smith"));
   assert.throws(
     () => timelineItems(b, [rows.find((r) => r.id === retro.id)]),
@@ -959,6 +969,54 @@ test("a refreshed timeline keeps the lanes it was placed with", () => {
   }
 });
 
+test("a refreshed timeline takes in the objects its grown frame covers", () => {
+  const b = board("Timeline");
+  const task = (n, who) =>
+    item("note", n * 220, 0, {
+      text: `Task ${n}`,
+      task: {
+        assignee: { id: who, name: who },
+        start: "2026-10-01",
+        due: "2026-10-09",
+        status: "todo",
+      },
+    });
+  b.items = [task(0, "Ana"), task(1, "Ana")];
+  const placed = timelineItems(b, collectTasks(b, { today: TODAY }), {
+    today: TODAY,
+    origin: { x: 0, y: 400 },
+  });
+  b.items.push(...placed.items);
+  const f = placed.frame;
+  const below = item("note", f.x, f.y + f.h + 40, { text: "Below" }),
+    hidden = item("note", f.x + 240, f.y + f.h + 40, { text: "Hidden" }),
+    far = item("note", f.x, f.y + 5000, { text: "Far" });
+  b.items.push(below, hidden, far);
+  // More people's tasks, later, need more lanes and a wider frame.
+  for (let n = 2; n < 8; n++) {
+    const more = task(n, `P${n}`);
+    more.task.due = "2026-12-20";
+    b.items.push(more);
+  }
+  const before = structuredClone(b.items);
+  const items = refreshedTimeline(
+    b,
+    placedTimeline(b.items, f.id),
+    collectTasks(b, { today: TODAY }),
+    { today: TODAY, skip: new Set([hidden.id]) },
+  );
+  assert.deepEqual(b.items, before, "The board itself is left unchanged");
+  validateBoard({ ...b, items });
+  const frame = items.find((i) => i.id === f.id),
+    find = (id) => items.find((i) => i.id === id);
+  assert.ok(frame.y + frame.h > below.y + below.h, "The frame grew over it");
+  assert.equal(find(below.id).parentId, f.id);
+  // An object hidden from this person, or one the frame does not reach,
+  // stays out.
+  assert.equal(find(hidden.id).parentId, undefined);
+  assert.equal(find(far.id).parentId, undefined);
+});
+
 test("Kanban status sync updates tasks moved into status frames only when enabled", () => {
   assert.equal(statusFromTitle("To do"), "todo");
   assert.equal(statusFromTitle("À faire"), "todo");
@@ -1118,6 +1176,34 @@ test("Kanban status sync gives a card made a task inside a status column that co
   });
   b.items.push(loose);
   assert.deepEqual(applyStatusSync(b, before), []);
+});
+
+test("Kanban status sync moves a pasted card to its column's status and keeps a card that came with its column", () => {
+  const { b, done } = plan();
+  b.planning = { statusSync: true };
+  const before = taskParents(b.items);
+  // A card pasted into Done, as one cut from In progress, is done.
+  const moved = item("note", 760, 300, {
+    text: "Waiting on legal",
+    parentId: done.id,
+    task: newTask({ status: "in-progress" }),
+  });
+  b.items.push(moved);
+  assert.deepEqual(
+    applyStatusSync(b, before).map((c) => [c.item.id, c.status]),
+    [[moved.id, "done"]],
+  );
+  // Inserting the Kanban template twice keeps both copies' blocked cards,
+  // which come with their columns.
+  const kanban = fromTemplate("kanban");
+  const copy = fromTemplate("kanban");
+  const parents = taskParents(kanban.items);
+  kanban.items.push(...copy.items);
+  assert.deepEqual(applyStatusSync(kanban, parents), []);
+  assert.equal(
+    kanban.items.filter((i) => i.task?.status === "blocked").length,
+    2,
+  );
 });
 
 test("Jira helpers link created issues, refresh statuses, and explain availability", () => {
@@ -2390,6 +2476,75 @@ test("inserting the Kanban template turns status sync on, says so, and lines up 
     await click('[data-action="undo"]');
     await click(`[data-id="${id}"]`);
     assert.equal(selected(app)[0].task.status, "todo");
+  } finally {
+    app.close();
+  }
+});
+
+test("Kanban columns saved as reusable content turn status sync on where they are inserted", async () => {
+  const app = await setup(),
+    { doc, w, click } = app;
+  const syncShown = async () => {
+    await click("#task-access");
+    const checked = doc.querySelector("#tasks-sync").checked;
+    doc.querySelector("dialog.tasks-modal .dialog-header button").click();
+    await app.tick();
+    return checked;
+  };
+  const save = async (name) => {
+    await click('[data-action="organize"]');
+    await click('[data-organize="snippet"]');
+    doc.querySelector("#snippet-name").value = name;
+    doc
+      .querySelector("dialog form")
+      .dispatchEvent(new w.Event("submit", { cancelable: true }));
+    for (let n = 0; n < 50 && doc.querySelector("dialog[open]"); n++)
+      await app.tick();
+  };
+  try {
+    await click('[data-action="new"]');
+    await click("#task-access");
+    const sync = doc.querySelector("#tasks-sync");
+    sync.checked = true;
+    sync.dispatchEvent(new w.Event("change", { bubbles: true }));
+    doc.querySelector("dialog.tasks-modal .dialog-header button").click();
+    await app.tick();
+    // A column and its card, then a plain note, are saved for reuse.
+    const { done } = plan();
+    const card = item("note", 760, 100, {
+      text: "Shipped",
+      parentId: done.id,
+      task: newTask({ status: "done" }),
+    });
+    dispatch(app, "paste", transfer(clipboardFormats([done, card])));
+    await app.tick();
+    await save("Done column");
+    dispatch(
+      app,
+      "paste",
+      transfer(clipboardFormats([item("note", 0, 600, { text: "Plain" })])),
+    );
+    await app.tick();
+    await save("Plain note");
+    // Inserted on another board, the column turns its status sync on.
+    await click('[data-action="home"]');
+    await click('[data-action="new"]');
+    await click('[data-action="templates"]');
+    const custom = (title) =>
+      [...doc.querySelectorAll("[data-custom]")].find(
+        (b) => b.querySelector("strong").textContent === title,
+      );
+    custom("Plain note").click();
+    await app.tick();
+    assert.equal(await syncShown(), false, "A plain note leaves it off");
+    await click('[data-action="templates"]');
+    custom("Done column").click();
+    await app.tick();
+    assert.match(
+      doc.querySelector("#toast").textContent,
+      /Kanban status sync is on for this board/,
+    );
+    assert.equal(await syncShown(), true);
   } finally {
     app.close();
   }

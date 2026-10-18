@@ -763,6 +763,37 @@ test("embed preview cards render on canvas and in SVG exports", () => {
   assert.doesNotMatch(svg, /<iframe|<foreignObject/);
 });
 
+test("a sheet whose data starts below and right of A1 imports from its first value", () => {
+  // Data at C4: a header, then 25 rows, so a second table repeats the header.
+  const rows = [
+    [],
+    [""],
+    ["", "", ""],
+    ["", "", "Name", "Owner"],
+    ...Array.from({ length: 25 }, (_, r) => ["", "", `Item ${r}`, `P${r}`]),
+  ];
+  const split = splitTable(rows);
+  assert.equal(split.columns, 2);
+  assert.deepEqual(
+    split.tables.map((t) => t.cells[0]),
+    [
+      ["Name", "Owner"],
+      ["Name", "Owner"],
+    ],
+  );
+  assert.deepEqual(split.tables[0].cells[1], ["Item 0", "P0"]);
+  // Ranges still name the sheet's own cells.
+  assert.deepEqual(
+    split.tables.map((t) => t.range),
+    ["C4:D23", "C24:D29"],
+  );
+  // Refreshing the second table repeats the same header.
+  const refreshed = rangeCells(rows, parseRange("C24:D29"));
+  assert.deepEqual(refreshed.cells[0], ["Name", "Owner"]);
+  assert.deepEqual(refreshed.cells[1], ["Item 19", "P19"]);
+  assert.equal(refreshed.cells.length, 7);
+});
+
 test("CSV rows split into tables within board limits, with refreshable ranges", () => {
   const header = Array.from({ length: 30 }, (_, c) => `Col ${c + 1}`);
   const rows = [
@@ -1178,6 +1209,90 @@ const W =
 const para = (text, style, extra = "") =>
   `<w:p><w:pPr>${style ? `<w:pStyle w:val="${style}"/>` : ""}${extra}</w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
 
+test("GIF and BMP pictures in a Word document import as PNG copies, as dropped ones do", async () => {
+  const gif = encoder.encode("GIF89a\x02\x00\x01\x00 rest of a GIF");
+  const bmp = encoder.encode("BM a bitmap's header and pixels");
+  const png = createCanvas(20, 10).toDataURL("image/png");
+  const zip = () =>
+    createZip([
+      {
+        name: "word/document.xml",
+        data: `<w:document ${W}><w:body>${["rId1", "rId2", "rId1"].map((id) => `<w:p><w:r><w:drawing><a:blip r:embed="${id}"/></w:drawing></w:r></w:p>`).join("")}</w:body></w:document>`,
+      },
+      {
+        name: "word/_rels/document.xml.rels",
+        data: `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="x/image" Target="media/image1.gif"/><Relationship Id="rId2" Type="x/image" Target="media/image2.bmp"/></Relationships>`,
+      },
+      { name: "word/media/image1.gif", data: gif },
+      { name: "word/media/image2.bmp", data: bmp },
+    ]);
+  const model = await extractDocx(zip());
+  assert.equal(model.skipped.images, 0);
+  const converted = [];
+  const result = await layoutDocument(model, {
+    ctx: measure,
+    point: { x: 0, y: 0 },
+    attach: false,
+    convert: async (src) => (converted.push(src.slice(0, 15)), png),
+  });
+  // A picture used twice is copied once.
+  assert.deepEqual(converted, ["data:image/gif;", "data:image/bmp;"]);
+  const images = result.items.filter((i) => i.type === "image");
+  assert.equal(images.length, 3);
+  assert.ok(images.every((i) => i.src === png && i.w === 20 && i.h === 10));
+  assert.deepEqual(result.skipped, []);
+  // A copy that cannot be made is reported, as is a picture without a way
+  // to copy it.
+  const failed = await layoutDocument(await extractDocx(zip()), {
+    ctx: measure,
+    point: { x: 0, y: 0 },
+    attach: false,
+    convert: async () => {
+      throw Error("This image could not be read.");
+    },
+  });
+  assert.deepEqual(failed.skipped, [
+    { reason: "Images that could not be read", count: 3, detail: "" },
+  ]);
+  const unconverted = await layoutDocument(await extractDocx(zip()), {
+    ctx: measure,
+    point: { x: 0, y: 0 },
+    attach: false,
+  });
+  assert.equal(unconverted.skipped[0].reason, "Images in unsupported formats");
+  assert.equal(unconverted.skipped[0].count, 3);
+});
+
+test("Word symbols, such as Wingdings arrows and check marks, import as the characters they show", async () => {
+  const sym = (font, char) =>
+    `<w:r><w:sym w:font="${font}" w:char="${char}"/></w:r>`;
+  const text = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const paragraphs = [
+    text("Next ") + sym("Wingdings", "F0E0") + text(" ship"),
+    sym("Wingdings", "F0FC") + text(" Done ") + sym("Wingdings", "F0FB"),
+    sym("Symbol", "F061") +
+      text(" = 2") +
+      sym("Symbol", "F070") +
+      sym("Symbol", "F0B3"),
+    sym("Segoe UI Symbol", "2713") + text(" plain"),
+    sym("Wingdings 3", "F07D") + text(" unknown"),
+    // The Symbol font's digits and plain punctuation are themselves.
+    sym("Symbol", "F028") + sym("Symbol", "F031") + sym("Symbol", "F029"),
+  ];
+  const model = await extractDocx(
+    createZip([
+      {
+        name: "word/document.xml",
+        data: `<w:document ${W}><w:body>${paragraphs.map((p) => `<w:p>${p}</w:p>`).join("")}</w:body></w:document>`,
+      },
+    ]),
+  );
+  assert.deepEqual(
+    model.blocks.map((b) => b.text),
+    ["Next → ship", "✓ Done ✗", "α = 2π≥", "✓ plain", "\ufffd unknown", "(1)"],
+  );
+});
+
 test("a Word picture damaged beyond its header is skipped rather than imported as an image that shows nothing", async () => {
   const broken = new Uint8Array(createCanvas(40, 20).toBuffer("image/png"));
   // The signature and size header stay; the picture data after them is lost.
@@ -1526,6 +1641,42 @@ test("plain text and Markdown become sticky notes, with headings as frames", asy
   assert.throws(
     () => checkFile({ name: "big.csv", size: 6 * 1024 * 1024 }),
     /5 MB/,
+  );
+});
+
+test("a Markdown file's lone # title is its title, and its ## sections become frames", async () => {
+  const layout = async (text) => {
+    const result = await layoutDocument(parseText(text, { markdown: true }), {
+      ctx: measure,
+      point: { x: 0, y: 0 },
+      file: { name: "README.md" },
+      attach: false,
+    });
+    const frames = result.items.filter((i) => i.type === "frame");
+    return {
+      frames: frames.map((f) => f.text),
+      headings: result.items
+        .filter((i) => i.type === "text")
+        .map((i) => [frames.find((f) => f.id === i.parentId).text, i.text]),
+    };
+  };
+  assert.deepEqual(
+    await layout(
+      "# Project Atlas\n\nShort intro.\n\n## Goals\n\n- Ship v1\n\n## Risks\n\n### Hiring\n\n- Slow\n\n## Timeline\n",
+    ),
+    {
+      frames: ["README", "Goals", "Risks", "Timeline"],
+      headings: [
+        ["README", "Project Atlas"],
+        ["Risks", "Hiring"],
+      ],
+    },
+  );
+  // A lone heading with nothing deeper, or below other text, is a frame.
+  assert.deepEqual((await layout("# Atlas\n\nIntro")).frames, ["Atlas"]);
+  assert.deepEqual(
+    (await layout("Intro\n\n# Atlas\n\n## Goals\n\nShip")).frames,
+    ["README", "Atlas"],
   );
 });
 
@@ -3588,6 +3739,19 @@ test("long runs of # in a Markdown heading parse in linear time", () => {
   );
 });
 
+test("a # line indented four spaces or a tab in Markdown is code, not a heading", () => {
+  const blocks = (text) =>
+    parseText(text, { markdown: true }).blocks.map((b) => [b.type, b.text]);
+  assert.deepEqual(blocks("Setup:\n\n    # install deps\n    npm ci"), [
+    ["paragraph", "Setup:"],
+    ["paragraph", "# install deps"],
+    ["paragraph", "npm ci"],
+  ]);
+  assert.deepEqual(blocks("\t# comment"), [["paragraph", "# comment"]]);
+  // Up to three spaces still start a heading.
+  assert.deepEqual(blocks("   ## Goals"), [["heading", "Goals"]]);
+});
+
 // A one-sheet workbook with the given cells: [value, numFmtId] pairs, and
 // custom number formats as [id, code] pairs.
 function cellsWorkbook(cells, formats = []) {
@@ -4951,6 +5115,10 @@ test("Excel number formats import as they are shown", async () => {
     [171, "0.00E+00"],
     [172, "#.##"],
     [173, "@"],
+    [
+      174,
+      "_-* #,##0.00\\ &quot;€&quot;_-;\\-* #,##0.00\\ &quot;€&quot;_-;_-* &quot;-&quot;??\\ &quot;€&quot;_-;_-@_-",
+    ],
   ];
   const cells = [
     ["1234.5", 164],
@@ -4972,6 +5140,11 @@ test("Excel number formats import as they are shown", async () => {
     // Floating point leftovers such as =0.1+0.2-0.3 round like any value.
     ["5.551115123125783e-17", 4],
     ["1e-9", 9],
+    // Accounting formats end in a text section, which numbers never use.
+    ["1234.5", 44],
+    ["-1234.5", 44],
+    ["0", 44],
+    ["-1234.5", 174],
   ];
   const workbook = await openXlsx(cellsWorkbook(cells, formats));
   assert.deepEqual((await workbook.read(0)).rows[0], [
@@ -4995,6 +5168,10 @@ test("Excel number formats import as they are shown", async () => {
     "-0",
     "0.00",
     "0%",
+    "$1,234.50",
+    "$(1,234.50)",
+    "$-",
+    "-1,234.50 €",
   ]);
 });
 
@@ -5410,16 +5587,87 @@ test("PDF text joins words broken at a line end and keeps other hyphens", () => 
     ]),
     ["Both pre- and post-war housing is hyphenated here, as is COVID-19 data."],
   );
-  // A dense page of 60,000 lines is joined in one pass, kept to the first
-  // 20,000 characters of the paragraph.
+  // A dense page of 60,000 lines is joined in one pass, and only until the
+  // paragraph passes the 20,000 characters a note keeps.
   const dense = Array.from({ length: 60000 }, (_, n) =>
     line(n % 7 ? `lorem ipsum ${n}` : "hyphen-", 1000 - n / 100),
   );
   const started = performance.now();
   const [paragraph] = pdfParagraphs(dense);
   assert.ok(performance.now() - started < 1000);
-  assert.equal(paragraph.length, 20000);
+  assert.ok(paragraph.length > 20000 && paragraph.length < 20100);
   assert.ok(paragraph.startsWith("hyphenlorem ipsum 1 lorem ipsum 2"));
+});
+
+test("imported text too long for a sticky note is shortened and reported", async () => {
+  const result = await layoutDocument(
+    parseText(`Short\n\n${"x".repeat(30000)}\n\n${"y".repeat(25000)}`),
+    {
+      ctx: measure,
+      point: { x: 0, y: 0 },
+      file: { name: "a.txt" },
+      attach: false,
+    },
+  );
+  assert.deepEqual(
+    result.items.filter((i) => i.type === "note").map((i) => i.text.length),
+    [5, 20000, 20000],
+  );
+  assert.deepEqual(result.skipped, [
+    {
+      reason: "Sticky notes shortened to 20,000 characters",
+      count: 2,
+      detail: "",
+    },
+  ]);
+});
+
+test("PDF paragraphs past forty on a page are reported as skipped", async () => {
+  // Sixty paragraphs, each far enough below the last to stand alone.
+  const items = Array.from({ length: 60 }, (_, n) => ({
+    str: `Paragraph ${n + 1}`,
+    transform: [1, 0, 0, 10, 0, 800 - n * 30],
+    height: 10,
+    hasEOL: true,
+  }));
+  const model = await extractPdf(new Uint8Array(10), {
+    loadPdfjs: async () => ({
+      getDocument: () => ({
+        promise: Promise.resolve({
+          numPages: 1,
+          getPage: async () => ({
+            getViewport: ({ scale }) => ({
+              width: 200 * scale,
+              height: 100 * scale,
+            }),
+            render: () => ({ promise: Promise.resolve() }),
+            getTextContent: async () => ({ items }),
+          }),
+          destroy() {},
+        }),
+        destroy() {},
+      }),
+    }),
+    createCanvas: () => ({
+      width: 0,
+      height: 0,
+      getContext: () => ({ fillRect() {} }),
+    }),
+    encode: () => createCanvas(960, 480).toDataURL("image/jpeg", 0.8),
+    text: true,
+  });
+  assert.equal(model.pages[0].texts.length, 40);
+  assert.equal(model.pages[0].texts.at(-1), "Paragraph 40");
+  const result = await layoutDocument(model, {
+    ctx: measure,
+    point: { x: 0, y: 0 },
+    file: { name: "Long.pdf" },
+    attach: false,
+  });
+  assert.equal(result.counts.note, 40);
+  assert.deepEqual(result.skipped, [
+    { reason: "Paragraphs beyond 40 on a page", count: 20, detail: "" },
+  ]);
 });
 
 test("refreshing a tagged source table retains unchanged declarations and removes ranges from replaced values", async () => {

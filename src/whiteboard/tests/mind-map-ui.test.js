@@ -132,6 +132,152 @@ test("mind-map parent choices preserve whole-node and passage languages while mo
   }
 });
 
+test("a branch moved to a mind map in another frame joins that frame", () => {
+  const dom = new JSDOM("<body></body>", { url: "https://whiteboard.test" });
+  const previous = globalThis.document;
+  globalThis.document = dom.window.document;
+  try {
+    const b = board("Mind map frames");
+    const node = (text, x, parent, extra = {}) =>
+      item("rect", x, 250, {
+        text,
+        w: 200,
+        h: 76,
+        mindMap: { parent, direction: "right", auto: true, line: "curved" },
+        ...extra,
+      });
+    const one = item("frame", 0, 0, { w: 900, h: 600, text: "One" }),
+      two = item("frame", 1200, 0, { w: 900, h: 600, text: "Two" }),
+      rootOne = node("Root one", 100, null, { parentId: one.id }),
+      rootTwo = node("Root two", 1300, null, { parentId: two.id }),
+      child = node("Child", 380, rootOne.id, { parentId: one.id, order: 1 }),
+      grandchild = node("Grandchild", 660, child.id, {
+        parentId: one.id,
+        order: 1,
+      });
+    b.items = [one, two, rootOne, rootTwo, child, grandchild];
+    const ui = createMindMapUI({
+      board: () => b,
+      source: () => child,
+      finish() {},
+      canEdit: () => true,
+      mutate: (fn) => fn(),
+      select() {},
+      focus() {},
+      reveal() {},
+      toast(message) {
+        throw Error(message);
+      },
+      modal(title, html, configure) {
+        const d = dom.window.document.createElement("dialog");
+        d.innerHTML = html;
+        d.close = () => d.remove();
+        dom.window.document.body.append(d);
+        configure(d);
+        return d;
+      },
+    });
+    ui.moveDialog();
+    dom.window.document
+      .querySelector(`[data-mind-parent="${rootTwo.id}"]`)
+      .click();
+    assert.equal(child.mindMap.parent, rootTwo.id);
+    assert.ok(child.x > two.x);
+    assert.equal(child.parentId, two.id);
+    assert.equal(grandchild.parentId, two.id);
+    assert.equal(rootOne.parentId, one.id);
+  } finally {
+    dom.window.close();
+    if (previous === undefined) delete globalThis.document;
+    else globalThis.document = previous;
+  }
+});
+
+test("a sibling refused because the layout would move a locked node names that node", () => {
+  const b = board("Locked node");
+  const node = (text, parent, extra = {}) =>
+    item("rect", 0, 0, {
+      text,
+      w: 200,
+      h: 76,
+      mindMap: { parent, direction: "right", auto: true, line: "curved" },
+      ...extra,
+    });
+  const root = node("Root", null),
+    locked = node("Keep\nhere", root.id, { order: 1, locked: true }),
+    open = node("Open", root.id, { order: 2 });
+  b.items = [root, locked, open];
+  const toasts = [];
+  let writes = 0;
+  const ui = createMindMapUI({
+    board: () => b,
+    source: () => open,
+    finish() {},
+    // The lock protects the root above the locked node too.
+    canEdit: (ids) =>
+      ![...ids].some((id) => id === locked.id || id === root.id),
+    mutate: () => writes++,
+    select() {},
+    focus() {},
+    reveal() {},
+    edit() {},
+    toast: (message) => toasts.push(message),
+  });
+  ui.add(true);
+  assert.equal(writes, 0);
+  assert.deepEqual(toasts, [
+    "Unlock “Keep here” first: the mind map’s layout moves it.",
+  ]);
+  assert.equal(b.items.length, 3);
+});
+
+test("a sibling added beside a node comes right after it", () => {
+  const b = board("Siblings");
+  const node = (text, parent, order) =>
+    item("rect", 0, 0, {
+      text,
+      w: 200,
+      h: 76,
+      order,
+      mindMap: { parent, direction: "right", auto: true, line: "curved" },
+    });
+  const root = node("Root", null),
+    a = node("A", root.id, 1),
+    bee = node("B", root.id, 2),
+    c = node("C", root.id, 3);
+  b.items = [root, a, bee, c];
+  let writes = 0;
+  const ui = createMindMapUI({
+    board: () => b,
+    source: () => a,
+    finish() {},
+    canEdit: () => true,
+    mutate: (fn) => (fn(), writes++),
+    select() {},
+    focus() {},
+    reveal() {},
+    edit() {},
+    toast(message) {
+      throw Error(message);
+    },
+  });
+  ui.add(true);
+  assert.equal(writes, 1, "One undo step");
+  const rows = b.items
+    .filter((i) => i.mindMap.parent === root.id)
+    .sort((p, q) => p.order - q.order);
+  assert.deepEqual(
+    rows.map((i) => i.text),
+    ["A", "New idea", "B", "C"],
+  );
+  assert.deepEqual(
+    rows.map((i) => i.order),
+    [1, 2, 3, 4],
+  );
+  // The layout follows the order.
+  assert.ok(rows.every((i, n) => !n || rows[n - 1].y < i.y));
+});
+
 test("French parent controls keep tagged English text and translated empty-node names", () => {
   const a = setup();
   try {

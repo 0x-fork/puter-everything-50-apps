@@ -1446,7 +1446,8 @@ nav + .workspace-label {
   max-width: calc(100% - 24px);
   box-shadow: 0 6px 22px #0002;
 }
-.selection-tools.is-interacting {
+.selection-tools.is-interacting,
+.selection-tools.is-floating.is-away {
   visibility: hidden;
 }
 /* 24 px, the smallest target a pointer finds reliably (WCAG 2.5.8). */
@@ -3188,6 +3189,12 @@ dialog.rail-flyout.add-content-flyout {
   border-color: var(--accent);
   background: var(--soft);
 }
+/* Its number and object count on the tint need the darker muted text
+   (5.3:1 rather than 4.4:1). */
+.frame-go[aria-current] > span,
+.frame-go[aria-current] small {
+  color: color-mix(in srgb, var(--muted) 80%, var(--text));
+}
 .frames-footer {
   display: flex;
   justify-content: flex-end;
@@ -3994,6 +4001,17 @@ dialog.history-dialog[open] {
 .icon-grid .icon-choice:focus-visible {
   outline-offset: -3px;
 }
+/* On a short screen, as a phone on its side, a list scrolling inside the
+   scrolling dialog showed a strip of 30 to 40px under the search and
+   filters; there the dialog alone scrolls, through the whole list. */
+@media (max-height: 500px) {
+  .template-library-list,
+  .shape-families,
+  .icon-grid {
+    max-height: none;
+    overflow: visible;
+  }
+}
 /* Tiles stay light in the dark theme, so they keep the light theme's accent
    for their focus ring and border (4.5:1 rather than 1.7:1). */
 :root[data-theme="dark"] .icon-choice:hover,
@@ -4128,13 +4146,15 @@ dialog.history-dialog[open] {
   }
   /* On a phone the category chips scroll in one row rather than wrapping
      into several, which left room for only one result. The padding keeps
-     focus rings inside the scrolling row. */
+     focus rings (3px out from a chip, 3px wide) inside the scrolling row;
+     the margins keep the chips where they were. */
   .library-chips {
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
-    padding: 3px;
-    margin: 9px -3px 0;
+    padding: 6px;
+    margin: 6px -6px -3px;
+    scroll-padding-inline: 6px;
   }
   .library-chip {
     flex: none;
@@ -5282,8 +5302,44 @@ dialog.history-dialog[open] {
 .comment-pages[hidden] {
   display: none;
 }
+/* Beside an open discussion the list keeps room for about two discussions.
+   Scrolling stops at a discussion's top, and while more lies below, the
+   last visible one fades out rather than being cut through a line. */
 .comments-panel.has-discussion #comment-list {
-  max-height: 120px;
+  max-height: min(184px, 30dvh);
+  scroll-snap-type: y proximity;
+}
+.comments-panel.has-discussion #comment-list > * {
+  scroll-snap-align: start;
+}
+@property --comment-list-fade {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@keyframes comment-list-more {
+  0%,
+  90% {
+    --comment-list-fade: 36px;
+  }
+  100% {
+    --comment-list-fade: 0px;
+  }
+}
+@supports (animation-timeline: scroll()) {
+  .comments-panel.has-discussion #comment-list {
+    mask-image: linear-gradient(
+      to bottom,
+      #000 calc(100% - var(--comment-list-fade)),
+      transparent
+    );
+    animation: comment-list-more linear both;
+    animation-timeline: scroll(self);
+  }
+  /* Nor does it dim the keyboard's focus ring. */
+  .comments-panel.has-discussion #comment-list:has(:focus-visible) {
+    mask-image: none;
+  }
 }
 .comments-panel header,
 .comment-list-actions,
@@ -5882,6 +5938,11 @@ dialog.history-dialog[open] {
 }
 .workshop-timer button {
   min-height: 40px;
+}
+/* Minutes and seconds share a row; at the panel's width the usual 160px
+   per field put them on two rows, far apart. */
+.workshop-timer .field-row > * {
+  flex-basis: 0;
 }
 .timer-presets,
 .timer-extensions {
@@ -6887,7 +6948,11 @@ dialog p[role="alert"]:not(.admin-error, .fac-error, .sr-only):not(:empty) {
   grid-auto-columns: 176px;
   gap: 14px;
   overflow-x: auto;
-  padding: 2px 2px 8px;
+  /* Room for a template's focus ring (3px out from it, 3px wide) inside the
+     scrolling row; the margin keeps the row where it was. */
+  padding: 6px 6px 8px;
+  margin: -4px -4px 0;
+  scroll-padding-inline: 6px;
   scrollbar-width: thin;
 }
 .template {
@@ -7091,7 +7156,7 @@ dialog p[role="alert"]:not(.admin-error, .fac-error, .sr-only):not(:empty) {
   flex-shrink: 0;
 }
 @container (max-width: 880px) {
-  .board-list-head:has(+ .board-grid.is-list) {
+  .board-list-head:has(+ .board-grid.is-list > .board-card) {
     grid-template-columns: 56px minmax(0, 1fr) 120px 150px 70px;
   }
   .board-list-head span:nth-child(4),
@@ -7103,7 +7168,7 @@ dialog p[role="alert"]:not(.admin-error, .fac-error, .sr-only):not(:empty) {
   }
 }
 @container (max-width: 680px) {
-  .board-list-head:has(+ .board-grid.is-list) {
+  .board-list-head:has(+ .board-grid.is-list > .board-card) {
     grid-template-columns: 56px minmax(0, 1fr) 120px 70px;
   }
   .board-list-head span:nth-child(2) {
@@ -7137,7 +7202,7 @@ dialog p[role="alert"]:not(.admin-error, .fac-error, .sr-only):not(:empty) {
   .board-grid.is-list .card-storage {
     display: none;
   }
-  .board-list-head:has(+ .board-grid.is-list) {
+  .board-list-head:has(+ .board-grid.is-list > .board-card) {
     display: none;
   }
 }

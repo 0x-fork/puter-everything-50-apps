@@ -504,7 +504,8 @@ test("facilitation preserves frame languages in staging, voting and agenda navig
         "Bonjour à tous.",
       );
       assert.equal(labels[1].querySelector("img"), null);
-      assert.equal(labels[2].textContent, t("Frame"));
+      // An untitled frame is named by its place, as in the Frames panel.
+      assert.equal(labels[2].textContent, `${t("Frame")} 3`);
       assert.equal(labels[2].querySelector("[lang]"), null);
     };
     try {
@@ -4189,6 +4190,8 @@ test("a timer started by hand keeps running through agenda steps without a durat
     host.click('[data-fac="agenda-next"]');
     assert.equal(host.calls.timer[0].duration, 600000);
     assert.equal(host.calls.timer[0].state, "running");
+    // A step's time limit takes the board timer, and says so.
+    assert.match(host.calls.toasts.at(-1), /replaced the board timer/);
     host.click('[data-fac="agenda-end"]');
     assert.equal(b.workshop.run.state, "ended");
     assert.equal(host.calls.timer[1].state, "idle");

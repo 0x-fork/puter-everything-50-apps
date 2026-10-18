@@ -141,6 +141,7 @@ import { createResizePlan, resizeLimits, applyResize } from "./resize.js";
 import {
   rotationOf,
   worldPoint,
+  localPoint,
   rotatePoint,
   setObjectHeight,
   objectBounds,
@@ -543,12 +544,14 @@ import {
   editTitle,
   plural,
   labelled,
+  untitledFrame,
 } from "./i18n.js";
 import { createFeatures } from "./features.js";
 import {
   createTransfer,
   textObject,
   decodeImage,
+  convertImage,
   IMAGE_ACCEPT,
 } from "./transfer.js";
 import { createBulkContent } from "./bulk-content.js";
@@ -586,15 +589,23 @@ let boards = [],
   // read at sign-in; the library marks them.
   cloudIndex = new Set(),
   cloudTitles = new Map(),
-  // Boards in Puter opened from this device's copy, by the copy's time: the
-  // first upload of the visit checks that Puter holds nothing newer.
-  cloudUnverified = new Map(),
+  // Boards in Puter by the time of the copy Puter last held as far as this
+  // page knows: every upload first checks that Puter holds nothing newer.
+  cloudStamps = new Map(),
+  // The version of each board's file in Puter that this page last read or
+  // wrote, where Puter tells it: while it is unchanged, no one else has
+  // saved the board, and the check needs no download.
+  cloudVersions = new Map(),
+  // The copy each board's last upload tried to write when its answer was
+  // lost: it may be the one in Puter, and is this page's own.
+  cloudAttempts = new Map(),
   // Cloud boards with edits awaiting upload, by the time of the latest.
   pendingCloud = new Map(),
   // Personal boards whose latest edits could not be saved on this device,
   // as when storage is full; closing the tab then asks first.
   unsavedLocal = new Set(),
   cloudTimer,
+  cloudChain = Promise.resolve(),
   saveChain = Promise.resolve(),
   // Recovery versions are written apart from boards: a board write queued
   // behind a version write would only start after it, which a closing tab
@@ -624,7 +635,9 @@ let boards = [],
 let lastPointerType = "mouse";
 let hoveredMind = null,
   // The object a click would select under a resting pointer, outlined.
-  hovered = null;
+  hovered = null,
+  // Where that pointer rests, so a view change looks again under it.
+  hoverPointer = null;
 // The last arrow-key move or resize, which a held key continues.
 let nudge = null;
 // A held key makes the same change to the same objects as one undo step, so
@@ -949,6 +962,7 @@ const features = createFeatures({
   concealedIn: (b) => facilitation.concealedIn(b),
   hiddenFromParticipants: (id) => facilitation.hiddenFromParticipants(id),
   presentTimer: (dialog) => workshopTimer.present(dialog),
+  presentReactions: (dialog) => liveUI.present(dialog),
   presentAttention: (dialog, rect, slide) =>
     attention.present(dialog, rect, slide),
   navigation: () => navigationSettings(),
@@ -1100,8 +1114,9 @@ const contentTools = createContentTools({
   action: (name) => action(name),
   loadPdfjs,
   // Images whose size is not in their first bytes are measured by the
-  // browser.
+  // browser, which also makes the PNG copy of a GIF or BMP picture.
   decodeImage,
+  convertImage,
   mutate,
   toast,
   modal,
@@ -1282,6 +1297,7 @@ const comments = createCommentsUI({
     ].filter((p) => p.id !== collaboration?.user?.uuid),
   reactions: (thread, message) =>
     facilitation.commentReactions(thread, message),
+  refreshIcons: () => iconsRefresh(),
   anchor: (p) => hitTest(visibleItems(), p, 8 / view.z),
   reveal: (id) => mindView.reveal(id),
   focus: (p, panel) => {
@@ -1430,7 +1446,7 @@ const organizationLibrary = createOrganizationLibrary({
   insertBoard: (json) => {
     const b = validateBoard(JSON.parse(json));
     assertImagePixels(b.items);
-    return features.insertTemplate(b.items, b.tags);
+    return features.insertTemplate(b.items, b.tags, b.planning);
   },
   // The open board as this person may see it, without its discussion.
   shareable: () => {
@@ -1748,9 +1764,11 @@ const tableEditor = createTableEditor({
     imageCrop.close(false);
     imageReplacement.close();
   },
-  resize: (i, patch) => {
-    if (current.items.includes(i) && canEditSelection(new Set([i.id])))
-      mutate(() => Object.assign(i, patch));
+  resize: (i, patch, key) => {
+    if (!current.items.includes(i) || !canEditSelection(new Set([i.id])))
+      return;
+    if (key) heldKeyChange(key, "table-size", () => Object.assign(i, patch));
+    else mutate(() => Object.assign(i, patch));
   },
   change: (i, cells, structure, languages) => {
     if (!current.items.includes(i) || !canEditSelection(new Set([i.id])))
@@ -1924,7 +1942,7 @@ async function followBoardAddress(value) {
     pointerUp();
     finishTextEdit();
     clearTimeout(cloudTimer);
-    if (cloudIds.has(origin.id)) await sync(clone(origin));
+    if (pendingCloud.has(origin.id)) await sync(clone(origin));
     flushNudgeSave();
     await saveChain;
     if (current !== origin || location.href !== value) return;
@@ -2139,6 +2157,7 @@ const canvasNavigation = createCanvasNavigation({
     attention.stop();
     view = next;
     if (drag?.pointer) pointerMove(drag.pointer);
+    else if (hoverPointer && !drag) pointerMove(hoverPointer);
     draw();
   },
 });
@@ -2309,7 +2328,8 @@ const contextMenu = createContextMenu({
       );
     if (entry.id === "select-all") return selectAll();
     if (entry.id === "frames:present") return features.actions.present();
-    if (entry.id === "frames:export") return features.actions.export();
+    if (entry.id === "frames:export")
+      return features.actions.export({ frames: true });
     return runCommand(entry);
   },
 });
@@ -2317,9 +2337,13 @@ const contextMenu = createContextMenu({
 // opens. A press on an object selects it first, as a left click would; a
 // press on the empty board drops the selection.
 // The first control the selection toolbar offers, where Alt+F10 goes.
+// The toolbar control the keyboard goes to. A toolbar hidden while its
+// selection is out of view shows again for it, and stays while it holds
+// the keyboard.
 function selectionToolbarControl() {
   const tools = document.querySelector("#selection-tools");
   if (!tools || tools.hidden) return null;
+  tools.classList.remove("is-away");
   return (
     [...tools.querySelectorAll("button, select, input")].find(
       (c) => !c.disabled && !c.closest("[hidden]"),
@@ -2412,7 +2436,7 @@ function goToFrame(id) {
       t("Showing frame {number} of {count}")
         .replace("{number}", n + 1)
         .replace("{count}", shown.length),
-      shown[n].text || `${t("Frame")} ${n + 1}`,
+      shown[n].text || untitledFrame(n),
     ),
   );
 }
@@ -2426,7 +2450,7 @@ async function runCommand(entry) {
     const origin = current;
     if (origin) {
       clearTimeout(cloudTimer);
-      if (cloudIds.has(origin.id)) await sync(clone(origin));
+      if (pendingCloud.has(origin.id)) await sync(clone(origin));
       flushNudgeSave();
       await saveChain;
       if (current !== origin) return;
@@ -2991,10 +3015,54 @@ document.addEventListener(
 function dropEditToast() {
   if (!toast.untilEdit) return;
   toast.untilEdit = false;
-  toastElement.classList.remove("visible");
+  hideToast();
 }
+// The keyboard on a notification's action goes back where it came from
+// when the notification goes, rather than to the page.
+function hideToast() {
+  clearTimeout(toast.timer);
+  toastElement.classList.remove("visible");
+  if (!toastElement.contains(document.activeElement)) return;
+  const back = toast.cameFrom;
+  (back?.isConnected && back.getClientRects().length
+    ? back
+    : document.querySelector("#canvas")
+  )?.focus({ preventScroll: true });
+}
+// A notification with an action keeps its time while a mouse or pen points
+// at it or it holds the keyboard, so the action can be read and reached. A
+// tap leaves no pointer resting on it, and one without an action, which
+// clicks pass through, goes in its time.
+function holdToast() {
+  if (!toastElement.classList.contains("visible") || !toast.until) return;
+  const held =
+    toast.acting &&
+    (toast.pointed || toastElement.contains(document.activeElement));
+  clearTimeout(toast.timer);
+  if (held) toast.left ??= Math.max(0, toast.until - Date.now());
+  else {
+    toast.until = Date.now() + (toast.left ?? toast.until - Date.now());
+    toast.left = null;
+    toast.timer = setTimeout(hideToast, toast.until - Date.now());
+  }
+}
+toastElement.addEventListener("pointerenter", (e) => {
+  toast.pointed = e.pointerType !== "touch";
+  holdToast();
+});
+toastElement.addEventListener("pointerleave", () => {
+  toast.pointed = false;
+  setTimeout(holdToast);
+});
+toastElement.addEventListener("focusin", (e) => {
+  if (!toastElement.contains(e.relatedTarget)) toast.cameFrom = e.relatedTarget;
+  holdToast();
+});
+toastElement.addEventListener("focusout", () => setTimeout(holdToast));
 function toast(message, action) {
   const el = toastElement;
+  // A new notification takes the place of the one holding the keyboard.
+  if (el.contains(document.activeElement)) hideToast();
   toast.untilEdit = !!action?.untilEdit;
   const host =
     [...document.querySelectorAll("dialog[open]")].at(-1) || document.body;
@@ -3008,18 +3076,17 @@ function toast(message, action) {
     button.className = "toast-action";
     button.textContent = action.label;
     button.onclick = () => {
-      el.classList.remove("visible");
+      hideToast();
       action.run();
     };
     el.append(button);
   }
   translateUI(el);
   el.classList.add("visible");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(
-    () => el.classList.remove("visible"),
-    action ? 10000 : 4500,
-  );
+  toast.until = Date.now() + (action ? 10000 : 4500);
+  toast.left = null;
+  toast.acting = !!action;
+  holdToast();
 }
 // A message inside a dialog: what happened, marked as success or an error
 // so the two are told apart at a glance and not only by their wording.
@@ -3252,23 +3319,39 @@ function save({ outlined = false } = {}) {
     cloudTimer = setTimeout(() => sync(snapshot), 1500);
   }
 }
-async function sync(snapshot) {
-  if (!cloud) return;
+// Uploads go one at a time, so each one checks Puter's copy after the one
+// before it has landed and recorded its time.
+function sync(snapshot) {
+  return (cloudChain = cloudChain.then(() => upload(snapshot)));
+}
+async function upload(snapshot) {
+  // One that waited behind an upload that found a newer copy goes no
+  // further.
+  if (!cloud || !cloudIds.has(snapshot.id)) return;
   // A save that finishes after another board was opened says nothing
   // about that board's state.
   const report = (text) => current?.id === snapshot.id && status(text);
+  let writing = false;
   try {
     report("Saving to Puter…");
-    if (cloudUnverified.has(snapshot.id)) {
-      // Another device may have saved this board since this copy was
-      // made; that copy is kept rather than written over.
-      const opened = cloudUnverified.get(snapshot.id);
-      const remote = await cloud
-        .read(`whiteboard/${snapshot.id}.json`)
-        .catch(() => null);
-      cloudUnverified.delete(snapshot.id);
-      if (remote && remote.updated > opened) {
+    if (cloudStamps.has(snapshot.id)) {
+      // Another device may have saved this board since this page last
+      // read or wrote it; that copy is kept rather than written over.
+      const held = cloudStamps.get(snapshot.id),
+        path = `whiteboard/${snapshot.id}.json`,
+        seen = cloudVersions.get(snapshot.id);
+      const remote =
+        seen && (await cloud.version(path)) === seen
+          ? null
+          : await cloud.read(path).catch(() => null);
+      if (
+        remote &&
+        remote.updated > held &&
+        remote.updated !== cloudAttempts.get(snapshot.id)
+      ) {
         // This device's copy is not the one in Puter now.
+        cloudStamps.delete(snapshot.id);
+        cloudVersions.delete(snapshot.id);
         cloudIds.delete(snapshot.id);
         cloudIndex.delete(snapshot.id);
         pendingCloud.delete(snapshot.id);
@@ -3288,12 +3371,24 @@ async function sync(snapshot) {
         return;
       }
     }
-    await cloud.save(snapshot);
+    writing = true;
+    const version = await cloud.save(snapshot);
+    cloudStamps.set(snapshot.id, snapshot.updated);
+    cloudAttempts.delete(snapshot.id);
+    if (version) cloudVersions.set(snapshot.id, version);
+    else cloudVersions.delete(snapshot.id);
     cloudIndex.add(snapshot.id);
     if (pendingCloud.get(snapshot.id) <= snapshot.updated)
       pendingCloud.delete(snapshot.id);
     report("Saved to Puter");
   } catch {
+    // A write whose answer was lost may still have landed: the copy in
+    // Puter may be this one, which the next check must not take for
+    // another device's.
+    if (writing) {
+      cloudAttempts.set(snapshot.id, snapshot.updated);
+      cloudVersions.delete(snapshot.id);
+    }
     report("Cloud save failed");
     toast(
       "Cloud save failed. Your local copy is safe. Use Save to Puter to retry.",
@@ -4003,7 +4098,8 @@ async function openBoard(b, { keepAddress = false } = {}) {
     window.puter?.auth?.isSignedIn?.()
   ) {
     cloudIds.add(b.id);
-    cloudUnverified.set(b.id, b.updated);
+    cloudStamps.set(b.id, b.updated);
+    cloudVersions.delete(b.id);
   }
   if (!keepAddress) address();
   commandPalette.recordBoard(b.id);
@@ -4276,6 +4372,7 @@ function editor() {
   );
   canvas.addEventListener("pointerleave", () => {
     collaborationCursor = null;
+    hoverPointer = null;
     hovered = null;
     renderHover();
     sendPresence();
@@ -6149,6 +6246,7 @@ function placeSelectionTools(panel, box) {
   panel.classList.toggle("is-floating", floating);
   panel._anchor = floating ? box : null;
   if (!floating) {
+    panel.classList.remove("is-away");
     panel.style.transform = "";
     panel.style.maxWidth = "";
     return;
@@ -6169,6 +6267,13 @@ function placeSelectionTools(panel, box) {
   let top = view.y + visual.y * view.z;
   for (const label of shownFrameLabels())
     if (selection.has(label.id)) top = Math.min(top, label.y);
+  // A selection panned out of view takes its toolbar with it, unless the
+  // keyboard is in the toolbar.
+  panel.classList.toggle(
+    "is-away",
+    (right < 0 || left > rect.width || bottom < 0 || top > rect.height) &&
+      !panel.contains(document.activeElement),
+  );
   const margin = 12;
   const rail = document.querySelector(".canvas-wrap .left-rail");
   const railRect = rail?.getBoundingClientRect();
@@ -6700,6 +6805,22 @@ document.addEventListener("visibilitychange", () => {
   )
     warmText.later = requestIdleCallback(warmTextNow);
 });
+// The board draws each line's text from the top of its line, and the
+// editor's lines put half the extra line height above the text, so the
+// editor is lifted by the difference to keep the text where it was.
+function editorLift(ctx, { font, size }) {
+  ctx.save();
+  ctx.font = font;
+  ctx.textBaseline = "alphabetic";
+  const { fontBoundingBoxAscent: ascent, fontBoundingBoxDescent: descent } =
+    ctx.measureText("Hg");
+  // How far the font reaches above the top the board draws text from.
+  ctx.textBaseline = "top";
+  const above = ctx.measureText("Hg").fontBoundingBoxAscent;
+  ctx.restore();
+  const lift = (size * 1.35 - ascent - descent) / 2 + above;
+  return Number.isFinite(lift) ? lift : 0;
+}
 function positionTextEditor() {
   if (!editing) return;
   const { item: i, input } = editing;
@@ -6748,15 +6869,21 @@ function positionTextEditor() {
             }
           : { ...i, h: i.h - tagFooter(i) };
   const origin = worldPoint(i, box);
+  // The editor's lines are lifted to where the board draws them: inside
+  // its top padding where there is room, so it keeps the object's box;
+  // otherwise, as for a text box, its top reaches above the object.
+  const lift = editorLift(ctx, style),
+    padTop = layout?.top ?? style.padding,
+    above = Math.max(0, lift - Math.max(0, padTop));
   Object.assign(input.style, {
     left: `${view.x + origin.x * view.z}px`,
     top: `${view.y + origin.y * view.z}px`,
     width: `${box.w}px`,
-    height: `${box.h}px`,
+    height: `${box.h + above}px`,
     background: i.type === "arrow" ? "#ffffff" : "transparent",
-    transform: `scale(${view.z}) rotate(${rotationOf(i)}deg)`,
+    transform: `scale(${view.z}) rotate(${rotationOf(i)}deg)${above ? ` translateY(${-above}px)` : ""}`,
     padding: `${style.padding}px`,
-    paddingTop: `${layout?.top ?? style.padding}px`,
+    paddingTop: `${padTop - lift + above}px`,
     font: style.font,
     lineHeight: "1.35",
     color: style.color,
@@ -6842,6 +6969,10 @@ function beginTextEdit(i, { inheritLanguage = true, point } = {}) {
     maxLength,
     inheritLanguage,
     onSelection: updateTextRangeControls,
+    onLimit: () =>
+      toast(
+        "This text is at its length limit, so the end of what was added was left out.",
+      ),
     history: collaboration
       ? (redo) => sharedStep(redo ? "redo" : "undo")
       : undefined,
@@ -7034,7 +7165,20 @@ function nextNote(id, direction = 1) {
 // Until then it is kept on the device as a draft, a moment after each
 // change, so a crash or a killed tab does not lose it; opening the board
 // again puts it back. Shared boards save as people type.
-const TEXT_DRAFT_KEY = "whiteboard-text-draft";
+// Each tab keeps its draft under a key of its own and holds a lock named
+// after it while open, so a board opened in another tab puts back only the
+// drafts of tabs that are gone, never one still being typed.
+const TEXT_DRAFT_KEY = "whiteboard-text-draft",
+  textDraftTab = uid(),
+  ownTextDraft = `${TEXT_DRAFT_KEY}:${textDraftTab}`,
+  textDraftLock = (tab) => `whiteboard-tab:${tab}`;
+try {
+  navigator.locks
+    ?.request(textDraftLock(textDraftTab), () => new Promise(() => {}))
+    .catch(() => {});
+} catch {
+  /* Without locks, every other tab's draft counts as left behind. */
+}
 let textDraftTimer = null;
 function keepTextDraft() {
   if (collaboration || textDraftTimer) return;
@@ -7044,7 +7188,7 @@ function keepTextDraft() {
     const { item: i, input } = editing;
     try {
       localStorage.setItem(
-        TEXT_DRAFT_KEY,
+        ownTextDraft,
         JSON.stringify({
           board: current.id,
           item: i.id,
@@ -7063,20 +7207,45 @@ function dropTextDraft() {
   clearTimeout(textDraftTimer);
   textDraftTimer = null;
   try {
-    localStorage.removeItem(TEXT_DRAFT_KEY);
+    localStorage.removeItem(ownTextDraft);
   } catch {
     /* Nothing was kept. */
   }
 }
-function restoreTextDraft(b) {
+async function restoreTextDraft(b) {
+  let open = [];
+  try {
+    open = (await navigator.locks?.query())?.held || [];
+  } catch {
+    /* Locks unavailable: no other tab is known to be open. */
+  }
+  if (current !== b) return;
+  const live = new Set(open.map((lock) => lock.name));
   let draft;
   try {
-    draft = JSON.parse(localStorage.getItem(TEXT_DRAFT_KEY) || "null");
+    for (let n = 0; n < localStorage.length && !draft; n++) {
+      const key = localStorage.key(n);
+      // An older version's draft has no tab in its key.
+      const tab =
+        key === TEXT_DRAFT_KEY
+          ? ""
+          : key?.startsWith(`${TEXT_DRAFT_KEY}:`)
+            ? key.slice(TEXT_DRAFT_KEY.length + 1)
+            : null;
+      if (tab === null || tab === textDraftTab || live.has(textDraftLock(tab)))
+        continue;
+      let kept = null;
+      try {
+        kept = JSON.parse(localStorage.getItem(key));
+      } catch {}
+      if (kept?.board !== b.id) continue;
+      draft = kept;
+      localStorage.removeItem(key);
+    }
   } catch {
-    draft = null;
+    /* Storage unavailable: nothing was kept. */
   }
-  if (draft?.board !== b.id) return;
-  dropTextDraft();
+  if (!draft) return;
   const i = b.items.find((o) => o.id === draft.item);
   // Only onto the text it was typed over, so a later change is never undone.
   if (
@@ -7732,6 +7901,24 @@ function revealQuickObject(i, { minimal = false } = {}) {
       : (top + bottom - h) / 2 - y;
   draw();
 }
+// Whether a new line from an object had its loose end let go inside that
+// same object, where it would connect nothing.
+function endsInsideStart(line) {
+  const source =
+    line.startId &&
+    !line.endId &&
+    current.items.find((i) => i.id === line.startId);
+  if (!source || source.type === "arrow") return false;
+  const end = localPoint(source, { x: line.x + line.w, y: line.y + line.h }),
+    left = Math.min(source.x, source.x + source.w),
+    top = Math.min(source.y, source.y + source.h);
+  return (
+    end.x >= left &&
+    end.x <= left + Math.abs(source.w) &&
+    end.y >= top &&
+    end.y <= top + Math.abs(source.h)
+  );
+}
 function startQuickConnection(id, event) {
   const source = current?.items.find((i) => i.id === id);
   if (!canQuickConnect(source) || !canEditSelection(new Set([id])))
@@ -7754,6 +7941,7 @@ function startQuickConnection(id, event) {
   selection = new Set([line.id]);
   drag = {
     kind: "arrow",
+    quick: true,
     id: line.id,
     start: canvasPoint(event),
     original,
@@ -7887,11 +8075,16 @@ function cancelTransform() {
   lastTap = null;
   draw();
 }
+const addsToSelection = (e) => !!(e?.shiftKey || e?.ctrlKey || e?.metaKey);
 function startMarquee(p, e, precise = preciseSelection) {
   const previousSelection = new Set(selection),
     previousAnchor = selectionAnchor,
     previousGroup = focusedGroup;
-  selection = e.shiftKey ? descendants(current.items, selection) : new Set();
+  // Shift, Ctrl or Cmd adds what the marquee takes to the selection, as
+  // they add a clicked object.
+  selection = addsToSelection(e)
+    ? descendants(current.items, selection)
+    : new Set();
   focusedGroup = null;
   selectionAnchor = null;
   drag = {
@@ -8293,6 +8486,10 @@ function pointerDown(
       kind: tool,
       id: i.id,
       start: p,
+      // Where a free line from here would start, on the grid, should it
+      // end inside the object it starts on.
+      freeStart:
+        tool === "arrow" && target ? snapGridPoint(p, activeGridStep(e)) : p,
       original,
       previousSelection,
       previousAnchor: selectionAnchor,
@@ -8560,6 +8757,14 @@ function pointerMove(e) {
     return;
   }
   if (!drag) {
+    hoverPointer =
+      e.pointerType === "touch"
+        ? null
+        : {
+            clientX: e.clientX,
+            clientY: e.clientY,
+            pointerType: e.pointerType,
+          };
     if (tool === "select")
       document.querySelector("#canvas").style.cursor = idleCursor();
     const hit =
@@ -8661,7 +8866,7 @@ function pointerMove(e) {
           dx,
           dy,
           view.z,
-          !snapping || e.altKey,
+          !snapping || e.altKey || e.ctrlKey || e.metaKey,
         ),
         e.altKey || e.ctrlKey || e.metaKey ? 0 : drag.gridStep,
       );
@@ -8857,7 +9062,7 @@ function pointerMove(e) {
       // A press that wobbles a pixel or two is a click, not a marquee: it
       // must not take the frame whose interior it happens to be in.
       if (Math.max(a.w, a.h) * view.z > 3)
-        updateMarqueeSelection(a, e.shiftKey);
+        updateMarqueeSelection(a, addsToSelection(e));
       a.precise = drag.precise;
     }
     drag.marquee = a;
@@ -9079,11 +9284,34 @@ function pointerUp(event) {
   }
   const createdLine =
     drag.kind === "arrow" && current.items.find((i) => i.id === drag.id);
+  // A line drawn with the Arrow tool from inside an object to elsewhere in
+  // it, as over a picture or a background shape, is kept as drawn, free of
+  // the object; one from a quick-connect handle connects nothing there.
+  if (
+    createdLine &&
+    drag.changed &&
+    !drag.quick &&
+    endsInsideStart(createdLine)
+  ) {
+    const end = {
+      x: createdLine.x + createdLine.w,
+      y: createdLine.y + createdLine.h,
+    };
+    const start = drag.freeStart || drag.start;
+    delete createdLine.startId;
+    Object.assign(createdLine, {
+      x: start.x,
+      y: start.y,
+      w: end.x - start.x,
+      h: end.y - start.y,
+    });
+  }
   if (
     drag.kind === "arrow" &&
     (!createdLine ||
       !drag.changed ||
-      Math.hypot(createdLine.w, createdLine.h) * view.z < 3)
+      Math.hypot(createdLine.w, createdLine.h) * view.z < 3 ||
+      endsInsideStart(createdLine))
   ) {
     cancelTransform();
     return;
@@ -10852,7 +11080,7 @@ async function startCollaboration(target, token, localTimer) {
             [...drag.baseSelection].filter((id) => present.has(id)),
           );
           if (drag.marquee)
-            updateMarqueeSelection(drag.marquee, drag.pointer?.shiftKey);
+            updateMarqueeSelection(drag.marquee, addsToSelection(drag.pointer));
         }
         const title = document.querySelector("#board-title");
         if (title && document.activeElement !== title)
@@ -10948,15 +11176,16 @@ async function startCollaboration(target, token, localTimer) {
         if (collaboration !== session || current !== target) return;
         // Recovery replaced the shared document; bind the open editor to it.
         if (editing?.unbind) {
-          editing.unbind();
+          const stranded = editing.unbind();
           // The editor shows the shared text again, without the refused
-          // words, rather than saving them once more.
+          // words, rather than saving them once more; what was typed while
+          // the document was replaced is made again on it.
           editing.unbind = bindText(
             session,
             editing.item.id,
             editing.input,
             editing.sharedChange,
-            { reload: true },
+            { reload: true, stranded },
           );
         }
         // A change made again without the names anonymous input leaves
@@ -11005,7 +11234,12 @@ async function startCollaboration(target, token, localTimer) {
     // what it was last rendered from agree.
     await session.publish();
     if (collaboration !== session || current !== target) return;
+    // The next save is measured from what was saved: a nudge still waiting
+    // is saved now, and a drag still held from where it began, so its
+    // release is saved too rather than taken as no change.
+    flushNudgeSave();
     collaborationLastSaved = clone(target);
+    if (drag?.original) collaborationLastSaved.items = clone(drag.original);
     renderParticipants();
     draw();
     return session;
@@ -11161,7 +11395,15 @@ async function shareBoard() {
         seed.commit(prepared);
         await staging.request("create", { update: encode(seed.update()) });
         try {
-          await staging.uploadAssets();
+          // A board with more pictures than a person may add in a minute
+          // waits for the rest to go up.
+          await staging.uploadEveryAsset((count) =>
+            progress.step(
+              t(
+                "Uploading images · {count} left, waiting for the board's server…",
+              ).replace("{count}", count),
+            ),
+          );
         } catch (error) {
           // Without its files the shared copy cannot be used, and trying
           // again creates another, so this one goes to the trash.
@@ -11171,6 +11413,10 @@ async function shareBoard() {
         if (prepared.comments) target.comments = prepared.comments;
         if (prepared.workshop) target.workshop = prepared.workshop;
         target.tags = prepared.tags;
+      } catch (error) {
+        // The images kept on this device for that copy belong to no board.
+        await local.collaborationClear(staging.scope).catch(() => {});
+        throw error;
       } finally {
         seed.destroy();
         staging.shared.destroy();
@@ -12058,7 +12304,8 @@ async function signOutAccount() {
   cloudIds.clear();
   cloudIndex.clear();
   cloudTitles.clear();
-  cloudUnverified.clear();
+  cloudStamps.clear();
+  cloudVersions.clear();
   pendingCloud.clear();
   // The organization belonged to that account; the next person to sign in
   // finds their own.
@@ -12096,7 +12343,8 @@ async function openCloudBoard(f, { replace = false } = {}) {
   } else if (existing && existing.updated > b.updated) {
     toast("A newer local copy was kept.");
     cloudIds.add(existing.id);
-    cloudUnverified.delete(existing.id);
+    cloudStamps.set(existing.id, b.updated);
+    cloudVersions.delete(existing.id);
     // Opening a copy that is in the trash takes it out again.
     if (existing.deletedAt) {
       delete existing.deletedAt;
@@ -12120,7 +12368,8 @@ async function openCloudBoard(f, { replace = false } = {}) {
     boards[boards.indexOf(b)] = stored;
     toast("A newer local copy was kept.");
     cloudIds.add(stored.id);
-    cloudUnverified.delete(stored.id);
+    cloudStamps.set(stored.id, b.updated);
+    cloudVersions.delete(stored.id);
     if (stored.deletedAt) {
       delete stored.deletedAt;
       await saveLibrary(stored, "deletedAt").catch(() => {});
@@ -12135,7 +12384,8 @@ async function openCloudBoard(f, { replace = false } = {}) {
   }
   cloudIds.add(b.id);
   cloudIndex.add(b.id);
-  cloudUnverified.delete(b.id);
+  cloudStamps.set(b.id, b.updated);
+  cloudVersions.delete(b.id);
   return openBoard(b);
 }
 // After the library is drawn again, the keyboard goes back to the card it
@@ -12372,7 +12622,8 @@ function boardOptions(b) {
           ) {
             if (!cloudIds.has(id)) {
               cloudIds.add(id);
-              cloudUnverified.set(id, updated);
+              cloudStamps.set(id, updated);
+              cloudVersions.delete(id);
             }
             pendingCloud.set(id, b.updated);
             sync(clone(b));
@@ -13296,7 +13547,7 @@ async function action(a) {
     case "home":
       if (current) {
         clearTimeout(cloudTimer);
-        if (cloudIds.has(current.id)) await sync(clone(current));
+        if (pendingCloud.has(current.id)) await sync(clone(current));
         flushNudgeSave();
         await saveChain;
       }
@@ -13633,10 +13884,17 @@ document.addEventListener("keydown", (e) => {
   // left the focus on a toolbar button, edit nothing there: a letter must
   // not run a tool shortcut and Backspace must not delete the object being
   // edited. Escape still leaves the edit.
+  // Undo and redo still work from a table's cells, as from the board.
   if (
     e.key !== "Escape" &&
     (editing || tableEditor.isOpen()) &&
-    e.target.closest("#selection-tools,#table-editor")
+    e.target.closest("#selection-tools,#table-editor") &&
+    !(
+      (e.ctrlKey || e.metaKey) &&
+      !e.altKey &&
+      e.target.closest("#table-cell-grid") &&
+      (shortcutLetter(e) === "z" || (shortcutLetter(e) === "y" && !e.shiftKey))
+    )
   )
     return;
   if (e.key === "Escape" && drag?.kind === "table-cells") {
@@ -13703,7 +13961,10 @@ document.addEventListener("keydown", (e) => {
   if (!drag && mindMap.keydown(e)) return;
   if (
     ["Control", "Meta"].includes(e.key) &&
-    (drag?.mind || drag?.gridStep) &&
+    (drag?.mind ||
+      drag?.gridStep ||
+      drag?.kind === "move" ||
+      drag?.kind === "marquee") &&
     drag.pointer
   ) {
     e.preventDefault();
@@ -13933,15 +14194,17 @@ document.addEventListener("keydown", (e) => {
     );
     return;
   }
-  if (mod && shortcutLetter(e) === "z") {
+  if (
+    (mod && shortcutLetter(e) === "z") ||
+    // Ctrl+Y redoes too, as on Windows and Linux and in the text editor.
+    (mod && !e.shiftKey && !e.altKey && shortcutLetter(e) === "y")
+  ) {
     e.preventDefault();
-    action(e.shiftKey ? "redo" : "undo");
-    return;
-  }
-  // Ctrl+Y redoes too, as on Windows and Linux and in the text editor.
-  if (mod && !e.shiftKey && !e.altKey && shortcutLetter(e) === "y") {
-    e.preventDefault();
-    action("redo");
+    action(e.shiftKey || shortcutLetter(e) === "y" ? "redo" : "undo");
+    // A step taken from a table's cells closes the table editor; the keys
+    // that follow go to the board.
+    if (!e.target.isConnected)
+      document.querySelector("#canvas")?.focus({ preventScroll: true });
     return;
   }
   if (mod && shortcutLetter(e) === "a") {
@@ -14099,7 +14362,10 @@ document.addEventListener("keyup", (e) => {
   flushNudgeSave();
   if (
     ["Control", "Meta"].includes(e.key) &&
-    (drag?.mind || drag?.gridStep) &&
+    (drag?.mind ||
+      drag?.gridStep ||
+      drag?.kind === "move" ||
+      drag?.kind === "marquee") &&
     drag.pointer
   )
     pointerMove({ ...drag.pointer, ctrlKey: e.ctrlKey, metaKey: e.metaKey });

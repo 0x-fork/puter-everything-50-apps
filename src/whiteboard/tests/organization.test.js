@@ -3499,6 +3499,50 @@ test("a library item's creator removes it only while still a member", async () =
   );
 });
 
+test("members have a limited amount of library content awaiting approval", async () => {
+  const { call, org } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  for (const user of [editor, viewer]) {
+    const { token } = await call(owner, { op: "org.invite", role: "member" });
+    await call(user, { op: "org.join", token });
+  }
+  const json = JSON.stringify(board("Retro template"));
+  const submit = async (user, name) =>
+    (await call(user, { op: "library.submit", name, board: json })).item;
+  const waiting = (key, createdBy, size) =>
+    org.kv.set("org:lib:" + key, {
+      id: key,
+      status: "pending",
+      createdBy,
+      ...(size === undefined ? {} : { size }),
+    });
+  // Many small items, as a migration of boards as templates shares, wait
+  // together; each records its size.
+  const shared = [];
+  for (let n = 0; n < 15; n++) shared.push(await submit(editor, "Retro " + n));
+  assert.equal(shared[0].size, json.length);
+  // Items saved before sizes were recorded were allowed without a limit
+  // and count for nothing, however many wait; Bob's own sized ones fill
+  // all but a little of his 250 MB.
+  for (let n = 0; n < 100; n++) await waiting("old" + n, editor.uuid);
+  await waiting("big", editor.uuid, 250 * 1024 ** 2 - 16 * json.length);
+  await submit(editor, "Fits");
+  await assert.rejects(submit(editor, "One more"), {
+    status: 429,
+    message: /awaiting approval have reached 250 MB/,
+  });
+  // Reviewing makes room for more; administrators share freely.
+  await call(owner, { op: "library.approve", id: shared[0].id });
+  await submit(editor, "One more");
+  for (let n = 0; n < 3; n++) await submit(owner, "Approved " + n);
+  // The whole organization's waiting content is limited too.
+  await waiting("others", "someone", 1024 ** 3 - 250 * 1024 ** 2);
+  await assert.rejects(submit(viewer, "Mine"), {
+    status: 429,
+    message: /organization's 1 GB limit/,
+  });
+});
+
 test("duplicate discovery tells boards without text apart by their objects", async () => {
   const { boards, call } = setup();
   await call(owner, { op: "org.setup", name: "Fabrikam" });
@@ -5387,6 +5431,55 @@ test("a failing webhook is tried six times in all", async () => {
   assert.equal((await org.list("org:hookq:")).length, 0);
 });
 
+test("a webhook that stays down keeps about a day of events, and requests read only a little of them", async () => {
+  const { call, org } = setup();
+  org.fetcher = async (url) =>
+    new Response("", {
+      status: String(url) === "https://down.example.ca/" ? 503 : 200,
+    });
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await call(owner, {
+    op: "org.policy.set",
+    policy: { integrations: { webhooks: { enabled: true } } },
+  });
+  await org.kv.set("org:hooksecret:0000000000000000", "whsec_test");
+  await org.kv.set("org:webhook:0000000000000000", {
+    id: "0000000000000000",
+    url: "https://down.example.ca/",
+    events: ["team"],
+    enabled: true,
+  });
+  org.instance.hooks = null;
+  let at = Date.now(),
+    read = 0;
+  org.now = () => at;
+  const page = org.page.bind(org);
+  org.page = async (options) => {
+    const rows = await page(options);
+    if (options.pattern.startsWith("org:hookq:"))
+      read += (Array.isArray(rows) ? rows : rows.items).length;
+    return rows;
+  };
+  // An event every five minutes for two days, the receiver down throughout.
+  for (let n = 0; n < 576; n++) {
+    at += 5 * 60_000;
+    read = 0;
+    await org.audit(owner, "team.updated", { type: "team", id: "t" + n });
+    await org.flush();
+  }
+  const last = read;
+  const queued = await org.list("org:hookq:");
+  const oldest = queued[0].value.entry.at;
+  assert.ok(
+    at - oldest < 86_400_000 + 15 * 60_000,
+    `${(at - oldest) / 3600_000} h`,
+  );
+  assert.ok(queued.length < 300, `${queued.length}`);
+  // The last request read the start of the queue and the events that had
+  // just turned a day old, not all of it.
+  assert.ok(last < 250, `${last}`);
+});
+
 test("changing a team rewrites only the people who joined or left it", async () => {
   const { call, org } = setup();
   await call(owner, { op: "org.setup", name: "Fabrikam" });
@@ -5696,6 +5789,112 @@ test("shared images and files are capped per board and per person each minute", 
   await assert.rejects(put(60), (error) => error.status === 429);
 });
 
+test("large edits kept as files count toward the board's file limit", async () => {
+  const { env, boards } = setup();
+  const { input, room } = createInput("Media");
+  await boards.call(owner, input);
+  const text = "x".repeat(19_000);
+  const add = (n) =>
+    commit(boards, owner, room, (b) => {
+      for (let k = 0; k < 20; k++)
+        b.items.push(item("note", k * 300, n * 300, { text: text + n }));
+    });
+  const files = () =>
+    [...env.files.keys()].filter((p) => p.includes(`/${room}/updates/`)).length;
+  await add(0);
+  assert.equal(files(), 1);
+  const used = env.data.get(`wb:${room}:assetbytes`);
+  assert.ok(used > 240_000);
+  // A board at its limit keeps no more of them, and counts nothing for one.
+  env.data.set(`wb:${room}:assetbytes`, 1024 ** 3 - 10);
+  await assert.rejects(add(1), (error) => error.status === 413);
+  assert.equal(env.data.get(`wb:${room}:assetbytes`), 1024 ** 3 - 10);
+  assert.equal(files(), 1);
+  assert.equal((await boards.load(room)).doc.snapshot().items.length, 21);
+});
+
+test("a large edit sent again after a failure counts toward the board's limit once", async () => {
+  const { env, boards } = setup();
+  const { input, room } = createInput("Media");
+  await boards.call(owner, input);
+  const { doc } = await boards.load(room);
+  const before = doc.vector(),
+    next = doc.snapshot();
+  for (let k = 0; k < 20; k++)
+    next.items.push(item("note", k * 300, 0, { text: "x".repeat(19_000) + k }));
+  doc.commit(next);
+  const update = doc.update(before);
+  doc.destroy();
+  const edit = {
+    op: "commit",
+    room,
+    id: await hash(update),
+    update: encode(update),
+  };
+  // The edit's file is written, then its record is not.
+  const set = boards.puter.kv.set;
+  let failed = false;
+  boards.puter.kv.set = async function (key, ...rest) {
+    if (!failed && key.includes(":log:")) {
+      failed = true;
+      throw Object.assign(Error("Busy"), { code: "too_many_requests" });
+    }
+    return set.call(this, key, ...rest);
+  };
+  await assert.rejects(boards.call(owner, edit));
+  await boards.call(owner, edit);
+  assert.equal(env.data.get(`wb:${room}:assetbytes`), edit.update.length);
+  boards.puter.kv.set = set;
+  // A file write that lands although its answer is lost stays counted.
+  const { doc: again } = await boards.load(room);
+  const from = again.vector(),
+    more = again.snapshot();
+  for (let k = 0; k < 20; k++)
+    more.items.push(
+      item("note", k * 300, 600, { text: "y".repeat(19_000) + k }),
+    );
+  again.commit(more);
+  const second = again.update(from);
+  again.destroy();
+  const landed = {
+    op: "commit",
+    room,
+    id: await hash(second),
+    update: encode(second),
+  };
+  const write = boards.puter.fs.write;
+  let lost = false;
+  boards.puter.fs.write = async function (path, ...rest) {
+    const result = await write.call(this, path, ...rest);
+    if (!lost && path.includes("/updates/")) {
+      lost = true;
+      throw Error("Connection reset");
+    }
+    return result;
+  };
+  await assert.rejects(boards.call(owner, landed));
+  await boards.call(owner, landed);
+  assert.equal(
+    env.data.get(`wb:${room}:assetbytes`),
+    edit.update.length + landed.update.length,
+  );
+});
+
+test("uploading the same file again counts it toward the board's limit once", async () => {
+  const { env, boards } = setup();
+  const { input, room } = createInput("Media");
+  await boards.call(owner, input);
+  const data = "data:image/png;base64," + btoa("image ".repeat(500));
+  const asset = await hash(data);
+  for (let n = 0; n < 3; n++)
+    await boards.call(owner, { op: "asset.put", room, asset, data });
+  assert.equal(env.data.get(`wb:${room}:assetbytes`), data.length);
+  assert.equal(
+    (await boards.call(owner, { op: "asset.get", room, asset })).data,
+    data,
+  );
+});
+
 test("moving someone's boards to a new owner goes a batch per request", async () => {
   const { call, org, boards } = setup();
   await call(owner, { op: "org.setup", name: "Fabrikam" });
@@ -5738,6 +5937,57 @@ test("moving someone's boards to a new owner goes a batch per request", async ()
     (r) => r.value.owner === editor.uuid,
   );
   assert.equal(owned.length, 59);
+});
+
+test("joining or verifying an address during a deactivation keeps the account deactivated", async () => {
+  const { call, org, sent } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  const { token: guestLink } = await call(owner, {
+    op: "org.invite",
+    role: "guest",
+  });
+  await call(guest, { op: "org.join", token: guestLink });
+  const { token } = await call(owner, { op: "org.invite", role: "member" });
+  // An administrator deactivates the guest just after the guest's own
+  // request has read their record, and before it saves.
+  const fresh = org.freshUser.bind(org);
+  const during = (step) => {
+    let armed = true;
+    org.freshUser = async (uuid) => {
+      const user = await fresh(uuid);
+      if (armed && new Error().stack.includes(step)) {
+        armed = false;
+        await call(owner, {
+          op: "org.users.update",
+          uuid: guest.uuid,
+          status: "deactivated",
+        });
+      }
+      return user;
+    };
+  };
+  during("joinOrganization");
+  await assert.rejects(
+    call(guest, { op: "org.join", token }),
+    (error) => error.status === 403,
+  );
+  assert.equal((await fresh(guest.uuid)).status, "deactivated");
+  assert.equal((await fresh(guest.uuid)).role, "guest");
+
+  await call(owner, {
+    op: "org.users.update",
+    uuid: guest.uuid,
+    status: "active",
+  });
+  org.freshUser = fresh;
+  await call(guest, { op: "email.start", email: "dee@example.test" });
+  const code = /code is (\d{6})/.exec(sent.at(-1).text)[1];
+  during("linkEmail");
+  await call(guest, { op: "email.confirm", code });
+  org.freshUser = fresh;
+  const saved = await fresh(guest.uuid);
+  assert.equal(saved.status, "deactivated");
+  assert.equal(saved.email, "dee@example.test");
 });
 
 test("a team change or preference save during a deactivation keeps the account deactivated", async () => {
@@ -6246,6 +6496,100 @@ test("editing a comment to name someone new notifies only them", async () => {
   await write("@alice and @cam, can you check this?", 3);
   assert.equal(await mentions(viewer), 1);
   assert.equal(await mentions(owner), 1);
+});
+
+test("taking a name out of a comment and putting it back notifies them once", async () => {
+  const { env, boards, call, sent } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  await env.service.org.updateUser(owner.uuid, {
+    uuid: owner.uuid,
+    email: "alice@fabrikam.test",
+    emailVerified: true,
+  });
+  const { input, room } = createInput("Sprint retro");
+  await boards.call(owner, input);
+  const { token } = await boards.call(owner, {
+    op: "invite",
+    room,
+    role: "editor",
+  });
+  await join({ service: boards }, editor, { room, token });
+  const write = (text) =>
+    commit(boards, editor, room, (b) => {
+      b.comments = [
+        {
+          id: "t1",
+          x: 0,
+          y: 0,
+          resolved: false,
+          messages: [
+            {
+              id: "m1",
+              authorId: editor.uuid,
+              authorName: editor.username,
+              text,
+              createdAt: 1,
+            },
+          ],
+        },
+      ];
+    });
+  await write("can you check this?");
+  for (let n = 0; n < 6; n++) {
+    env.now += 1000;
+    await write(n % 2 ? `check ${n}` : `@alice check ${n}`);
+  }
+  const notes = (await call(owner, { op: "notifications.list" })).items;
+  assert.equal(notes.filter((n) => n.type === "mention").length, 1);
+  assert.equal(
+    sent.filter((m) => m.subject.includes("mentioned you")).length,
+    1,
+  );
+});
+
+test("a mention added to a reply reaches someone already told of the reply", async () => {
+  const { env, boards, call } = setup();
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  const { input, room } = createInput("Sprint retro");
+  await boards.call(owner, input);
+  const { token } = await boards.call(owner, {
+    op: "invite",
+    room,
+    role: "editor",
+  });
+  await join({ service: boards }, editor, { room, token });
+  const first = {
+    id: "m0",
+    authorId: owner.uuid,
+    authorName: owner.username,
+    text: "first",
+    createdAt: 0,
+  };
+  await commit(boards, owner, room, (b) => {
+    b.comments = [{ id: "t1", x: 0, y: 0, resolved: false, messages: [first] }];
+  });
+  const reply = (text) =>
+    commit(boards, editor, room, (b) => {
+      b.comments[0].messages = [
+        first,
+        {
+          id: "m1",
+          authorId: editor.uuid,
+          authorName: editor.username,
+          text,
+          createdAt: 1,
+        },
+      ];
+    });
+  env.now += 1000;
+  await reply("looks good");
+  env.now += 1000;
+  await reply("@alice can you check the numbers?");
+  const types = (await call(owner, { op: "notifications.list" })).items
+    .map((n) => n.type)
+    .filter((type) => ["mention", "reply"].includes(type))
+    .sort();
+  assert.deepEqual(types, ["mention", "reply"]);
 });
 
 test("notification mail and board channel posts link to the board in the app", async () => {
@@ -7347,6 +7691,40 @@ test("the organization's AI is for its members, not guests", async () => {
   );
 });
 
+test("AI use is recorded only on boards the person can open, and limited each minute", async () => {
+  const { env, boards, call, org } = setup();
+  org.puter.ai = { chat: async () => ({ message: { content: "ok" } }) };
+  await call(owner, { op: "org.setup", name: "Fabrikam" });
+  const { token } = await call(owner, { op: "org.invite", role: "member" });
+  await call(editor, { op: "org.join", token });
+  const { input, room } = createInput("Confidential");
+  await boards.call(owner, input);
+  const ask = (room) =>
+    call(editor, { op: "org.ai", task: "summarize", prompt: "x", room });
+  const used = async () =>
+    (await call(owner, { op: "org.board.activity", room })).entries.filter(
+      (e) => e.action === "ai.used",
+    ).length;
+  // Bob cannot open the private board, so his request writes nothing there.
+  assert.equal((await ask(room)).text, "ok");
+  assert.equal(await used(), 0);
+  // Once invited, his use shows on it.
+  const { token: link } = await boards.call(owner, {
+    op: "invite",
+    room,
+    role: "editor",
+  });
+  await boards.call(editor, { op: "join", room, token: link });
+  await ask(room);
+  assert.equal(await used(), 1);
+  // Twenty a minute, counted in a minute no other test uses.
+  env.now = (Math.floor(env.now / 60_000) + 7) * 60_000;
+  for (let n = 0; n < 20; n++) await ask(room);
+  await assert.rejects(ask(room), { status: 429 });
+  env.now += 60_000;
+  await ask(room);
+});
+
 test("an invitation that fails to join keeps the organization already in use", async () => {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<!doctype html><body></body>", {
@@ -8403,11 +8781,46 @@ test("only the account owner moves the boards of an administrator or of the owne
       call(editor, { op: "org.users.transfer", from, to: editor.uuid }),
       { status: 403 },
     );
+  // Nor one board at a time.
+  for (const room of [mine.room, theirs.room])
+    await assert.rejects(
+      boards.call(editor, { op: "transfer", room, uuid: editor.uuid }),
+      { status: 403, message: /Only the account owner/ },
+    );
+  // Nor an administrator's API key.
+  const { key } = await call(editor, {
+    op: "apikeys.create",
+    name: "Admin",
+    scopes: ["boards:write"],
+  });
+  await assert.rejects(
+    restRoute(
+      org,
+      boards,
+      new Request("https://w.puter.work/v1/boards/" + mine.room, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${key}` },
+      }),
+      "PATCH",
+      "boards/" + mine.room,
+      { owner: editor.uuid },
+    ),
+    { status: 403 },
+  );
   assert.equal((await org.kv.get("org:board:" + mine.room)).owner, owner.uuid);
   assert.equal(
     (await org.kv.get("org:board:" + theirs.room)).owner,
     viewer.uuid,
   );
+  // An administrator still hands on their own board.
+  const own = createInput("First admin's board");
+  await boards.call(editor, own.input);
+  await boards.call(editor, {
+    op: "transfer",
+    room: own.room,
+    uuid: owner.uuid,
+  });
+  assert.equal((await org.kv.get("org:board:" + own.room)).owner, owner.uuid);
   // The account owner still can.
   const moved = await call(owner, {
     op: "org.users.transfer",

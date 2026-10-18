@@ -196,6 +196,16 @@ function transferData(formats = {}, files = []) {
   };
 }
 
+// The height of the object a canvas text editor stands for: a text box's
+// editor reaches above it by the lift that puts its lines where the board
+// draws them.
+function editorHeight(input) {
+  const lift = -parseFloat(
+    input.style.transform.match(/translateY\((-?[\d.]+)px\)/)?.[1] ?? 0,
+  );
+  return parseFloat(input.style.height) - lift;
+}
+
 // Sharing a personal board asks first; a shared board opens its dialog.
 async function confirmShare(app) {
   for (let n = 0; n < 5 && !app.doc.querySelector("#confirm-share"); n++)
@@ -1404,7 +1414,7 @@ test("built editors join the same board, show participants, synchronize text and
       "Remote width changes rewrap the active text editor",
     );
     const resizedText = selectedClipboard(b)[0];
-    assert.equal(parseFloat(growing.style.height), resizedText.h);
+    assert.equal(editorHeight(growing), resizedText.h);
     growing.value += "\nOne more shared line.\nAnd another.";
     growing.dispatchEvent(new a.w.Event("input", { bubbles: true }));
     await until(
@@ -2929,6 +2939,118 @@ test("dropping multiple real images and attachments inserts one undoable batch; 
       "a failed batch inserts no partial content",
     );
     assert.match(doc.querySelector("#toast").textContent, /decode/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("text pasted into a note past its length limit says the end was left out", async () => {
+  const app = await setup();
+  const { doc, w, click } = app;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    const editor = doc.querySelector("#canvas-text-editor");
+    const paste = (text) => {
+      const event = new w.Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", {
+        value: transferData({ "text/plain": text }),
+      });
+      editor.dispatchEvent(event);
+    };
+    paste("Short words");
+    assert.doesNotMatch(doc.querySelector("#toast").textContent, /limit/);
+    paste("x".repeat(20100));
+    assert.equal(editor.value.length, 20000);
+    assert.match(doc.querySelector("#toast").textContent, /length limit/);
+    // A key typed at the limit adds nothing and says nothing, as in any
+    // text field.
+    doc.querySelector("#toast").textContent = "";
+    editor.dispatchEvent(
+      new w.InputEvent("beforeinput", {
+        inputType: "insertText",
+        data: "y",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.equal(editor.value.length, 20000);
+    assert.doesNotMatch(doc.querySelector("#toast").textContent, /limit/);
+    // Dictated or predicted words that do not fit are reported.
+    editor.dispatchEvent(
+      new w.InputEvent("beforeinput", {
+        inputType: "insertText",
+        data: "several dictated words",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.match(doc.querySelector("#toast").textContent, /length limit/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("pasted text and links land in the middle of the view, as pasted objects do", async () => {
+  const app = await setup();
+  const { doc, click } = app;
+  try {
+    await click('[data-action="new"]');
+    doc.querySelector("#canvas").getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      right: 1200,
+      bottom: 900,
+      width: 1200,
+      height: 900,
+    });
+    const v = renderedView(app),
+      middle = { x: (600 - v.x) / v.z, y: (450 - v.y) / v.z };
+    for (const text of ["A pasted sentence", "https://example.com/guide"]) {
+      dispatchTransfer(app, "paste", transferData({ "text/plain": text }));
+      await app.tick();
+      const [pasted] = selectedClipboard(app);
+      assert.ok(
+        Math.abs(pasted.x + pasted.w / 2 - middle.x) < 30 &&
+          Math.abs(pasted.y + pasted.h / 2 - middle.y) < 30,
+        `${text}: ${JSON.stringify(pasted)} around ${JSON.stringify(middle)}`,
+      );
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("drops on the note being edited put text in it and files on the board, and never leave the drop target up", async () => {
+  const app = await setup();
+  const { w, doc, click, tick } = app;
+  const png = createCanvas(8, 4).toBuffer("image/png");
+  const target = () =>
+    doc.querySelector(".canvas-wrap").classList.contains("drop-target");
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    const editor = doc.querySelector("#canvas-text-editor");
+    editor.value = "Editing";
+    editor.dispatchEvent(new w.Event("input", { bubbles: true }));
+    const words = transferData({ "text/plain": " dropped" });
+    dispatchTransfer(app, "dragenter", words, editor);
+    dispatchTransfer(app, "dragover", words, editor);
+    assert.ok(!target(), "Text dragged over the editor shows no drop target");
+    dispatchTransfer(app, "drop", words, editor);
+    await tick();
+    assert.match(editor.value, /dropped/);
+    assert.ok(!target());
+    const file = transferData({}, [
+      new w.File([png], "pic.png", { type: "image/png" }),
+    ]);
+    dispatchTransfer(app, "dragenter", file, editor);
+    assert.ok(target(), "A file dragged over the editor goes on the board");
+    dispatchTransfer(app, "drop", file, editor, { clientX: 300, clientY: 260 });
+    await tick();
+    await tick();
+    assert.ok(!target(), "The drop takes the drop target down");
+    assert.match(doc.querySelector("#board-outline").textContent, /Image/);
   } finally {
     await app.close();
   }
@@ -5728,6 +5850,62 @@ test("a slide button that disables under the keyboard hands focus on, so the arr
   }
 });
 
+test("the presenter's slide is cut off at its frame's edge, as followers see it", async () => {
+  const app = await setup();
+  const { doc, click } = app;
+  try {
+    // A tall frame on a wide stage, and a note reaching past its edge.
+    const frame = item("frame", 0, 0, { w: 400, h: 800, text: "Tall" });
+    await rotationFixture(app, [
+      frame,
+      item("note", 300, 100, {
+        w: 400,
+        h: 200,
+        color: "#ff0000",
+        parentId: frame.id,
+      }),
+    ]);
+    await click('[data-action="present"]');
+    await click("#start-presentation");
+    const canvas = doc.querySelector("#slide-canvas");
+    const pixel = (x, y) => [
+      ...canvas._native.getContext("2d").getImageData(x, y, 1, 1).data,
+    ];
+    // Stage 900 by 500: the slide spans 250 wide in the middle.
+    assert.deepEqual(pixel(10, 250), [0x3a, 0x3d, 0x42, 255]);
+    assert.deepEqual(
+      pixel(660, 120),
+      [0x3a, 0x3d, 0x42, 255],
+      "The note past the edge is cut off",
+    );
+    assert.deepEqual(pixel(450, 400), [255, 255, 255, 255]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("live reactions float over the presentation while it is open, and over the board after", async () => {
+  const app = await setup();
+  const { doc, click } = app;
+  try {
+    await rotationFixture(app, [
+      item("frame", 0, 0, { w: 500, h: 400, text: "One" }),
+    ]);
+    const layer = doc.querySelector(".live-reactions");
+    assert.ok(layer.closest(".canvas-wrap"));
+    await click('[data-action="present"]');
+    await click("#start-presentation");
+    const dialog = doc.querySelector("dialog.presentation-dialog");
+    assert.equal(doc.querySelector(".live-reactions"), layer);
+    assert.ok(dialog.contains(layer), "The presenter sees reactions");
+    await click("#slide-exit");
+    assert.ok(layer.isConnected && layer.closest(".canvas-wrap"));
+    assert.equal(doc.querySelectorAll(".live-reactions").length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
 test("presentation names and slide outlines preserve authored language tags", async () => {
   const app = await setup();
   const { doc, w, click } = app;
@@ -5895,6 +6073,31 @@ test("authored language tags distinguish a French phrase from the English interf
       rules: { "color-contrast": { enabled: false } },
     });
     assert.equal(result.violations.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a posted comment's Add a reaction button shows its icon", async () => {
+  // Posting rebuilt the discussion after the board's redraw had drawn its
+  // icons, so the button was an empty circle until the next redraw.
+  const app = await setup();
+  const { doc, click } = app;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    await click('[data-action="finish-text"]');
+    await click('[data-action="add-comment"]');
+    doc.querySelector("#comment-text").value = "Hello there";
+    await click('#comment-form [type="submit"]');
+    const add = () => doc.querySelectorAll("#comment-messages .fac-react-add");
+    assert.equal(add().length, 1);
+    assert.ok(add()[0].querySelector("svg"));
+    assert.equal(doc.querySelector("#comment-messages i[data-lucide]"), null);
+    doc.querySelector("#comment-text").value = "A reply";
+    await click('#comment-form [type="submit"]');
+    assert.equal(add().length, 2);
+    for (const button of add()) assert.ok(button.querySelector("svg"));
   } finally {
     await app.close();
   }
@@ -6277,6 +6480,89 @@ test("moving a board to the trash can be undone from the notification", async ()
       /^Deleted /,
     );
   } finally {
+    await app.close();
+  }
+});
+
+test("a notification with an action waits while it holds the keyboard", async () => {
+  // "Moved to the trash. Undo" went after 10 seconds even with the keyboard
+  // on Undo, dropping the focus to the page.
+  const app = await setup();
+  const { doc, w, click, tick } = app;
+  const realTimeout = w.setTimeout;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="home"]');
+    await click('[data-action="new"]');
+    await click('[data-action="home"]');
+    // Notifications' times run 50 times faster.
+    w.setTimeout = (fn, ms, ...rest) =>
+      realTimeout(fn, ms >= 4000 ? ms / 50 : ms, ...rest);
+    await click(
+      `[data-more="${doc.querySelector("[data-more]").dataset.more}"]`,
+    );
+    await click("#remove-board");
+    await click("#confirm-delete");
+    const toast = doc.querySelector("#toast");
+    const undo = toast.querySelector(".toast-action");
+    doc.querySelector("#search").focus();
+    undo.focus();
+    await new Promise((r) => realTimeout(r, 400));
+    assert.ok(toast.classList.contains("visible"));
+    assert.equal(doc.activeElement, undo);
+    // Its time runs again once the keyboard leaves it.
+    doc.querySelector("#search").focus();
+    await tick();
+    assert.ok(toast.classList.contains("visible"));
+    await new Promise((r) => realTimeout(r, 400));
+    assert.equal(toast.classList.contains("visible"), false);
+    assert.equal(doc.activeElement, doc.querySelector("#search"));
+  } finally {
+    w.setTimeout = realTimeout;
+    await app.close();
+  }
+});
+
+test("a notification with an action waits while a mouse points at it, not after a tap", async () => {
+  const app = await setup();
+  const { doc, w, click } = app;
+  const realTimeout = w.setTimeout;
+  try {
+    for (let n = 0; n < 2; n++) {
+      await click('[data-action="new"]');
+      await click('[data-action="home"]');
+    }
+    // Notifications' times run 50 times faster.
+    w.setTimeout = (fn, ms, ...rest) =>
+      realTimeout(fn, ms >= 4000 ? ms / 50 : ms, ...rest);
+    const toast = doc.querySelector("#toast");
+    const point = (type, pointerType) => {
+      const event = new w.MouseEvent(type);
+      Object.defineProperty(event, "pointerType", { value: pointerType });
+      toast.dispatchEvent(event);
+    };
+    const trash = async () => {
+      await click(
+        `[data-more="${doc.querySelector("[data-more]").dataset.more}"]`,
+      );
+      await click("#remove-board");
+      await click("#confirm-delete");
+      assert.ok(toast.querySelector(".toast-action"));
+    };
+    await trash();
+    point("pointerenter", "mouse");
+    await new Promise((r) => realTimeout(r, 400));
+    assert.ok(toast.classList.contains("visible"), "Held while pointed at");
+    point("pointerleave", "mouse");
+    await new Promise((r) => realTimeout(r, 400));
+    assert.equal(toast.classList.contains("visible"), false);
+    // A tap leaves nothing pointing at it: its time runs on.
+    await trash();
+    point("pointerenter", "touch");
+    await new Promise((r) => realTimeout(r, 400));
+    assert.equal(toast.classList.contains("visible"), false, "Gone in time");
+  } finally {
+    w.setTimeout = realTimeout;
     await app.close();
   }
 });
@@ -11513,6 +11799,11 @@ test("the tool rail's Add content button offers tables, links, files and other c
       doc.querySelector("dialog[open] [type=submit]").textContent,
       "Add table",
     );
+    // The keyboard starts in the first cell, its sample heading selected,
+    // not on Close.
+    const cell = doc.querySelector("#table-dialog-cell-0-0");
+    assert.equal(doc.activeElement, cell);
+    assert.equal(doc.getSelection().toString(), "Label");
     doc.querySelector("dialog[open]").close();
     await click('.left-rail [data-action="add-content"]');
     await click('[data-add="task-card"]');
@@ -11769,7 +12060,7 @@ test("automatic text height grows drafts, follows typography and width, cancels 
     paletteQuery(app, "Text");
     await click('[data-command="add:text"]');
     const input = doc.querySelector("#canvas-text-editor");
-    const initialHeight = parseFloat(input.style.height);
+    const initialHeight = editorHeight(input);
     assert.equal(
       doc.querySelector("#auto-height-text").getAttribute("aria-pressed"),
       "true",
@@ -11780,7 +12071,7 @@ test("automatic text height grows drafts, follows typography and width, cancels 
       );
     input.value = content;
     input.dispatchEvent(new w.Event("input", { bubbles: true }));
-    assert.ok(parseFloat(input.style.height) > initialHeight);
+    assert.ok(editorHeight(input) > initialHeight);
     assert.equal(parseFloat(input.style.fontSize), 28);
     assert.ok(
       parseFloat(input.style.top) < 320,
@@ -11811,7 +12102,7 @@ test("automatic text height grows drafts, follows typography and width, cancels 
     assert.equal(doc.querySelector("#canvas-text-editor"), input);
     assert.equal(input.selectionStart, 3);
     assert.equal(input.selectionEnd, 12);
-    const draftHeight = parseFloat(input.style.height);
+    const draftHeight = editorHeight(input);
     await click('[data-action="finish-text"]');
     const saved = selectedClipboard(app)[0];
     assert.equal(saved.text, content);
@@ -11825,7 +12116,7 @@ test("automatic text height grows drafts, follows typography and width, cancels 
     await click('[data-action="edit"]');
     change("#canvas-text-editor", "Short", "input");
     assert.equal(
-      parseFloat(doc.querySelector("#canvas-text-editor").style.height),
+      editorHeight(doc.querySelector("#canvas-text-editor")),
       initialHeight,
     );
     await click('[data-action="cancel-text"]');
@@ -11975,7 +12266,8 @@ test("automatic height preserves manual layouts, handles mixed selections and po
     const input = doc.querySelector("#canvas-text-editor");
     input.value = "More\nlines\nthan\nbefore\nwhile\nfixed";
     input.dispatchEvent(new w.Event("input", { bubbles: true }));
-    assert.equal(parseFloat(input.style.height), fixed.h);
+    // The editor ends where the fixed text box ends.
+    assert.ok(Math.abs(editorHeight(input) - fixed.h) < 1e-6);
     await click('[data-action="finish-text"]');
     assert.equal(selectedClipboard(app)[0].h, fixed.h);
     await click('[data-action="home"]');
@@ -16119,6 +16411,223 @@ test("object links pick canvas targets, navigate and return, copy addresses, rej
       selectedClipboard(app)[0].objectLink.url,
       "https://example.com/resource",
     );
+  } finally {
+    await app.close();
+  }
+});
+
+test("the text editor lifts its lines to where the board draws the text", async () => {
+  const app = await setup(),
+    { doc, click, w } = app;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    const input = doc.querySelector("#canvas-text-editor");
+    let text;
+    const size = () =>
+      parseFloat(text.style.fontSize || text.style.font.match(/(\d+)px/)[1]);
+    // In a note, the lift is taken from the top padding, so the editor
+    // keeps the note's box.
+    assert.doesNotMatch(input.style.transform, /translateY/);
+    assert.ok(parseFloat(input.style.paddingTop) >= 0);
+    input.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    // A text box has no padding: its editor reaches above it by the lift
+    // and still ends where the text box ends.
+    await app.tick();
+    const canvas = doc.querySelector("#canvas");
+    canvas.focus();
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "t", bubbles: true }),
+    );
+    await app.tick();
+    text = doc.querySelector("#canvas-text-editor");
+    const above = -parseFloat(
+      text.style.transform.match(/translateY\((-?[\d.]+)px\)/)?.[1],
+    );
+    // Half the extra line height, less how far the font reaches above the
+    // top of the text the board draws: about a quarter of the font size.
+    assert.equal(parseFloat(text.style.paddingTop), 0);
+    assert.ok(
+      above > size() * 0.1 && above < size() * 0.4,
+      `${above} for ${size()}px`,
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test("a key held on a table's resize handle is one undo step", async () => {
+  const app = await setup(),
+    { doc, w, click } = app;
+  try {
+    await click('[data-action="new"]');
+    dispatchTransfer(
+      app,
+      "paste",
+      transferData(
+        clipboardFormats([
+          item("table", 200, 200, {
+            w: 340,
+            h: 150,
+            cells: [
+              ["a", "b"],
+              ["c", "d"],
+            ],
+          }),
+        ]),
+      ),
+    );
+    const before = selectedClipboard(app)[0];
+    await click('[data-action="edit"]');
+    const handle = doc.querySelector(".table-size-column");
+    handle.focus();
+    for (let n = 0; n < 6; n++)
+      handle.dispatchEvent(
+        new w.KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          repeat: n > 0,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    handle.dispatchEvent(
+      new w.KeyboardEvent("keyup", { key: "ArrowRight", bubbles: true }),
+    );
+    const widths = async () => {
+      await app.tick();
+      await app.tick();
+      const i = (await storedBoards(app))[0].items.find(
+        (i) => i.type === "table",
+      );
+      return i.columnWidths || [i.w / 2, i.w / 2];
+    };
+    const original = before.columnWidths || [before.w / 2, before.w / 2];
+    assert.deepEqual(await widths(), [original[0] + 6, original[1]]);
+    await click('[data-action="undo"]');
+    assert.deepEqual(await widths(), original);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a table's column resize handle stays clear of the table's toolbar", async () => {
+  const app = await setup(),
+    { doc, w, click } = app;
+  try {
+    await click('[data-action="new"]');
+    doc.querySelector("#canvas").getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      right: 1200,
+      bottom: 800,
+      width: 1200,
+      height: 800,
+    });
+    dispatchTransfer(
+      app,
+      "paste",
+      transferData(
+        clipboardFormats([
+          item("table", 200, 200, {
+            w: 340,
+            h: 150,
+            cells: [
+              ["a", "b"],
+              ["c", "d"],
+            ],
+          }),
+        ]),
+      ),
+    );
+    const [table] = selectedClipboard(app);
+    await click('[data-action="edit"]');
+    const handle = doc.querySelector(".table-size-column");
+    const v = renderedView(app),
+      top = v.y + table.y * v.z;
+    // A toolbar reaching down to just below the table's top.
+    doc.querySelector(".table-cell-tools").getBoundingClientRect = () => ({
+      left: 0,
+      top: 16,
+      right: 1200,
+      bottom: top + 10,
+      width: 1200,
+      height: top - 6,
+    });
+    const grid = doc.querySelector("#table-cell-grid");
+    grid.focus();
+    grid.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    assert.equal(handle.hidden, false);
+    assert.ok(
+      parseFloat(handle.style.top) - 22 >= top + 10,
+      `${handle.style.top} below ${top + 10}`,
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test("undo and redo shortcuts work from a table's cells", async () => {
+  const app = await setup(),
+    { doc, w, click } = app;
+  const key = (key, options = {}) =>
+    doc.activeElement.dispatchEvent(
+      new w.KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+        ...options,
+      }),
+    );
+  try {
+    await click('[data-action="new"]');
+    dispatchTransfer(
+      app,
+      "paste",
+      transferData(
+        clipboardFormats([
+          item("table", 200, 200, {
+            w: 340,
+            h: 150,
+            cells: [
+              ["a", "b", "c"],
+              ["d", "e", "f"],
+            ],
+          }),
+        ]),
+      ),
+    );
+    await click('[data-action="edit"]');
+    assert.equal(doc.activeElement.id, "table-cell-grid");
+    key("ArrowRight");
+    const column = doc.querySelector("#table-column-action");
+    column.value = "delete";
+    column.dispatchEvent(new w.Event("change"));
+    const cells = async () => {
+      await app.tick();
+      await app.tick();
+      return (await storedBoards(app))[0].items.find((i) => i.type === "table")
+        .cells;
+    };
+    assert.deepEqual(await cells(), [
+      ["a", "c"],
+      ["d", "f"],
+    ]);
+    assert.equal(doc.activeElement.id, "table-cell-grid");
+    key("z", { metaKey: true });
+    assert.deepEqual(await cells(), [
+      ["a", "b", "c"],
+      ["d", "e", "f"],
+    ]);
+    assert.equal(doc.activeElement.id, "canvas", "The board keeps the keys");
+    key("y", { ctrlKey: true });
+    assert.deepEqual(await cells(), [
+      ["a", "c"],
+      ["d", "f"],
+    ]);
   } finally {
     await app.close();
   }
@@ -20604,6 +21113,95 @@ test("Ctrl- or Cmd-click adds an object to the selection or takes it out", async
   }
 });
 
+test("Ctrl or Cmd keeps the selection on empty board and adds what a marquee takes, as Shift does", async () => {
+  const app = await setup();
+  try {
+    const { selected, pointer } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 200, h: 100 }),
+      item("rect", 400, 0, { w: 200, h: 100 }),
+      item("rect", 800, 0, { w: 200, h: 100 }),
+    ]);
+    const [a, b, c] = selected;
+    const chosen = () =>
+      selectedClipboard(app)
+        .map((i) => i.id)
+        .sort();
+    for (const extra of [
+      { shiftKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+    ]) {
+      const click = (o, keys = {}) => {
+        pointer("pointerdown", o, keys);
+        pointer("pointerup", o, keys);
+      };
+      click({ x: a.x + 100, y: a.y + 50 });
+      click({ x: b.x + 100, y: b.y + 50 }, extra);
+      await app.tick();
+      assert.deepEqual(chosen(), [a.id, b.id].sort());
+      click({ x: b.x + 100, y: b.y + 400 }, extra);
+      await app.tick();
+      assert.deepEqual(chosen(), [a.id, b.id].sort(), JSON.stringify(extra));
+      const from = { x: c.x - 20, y: c.y - 20 },
+        to = { x: c.x + 220, y: c.y + 120 };
+      pointer("pointerdown", from, extra);
+      pointer("pointermove", to, extra);
+      pointer("pointerup", to, extra);
+      await app.tick();
+      assert.deepEqual(
+        chosen(),
+        [a.id, b.id, c.id].sort(),
+        JSON.stringify(extra),
+      );
+      click({ x: b.x + 100, y: b.y + 400 });
+      await app.tick();
+      assert.ok(
+        app.doc.querySelector("#selection-tools").hidden,
+        "A plain click on empty board clears it",
+      );
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("Ctrl or Cmd held during a move keeps the object off other objects' edges", async () => {
+  const app = await setup();
+  try {
+    const { selected, pointer } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 200, h: 100 }),
+      item("rect", 400, 300, { w: 200, h: 100 }),
+    ]);
+    const [a, b] = selected;
+    // Drags the second rectangle from where it started to 3 units right of
+    // the first one's left edge, then puts it back.
+    const drag = async (extra) => {
+      const at = { x: b.x + 100, y: b.y + 50 },
+        to = { x: a.x + 103, y: at.y };
+      pointer("pointerdown", at);
+      pointer("pointerup", at);
+      pointer("pointerdown", at, extra);
+      pointer("pointermove", { x: at.x - 200, y: at.y }, extra);
+      pointer("pointermove", to, extra);
+      pointer("pointerup", to, extra);
+      await app.tick();
+      const left = selectedClipboard(app).find((i) => i.id === b.id).x;
+      const back = { x: left + 100, y: at.y };
+      pointer("pointerdown", back);
+      pointer("pointermove", { x: back.x + 100, y: at.y }, { altKey: true });
+      pointer("pointermove", at, { altKey: true });
+      pointer("pointerup", at, { altKey: true });
+      await app.tick();
+      return left - a.x;
+    };
+    assert.equal(await drag({}), 0, "It snaps to the other's left edge");
+    assert.equal(await drag({ ctrlKey: true }), 3);
+    assert.equal(await drag({ metaKey: true }), 3);
+  } finally {
+    await app.close();
+  }
+});
+
 test("pressing an object keeps its toolbar where it settles once released", async () => {
   const app = await setup();
   try {
@@ -20628,6 +21226,48 @@ test("pressing an object keeps its toolbar where it settles once released", asyn
     await app.tick();
     assert.equal(app.doc.querySelector("#quick-ports").hidden, false);
     assert.equal(panel.style.transform, pressed);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the floating toolbar goes with a selection panned out of view and comes back with it", async () => {
+  const app = await setup();
+  try {
+    const { canvas } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 200, h: 100 }),
+    ]);
+    const panel = app.doc.querySelector("#selection-tools");
+    const pan = async (deltaX) => {
+      for (let n = 0; n < 10; n++)
+        canvas.dispatchEvent(
+          new app.w.WheelEvent("wheel", { deltaX, bubbles: true }),
+        );
+      await app.tick();
+    };
+    assert.ok(panel.classList.contains("is-floating"));
+    assert.ok(!panel.classList.contains("is-away"));
+    await pan(200);
+    assert.ok(renderedView(app).x < -1000, "The board moved left");
+    assert.equal(panel.hidden, false, "The object is still selected");
+    assert.ok(panel.classList.contains("is-away"), "Its toolbar is not shown");
+    // Alt+F10 still goes to the toolbar, which shows while it has the keys.
+    canvas.focus();
+    canvas.dispatchEvent(
+      new app.w.KeyboardEvent("keydown", {
+        key: "F10",
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    assert.ok(panel.contains(app.doc.activeElement));
+    assert.ok(!panel.classList.contains("is-away"), "Shown for the keyboard");
+    await pan(10);
+    assert.ok(!panel.classList.contains("is-away"));
+    canvas.focus();
+    await pan(-210);
+    assert.ok(!panel.classList.contains("is-away"));
   } finally {
     await app.close();
   }
@@ -22958,8 +23598,44 @@ test("undo on a shared board waits for an edit still on its way in", async () =>
   }
 });
 
+// Web Locks shared by the tabs of one test, as a browser's are by the tabs
+// of one origin. `release` lets go of a tab's locks, as closing it does.
+function tabLocks() {
+  const held = new Map();
+  return {
+    prepare(w) {
+      Object.defineProperty(w.navigator, "locks", {
+        configurable: true,
+        value: {
+          async request(name, callback) {
+            held.set(name, w);
+            return callback();
+          },
+          async query() {
+            return { held: [...held.keys()].map((name) => ({ name })) };
+          },
+        },
+      });
+    },
+    release(w) {
+      for (const [name, owner] of held) if (owner === w) held.delete(name);
+    },
+  };
+}
+// The text drafts kept in a tab's storage, by key.
+function textDrafts(w) {
+  const drafts = {};
+  for (let n = 0; n < w.localStorage.length; n++) {
+    const key = w.localStorage.key(n);
+    if (key.startsWith("whiteboard-text-draft"))
+      drafts[key] = w.localStorage.getItem(key);
+  }
+  return drafts;
+}
+
 test("text being typed when the page is killed is put back when the board opens again", async () => {
-  const app = await setup();
+  const locks = tabLocks();
+  const app = await setup(undefined, { prepare: locks.prepare });
   let reopened;
   try {
     const { doc, w } = app;
@@ -22979,12 +23655,18 @@ test("text being typed when the page is killed is put back when the board opens 
     await app.tick();
     // The tab is killed while typing: nothing ends the edit, so the board
     // in storage still holds the note without its text.
-    const draft = w.localStorage.getItem("whiteboard-text-draft");
-    assert.ok(draft, "the text is kept on the device as it is typed");
+    const drafts = textDrafts(w);
+    assert.equal(
+      Object.keys(drafts).length,
+      1,
+      "the text is kept on the device as it is typed",
+    );
+    locks.release(w);
     reopened = await setup(undefined, {
       url: w.location.href,
       indexedDB: w.indexedDB,
-      preferences: { "whiteboard-text-draft": draft },
+      preferences: drafts,
+      prepare: locks.prepare,
     });
     for (
       let n = 0;
@@ -22997,17 +23679,73 @@ test("text being typed when the page is killed is put back when the board opens 
       /Minutes of the meeting/,
     );
     assert.match(reopened.doc.querySelector("#toast").textContent, /put back/);
-    assert.equal(
-      reopened.w.localStorage.getItem("whiteboard-text-draft"),
-      null,
-    );
+    assert.deepEqual(textDrafts(reopened.w), {});
     // Ending an edit leaves no draft behind.
     input.dispatchEvent(
       new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
     );
-    assert.equal(w.localStorage.getItem("whiteboard-text-draft"), null);
+    assert.deepEqual(textDrafts(w), {});
   } finally {
     await reopened?.close();
+    await app.close();
+  }
+});
+
+test("a board opened in a second tab leaves alone the text still being typed in the first", async () => {
+  const locks = tabLocks();
+  const app = await setup(undefined, { prepare: locks.prepare });
+  let other;
+  try {
+    const { doc, w } = app;
+    await app.click('[data-action="new"]');
+    doc
+      .querySelector("#canvas")
+      .dispatchEvent(
+        new w.KeyboardEvent("keydown", { key: "n", bubbles: true }),
+      );
+    for (let n = 0; n < 20 && !doc.querySelector("#canvas-text-editor"); n++)
+      await app.tick();
+    const input = doc.querySelector("#canvas-text-editor");
+    input.value = "Minutes of the";
+    input.dispatchEvent(new w.Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await app.tick();
+    // The second tab shares the first one's storage, draft included.
+    other = await setup(undefined, {
+      url: w.location.href,
+      indexedDB: w.indexedDB,
+      preferences: textDrafts(w),
+      prepare: locks.prepare,
+    });
+    for (
+      let n = 0;
+      n < 50 && !other.doc.querySelector("#board-outline [data-id]");
+      n++
+    )
+      await other.tick();
+    for (let n = 0; n < 10; n++) await other.tick();
+    assert.doesNotMatch(
+      other.doc.querySelector("#toast").textContent,
+      /put back/,
+    );
+    assert.equal(
+      Object.keys(textDrafts(other.w)).length,
+      1,
+      "The first tab's draft stays",
+    );
+    // The first tab finishes its note and saves it.
+    input.value = "Minutes of the meeting";
+    input.dispatchEvent(new w.Event("input", { bubbles: true }));
+    input.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    for (let n = 0; n < 40; n++) await app.tick();
+    assert.equal(
+      doc.querySelector("#save-state").textContent,
+      "Saved on this device",
+    );
+  } finally {
+    await other?.close();
     await app.close();
   }
 });
@@ -23657,10 +24395,11 @@ async function sharedEditors(
   items,
   count = 2,
   assets = [],
-  { peers = true, hub = createPeerHub() } = {},
+  { peers = true, hub = createPeerHub(), prepare = () => {} } = {},
 ) {
   const env = environment(),
     seed = new SharedDocument();
+  prepare(env);
   env.service.now = () => Date.now();
   seed.commit({ version: 1, id: room, title: "Shared", items });
   await env.service.call(owner, {
@@ -24631,6 +25370,326 @@ test("a board kept in Puter goes on uploading after a reload, unless Puter holds
     assert.deepEqual(titles.sort(), ["Alpha", "Alpha (copy on this device)"]);
   } finally {
     await third.app.close();
+  }
+});
+
+test("a board kept in Puter checks for a newer copy before every upload, and leaving it unedited uploads nothing", async () => {
+  const files = new Map();
+  let writes = 0;
+  const puter = {
+    env: "web",
+    auth: {
+      isSignedIn: () => true,
+      signIn: async () => {},
+      getUser: async () => ({ uuid: "u1", username: "alice" }),
+    },
+    fs: {
+      async read(path) {
+        if (!files.has(path)) throw { code: "subject_does_not_exist" };
+        return new Blob([files.get(path)]);
+      },
+      async readdir() {
+        return [];
+      },
+      async write(path, value) {
+        if (path !== "whiteboard/catalog.json") writes++;
+        files.set(path, typeof value === "string" ? value : await value.text());
+        return { path };
+      },
+    },
+  };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = await setup(puter);
+  const { doc, w, tick } = app;
+  const status = () => doc.querySelector("#save-state")?.textContent;
+  const addNote = async () => {
+    const canvas = doc.querySelector("#canvas");
+    canvas.focus();
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "n", bubbles: true }),
+    );
+    await tick();
+    doc
+      .querySelector("#canvas-text-editor")
+      .dispatchEvent(
+        new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    await tick();
+  };
+  const boardFile = () =>
+    [...files.keys()].find(
+      (path) => path.endsWith(".json") && path !== "whiteboard/catalog.json",
+    );
+  const cloudBoard = () => JSON.parse(files.get(boardFile()));
+  try {
+    await app.click('[data-action="new"]');
+    await app.click('[data-action="cloud-save"]');
+    for (let n = 0; n < 200 && status() !== "Saved to Puter"; n++) await tick();
+    await addNote();
+    await wait(2500);
+    assert.equal(cloudBoard().items.length, 1, "The edit reached Puter");
+    // Opening the board again and leaving it without an edit writes nothing.
+    const uploaded = writes;
+    for (let n = 0; n < 2; n++) {
+      await app.click('[data-action="home"]');
+      await app.click("[data-open]");
+    }
+    await app.click('[data-action="home"]');
+    assert.equal(writes, uploaded, "Leaving an unedited board uploads nothing");
+    await app.click("[data-open]");
+    // Another device saves a newer copy while this tab stays open; the next
+    // edit here does not write over it.
+    const newer = { ...cloudBoard(), updated: Date.now() + 1000 };
+    newer.items = [...newer.items, { ...newer.items[0], id: "other-device" }];
+    files.set(boardFile(), JSON.stringify(newer));
+    await addNote();
+    await wait(2500);
+    assert.ok(
+      cloudBoard().items.some((item) => item.id === "other-device"),
+      "Puter's newer copy is kept",
+    );
+    assert.equal(status(), "Newer copy in Puter");
+    assert.match(doc.querySelector("#toast").textContent, /newer copy/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the check for a newer copy in Puter downloads the board only when its file changed", async () => {
+  const files = new Map(),
+    versions = new Map();
+  let clock = 0,
+    reads = 0;
+  const written = (path) => ({
+    path,
+    modified: versions.get(path),
+    size: files.get(path).length,
+  });
+  const puter = {
+    env: "web",
+    auth: {
+      isSignedIn: () => true,
+      signIn: async () => {},
+      getUser: async () => ({ uuid: "u1", username: "alice" }),
+    },
+    fs: {
+      async read(path) {
+        if (!files.has(path)) throw { code: "subject_does_not_exist" };
+        if (path !== "whiteboard/catalog.json") reads++;
+        return new Blob([files.get(path)]);
+      },
+      async readdir() {
+        return [];
+      },
+      async stat(path) {
+        if (!files.has(path)) throw { code: "subject_does_not_exist" };
+        return written(path);
+      },
+      async write(path, value) {
+        files.set(path, typeof value === "string" ? value : await value.text());
+        versions.set(path, ++clock);
+        return written(path);
+      },
+    },
+  };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = await setup(puter);
+  const { doc, w, tick } = app;
+  const status = () => doc.querySelector("#save-state")?.textContent;
+  const addNote = async () => {
+    const canvas = doc.querySelector("#canvas");
+    canvas.focus();
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "n", bubbles: true }),
+    );
+    await tick();
+    doc
+      .querySelector("#canvas-text-editor")
+      .dispatchEvent(
+        new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    await tick();
+    await wait(2500);
+  };
+  const boardFile = () =>
+    [...files.keys()].find(
+      (path) => path.endsWith(".json") && path !== "whiteboard/catalog.json",
+    );
+  const cloudBoard = () => JSON.parse(files.get(boardFile()));
+  try {
+    await app.click('[data-action="new"]');
+    await app.click('[data-action="cloud-save"]');
+    for (let n = 0; n < 200 && status() !== "Saved to Puter"; n++) await tick();
+    await addNote();
+    const before = reads;
+    await addNote();
+    await addNote();
+    assert.equal(cloudBoard().items.length, 3, "The edits reached Puter");
+    assert.equal(reads, before, "Unchanged since this page wrote it");
+    // Another device saves a newer copy: the next edit reads it and keeps it.
+    const newer = { ...cloudBoard(), updated: Date.now() + 1000 };
+    newer.items = [...newer.items, { ...newer.items[0], id: "other-device" }];
+    files.set(boardFile(), JSON.stringify(newer));
+    versions.set(boardFile(), ++clock);
+    await addNote();
+    assert.equal(reads, before + 1);
+    assert.ok(cloudBoard().items.some((item) => item.id === "other-device"));
+    assert.equal(status(), "Newer copy in Puter");
+  } finally {
+    await app.close();
+  }
+});
+
+test("an upload whose answer was lost is not taken for another device's newer copy", async () => {
+  const files = new Map();
+  let failNext = false;
+  const puter = {
+    env: "web",
+    auth: {
+      isSignedIn: () => true,
+      signIn: async () => {},
+      getUser: async () => ({ uuid: "u1", username: "alice" }),
+    },
+    fs: {
+      async read(path) {
+        if (!files.has(path)) throw { code: "subject_does_not_exist" };
+        return new Blob([files.get(path)]);
+      },
+      async readdir() {
+        return [];
+      },
+      async write(path, value) {
+        files.set(path, typeof value === "string" ? value : await value.text());
+        // The file is written, but its answer never arrives.
+        if (failNext && path !== "whiteboard/catalog.json") {
+          failNext = false;
+          throw Error("Network lost");
+        }
+        return { path };
+      },
+    },
+  };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = await setup(puter);
+  const { doc, w, tick } = app;
+  const status = () => doc.querySelector("#save-state")?.textContent;
+  const addNote = async () => {
+    const canvas = doc.querySelector("#canvas");
+    canvas.focus();
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "n", bubbles: true }),
+    );
+    await tick();
+    doc
+      .querySelector("#canvas-text-editor")
+      .dispatchEvent(
+        new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    await tick();
+    await wait(2500);
+  };
+  const cloudBoard = () =>
+    JSON.parse(
+      files.get(
+        [...files.keys()].find(
+          (path) =>
+            path.endsWith(".json") && path !== "whiteboard/catalog.json",
+        ),
+      ),
+    );
+  try {
+    await app.click('[data-action="new"]');
+    await app.click('[data-action="cloud-save"]');
+    for (let n = 0; n < 200 && status() !== "Saved to Puter"; n++) await tick();
+    await addNote();
+    failNext = true;
+    await addNote();
+    assert.equal(status(), "Cloud save failed");
+    await addNote();
+    assert.equal(status(), "Saved to Puter");
+    assert.equal(cloudBoard().items.length, 3, "The next edit is uploaded");
+  } finally {
+    await app.close();
+  }
+});
+
+test("an edit made offline does not write over another device's newer copy in Puter", async () => {
+  const files = new Map();
+  let offline = false;
+  const down = () => {
+    if (offline) throw Error("Network down");
+  };
+  const puter = {
+    env: "web",
+    auth: {
+      isSignedIn: () => true,
+      signIn: async () => {},
+      getUser: async () => ({ uuid: "u1", username: "alice" }),
+    },
+    fs: {
+      async read(path) {
+        down();
+        if (!files.has(path)) throw { code: "subject_does_not_exist" };
+        return new Blob([files.get(path)]);
+      },
+      async stat(path) {
+        down();
+        if (!files.has(path)) throw { code: "subject_does_not_exist" };
+        return { modified: files.get(path).length, size: 1 };
+      },
+      async readdir() {
+        return [];
+      },
+      async write(path, value) {
+        down();
+        files.set(path, typeof value === "string" ? value : await value.text());
+        return { path };
+      },
+    },
+  };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = await setup(puter);
+  const { doc, w, tick } = app;
+  const status = () => doc.querySelector("#save-state")?.textContent;
+  const addNote = async () => {
+    const canvas = doc.querySelector("#canvas");
+    canvas.focus();
+    canvas.dispatchEvent(
+      new w.KeyboardEvent("keydown", { key: "n", bubbles: true }),
+    );
+    await tick();
+    doc
+      .querySelector("#canvas-text-editor")
+      .dispatchEvent(
+        new w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    await tick();
+    await wait(2500);
+  };
+  const path = () =>
+    [...files.keys()].find(
+      (p) => p.endsWith(".json") && p !== "whiteboard/catalog.json",
+    );
+  try {
+    await app.click('[data-action="new"]');
+    await app.click('[data-action="cloud-save"]');
+    for (let n = 0; n < 200 && status() !== "Saved to Puter"; n++) await tick();
+    await addNote();
+    // Another device saves its edit, then this one edits offline.
+    const other = JSON.parse(files.get(path()));
+    other.title = "Edited on the phone";
+    other.updated = Date.now();
+    files.set(path(), JSON.stringify(other));
+    await wait(5);
+    offline = true;
+    await addNote();
+    assert.equal(status(), "Cloud save failed");
+    offline = false;
+    await addNote();
+    assert.equal(status(), "Newer copy in Puter");
+    assert.equal(JSON.parse(files.get(path())).title, "Edited on the phone");
+  } finally {
+    await app.close();
   }
 });
 
@@ -27298,6 +28357,19 @@ test("a selected frame's context menu presents from it or exports it", async () 
         ?.dispatchEvent(
           new app.w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
         );
+    // With other objects selected too, it exports only the frames.
+    key("F10", { shiftKey: true, cancelable: true });
+    await tick();
+    doc.querySelector('#context-menu [data-command="frames:export"]').click();
+    await tick();
+    assert.equal(doc.querySelector("#export-scope").value, "frames");
+    assert.deepEqual(
+      [...doc.querySelectorAll("#export-frames input:checked")].map(
+        (i) => i.value,
+      ),
+      [byText("Intro").id, byText("Ideas").id],
+    );
+    doc.querySelector("dialog[open]").close();
     assert.ok(!(await menu(byText("Loose").id)).includes("frames:export"));
     close();
     const commands = await menu(byText("Ideas").id);
@@ -28653,6 +29725,105 @@ async function joinLink(app, id, token) {
     await app.tick();
 }
 
+test("a version of a shared board opened as a copy waits for images not downloaded yet", async () => {
+  const room = crypto.randomUUID();
+  const missing = "a".repeat(64);
+  const note = item("note", 300, 0, { text: "Still here" });
+  const image = item("image", 0, 0, {
+    w: 100,
+    h: 100,
+    src: `asset:${missing}`,
+  });
+  const shared = await sharedEditors(room, [image, note], 1);
+  const [app] = shared.apps;
+  try {
+    await app.click('[data-action="more-tools"]');
+    await app.click('[data-feature="history"]');
+    await app.click("#checkpoint-create");
+    for (
+      let n = 0;
+      n < 80 &&
+      !app.doc.querySelector("#local-revisions [data-revision-options]");
+      n++
+    )
+      await app.tick();
+    await app.click("#local-revisions [data-revision-options]");
+    for (let n = 0; n < 80 && !app.doc.querySelector('[data-part="copy"]'); n++)
+      await app.tick();
+    await app.click('[data-part="copy"]');
+    for (
+      let n = 0;
+      n < 80 &&
+      !/not downloaded/.test(app.doc.querySelector("#toast").textContent);
+      n++
+    )
+      await app.tick();
+    assert.match(
+      app.doc.querySelector("#toast").textContent,
+      /have not downloaded from the shared board yet/,
+    );
+    // No personal board was made that would hold the image's reference
+    // to the shared board rather than the image.
+    const boards = await storedBoards(app);
+    assert.equal(boards.filter((b) => !b.shared).length, 0);
+    assert.match(app.doc.querySelector(".board-tag").textContent, /Shared/);
+  } finally {
+    await shared.close();
+  }
+});
+
+test("a version opened as a copy is not opened once version history was closed meanwhile", async () => {
+  const room = crypto.randomUUID();
+  const data =
+    "data:image/png;base64," +
+    createCanvas(8, 4).toBuffer("image/png").toString("base64");
+  const image = item("image", 0, 0, {
+    w: 100,
+    h: 100,
+    src: `asset:${await hash(data)}`,
+  });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  // The image does not download until the copy is asked for.
+  const shared = await sharedEditors(room, [image], 1, [data], {
+    peers: false,
+    prepare(env) {
+      const call = env.service.call.bind(env.service);
+      env.service.call = async (user, input) => {
+        if (input.op === "asset.get") await gate;
+        return call(user, input);
+      };
+    },
+  });
+  const [app] = shared.apps;
+  try {
+    await app.click('[data-action="more-tools"]');
+    await app.click('[data-feature="history"]');
+    await app.click("#checkpoint-create");
+    for (
+      let n = 0;
+      n < 80 &&
+      !app.doc.querySelector("#local-revisions [data-revision-options]");
+      n++
+    )
+      await app.tick();
+    await app.click("#local-revisions [data-revision-options]");
+    for (let n = 0; n < 80 && !app.doc.querySelector('[data-part="copy"]'); n++)
+      await app.tick();
+    await app.click('[data-part="copy"]');
+    // The person closes version history while the images download.
+    for (const d of app.doc.querySelectorAll("dialog[open]")) d.close();
+    release();
+    for (let n = 0; n < 40; n++) await app.tick();
+    const boards = await storedBoards(app);
+    assert.equal(boards.filter((b) => !b.shared).length, 0);
+    assert.match(app.doc.querySelector(".board-tag").textContent, /Shared/);
+  } finally {
+    release();
+    await shared.close();
+  }
+});
+
 test("restoring a version never changes content hidden from a participant", async () => {
   const env = environment();
   const boards = env.service;
@@ -28798,6 +29969,30 @@ test("library content inserted inside a frame joins the frame", async () => {
     await click(`#board-outline [data-id="${sticker.id}"]`);
     const [moved] = selectedClipboard(app);
     assert.equal(moved.x, sticker.x + 50);
+  } finally {
+    await app.close();
+  }
+});
+
+test("untitled frames present by their place in the frame order, as the Frames panel names them", async () => {
+  const app = await setup();
+  const { click, doc } = app;
+  try {
+    await rotationFixture(app, [
+      item("frame", 0, 0, { w: 400, h: 300, text: "", order: 0 }),
+      item("frame", 500, 0, { w: 400, h: 300, text: "Plan", order: 1 }),
+      item("frame", 1000, 0, { w: 400, h: 300, text: "", order: 2 }),
+    ]);
+    await click('[data-action="present"]');
+    assert.deepEqual(
+      [...doc.querySelectorAll(".slide-choices label")].map(
+        (l) => l.textContent,
+      ),
+      ["Frame 1", "Plan", "Frame 3"],
+    );
+    await click("#start-presentation");
+    assert.match(doc.querySelector("#slide-count").textContent, /· Frame 1$/);
+    await click("#slide-exit");
   } finally {
     await app.close();
   }
@@ -29604,6 +30799,91 @@ test("losing edit access closes the text being typed and the creation tool", asy
     await new Promise((r) => setTimeout(r, 500));
   } finally {
     await shared.close();
+  }
+});
+
+test("a drag held while a shared board finishes connecting is saved when it is let go", async () => {
+  const env = environment();
+  env.service.now = () => Date.now();
+  const room = crypto.randomUUID();
+  const note = item("note", 200, 160, { text: "Drag me" });
+  const seed = new SharedDocument();
+  seed.commit({ version: 1, id: room, title: "Race", items: [note] });
+  await env.service.call(owner, {
+    op: "create",
+    room,
+    update: encode(seed.update()),
+  });
+  seed.destroy();
+  const invite = await env.service.call(owner, {
+    op: "invite",
+    room,
+    role: "editor",
+  });
+  // The board takes edits once synchronized; the check-in that follows
+  // is held until the drag below has begun.
+  const call = env.service.call.bind(env.service);
+  let gated = false,
+    reached,
+    release;
+  const joining = new Promise((resolve) => (reached = resolve));
+  env.service.call = async (user, input) => {
+    if (input.op === "presence" && gated) {
+      gated = false;
+      reached();
+      await new Promise((resolve) => (release = resolve));
+    }
+    return call(user, input);
+  };
+  const app = await setup(env.sdk(collaborator));
+  const { doc } = app;
+  const until = async (fn) => {
+    for (let n = 0; n < 300 && !fn(); n++) await app.tick();
+    return fn();
+  };
+  const saved = () => doc.querySelector("#save-state")?.textContent || "";
+  try {
+    await joinLink(app, room, invite.token);
+    assert.ok(await until(() => /Saved/.test(saved())), saved());
+    await app.click('[data-action="home"]');
+    gated = true;
+    await app.click(".library [data-open]");
+    await joining;
+    const canvas = doc.querySelector("#canvas");
+    canvas.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      right: 1000,
+      bottom: 800,
+      width: 1000,
+      height: 800,
+    });
+    const pointer = (type, x, y) => {
+      const v = renderedView(app);
+      canvasPointer(app, type, 1, v.x + x * v.z, v.y + y * v.z, {
+        pointerType: "mouse",
+      });
+    };
+    pointer("pointerdown", 295, 240);
+    pointer("pointermove", 345, 240);
+    pointer("pointermove", 395, 240);
+    // Connecting finishes while the pointer is still held there.
+    release();
+    assert.ok(await until(() => saved() === "Saved · live"), saved());
+    for (let n = 0; n < 10; n++) await app.tick();
+    pointer("pointerup", 395, 240);
+    const uploaded = async () => {
+      const { doc: shared } = await env.service.load(room);
+      const x = shared.snapshot().items[0].x;
+      shared.destroy();
+      return Math.round(x);
+    };
+    for (let n = 0; n < 200 && (await uploaded()) !== 300; n++)
+      await app.tick();
+    assert.equal(await uploaded(), 300, "The move reached the shared board");
+  } finally {
+    env.service.call = call;
+    await app.close();
   }
 });
 
@@ -33311,6 +34591,113 @@ test("an organization template inserts into the open board beside its content", 
   }
 });
 
+test("an organization Kanban template turns status sync on in the board it is inserted into", async () => {
+  // A board without status columns brings no status sync along.
+  for (const [title, synced] of [
+    ["Done", true],
+    ["Ideas", false],
+  ])
+    await orgTemplateSync(title, synced);
+});
+async function orgTemplateSync(title, synced) {
+  const env = environment();
+  const { adminCall } = await import("../worker/admin.js");
+  const org = env.service.org;
+  await adminCall(org, env.service, owner, { op: "org.setup", name: "CDS" });
+  const sdk = env.sdk(owner);
+  await sdk.kv.set("whiteboard-organization-v1", {
+    server: "https://whiteboard-test.puter.work",
+  });
+  const exec = sdk.workers.exec;
+  sdk.workers.exec = async (url, options) => {
+    const input = JSON.parse(options.body);
+    if (
+      /^(org|email|notifications|prefs|library|spaces|teams)\./.test(input.op)
+    )
+      return adminCall(org, env.service, owner, input).then(
+        (result) => Response.json(result),
+        (error) =>
+          Response.json({ message: error.message }, { status: error.status }),
+      );
+    return exec(url, options);
+  };
+  const read = sdk.fs.read;
+  sdk.fs.read = async (path, ...rest) => {
+    if (String(path).endsWith("catalog.json"))
+      throw { code: "subject_does_not_exist" };
+    return read(path, ...rest);
+  };
+  sdk.fs.readdir = async () => [];
+  const app = await setup(sdk);
+  const { doc, w, click } = app;
+  const syncShown = async () => {
+    await click("#task-access");
+    const sync = doc.querySelector("#tasks-sync");
+    const checked = sync.checked;
+    return { sync, checked };
+  };
+  const closeTasks = async () => {
+    doc.querySelector("dialog.tasks-modal .dialog-header button").click();
+    await app.tick();
+  };
+  try {
+    for (
+      let n = 0;
+      n < 200 && !doc.querySelector('[data-org-action="admin"]');
+      n++
+    )
+      await app.tick();
+    // Share a Kanban column with status sync on as a template.
+    const column = item("frame", 0, 0, {
+      text: title,
+      w: 400,
+      h: 300,
+      order: 0,
+    });
+    await rotationFixture(app, [
+      column,
+      item("note", 50, 80, {
+        text: "Shipped",
+        parentId: column.id,
+        task: { assignee: null, start: null, due: null, status: "done" },
+      }),
+    ]);
+    const { sync } = await syncShown();
+    sync.checked = true;
+    sync.dispatchEvent(new w.Event("change", { bubbles: true }));
+    await closeTasks();
+    await click('[data-action="commands"]');
+    paletteQuery(app, "share template");
+    await click('[data-command="org-library-share"]');
+    doc.querySelector("#org-library-name").value = "Team Kanban";
+    await click("#org-library-share .primary");
+    for (let n = 0; n < 200 && doc.querySelector("#org-library-share"); n++)
+      await app.tick();
+    // Inserted into another board, its cards keep following the columns.
+    await click('[data-action="home"]');
+    await rotationFixture(app, [item("note", 0, 0, { text: "Already here" })]);
+    assert.equal((await syncShown()).checked, false);
+    await closeTasks();
+    await click('[data-action="commands"]');
+    paletteQuery(app, "Organization library");
+    await click('[data-command="org-library"]');
+    for (let n = 0; n < 200 && !doc.querySelector("[data-library-insert]"); n++)
+      await app.tick();
+    await click("[data-library-insert]");
+    for (let n = 0; n < 200 && doc.querySelector("dialog[open]"); n++)
+      await app.tick();
+    if (synced)
+      assert.match(
+        doc.querySelector("#toast").textContent,
+        /Kanban status sync is on for this board/,
+      );
+    assert.equal((await syncShown()).checked, synced);
+    await closeTasks();
+  } finally {
+    await app.close();
+  }
+}
+
 test("a notification without a usable time is listed without one instead of failing the list", async () => {
   const env = environment(),
     service = env.service,
@@ -34816,6 +36203,35 @@ for (const [created, later, text] of [
       await app.close();
     }
   });
+
+test("the AI assistant opens on its heading, not on an action that sends the board", async () => {
+  // It opened on Summarize, so a second Enter sent the whole board to the
+  // AI model.
+  const asked = [];
+  const app = await setup({
+    ai: {
+      chat: async (prompt) => {
+        asked.push(prompt);
+        return "Summary";
+      },
+    },
+  });
+  const { doc, click } = app;
+  try {
+    await click('[data-action="new"]');
+    await click('[data-action="add-note"]');
+    await click('[data-action="finish-text"]');
+    await click('[data-action="ai"]');
+    const d = doc.querySelector("dialog.ai-dialog[open]");
+    assert.ok(d);
+    assert.equal(d.querySelector('[data-ai="summarize"]').disabled, false);
+    assert.equal(doc.activeElement, d.querySelector(".dialog-header h2"));
+    assert.equal(doc.activeElement.textContent, "AI assistant");
+    assert.equal(asked.length, 0);
+  } finally {
+    await app.close();
+  }
+});
 
 test("AI summary authoring preserves explicit mixed languages, literal text and edited ranges through saving", async () => {
   const text =
@@ -46899,6 +48315,100 @@ test("menu Paste after this tab's menu Copy works when reading the clipboard is 
   }
 });
 
+test("an arrow drawn from an object and let go inside it is kept as drawn, free of the object", async () => {
+  const app = await setup();
+  try {
+    const { selected, pointer } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 600, h: 400 }),
+    ]);
+    const [shape] = selected;
+    const arrows = () => allClipboard(app).filter((i) => i.type === "arrow");
+    await app.click('[data-action="tool-arrow"]');
+    const from = { x: shape.x + 100, y: shape.y + 100 },
+      to = { x: shape.x + 450, y: shape.y + 300 };
+    pointer("pointerdown", from);
+    pointer("pointermove", to);
+    pointer("pointerup", to);
+    await app.tick();
+    const [line] = arrows();
+    assert.ok(line, "The arrow drawn over the shape is kept");
+    assert.equal(line.startId, undefined);
+    assert.deepEqual(
+      [line.x, line.y, line.x + line.w, line.y + line.h].map(Math.round),
+      [from.x, from.y, to.x, to.y].map(Math.round),
+    );
+    // One leaving the shape still starts from it.
+    await app.click('[data-action="tool-arrow"]');
+    pointer("pointerdown", from);
+    pointer("pointermove", { x: from.x + 900, y: from.y });
+    pointer("pointerup", { x: from.x + 900, y: from.y });
+    await app.tick();
+    assert.equal(arrows().length, 2);
+    assert.equal(arrows().filter((i) => i.startId === shape.id).length, 1);
+    // With grid snapping, such a line starts on the grid, as free lines do.
+    await openGrid(app, "dots", true);
+    app.doc.querySelector("dialog").close();
+    await app.click('[data-action="tool-arrow"]');
+    const off = { x: from.x + 7, y: from.y + 5 };
+    pointer("pointerdown", off);
+    pointer("pointermove", to);
+    pointer("pointerup", to);
+    await app.tick();
+    const snapped = arrows().find(
+      (i) => !i.startId && i.id !== line.id && Math.round(i.x) !== off.x,
+    );
+    assert.ok(snapped, "The line's start went to the grid");
+    assert.equal(Math.abs(snapped.x % 24), 0);
+    assert.equal(Math.abs(snapped.y % 24), 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the hover outline follows what comes under a resting pointer as the wheel pans", async () => {
+  const app = await setup();
+  const { doc, w, tick } = app;
+  try {
+    const { canvas, selected } = await rotationFixture(app, [
+      item("rect", 0, 0, { w: 200, h: 100 }),
+      item("ellipse", 300, 0, { w: 200, h: 100 }),
+    ]);
+    canvasPointer(app, "pointerdown", 3, 1150, 880, { pointerType: "mouse" });
+    canvasPointer(app, "pointerup", 3, 1150, 880, { pointerType: "mouse" });
+    await tick();
+    const outline = doc.querySelector("#hover-outline");
+    const [left, right] = selected;
+    let v = renderedView(app);
+    const at = { x: v.x + (left.x + 100) * v.z, y: v.y + (left.y + 50) * v.z };
+    canvasPointer(app, "pointermove", 3, at.x, at.y, {
+      pointerType: "mouse",
+      buttons: 0,
+    });
+    const shown = () =>
+      parseFloat(outline.style.transform.match(/translate\(([-\d.]+)px/)[1]);
+    assert.equal(outline.hidden, false);
+    const before = shown();
+    // The wheel moves the view by the distance between the two shapes.
+    const event = new w.WheelEvent("wheel", {
+      deltaX: (right.x - left.x) * v.z,
+      clientX: at.x,
+      clientY: at.y,
+      bubbles: true,
+      cancelable: true,
+    });
+    canvas.dispatchEvent(event);
+    await tick();
+    v = renderedView(app);
+    assert.equal(outline.hidden, false);
+    assert.ok(
+      Math.abs(shown() - before) < 2,
+      "The outline is on the shape now under the pointer",
+    );
+  } finally {
+    await app.close();
+  }
+});
+
 test("a resting pointer outlines the object a click would select", async () => {
   const app = await setup();
   const { doc, w, tick } = app;
@@ -47881,6 +49391,116 @@ test("sharing a personal board asks first, and cancelling leaves it personal", a
     for (let n = 0; n < 5; n++) await tick();
     assert.equal(doc.querySelector("dialog[open]"), null);
     assert.match(doc.querySelector(".board-tag").textContent, /Personal/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("sharing a board with more images than a person may add a minute waits for the rest, and a failed share leaves nothing staged", async () => {
+  const env = environment(),
+    puter = env.sdk(owner),
+    build = "faceb00cfaceb00c";
+  await puter.fs.write("whiteboard/catalog.json", "[]");
+  await puter.kv.set("whiteboard-collaboration-worker-v1", {
+    name: "whiteboard-test",
+    server: "https://whiteboard-test.puter.work",
+    path: "whiteboard/whiteboard-worker.js",
+    build,
+    builtAt: 200,
+  });
+  let failUploads = true;
+  const exec = puter.workers.exec;
+  puter.workers.exec = (url, options) =>
+    url.endsWith("/health")
+      ? Promise.resolve(Response.json({ build }))
+      : failUploads &&
+          options?.body &&
+          JSON.parse(options.body).op === "asset.put"
+        ? Promise.resolve(
+            Response.json({ message: "Worker unavailable" }, { status: 500 }),
+          )
+        : exec(url, options);
+  // The minute the worker asks to wait passes at once.
+  let waits = 0,
+    shown = "";
+  const app = await setup(puter, {
+    prepare(w) {
+      const setTimeout = w.setTimeout;
+      w.setTimeout = (fn, ms, ...rest) => {
+        if (ms !== 61_000) return setTimeout(fn, ms, ...rest);
+        waits++;
+        shown = w.document.querySelector("#share-progress-text").textContent;
+        env.now += 60_000;
+        return setTimeout(fn, 0, ...rest);
+      };
+    },
+  });
+  const { doc, w, click, tick } = app;
+  w.fetch = async () =>
+    new Response(`/* whiteboard-worker build=${build} at=200 */`);
+  const stagedRows = async () => {
+    const database = await new Promise((resolve, reject) => {
+      const request = w.indexedDB.open("whiteboard-v1", 3);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = database.transaction("collaboration", "readonly");
+        const request = transaction.objectStore("collaboration").getAll();
+        transaction.oncomplete = () => resolve(request.result);
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } finally {
+      database.close();
+    }
+  };
+  const images = Array.from({ length: 62 }, (_, n) => {
+    const c = createCanvas(2, 2),
+      ctx = c.getContext("2d");
+    ctx.fillStyle = `rgb(${n}, ${n * 2}, 9)`;
+    ctx.fillRect(0, 0, 2, 2);
+    return item("image", (n % 10) * 50, Math.floor(n / 10) * 50, {
+      w: 40,
+      h: 40,
+      src: c.toDataURL(),
+    });
+  });
+  try {
+    await rotationFixture(app, images);
+    // The worker cannot take the files: the share fails, and the images
+    // kept on this device for it go too.
+    await click('[data-action="share"]');
+    await confirmShare(app);
+    const failed = () =>
+      doc.querySelector("#save-state").textContent ===
+      "Sharing failed · try again";
+    for (let n = 0; n < 200 && !failed(); n++) await tick();
+    assert.ok(failed(), doc.querySelector("#toast").textContent);
+    assert.match(doc.querySelector(".board-tag").textContent, /Personal/);
+    assert.deepEqual(await stagedRows(), [], "Nothing is left staged");
+    failUploads = false;
+    await click('[data-action="share"]');
+    await confirmShare(app);
+    for (let n = 0; n < 400 && !doc.querySelector("#share-link"); n++)
+      await tick();
+    assert.ok(
+      doc.querySelector("#share-link"),
+      doc.querySelector("#toast").textContent,
+    );
+    assert.equal(waits, 1, "It waited once for the worker's minute");
+    assert.equal(
+      shown,
+      "Uploading images · 2 left, waiting for the board's server…",
+    );
+    const room = env.calls.findLast((call) => call.op === "create").room;
+    assert.equal(
+      [...env.files.keys()].filter((path) =>
+        path.startsWith(`whiteboard/shared/${room}/assets/`),
+      ).length,
+      62,
+      "Every image reached the shared board",
+    );
   } finally {
     await app.close();
   }

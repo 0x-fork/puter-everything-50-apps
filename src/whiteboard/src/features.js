@@ -92,12 +92,13 @@ import {
   addTranslations,
   plural,
   labelled,
+  untitledFrame,
 } from "./i18n.js";
 import { paint, exportImage } from "./render.js";
 import { reflowTextItems, clearTextLayoutCache } from "./text.js";
 import { loadItemFonts, itemFontFamilies, FONT_FAMILIES } from "./fonts.js";
 import { clearConnectorLabelCache } from "./connectors.js";
-import { exportPDF, exportRegions, pdfPlan } from "./export.js";
+import { exportPDF, exportRegions, pdfPlan, regionData } from "./export.js";
 import { exportCSV, exportXLSX } from "./export-sheet.js";
 import { createZip } from "./zip.js";
 import { fileBytes } from "./content/binary.js";
@@ -117,8 +118,8 @@ import { keptRevision } from "./storage.js";
 import { readTableContent, pasteTable, tableHeight } from "./bulk-content.js";
 import { canSwitchShape, shapeKey, switchShape } from "./shapes.js";
 import { portableWorkshop, WORKSHOP_LIMITS } from "./facilitation/model.js";
-import { unlinkCopiedJira, hasTask } from "./planning/task.js";
-import { alignColumnStatuses } from "./planning/kanban.js";
+import { unlinkCopiedJira, hasTask, statusFromTitle } from "./planning/task.js";
+import { alignColumnStatuses, statusSyncEnabled } from "./planning/kanban.js";
 import { protectedIds } from "./locking.js";
 import { collectTasks, taskSheet } from "./planning/tasks.js";
 // A writer that fails to download reports it plainly instead of with the
@@ -129,9 +130,25 @@ const loadWriter = (pending) =>
       "This feature could not load. Check your connection and try again.",
     );
   });
-// The plain space around a followed slide that a different screen shape
-// leaves, like the presenter's own surround.
+// The plain space around a slide that a different screen shape leaves,
+// for the presenter and those following alike.
 const SLIDE_SURROUND = "#3a3d42";
+// Objects reaching past the slide's edge are cut off there.
+function paintSlideSurround(canvas, view, rect, { width, height, dpr }) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = SLIDE_SURROUND;
+  ctx.beginPath();
+  ctx.rect(0, 0, width, height);
+  ctx.rect(
+    view.x + rect.x * view.z,
+    view.y + rect.y * view.z,
+    rect.w * view.z,
+    rect.h * view.z,
+  );
+  ctx.fill("evenodd");
+}
 const frameTitleHTML = (frame, fallback = "Frame") =>
   frame?.text ? authoredTextHTML(frame) : escape(t(fallback));
 function frameChoicesHTML(frames, id, legend, allowNone = false) {
@@ -173,7 +190,7 @@ const RENDERING_HELP = {
 // The exported tasks as the Tasks view lists them, with assignees,
 // dependencies and Jira links, as a spreadsheet sheet of their own.
 function taskSheets(snapshot, regions) {
-  const ids = new Set(regions.flatMap((r) => r.items).map((i) => i.id));
+  const ids = new Set(regions.flatMap(regionData).map((i) => i.id));
   const rows = collectTasks(snapshot).filter((r) => ids.has(r.id));
   return rows.length ? [taskSheet(rows)] : [];
 }
@@ -613,6 +630,12 @@ export function createFeatures(api) {
           { once: true },
         );
         render();
+        // The cells are what the dialog is for; the keyboard starts in the
+        // first rather than on Close. A new table's sample heading is
+        // selected, so typing replaces it.
+        const first = fields[0];
+        first?.focus({ preventScroll: true });
+        if (first && !i) first.setSelectionRange(0, first.value.length);
         d.querySelectorAll("[data-table]").forEach(
           (btn) =>
             (btn.onclick = () => {
@@ -1029,7 +1052,7 @@ export function createFeatures(api) {
     const frames = orderedFrames((api.visualBoard?.() || api.board()).items);
     api.modal(
       "Presentation",
-      `<p class="dialog-copy">${frames.length ? "Choose frames in presentation order." : "This board has no frames, so it presents as one slide. Add frames to make slides."}</p>${frames.length > 1 ? `<div class="slide-choice-actions"><button type="button" class="text-btn" id="slides-all">${t("Select all")}</button><button type="button" class="text-btn" id="slides-none">${t("Select none")}</button></div>` : ""}<div class="slide-choices" role="group" aria-label="${t("Frames")}" ${frames.length ? "" : "hidden"}>${frames.map((f) => `<label><input type="checkbox" value="${escape(f.id)}" aria-describedby="presentation-error" checked><span>${frameTitleHTML(f)}</span></label>`).join("")}</div><p id="presentation-error" class="dialog-copy" role="alert" hidden></p><div class="dialog-footer">${api.selection().size ? '<button class="secondary" id="present-selection">Present selection</button>' : ""}<button class="primary" id="start-presentation">${frames.length ? "Start presentation" : "Present board"}</button></div>`,
+      `<p class="dialog-copy">${frames.length ? "Choose frames in presentation order." : "This board has no frames, so it presents as one slide. Add frames to make slides."}</p>${frames.length > 1 ? `<div class="slide-choice-actions"><button type="button" class="text-btn" id="slides-all">${t("Select all")}</button><button type="button" class="text-btn" id="slides-none">${t("Select none")}</button></div>` : ""}<div class="slide-choices" role="group" aria-label="${t("Frames")}" ${frames.length ? "" : "hidden"}>${frames.map((f, n) => `<label><input type="checkbox" value="${escape(f.id)}" aria-describedby="presentation-error" checked><span>${f.text ? frameTitleHTML(f) : escape(untitledFrame(n))}</span></label>`).join("")}</div><p id="presentation-error" class="dialog-copy" role="alert" hidden></p><div class="dialog-footer">${api.selection().size ? '<button class="secondary" id="present-selection">Present selection</button>' : ""}<button class="primary" id="start-presentation">${frames.length ? "Start presentation" : "Present board"}</button></div>`,
       (d) => {
         const choices = d.querySelector(".slide-choices"),
           error = d.querySelector("#presentation-error");
@@ -1111,32 +1134,41 @@ export function createFeatures(api) {
       (d) => {
         d.classList.add("presentation-dialog");
         api.presentTimer?.(d);
+        api.presentReactions?.(d);
         const canvas = d.querySelector("canvas");
         const render = () => {
           const region = regions[index],
             r = canvas.getBoundingClientRect(),
+            size = {
+              width: r.width || 900,
+              height: r.height || 500,
+              dpr: Math.min(window.devicePixelRatio || 1, 2),
+            },
             z = Math.min(
-              (r.width || 900) / region.rect.w,
-              (r.height || 500) / region.rect.h,
-            );
+              size.width / region.rect.w,
+              size.height / region.rect.h,
+            ),
+            view = {
+              x: size.width / 2 - (region.rect.x + region.rect.w / 2) * z,
+              y: size.height / 2 - (region.rect.y + region.rect.h / 2) * z,
+              z,
+            };
           // The frame is the slide, as in Miro: its editing outline and
-          // its title are left out, and only what it holds is shown.
+          // its title are left out, and only what it holds is shown, cut
+          // off at its edge as those following see it.
           paint(
             canvas,
             region.items.filter((i) => i.id !== region.frameId),
-            {
-              x: (r.width || 900) / 2 - (region.rect.x + region.rect.w / 2) * z,
-              y:
-                (r.height || 500) / 2 - (region.rect.y + region.rect.h / 2) * z,
-              z,
-            },
+            view,
             {
               background: "#ffffff",
               textColor: "#30342f",
               mindCounts: region.mindCounts,
               tags: api.board().tags,
+              ...size,
             },
           );
+          paintSlideSurround(canvas, view, region.rect, size);
           api.presentAttention?.(d, region.rect, {
             ...(region.frameId ? { frame: region.frameId } : {}),
             at: index + 1,
@@ -1363,21 +1395,7 @@ export function createFeatures(api) {
         dpr,
       },
     );
-    // Objects reaching past the slide's edge are cut off there.
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = SLIDE_SURROUND;
-      ctx.beginPath();
-      ctx.rect(0, 0, width, height);
-      ctx.rect(
-        view.x + rect.x * z,
-        view.y + rect.y * z,
-        rect.w * z,
-        rect.h * z,
-      );
-      ctx.fill("evenodd");
-    }
+    paintSlideSurround(canvas, view, rect, { width, height, dpr });
     const frame = region.items.find((i) => i.id === region.frameId);
     const shown = {
       name: frame?.text
@@ -1897,6 +1915,23 @@ export function createFeatures(api) {
             copy.title = versionCopyTitle(version.title, when(at));
             copy.updated = Date.now();
             copy.favorite = false;
+            // A personal board holds its images itself, as a duplicate
+            // does; one not downloaded yet is fetched, or the copy waits.
+            const media = api.includeSharedMedia?.(copy);
+            if (media) {
+              // One copy per press, while the images download.
+              el.disabled = true;
+              try {
+                await media;
+              } catch (error) {
+                return api.toast(error.message);
+              } finally {
+                el.disabled = false;
+              }
+              // Version history closed meanwhile: the person has moved on,
+              // and the copy would take them away from where they went.
+              if (!d.open || !d.isConnected) return;
+            }
             d.close();
             await api.addBoard(copy);
             if (covered)
@@ -2411,11 +2446,19 @@ export function createFeatures(api) {
               (step) =>
                 keep.some((i) => i.id === step.frame && i.type === "frame"),
             );
+            // Kanban columns saved from a board with status sync turn it on
+            // where they are inserted, as the Kanban template does.
+            const columns =
+              statusSyncEnabled(openedBoard) &&
+              keep.some(
+                (i) => i.type === "frame" && statusFromTitle(i.text || ""),
+              );
             content = {
               id: uid(),
               items: keep,
               tags: referencedTags(keep, openedBoard.tags),
               ...(steps.length ? { agenda: { steps: clone(steps) } } : {}),
+              ...(columns ? { planning: { statusSync: true } } : {}),
               version: 1,
             };
           }
@@ -2812,7 +2855,7 @@ export function createFeatures(api) {
               b.items,
               b.tags,
               saved
-                ? { fit: true, agenda: b.agenda }
+                ? { fit: true, agenda: b.agenda, planning: b.planning }
                 : { template: true, planning: b.planning },
             );
           else {
@@ -3144,7 +3187,9 @@ export function createFeatures(api) {
       },
     );
   }
-  function exports() {
+  // `frames`, as from the context menu's Export selected frames, opens on
+  // the selected frames whatever else is selected with them.
+  function exports({ frames: framesOnly = false } = {}) {
     const board = api.board(),
       shown = (api.visualBoard?.() || board).items,
       frames = orderedFrames(shown),
@@ -3161,7 +3206,7 @@ export function createFeatures(api) {
     };
     const framesChosen =
       selectedFrames.length > 0 &&
-      [...chosen].every((id) => inChosenFrame(byId.get(id)));
+      (framesOnly || [...chosen].every((id) => inChosenFrame(byId.get(id))));
     // Letter is the default in North America; elsewhere A4.
     const letter = /-(US|CA|MX|PH|CL|CO|VE|GT|PR)$/i.test(
       globalThis.navigator?.language || "",
@@ -3417,9 +3462,7 @@ export function createFeatures(api) {
             else if (format === "json") {
               const items = [
                   ...new Map(
-                    regions
-                      .flatMap((r) => r.items)
-                      .map((i) => [i.id, clone(i)]),
+                    regions.flatMap(regionData).map((i) => [i.id, clone(i)]),
                   ).values(),
                 ],
                 kept = new Set(items.map((i) => i.id));
@@ -3863,9 +3906,17 @@ export function createFeatures(api) {
     actions,
     followSlide,
     // Inserts a whole template's objects into the open board, as the
-    // template library does.
-    insertTemplate: (items, tags) =>
-      insertContent(items, tags, { template: true }),
+    // template library does, with a Kanban board's status sync when it
+    // brings status columns, as saved content does.
+    insertTemplate: (items, tags, planning) =>
+      insertContent(items, tags, {
+        template: true,
+        planning:
+          statusSyncEnabled({ planning }) &&
+          items.some((i) => i.type === "frame" && statusFromTitle(i.text || ""))
+            ? planning
+            : undefined,
+      }),
     organizeSelection,
     edit(i) {
       if (i.type === "link") linkDialog(i);

@@ -619,6 +619,12 @@ export function createTransfer(api) {
         point,
         document.createElement("canvas").getContext("2d"),
       );
+      // A paste places the text or link as it does copied objects, in the
+      // middle of the view; a drop leaves it where it was dropped.
+      if (object && pasted) {
+        Object.assign(object, pasteAt(object, point, pasted));
+        keepOnBoard([object]);
+      }
       if (object) insert([object], target);
     }
   }
@@ -797,8 +803,13 @@ export function createTransfer(api) {
       // Text fields they can still type in take text as usual.
       const refused = (event) =>
         !(api.canDrop?.() ?? true) && !editable(event.target);
+      // Text dragged over a text field goes into the field, so the board's
+      // drop target, which would cover it, stays down there.
+      const intoField = (event) =>
+        editable(event.target) &&
+        !Array.from(event.dataTransfer?.types || []).includes("Files");
       wrap.addEventListener("dragenter", (event) => {
-        if (!accepts(event)) return;
+        if (!accepts(event) || intoField(event)) return;
         event.preventDefault();
         if (refused(event)) return;
         depth++;
@@ -813,7 +824,8 @@ export function createTransfer(api) {
           clear();
         } else event.dataTransfer.dropEffect = "copy";
       });
-      wrap.addEventListener("dragleave", () => {
+      wrap.addEventListener("dragleave", (event) => {
+        if (!accepts(event) || intoField(event)) return;
         if (--depth <= 0) clear();
       });
       wrap.addEventListener("dragend", clear);

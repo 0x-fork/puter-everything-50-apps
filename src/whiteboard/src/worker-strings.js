@@ -92,6 +92,8 @@ addTranslations({
     "Seuls le propriétaire du tableau ou un administrateur peuvent le faire.",
   "Only the board owner or an administrator can transfer ownership.":
     "Seuls le propriétaire du tableau ou un administrateur peuvent en transférer la propriété.",
+  "Only the account owner can transfer boards owned by the account owner or an administrator.":
+    "Seul le propriétaire du compte peut transférer les tableaux appartenant au propriétaire du compte ou à un administrateur.",
   "Only the board owner or an administrator can connect Slack.":
     "Seuls le propriétaire du tableau ou un administrateur peuvent connecter Slack.",
   "Your organization has turned off Slack.":
@@ -242,6 +244,10 @@ addTranslations({
   "This item is awaiting approval.": "Cet élément attend une approbation.",
   "This content is too large for the library.":
     "Ce contenu est trop volumineux pour la bibliothèque.",
+  "Your library items awaiting approval have reached 250 MB. Share more once an administrator has reviewed them.":
+    "Vos éléments de bibliothèque en attente d’approbation ont atteint 250 Mo. Partagez-en d’autres une fois qu’un administrateur les aura examinés.",
+  "Library items awaiting approval have reached the organization's 1 GB limit. Share this once an administrator has reviewed them.":
+    "Les éléments de bibliothèque en attente d’approbation ont atteint la limite de 1 Go de l’organisation. Partagez celui-ci une fois qu’un administrateur les aura examinés.",
   "Choose a rating from 1 to 5.": "Choisissez une note de 1 à 5.",
   "Only people in the organization can send feedback.":
     "Seules les personnes de l’organisation peuvent envoyer des commentaires.",

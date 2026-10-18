@@ -41,7 +41,9 @@ export function createCommentsUI(api) {
     suppressClick = 0;
   let visible = true;
   const pins = new Map(),
-    drafts = new Map();
+    drafts = new Map(),
+    // Drafts this tab wrote or removed since it last stored them.
+    touched = new Set();
   let indexedItems,
     indexedLength = -1,
     itemIndex = new Map();
@@ -301,13 +303,18 @@ export function createCommentsUI(api) {
     // The draft just written is the most recent, so the oldest untouched
     // one goes first when there are too many.
     drafts.delete(key());
+    touched.add(key());
     if (draft.text) drafts.set(key(), structuredClone({ ...draft, editing }));
+    // The stored list keeps the twenty most recent of every tab's drafts;
+    // one this tab lets go is not taken out of it for that, as another tab
+    // may have just written it.
     while (drafts.size > 20) drafts.delete(drafts.keys().next().value);
     if (!soon) rememberStorage();
     else if (!storeTimer) storeTimer = setTimeout(rememberStorage, 500);
   }
   function clearDraft() {
     drafts.delete(key());
+    touched.add(key());
     draft = null;
     rememberStorage();
   }
@@ -315,10 +322,26 @@ export function createCommentsUI(api) {
     clearTimeout(storeTimer);
     storeTimer = null;
     try {
+      // Other tabs keep their drafts in the same list: only what this tab
+      // changed is written over, so theirs stay.
+      let stored = new Map();
+      try {
+        stored = new Map(
+          JSON.parse(localStorage.getItem("whiteboard-comment-drafts")),
+        );
+      } catch {}
+      for (const key of touched) {
+        stored.delete(key);
+        if (drafts.has(key)) stored.set(key, drafts.get(key));
+      }
+      while (stored.size > 20) stored.delete(stored.keys().next().value);
       localStorage.setItem(
         "whiteboard-comment-drafts",
-        JSON.stringify([...drafts]),
+        JSON.stringify([...stored]),
       );
+      // Only once written: a write refused, as when storage is full, is
+      // tried again with the next change.
+      touched.clear();
     } catch {}
   }
   globalThis.addEventListener?.("pagehide", () => {
@@ -1043,6 +1066,10 @@ export function createCommentsUI(api) {
           )
           .join("")
       : "";
+    // The reaction buttons' icons are placeholders until drawn; a render
+    // outside the board's redraw, as after posting, draws them here.
+    if (panel.querySelector("#comment-messages i[data-lucide]"))
+      api.refreshIcons?.();
     for (const b of panel.querySelectorAll("[data-edit-comment]"))
       b.onclick = () => editMessage(b.dataset.editComment);
     for (const b of panel.querySelectorAll("[data-delete-comment]"))

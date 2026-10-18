@@ -195,11 +195,13 @@ export async function linkEmail(org, identity, email, { onDeactivated } = {}) {
   let user = await org.freshUser(identity.uuid);
   managedAddress(user, email);
   const wasActive = !user || user.status === "active";
+  let merged = false;
   if (linked && linked !== identity.uuid) {
     const other = await org.freshUser(linked);
     if (other && other.status !== "pending")
       fail(409, "This email address is already linked to another account.");
     if (other) {
+      merged = true;
       const isOwner = identity.uuid === (await org.accountOwner()).uuid;
       // Linking never lifts a deactivation or lowers an existing role.
       const rank = ["guest", "member", "admin"];
@@ -262,15 +264,30 @@ export async function linkEmail(org, identity, email, { onDeactivated } = {}) {
   }
   if (user) {
     const previous = user.email?.toLowerCase();
-    user.email = email;
-    user.emailVerified = true;
-    await org.saveUser(user);
+    if (merged) {
+      // An administrator may have deactivated the account since it was
+      // read above; the merged record keeps that.
+      if ((await org.freshUser(identity.uuid))?.status === "deactivated")
+        user.status = "deactivated";
+      user.email = email;
+      user.emailVerified = true;
+      await org.saveUser(user);
+    } else {
+      // Only the address is written, so a change saved meanwhile, such as
+      // a deactivation, is not written over with the copy read above.
+      user = await org.updateUser(
+        identity.uuid,
+        { email, emailVerified: true },
+        { access: true },
+      );
+      await org.kv.set("org:email:" + (await hash(email)), user.uuid);
+    }
     // The address this account used before is free for its next owner.
     if (previous && previous !== email) {
       const key = "org:email:" + (await hash(previous));
       if ((await org.kv.get(key)) === user.uuid) await org.kv.del(key);
     }
-    if (wasActive && user.status === "deactivated")
+    if (merged && wasActive && user.status === "deactivated")
       await onDeactivated?.(user.uuid);
   }
   return user;
@@ -547,6 +564,13 @@ async function capture(org, boards, user) {
 // How many such guests a policy change brings in at once; anyone beyond
 // joins the next time they open the organization.
 const CAPTURE_BATCH = 200;
+// The largest library item, and how much may await approval from one
+// member and in all.
+const LIBRARY_ITEM = 12_000_000,
+  LIBRARY_PENDING_EACH = 250 * 1024 ** 2,
+  LIBRARY_PENDING = 1024 ** 3;
+// AI requests one person can make each minute.
+const AI_REQUESTS = 20;
 async function joinOrganization(org, identity, input) {
   const existing = await org.freshUser(identity.uuid);
   const invite = input.token
@@ -616,8 +640,7 @@ async function joinOrganization(org, identity, input) {
     else if ((await org.kv.get(claim + ":by")) !== identity.uuid)
       fail(403, "This administrator invitation was already used.");
   }
-  const user = {
-    ...(existing || {}),
+  const fields = {
     uuid: identity.uuid,
     username: identity.username,
     role,
@@ -627,7 +650,28 @@ async function joinOrganization(org, identity, input) {
     source,
     teams: existing?.teams || [],
   };
-  await org.saveUser(user);
+  let user;
+  if (!existing) {
+    user = fields;
+    await org.saveUser(user);
+  } else {
+    // An administrator may have deactivated the person, or changed their
+    // record otherwise, since it was read above: only the fields joining
+    // sets are written, and someone deactivated meanwhile stays so.
+    if ((await org.freshUser(identity.uuid))?.status === "deactivated")
+      fail(403, "Your organization account is deactivated.");
+    const { teams, created, ...patch } = fields;
+    if (existing.status === "active") delete patch.status;
+    user = await org.updateUser(
+      identity.uuid,
+      {
+        ...patch,
+        ...(existing.created ? {} : { created }),
+        ...(existing.teams ? {} : { teams }),
+      },
+      { access: true },
+    );
+  }
   if (invite?.role === "admin" && source === "invite" && !invite.usedBy)
     await org.kv.set("org:invite:" + (await hash(String(input.token))), {
       ...invite,
@@ -966,7 +1010,7 @@ export async function apiKey(org, bearer, scope) {
     createdBy: record.createdBy,
   };
 }
-async function aiRequest(org, identity, input) {
+async function aiRequest(org, identity, input, boards) {
   const policy = await org.policy();
   const task = input.task;
   const feature = {
@@ -984,6 +1028,8 @@ async function aiRequest(org, identity, input) {
   const role = await org.role(identity);
   if (!role || role === "guest")
     fail(403, "AI features are available to organization members.");
+  // Each request costs the organization, and is recorded.
+  boards.perMinute(`ai|${identity.uuid}`, AI_REQUESTS);
   const prompt = text(input.prompt, 60_000);
   if (!prompt) fail(400, "Nothing to send to AI.");
   const options = {
@@ -1043,16 +1089,21 @@ async function aiRequest(org, identity, input) {
       : Array.isArray(content)
         ? content.map((c) => c.text || "").join("")
         : String(response?.text || response || "");
+  // The use is recorded in the board's activity only when the person can
+  // open it, so no one writes into a board they have no access to.
+  const room =
+    typeof input.room === "string" &&
+    ID.test(input.room) &&
+    (await boards.member(input.room, identity).then(
+      () => true,
+      () => false,
+    ))
+      ? input.room
+      : null;
   await org.audit(
     identity,
     "ai.used",
-    {
-      type: "board",
-      id:
-        typeof input.room === "string" && ID.test(input.room)
-          ? input.room
-          : null,
-    },
+    { type: "board", id: room },
     {
       task,
     },
@@ -1908,7 +1959,7 @@ export async function adminCall(org, boards, identity, input) {
     const role = await org.role(identity);
     if (!role || role === "guest")
       fail(403, "Only organization members can share library content.");
-    if (typeof input.board !== "string" || input.board.length > 12_000_000)
+    if (typeof input.board !== "string" || input.board.length > LIBRARY_ITEM)
       fail(413, "This content is too large for the library.");
     // Content the library cannot hold is refused for good, not reported as
     // a failure worth retrying.
@@ -1919,13 +1970,39 @@ export async function adminCall(org, boards, identity, input) {
     }
     // Validate language before writing the template or creating a record.
     const description = libraryDescription(input);
+    const isAdmin = role === "owner" || role === "admin";
+    // What members share waits for an administrator, and so does a limited
+    // amount of it, so no one can fill the organization's storage with it.
+    // Each item records its size. One saved before items did was allowed
+    // without a limit and counts for nothing, so items already waiting
+    // never stop anyone from sharing.
+    if (!isAdmin) {
+      const size = input.board.length;
+      let mine = size,
+        all = size;
+      for (const { value: i } of await org.list("org:lib:")) {
+        if (i?.status !== "pending") continue;
+        const bytes = Number.isFinite(i.size) ? i.size : 0;
+        all += bytes;
+        if (i.createdBy === identity.uuid) mine += bytes;
+      }
+      if (mine > LIBRARY_PENDING_EACH)
+        fail(
+          429,
+          "Your library items awaiting approval have reached 250 MB. Share more once an administrator has reviewed them.",
+        );
+      if (all > LIBRARY_PENDING)
+        fail(
+          429,
+          "Library items awaiting approval have reached the organization's 1 GB limit. Share this once an administrator has reviewed them.",
+        );
+    }
     const itemId = short();
     const file = `whiteboard/library/${itemId}.json`;
     await org.puter.fs.write(file, input.board, {
       createMissingParents: true,
       overwrite: true,
     });
-    const isAdmin = role === "owner" || role === "admin";
     const item = {
       id: itemId,
       name: text(input.name, 120) || "Untitled",
@@ -1937,6 +2014,7 @@ export async function adminCall(org, boards, identity, input) {
       createdByName: identity.username,
       created: org.now(),
       file,
+      size: input.board.length,
     };
     await org.kv.set("org:lib:" + itemId, item);
     await org.audit(
@@ -2059,7 +2137,7 @@ export async function adminCall(org, boards, identity, input) {
     await member();
     return { teams: (await org.list("org:team:")).map((r) => r.value) };
   }
-  if (op === "org.ai") return aiRequest(org, identity, input);
+  if (op === "org.ai") return aiRequest(org, identity, input, boards);
   if (op === "org.jira.create" || op === "org.jira.status")
     return jira(org, identity, input, boards);
 

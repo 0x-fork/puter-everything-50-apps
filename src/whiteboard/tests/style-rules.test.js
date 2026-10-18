@@ -155,21 +155,23 @@ test("the board list drops columns in a narrower library instead of hiding names
     rule(".board-grid.is-list .board-info {", narrow),
     /minmax\(0, 1fr\) 120px;/,
   );
-  // Header columns line up with the rows' columns.
-  assert.match(
-    rule(".board-list-head:has(+ .board-grid.is-list) {", wide),
-    /56px minmax\(0, 1fr\) 120px 150px 70px/,
+  // Header columns line up with the rows' columns. The narrower rules use
+  // the base rule's selector: a shorter `:has()` lost to it on specificity,
+  // so the header kept all six columns, misaligned with the rows, and "Name"
+  // ran into "Last edited" from 900px down.
+  const head = ".board-list-head:has(+ .board-grid.is-list > .board-card) {";
+  assert.equal(
+    css.includes(".board-list-head:has(+ .board-grid.is-list) {"),
+    false,
   );
-  assert.match(
-    rule(".board-list-head:has(+ .board-grid.is-list) {", narrow),
-    /56px minmax\(0, 1fr\) 120px 70px/,
-  );
+  assert.match(rule(head, wide), /56px minmax\(0, 1fr\) 120px 150px 70px/);
+  assert.match(rule(head, narrow), /56px minmax\(0, 1fr\) 120px 70px/);
   // Phones keep their own layout, which comes later.
-  assert.ok(
-    css.indexOf(
-      "@media (max-width: 760px) {\n  .board-grid.is-list .board-info {",
-    ) > narrow,
+  const phone = css.indexOf(
+    "@media (max-width: 760px) {\n  .board-grid.is-list .board-info {",
   );
+  assert.ok(phone > narrow);
+  assert.match(rule(head, phone), /display:\s*none/);
 });
 
 test("the board list's column names show only above boards, not above an empty state", () => {
@@ -438,4 +440,81 @@ test("a guest's access words in the board tag are never cut; on phones they show
   assert.match(rule(".board-tag[data-access] {"), /flex-shrink:\s*0/);
   assert.match(rule(".board-tag-place {", phone), /display:\s*none/);
   assert.match(rule(".board-tag-access {", phone), /white-space:\s*normal/);
+});
+
+test("focus rings in the home templates row and the phone category chips are not cut off", () => {
+  // A focus ring reaches 6px outside a control (3px wide, 3px out), but
+  // these scrolling rows kept only 2px and 3px of room, so the ring was cut
+  // on the scrolling sides.
+  const room = (selector, from) => {
+    const body = rule(selector, from);
+    const padding = body.match(/\n\s*padding:\s*([^;]+);/)[1].split(/\s+/);
+    const [top, right = top, , left = right] = padding.map(parseFloat);
+    return Math.min(top, right, left);
+  };
+  const home = css.indexOf("/* Home page.");
+  assert.ok(home >= 0);
+  assert.ok(room(".templates {", home) >= 6);
+  assert.match(rule(".templates {", home), /scroll-padding-inline:\s*6px/);
+  const phone = css.indexOf("On a phone the category chips scroll");
+  assert.ok(phone >= 0);
+  assert.ok(room(".library-chips {", phone) >= 6);
+  assert.match(rule(".library-chips {", phone), /scroll-padding-inline:\s*6px/);
+});
+
+test("on a short screen the template, shape and icon lists scroll with their dialog", () => {
+  // At 844x390 each list scrolled inside the scrolling dialog, showing a
+  // strip of 30 to 40px under the search and filters.
+  const at = css.indexOf(
+    "@media (max-height: 500px) {\n  .template-library-list,",
+  );
+  assert.ok(at >= 0);
+  const body = rule(".template-library-list,", at);
+  assert.match(
+    css.slice(at, css.indexOf("{", at + 30)),
+    /\.shape-families,\s*\.icon-grid/,
+  );
+  assert.match(body, /max-height:\s*none/);
+  assert.match(body, /overflow:\s*visible/);
+});
+
+test("the timer's minutes and seconds fields share a row", () => {
+  // The panel leaves 248px for them, under the 336px two 160px fields and
+  // their gap need, so Seconds wrapped 46px below Minutes.
+  assert.match(rule(".workshop-timer.panel {"), /width:\s*280px/);
+  assert.match(rule(".workshop-timer .field-row > * {"), /flex-basis:\s*0/);
+});
+
+test("beside an open discussion the comment list shows a scroll cue, not a card cut through a line", () => {
+  // At 120px it showed one discussion and the first line of the next, cut
+  // through mid-line.
+  const list = rule(".comments-panel.has-discussion #comment-list {");
+  assert.match(list, /max-height:\s*min\(184px, 30dvh\)/);
+  assert.match(list, /scroll-snap-type:\s*y proximity/);
+  const at = css.indexOf("@supports (animation-timeline: scroll())");
+  assert.ok(at >= 0);
+  const faded = rule(".comments-panel.has-discussion #comment-list {", at);
+  assert.match(faded, /mask-image:\s*linear-gradient/);
+  assert.match(faded, /animation-timeline:\s*scroll\(self\)/);
+  assert.match(
+    rule(".comments-panel.has-discussion #comment-list:has(:focus-visible) {"),
+    /mask-image:\s*none/,
+  );
+});
+
+test("the AI assistant's actions line their icons up at the left", () => {
+  // They took the secondary buttons' centring, so each icon sat where its
+  // name's length put it, in a ragged column. The rule needs a class to
+  // outweigh button.secondary, which loads later.
+  const org = readFileSync(
+    new URL("../src/organization/organization.css", import.meta.url),
+    "utf8",
+  );
+  const at = org.indexOf(".ai-actions button.secondary {");
+  assert.ok(at >= 0);
+  assert.match(
+    org.slice(at, org.indexOf("}", at)),
+    /justify-content:\s*flex-start/,
+  );
+  assert.match(rule("button.secondary {"), /justify-content:\s*center/);
 });

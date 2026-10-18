@@ -1624,6 +1624,19 @@ export class BoardService {
         (!orgUser && (next?.guest || configured)))
     )
       fail(400, "Choose an active member of your organization.");
+    // As when moving someone's boards all at once, only the account owner
+    // takes a board from the account owner or an administrator; another
+    // administrator could otherwise take them one by one.
+    if (
+      actor.uuid !== meta.owner &&
+      (await this.org.role(actor)) !== "owner" &&
+      (meta.owner === owner.uuid ||
+        (await this.org.freshUser(meta.owner))?.role === "admin")
+    )
+      fail(
+        403,
+        "Only the account owner can transfer boards owned by the account owner or an administrator.",
+      );
     if (previous)
       await this.setMember(room, { ...previous, role: "facilitator" });
     // An owner's access never expires, whatever they had as a guest, and
@@ -2588,6 +2601,21 @@ export class BoardService {
         (await hash(input.data)) !== input.asset
       )
         fail(400, "Invalid shared asset.");
+      // Assets are content-addressed, so one already saved, as when an
+      // upload's answer was lost or the same image is pasted again, is
+      // neither written nor counted again.
+      try {
+        await this.puter.fs.stat(path);
+        return { ok: true };
+      } catch (error) {
+        if (
+          error?.code &&
+          !["subject_does_not_exist", "ENOENT", "not_found"].includes(
+            error.code,
+          )
+        )
+          throw error;
+      }
       // A board's shared files are capped in all, so one participant, such
       // as a guest, cannot fill its owner's storage.
       const used = `wb:${room}:assetbytes`,
@@ -2770,8 +2798,51 @@ export class BoardService {
               if (input.update.length <= MAX_UPDATE)
                 record.update = input.update;
               else {
+                // A large edit is kept as a file for good, so it counts
+                // toward the board's file limit like an upload: otherwise
+                // anyone who can edit could fill its owner's storage by
+                // adding and removing a lot of content.
+                // The file is named by the edit, so one already written
+                // whole, as when a retry follows a lost answer, is neither
+                // written nor counted again; a write whose answer was lost
+                // but which landed whole stays counted.
+                const used = `wb:${room}:assetbytes`,
+                  size = input.update.length;
                 record.path = `whiteboard/shared/${room}/updates/${digest}.txt`;
-                await this.writeFile(record.path, input.update);
+                const whole = async () => {
+                  try {
+                    return (
+                      (await this.puter.fs.stat(record.path))?.size === size
+                    );
+                  } catch (error) {
+                    if (
+                      error?.code &&
+                      ![
+                        "subject_does_not_exist",
+                        "ENOENT",
+                        "not_found",
+                      ].includes(error.code)
+                    )
+                      throw error;
+                    return false;
+                  }
+                };
+                if (!(await whole())) {
+                  if ((await this.kv.incr(used, size)) > ASSET_BYTES) {
+                    await this.kv.incr(used, -size).catch(() => {});
+                    fail(
+                      413,
+                      "This board has reached its 1 GB limit for images and files.",
+                    );
+                  }
+                  await this.writeFile(record.path, input.update).catch(
+                    async (error) => {
+                      if (!(await whole().catch(() => false)))
+                        await this.kv.incr(used, -size).catch(() => {});
+                      throw error;
+                    },
+                  );
+                }
               }
               // The record's time is when it becomes visible, not when the
               // commit arrived: a slow file write must not leave it older
@@ -3842,7 +3913,8 @@ export class BoardService {
     }
   }
   // Mentions and replies become notifications for the people involved. An
-  // edited message notifies only the names the edit added.
+  // edited message notifies only the names the edit added that it has not
+  // told before.
   async commentNotifications(room, user, before, after) {
     const known = new Map(
       (before.comments || []).flatMap((t) =>
@@ -3969,12 +4041,29 @@ export class BoardService {
       // Their access is checked and their notifications written twenty at a
       // time, as one at a time a hundred-person discussion kept each reply's
       // save waiting seconds; who is told, and of what, is unchanged.
+      // Each message tells each person of each kind of news once: names
+      // taken out of a message and put back, however often, notify no one
+      // again, while a mention added to a reply still reaches someone told
+      // of the reply.
+      const told = `wb:${room}:told:${message.id}`,
+        heard =
+          only && index < 20 ? new Set((await this.kv.get(told)) || []) : null;
       const chosen = [];
       for (const [uuid, type] of recipients) {
-        if (index >= 20 || notified.has(uuid)) continue;
+        if (index >= 20 || notified.has(uuid) || heard?.has(`${type}:${uuid}`))
+          continue;
         notified.add(uuid);
         chosen.push([uuid, type]);
       }
+      if (chosen.length)
+        await this.kv.set(
+          told,
+          [
+            ...(heard || []),
+            ...chosen.map(([uuid, type]) => `${type}:${uuid}`),
+          ].slice(-200),
+          Math.floor((this.now() + 30 * DAY) / 1000),
+        );
       const reach = [];
       for (let n = 0; n < chosen.length; n += 20)
         reach.push(

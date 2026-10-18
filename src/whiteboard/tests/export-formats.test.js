@@ -6,7 +6,7 @@ import { PDFDocument, PDFRawStream, PDFName } from "pdf-lib";
 import { Image } from "@napi-rs/canvas";
 import { createCanvas } from "./canvas.js";
 import { board, item, validateBoard } from "../src/model.js";
-import { updateConnectors } from "../src/scene.js";
+import { updateConnectors, framesItems } from "../src/scene.js";
 import { drawObject } from "../src/render.js";
 import { fromTemplate } from "../src/templates.js";
 import {
@@ -475,6 +475,79 @@ test("spreadsheet exports list described pictures and refuse an area with nothin
   assert.match(text, /\r\nDrawing,Red and blue arrows,/);
   assert.match(text, /\r\nImage,"Team photo, =1\+1",/);
   assert.ok(exportXLSX(b, exportRegions(b)).size > 0);
+});
+
+test("a locked object inside a frame is exported, listed and counted with it", () => {
+  const b = board("Locked");
+  const frame = item("frame", 0, 0, { w: 600, h: 400, text: "Slide A" }),
+    loose = item("note", 100, 100, { text: "Locked heading", locked: true }),
+    member = item("note", 300, 100, { text: "Member", parentId: frame.id });
+  b.items = [frame, loose, member];
+  // Locked objects never take a parentId; they lie in the frame by place.
+  assert.equal(loose.parentId, undefined);
+  const [region] = exportRegions(b, { scope: "frames" });
+  assert.deepEqual(
+    region.items.map((i) => i.id),
+    [frame.id, loose.id, member.id],
+  );
+  assert.equal(framesItems(b.items, [frame.id]).get(frame.id).size - 1, 2);
+  const rows = spreadsheetModel(b, exportRegions(b))[0].rows,
+    locked = rows.find((row) => row[1] === "Locked heading");
+  assert.equal(locked[2], "Slide A");
+});
+
+test("selected mind map nodes export as data without the nodes drawn to show their lines", async () => {
+  const { regionNotes } = await import("../src/export-pptx.js");
+  const b = board("Mind");
+  const node = (text, x, y, parent) =>
+    item("note", x, y, {
+      w: 100,
+      h: 60,
+      text,
+      mindMap: { parent, direction: "right", auto: false, line: "straight" },
+    });
+  const root = node("Root", 0, 100, null);
+  const [x, y, z] = ["Idea X", "Idea Y", "Idea Z"].map((text, n) =>
+    node(text, 300, n * 100, root.id),
+  );
+  b.items = [root, x, y, z];
+  const [region] = exportRegions(b, {
+    scope: "selection",
+    selection: new Set([x.id]),
+  });
+  // The root is drawn, for the line to it; its other branches are not.
+  assert.deepEqual(
+    region.items.map((i) => i.id),
+    [root.id, x.id],
+  );
+  const rows = spreadsheetModel(b, [region])[0].rows;
+  assert.deepEqual(
+    rows.slice(1).map((row) => row[1]),
+    ["Idea X"],
+  );
+  assert.deepEqual(regionNotes(region), ["Idea X"]);
+});
+
+test("untitled frames export and present by their place in the frame order", () => {
+  const b = board("Untitled");
+  b.items = [0, 1, 2].map((n) =>
+    item("frame", n * 500, 0, {
+      w: 400,
+      h: 300,
+      text: n === 1 ? "Named" : "",
+      order: n,
+    }),
+  );
+  assert.deepEqual(
+    exportRegions(b, { scope: "frames" }).map((r) => r.name),
+    ["Frame 1", "Named", "Frame 3"],
+  );
+  assert.deepEqual(
+    exportRegions(b, { scope: "frames", frameIds: [b.items[2].id] }).map(
+      (r) => r.name,
+    ),
+    ["Frame 3"],
+  );
 });
 
 test("CSV exports a single table and rejects tables outside the scope", async () => {
@@ -2143,6 +2216,78 @@ test("image PDF pages hold no more pixels than print needs", async () => {
       );
     assert.ok(drawn <= printed * 1.01, `${scale}: ${drawn} > ${printed}`);
   }
+});
+
+test("an image PDF page holds its picture's pixels, see-through ones laid on white", async () => {
+  const b = board("Picture");
+  b.items = [item("note", 0, 0, { text: "Hello" })];
+  // Red on the left, see-through on the right, half see-through below.
+  const picture = async (board, rect, options) => {
+    if (options.transparent) return createCanvas(1, 1);
+    const canvas = createCanvas(2, 2),
+      ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 1, 1);
+    ctx.fillStyle = "rgba(0, 0, 255, 0.5)";
+    ctx.fillRect(0, 1, 2, 1);
+    return canvas;
+  };
+  const blob = await exportPDF(b, exportRegions(b), "en", picture, {
+    pageSize: "a4",
+  });
+  const pdf = await PDFDocument.load(await blobBytes(blob));
+  const images = [];
+  for (const [, object] of pdf.context.enumerateIndirectObjects())
+    if (
+      object instanceof PDFRawStream &&
+      object.dict.get(PDFName.of("Subtype"))?.toString() === "/Image" &&
+      object.dict.get(PDFName.of("Width"))?.toString() === "2"
+    )
+      images.push(object);
+  assert.equal(images.length, 1);
+  const [image] = images;
+  assert.equal(
+    image.dict.get(PDFName.of("ColorSpace")).toString(),
+    "/DeviceRGB",
+  );
+  assert.equal(image.dict.get(PDFName.of("SMask")), undefined);
+  const pixels = [...inflateSync(image.contents)];
+  assert.deepEqual(pixels.slice(0, 6), [255, 0, 0, 255, 255, 255]);
+  // Half see-through blue on white.
+  for (const n of [6, 9]) {
+    assert.ok(Math.abs(pixels[n] - 128) <= 2, `${pixels.slice(6)}`);
+    assert.ok(Math.abs(pixels[n + 1] - 128) <= 2);
+    assert.equal(pixels[n + 2], 255);
+  }
+});
+
+test("PowerPoint slide pictures are encoded by the browser where it can", async () => {
+  const b = board("Slides");
+  b.items = [item("note", 0, 0, { text: "Hello" })];
+  let blobs = 0;
+  // A canvas whose picture can only be had as a Blob, as the browser
+  // encodes it away from the page.
+  const rasterizer = async () => {
+    const canvas = createCanvas(4, 4),
+      png = canvas.toBuffer("image/png");
+    return {
+      width: 4,
+      height: 4,
+      toDataURL() {
+        throw Error("Encoded on the page");
+      },
+      toBlob(done, type) {
+        blobs++;
+        done(new Blob([png], { type }));
+      },
+    };
+  };
+  const entries = readZip(
+    await blobBytes(await exportPPTX(b, exportRegions(b), { rasterizer })),
+  );
+  assert.ok(blobs > 0);
+  const image = entries.get("ppt/media/image1.png");
+  assert.deepEqual([...image.slice(1, 4)], [0x50, 0x4e, 0x47]);
 });
 
 test("UML, BPMN and ERD connector ends validate and export as drawn", () => {

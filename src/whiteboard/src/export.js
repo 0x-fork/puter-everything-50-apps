@@ -5,7 +5,7 @@ import { orderedFrames, framesItems, isConnector } from "./scene.js";
 import { rasterRegion } from "./render.js";
 import { measureContext, breathe } from "./export-layout.js";
 import { exportLinks, linkCorners } from "./export-links.js";
-import { addTranslations, t } from "./i18n.js";
+import { addTranslations, t, untitledFrame } from "./i18n.js";
 
 export function exportRegions(b, options = {}) {
   const scene = mindVisibility(b.items, b.comments);
@@ -16,31 +16,42 @@ export function exportRegions(b, options = {}) {
 }
 // A mind map line is drawn from both of its nodes, so the far node of a
 // line that reaches an exported area, or joins an exported node, comes
-// along: the area then shows the line as the canvas does.
+// along: the area then shows the line as the canvas does. Only lines from
+// what was exported count, so partners never bring in theirs. Partners are
+// listed as such, since they are drawn but not exported as data.
 // The lines are found once per export, since a board can hold thousands
 // of frames.
 function mindPartners(b) {
   const lines = mindLines(b.items);
-  if (!lines.length) return (items) => items;
+  if (!lines.length) return (items) => ({ items });
   const byId = new Map(b.items.map((i) => [i.id, i])),
     joins = lines.map((line) => {
       const child = byId.get(line.id.slice("mind-line:".length));
       return { box: bounds([line]), ids: [child.id, child.mindMap.parent] };
     });
   return (items, rect) => {
-    const chosen = new Set(items.map((i) => i.id));
-    let added = false;
+    const chosen = new Set(items.map((i) => i.id)),
+      partners = new Set();
     for (const { box, ids } of joins) {
       const reaches = rect
         ? touches(box, rect)
         : ids.some((id) => chosen.has(id));
-      if (!reaches || ids.every((id) => chosen.has(id))) continue;
-      ids.forEach((id) => chosen.add(id));
-      added = true;
+      if (reaches) for (const id of ids) if (!chosen.has(id)) partners.add(id);
     }
-    return added ? b.items.filter((i) => chosen.has(i.id)) : items;
+    return partners.size
+      ? {
+          items: b.items.filter((i) => chosen.has(i.id) || partners.has(i.id)),
+          partners,
+        }
+      : { items };
   };
 }
+// What an exported area holds as data, for spreadsheets, whiteboard files
+// and speaker notes: its objects without the mind map partners drawn there.
+export const regionData = (region) =>
+  region.partners
+    ? region.items.filter((i) => !region.partners.has(i.id))
+    : region.items;
 const touches = (box, rect) =>
   box.x <= rect.x + rect.w &&
   box.x + box.w >= rect.x &&
@@ -60,7 +71,7 @@ function regionPlans(
         {
           name: t("Selected region"),
           rect: region,
-          items: withMindPartners(
+          ...withMindPartners(
             b.items.filter((i) => touches(bounds([i]), region)),
             region,
           ),
@@ -87,14 +98,14 @@ function regionPlans(
       {
         name: t("Selected objects"),
         rect: { x: a.x - 20, y: a.y - 20, w: a.w + 40, h: a.h + 40 },
-        items: withMindPartners(items),
+        ...withMindPartners(items),
       },
     ];
   }
   if (scope === "frames") {
-    const frames = orderedFrames(b.items).filter(
-      (f) => !frameIds.length || frameIds.includes(f.id),
-    );
+    const every = orderedFrames(b.items),
+      rank = new Map(every.map((f, n) => [f, n])),
+      frames = every.filter((f) => !frameIds.length || frameIds.includes(f.id));
     if (!frames.length) throw Error("Add a frame before exporting sections.");
     // A frame drawn wholly inside an exported frame belongs to it and shows
     // in it on the board, with what it holds; and a line leading from the
@@ -146,11 +157,11 @@ function regionPlans(
       for (const id of [...chosen])
         for (const line of linesAt.get(id) || []) chosen.add(line);
       return {
-        name: f.text || t("Frame"),
+        name: f.text || untitledFrame(rank.get(f)),
         frameId: f.id,
         rect,
         // Board order is kept, so what is drawn on top stays on top.
-        items: withMindPartners(
+        ...withMindPartners(
           [...chosen]
             .sort((p, q) => order.get(p) - order.get(q))
             .map((id) => byId.get(id)),
@@ -526,6 +537,57 @@ export function pageItems(region, rect, cache) {
 // exactly. Vector mode draws text and shapes as PDF content so they stay
 // sharp and selectable, using standard PDF fonts. Large regions are tiled at
 // a constant scale; an overview page shows the page grid.
+// A page's picture goes into the PDF as its pixels, compressed by the
+// browser off the page's thread: a PNG made of it would be encoded, then
+// decoded, split and compressed again in script, which took most of half a
+// second a page and held up the page for a minute on a large board. A page
+// is opaque, so any see-through pixel is laid on white, as the page is.
+// It resolves with what draws it on a page.
+async function pagePicture(pdf, canvas, operators) {
+  if (typeof CompressionStream !== "function") {
+    const png = await pdf.embedPng(canvas.toDataURL("image/png"));
+    // Compressed now, between pages, rather than all at once when the file
+    // is written, which would hold up the page for seconds.
+    await png.embed();
+    return (page, box) => page.drawImage(png, box);
+  }
+  const { width, height } = canvas,
+    rgba = canvas.getContext("2d").getImageData(0, 0, width, height).data,
+    pixels = new Uint8Array(width * height * 3);
+  for (let p = 0, q = 0; p < rgba.length; p += 4, q += 3) {
+    const a = rgba[p + 3];
+    if (a === 255) {
+      pixels[q] = rgba[p];
+      pixels[q + 1] = rgba[p + 1];
+      pixels[q + 2] = rgba[p + 2];
+    } else
+      for (let c = 0; c < 3; c++)
+        pixels[q + c] = Math.round((rgba[p + c] * a + 255 * (255 - a)) / 255);
+  }
+  const bytes = new Uint8Array(
+    await new Response(
+      new Blob([pixels]).stream().pipeThrough(new CompressionStream("deflate")),
+    ).arrayBuffer(),
+  );
+  const ref = pdf.context.register(
+    pdf.context.stream(bytes, {
+      Type: "XObject",
+      Subtype: "Image",
+      Width: width,
+      Height: height,
+      ColorSpace: "DeviceRGB",
+      BitsPerComponent: 8,
+      Filter: "FlateDecode",
+    }),
+  );
+  return (page, { x, y, width, height }) =>
+    page.pushOperators(
+      operators.pushGraphicsState(),
+      operators.concatTransformationMatrix(width, 0, 0, height, x, y),
+      operators.drawObject(page.node.newXObject("Image", ref)),
+      operators.popGraphicsState(),
+    );
+}
 export async function exportPDF(
   b,
   regions,
@@ -538,7 +600,18 @@ export async function exportPDF(
   // The PDF writer and its fonts load when a PDF is first exported, as the
   // PowerPoint and SVG writers do, rather than with every visit.
   const [
-    { PDFDocument, PDFHexString, PDFName, StandardFonts, degrees, rgb },
+    {
+      PDFDocument,
+      PDFHexString,
+      concatTransformationMatrix,
+      drawObject,
+      popGraphicsState,
+      pushGraphicsState,
+      PDFName,
+      StandardFonts,
+      degrees,
+      rgb,
+    },
     { createVectorContext, drawVectorRegion },
   ] = await Promise.all([
     import("pdf-lib"),
@@ -794,13 +867,15 @@ export async function exportPDF(
             maxSize,
             mindCounts: entry.region.mindCounts,
           });
-          const png = await pdf.embedPng(canvas.toDataURL("image/png"));
+          const picture = await pagePicture(pdf, canvas, {
+            concatTransformationMatrix,
+            drawObject,
+            popGraphicsState,
+            pushGraphicsState,
+          });
           // The canvas memory goes before the next part is drawn.
           canvas.width = canvas.height = 0;
-          // Compressed now, between pages, rather than all at once when
-          // the file is written, which would hold up the page for seconds.
-          await png.embed();
-          page.drawImage(png, {
+          picture(page, {
             x: drawn.x + (part.x - rect.x) * scale,
             y: placement.y - (part.y - rect.y + part.h) * scale,
             width: part.w * scale,

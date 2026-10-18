@@ -50,6 +50,8 @@ export function createTextEditor(
   item,
   {
     onSelection = () => {},
+    // Told when what was pasted or dropped did not all fit.
+    onLimit = () => {},
     history,
     plainTextOnly = false,
     maxLength = LIMIT,
@@ -61,6 +63,7 @@ export function createTextEditor(
   } = {},
 ) {
   const input = doc.createElement("div");
+  let typedAtLimit = false;
   input.dataset.userContent = "";
   input.contentEditable = "true";
   input.setAttribute("contenteditable", "true");
@@ -389,6 +392,7 @@ export function createTextEditor(
       start: shift(b.start),
     }));
     insert = limit(normalized, maxLength - value.length + end - start);
+    if (insert.length < normalized.length && !typedAtLimit) onLimit();
     if (!insert && start === end) return;
     if (record) remember(group);
     runs = spliceTextRuns(
@@ -614,7 +618,15 @@ export function createTextEditor(
           maxLength
       ) {
         e.preventDefault();
-        replace(e.data);
+        // A key typed at the limit adds nothing, as in any text field;
+        // pasted, dropped, dictated or predicted words that do not all fit
+        // are reported.
+        typedAtLimit = Array.from(e.data).length === 1;
+        try {
+          replace(e.data);
+        } finally {
+          typedAtLimit = false;
+        }
       }
     }
   });
@@ -887,8 +899,10 @@ export function createTextEditor(
     e.stopPropagation();
   });
   input.addEventListener("drop", (e) => {
+    // Files go on the board, as they do when dropped beside the text; the
+    // board also takes down its drop target as the drop passes it.
+    if (Array.from(e.dataTransfer?.types || []).includes("Files")) return;
     e.preventDefault();
-    e.stopPropagation();
     if (!e.dataTransfer || readOnly()) return;
     const { text, formatting, paragraphs } = readTransfer(e.dataTransfer);
     if (!text) return;
