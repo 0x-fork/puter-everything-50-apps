@@ -71,6 +71,32 @@ export async function restylePicture(picture, { prompt = '', style = null, testM
   return { blob, prompt: text };
 }
 
+/** The instruction sent with a picture to change it as described ("make the sky a sunset"). */
+export function editPrompt(text) {
+  const t = String(text || '').trim().slice(0, RESTYLE_PROMPT_MAX);
+  if (!t) return '';
+  return `Edit this picture: ${t}. Keep everything the edit does not change as it is: the composition, framing, subjects and their poses. Return the full image with the same aspect ratio.`;
+}
+
+/**
+ * Change a picture as described: { blob }. picture is { blob, width, height }
+ * as for restylePicture.
+ */
+export async function editPicture(picture, instruction, { testMode = false, txt2img = defaultTxt2img, fetchFn } = {}) {
+  const text = editPrompt(instruction);
+  if (!text) throw new Error('Describe the change first.');
+  if (!picture?.blob) throw new Error('There is no picture to change here.');
+  const options = { ratio: { w: picture.width, h: picture.height }, input_image: await blobToDataUri(picture.blob), ...(testMode ? { test_mode: true } : {}) };
+  let result;
+  try {
+    result = await txt2img(text, options);
+  } catch (err) {
+    throw new Error(imageErrorMessage(err));
+  }
+  const blob = await imageBlobFrom(result, fetchFn);
+  return { blob, prompt: text };
+}
+
 /** A file name for a restyled picture: "Clip name - Storybook.png". */
 export function restyleFileName(base, styleId, type = 'image/png') {
   const style = RESTYLE_STYLES.find((s) => s.id === styleId)?.label || 'Restyled';

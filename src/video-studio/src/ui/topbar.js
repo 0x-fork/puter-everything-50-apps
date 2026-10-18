@@ -3,6 +3,7 @@
  * account and Export buttons.
  */
 import { h } from '../lib/dom.js';
+import { shortcutLabel } from '../lib/platform.js';
 import { icon, appIcon } from '../lib/icons.js';
 import { menuButton } from './menu.js';
 import { getTheme, setTheme, prefs } from './prefs.js';
@@ -71,7 +72,7 @@ export function createTopbar(ctx) {
     cmd('import', { icon: 'import', label: 'Import media...' }),
     cmd('scriptToVideo', { icon: 'script', label: 'Script to video...' }),
     cmd('findHighlights', { icon: 'highlights', label: 'Find highlights...' }),
-    cmd('assistant', { icon: 'magic' }),
+    cmd('assistant', { icon: 'effects' }),
     cmd('export', { icon: 'export', label: 'Export...' }),
     cmd('shareReview', { icon: 'shareReview', label: 'Share for review...' }),
     cmd('reviewComments', { icon: 'comment', label: 'Review comments' }),
@@ -132,7 +133,7 @@ export function createTopbar(ctx) {
       cmd('multicam', { icon: 'multicam', label: 'Create multi-camera clip...' }),
       cmd('flattenMulticam', { icon: 'rows' }),
       'separator',
-      cmd('assistant', { icon: 'magic', checked: Boolean(ctx.assistant?.isOpen) }),
+      cmd('assistant', { icon: 'effects', checked: Boolean(ctx.assistant?.isOpen) }),
       cmd('splitScenes', { icon: 'scissors', label: 'Split at scene changes...' }),
       cmd('removeSilences', { icon: 'waveform', label: 'Remove silences...' }),
       cmd('syncBySound', { icon: 'waveform' }),
@@ -215,13 +216,15 @@ export function createTopbar(ctx) {
   const shareBtn = h('button.btn.share-btn', { type: 'button', 'data-tip': 'Share for review' }, icon('shareReview', 16), h('span', 'Share'));
   shareBtn.addEventListener('click', () => commands.run('shareReview'));
   const shortcutsBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Keyboard shortcuts', 'data-tip': 'Keyboard shortcuts' }, icon('keyboard', 18));
+  const aiBtn = h('button.icon-btn.ai-btn', { type: 'button', 'aria-label': 'AI assistant', 'aria-controls': 'ai-panel', 'data-tip': 'AI assistant', 'data-tip-key': shortcutLabel(commands.get('assistant')?.keys[0] || 'Mod+K') }, icon('effects', 18));
+  aiBtn.addEventListener('click', () => commands.run('assistant'));
   shortcutsBtn.addEventListener('click', () => ctx.openShortcuts());
 
   const account = accountButton(ctx.account);
   const el = h('header.topbar', { role: 'banner' },
     h('div.topbar-left', menuBtn, menubar, status),
     h('div.topbar-center', nameBtn),
-    h('div.topbar-right', layoutBtn, shortcutsBtn, account, shareBtn, exportBtn),
+    h('div.topbar-right', aiBtn, layoutBtn, shortcutsBtn, account, shareBtn, exportBtn),
   );
 
   const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });

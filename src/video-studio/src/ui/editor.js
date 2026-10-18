@@ -28,7 +28,7 @@ import { openDialog, toast, installTooltips } from './dialog.js';
 import { openShortcutsDialog } from './shortcuts-dialog.js';
 import { createHistoryPanel } from './history-panel.js';
 import { createReviewPanel } from './review/review-panel.js';
-import { createEditAssistant } from './edit-assistant.js';
+import { createAiPanel } from './ai-panel.js';
 import { openPreferences, pref, onPrefsChange } from './preferences-dialog.js';
 import { prefs, setPref } from './prefs.js';
 
@@ -113,8 +113,8 @@ export class Editor {
     ctx.timeline = createTimeline(ctx);
 
     const p = prefs();
-    this.el = h('div.editor', { style: { '--left-w': `${p.leftW}px`, '--right-w': `${p.rightW}px`, '--upper': String(p.upperH) } },
-      topbar.el,
+    // The workspace and, beside it, the AI sidebar (added once the mobile chrome knows the layout).
+    const body = h('div.editor-body',
       h('main#main.workspace', { tabindex: '-1' },
         h('h1.sr-only', `${project.name} - Video Studio editor`),
         h('div.upper',
@@ -128,14 +128,19 @@ export class Editor {
         ctx.timeline.el,
       ),
     );
+    this.el = h('div.editor', { style: { '--left-w': `${p.leftW}px`, '--right-w': `${p.rightW}px`, '--upper': String(p.upperH) } },
+      topbar.el,
+      body,
+    );
     ctx.history = createHistoryPanel(ctx);
     this.el.append(ctx.history.el);
     ctx.review = createReviewPanel(ctx);
     this.el.append(ctx.review.el);
     ctx.mobile = createMobileChrome(ctx, this.el);
-    ctx.assistant = createEditAssistant(ctx);
-    ctx.timeline.el.append(ctx.assistant.launcher);
-    this.el.append(ctx.assistant.el);
+    // Development builds make free sample clips with ?aitest (Puter's test mode).
+    ctx.aiTestMode = Boolean(import.meta.env?.DEV && new URLSearchParams(location.search).has('aitest'));
+    ctx.assistant = createAiPanel(ctx);
+    body.append(ctx.assistant.rail, ctx.assistant.el);
     root.replaceChildren(this.el);
     root.removeAttribute('aria-busy');
     installTooltips(this.el);

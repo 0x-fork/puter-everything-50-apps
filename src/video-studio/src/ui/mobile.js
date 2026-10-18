@@ -359,6 +359,7 @@ export function createMobileChrome(ctx, root, { matchMedia: mmImpl } = {}) {
     ctx.timeline.setCentered?.(next === 'phone');
     syncBars();
     syncHistory();
+    ctx.assistant?.relayout?.();
     requestAnimationFrame(() => ctx.playerView.relayout?.());
   }
 
