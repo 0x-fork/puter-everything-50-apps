@@ -12,7 +12,7 @@
 export const NUM_FORMATS = ['general', 'number', 'currency', 'percent', 'date', 'time', 'datetime', 'scientific', 'text', 'custom'];
 export const MAX_DECIMAL_PLACES = 20;
 
-import { formatWithCode, codeDateKind, codeScalesPercent, codeLocale, localeTag, MAX_FORMAT_CODE_LENGTH } from './numfmt.js';
+import { formatWithCode, codeDateKind, codeScalesPercent, codeLocale, localeTag, MAX_FORMAT_CODE_LENGTH, stepCodeDecimals } from './numfmt.js';
 import { normalizeNumberDigits } from './number-shape.js';
 import { parseDecimalText } from './formula/number-text.js';
 
@@ -632,7 +632,10 @@ export function parseDate(text, now = new Date(), loc = locale) {
     const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
     return typedDate(y, mo, d, CJK_DATE_RE.test(t) ? 'long' : null);
   }
-  m = (info.decimal === ',' ? DOTTED_DATE_RE : SLASH_DATE_RE).exec(t);
+  // A day and month written with the full stop that ends each ("15.3.", Czech "15. 3."), the quick way to
+  // type a date of this year where dates are dotted, is the same as 15.3.
+  const dotted = info.decimal === ',' && /^\d{1,2}\. ?\d{1,2}\.$/.test(t) ? t.slice(0, -1) : t;
+  m = (info.decimal === ',' ? DOTTED_DATE_RE : SLASH_DATE_RE).exec(dotted);
   if (m) {
     let y, mo, d;
     // Year-first locales (ja-JP, zh-CN, ko-KR) read 24/1/1 as 2024-01-01 when that is a date; otherwise the usual order below applies.
@@ -715,12 +718,16 @@ export function parseInput(text, loc = locale) {
   if (TYPED_ERRORS.has(upper)) return { v: { error: upper }, f: null, fmt: null };
 
   // The sign may lead, as Turkish writes %12,5 (and -%12,5), and a typed %50 reads in any regional format.
-  if (t.endsWith('%') || /^[-+]?%/.test(t)) {
-    const body = (t.endsWith('%') ? t.slice(0, -1) : t.replace('%', '')).trim();
+  // In parentheses it is negative, as an amount is: (5%) is -5%.
+  const bracketed = /^\(.*\)$/.test(t) ? t.slice(1, -1).trim() : null;
+  const pct = bracketed ?? t;
+  if (pct.endsWith('%') || /^[-+]?%/.test(pct)) {
+    const body = (pct.endsWith('%') ? pct.slice(0, -1) : pct.replace('%', '')).trim();
     // The percent moves the decimal point of the digits as typed, as VALUE reads it, so 12.3% is
     // 0.123 exactly as Excel stores it and not 12.3 / 100 (0.12300000000000001).
-    const n = body !== '' && /\d/.test(body) ? localeNumber(body, info, (digits) => parseDecimalText(digits, -2)) : null;
-    if (n != null) return { v: n, f: null, fmt: 'percent' };
+    const n = body !== '' && /\d/.test(body) && !(bracketed != null && /^[-+]/.test(body))
+      ? localeNumber(body, info, (digits) => parseDecimalText(digits, -2)) : null;
+    if (n != null) return { v: bracketed != null && n !== 0 ? -n : n, f: null, fmt: 'percent' };
   }
 
   if (/\d/.test(t)) {
@@ -1184,6 +1191,16 @@ export function editText(cell) {
     if (typeof back === 'number' && Math.abs(back - v) < 1e-9) return text;
   }
   return formatInputNumber(v);
+}
+
+/**
+ * Whether More and Fewer decimal places have places to step in a style: not in a date, a time or text, and in
+ * a custom code only where a section shows a number (#,##0.00_);(#,##0.00), the Accounting preset, 0.0%).
+ */
+export function hasDecimalPlaces(style) {
+  const fmt = style?.fmt;
+  if (['date', 'time', 'datetime', 'text'].includes(fmt)) return false;
+  return fmt !== 'custom' || stepCodeDecimals(style.code, 1) != null;
 }
 
 /** Alignment a value gets when the style does not force one. */

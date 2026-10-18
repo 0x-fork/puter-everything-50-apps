@@ -202,13 +202,15 @@ const textW = (text, size = 12) => {
 };
 
 let axisTextContext;
+const UI_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 function axisTextWidth(text, style) {
   // Imported charts often fit a dozen small category labels on one line.
   // Measure their actual font instead of rotating them on a fixed-width estimate.
   if (typeof OffscreenCanvas === 'undefined') return textW(text, style.size);
   axisTextContext ||= new OffscreenCanvas(1, 1).getContext('2d');
   if (!axisTextContext) return textW(text, style.size);
-  axisTextContext.font = `${style.italic ? 'italic ' : ''}${style.bold ? '700 ' : ''}${style.size}px ${fontStack(style.font)}`;
+  // Text without a font of its own is drawn in the interface's (tokens.css --font), not the canvas's fallback.
+  axisTextContext.font = `${style.italic ? 'italic ' : ''}${style.bold ? '700 ' : ''}${style.size}px ${fontStack(style.font) || UI_FONT}`;
   return axisTextContext.measureText(String(text)).width;
 }
 
@@ -1001,7 +1003,9 @@ function renderStyledCartesian(data, chart, width, height) {
   // A bubble chart read from a range shares its x and size columns across its series; file series carry their own.
   const series = data.series.slice(0, MAX_SERIES).map(s => chart.type === 'bubble' && (!s.x || !s.sizes)
     ? { ...s, x: s.x || data.x, sizes: s.sizes || data.sizes, ...(!s.sizePointStyles && data.sizePointStyles ? { sizePointStyles: data.sizePointStyles } : {}),
-      ...(s.sizeStyle === undefined && data.sizeStyle ? { sizeStyle: data.sizeStyle } : {}) } : s), n = data.categories.length;
+      ...(s.sizeStyle === undefined && data.sizeStyle ? { sizeStyle: data.sizeStyle } : {}) } : s)
+    // A scatter series without x values (text beside its numbers, or none) plots at 1, 2, 3…, as Excel's does.
+    .map(s => chart.type === 'scatter' && !(s.x || data.x)?.some(Number.isFinite) ? { ...s, x: s.values.map((_, i) => i + 1) } : s), n = data.categories.length;
   const layered = chart.type === 'combo' && a.seriesTypes?.length === series.length;
   const pureArea = chart.type === 'area';
   // Stacked lines accumulate as stacked areas do; only the fill is missing.
@@ -1212,10 +1216,15 @@ function renderStyledCartesian(data, chart, width, height) {
     const last = Math.max(1, between ? n : n - 1);
     return categoryTickPosition(crossingValue(crossing, 1, last + 1, 1) - 1);
   };
-  const formatted = (v, code, step, units) => {
+  // An axis without a number format of its own reads its numbers in the cells' (Excel's Linked to
+  // source): 10% not 0.1, $1,000 not 1,000, a date not its serial number.
+  const primarySource = (secondary ? series.slice(0, -1) : series).find(s => s.style)?.style || null;
+  const secondarySource = secondary ? series.at(-1).style || null : null;
+  const formatted = (v, code, step, units, source = null) => {
     const divisor = units?.divisor || 1;
+    if (!code && source?.fmt === 'custom') code = source.code;
     // Display units already name the scale: 20,000 thousands, not 20K thousands.
-    return code ? formatValue(v / divisor, { fmt: 'custom', code }) : axisLabel(v / divisor, null, step / divisor, { compact: divisor === 1 });
+    return code ? formatValue(v / divisor, { fmt: 'custom', code }) : axisLabel(v / divisor, source, step / divisor, { compact: divisor === 1 });
   };
   if (horizontal && valueLabels) {
     // An automatic major unit must fit the formatted labels along the physical
@@ -1225,7 +1234,7 @@ function renderStyledCartesian(data, chart, width, height) {
     {
       while (true) {
         const ticks = scaleTicks(scale);
-        const widths = ticks.map(v => axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits).trim(), a.yStyle));
+        const widths = ticks.map(v => axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), a.yStyle));
         // Centered end labels need space outside the plot. Solve each edge's
         // movement by its fractional contribution to the label position, as
         // for an interior axis crossing. Keep sufficient authored margins.
@@ -1249,7 +1258,7 @@ function renderStyledCartesian(data, chart, width, height) {
       }
       categoryCrossing = crossingValue(crossings.x, scale.min, scale.max);
     }
-    const texts = scaleTicks(scale).map(v => formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits).trim()).filter(Boolean);
+    const texts = scaleTicks(scale).map(v => formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim()).filter(Boolean);
     if (texts.length) {
       const boxes = texts.map(t => categoryTextLayout(t, a.yStyle, Infinity, 'none'));
       const ascent = Math.max(...boxes.map(b => b.ascent)), descent = Math.max(...boxes.map(b => b.height - b.ascent));
@@ -1268,9 +1277,9 @@ function renderStyledCartesian(data, chart, width, height) {
     }
   }
   const primaryLabelWidth = !horizontal && valueLabels ? Math.max(0, ...scaleTicks(scale).map(v =>
-    axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits).trim(), a.yStyle))) : 0;
+    axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), a.yStyle))) : 0;
   const secondaryLabelWidth = secondaryLabels ? Math.max(0, ...scaleTicks(scale2).map(v =>
-    axisTextWidth(formatted(v, a.y2Format, scale2.step, a.y2Units).trim(), a.y2Style))) : 0;
+    axisTextWidth(formatted(v, a.y2Format, scale2.step, a.y2Units, secondarySource).trim(), a.y2Style))) : 0;
   const primaryTitleSpace = !horizontal && chart.yTitle ? a.yStyle.size * 1.6 : 0;
   const secondaryTitleSpace = secondary && chart.y2Title ? a.y2Style.size * 1.6 : 0;
   const valueLabelColumns = () => {
@@ -1314,7 +1323,7 @@ function renderStyledCartesian(data, chart, width, height) {
       Math.max(2, Math.floor((horizontal ? plot.h : plot.w) / 130))).step)) : 1;
   const xTicks = dates ? dates.ticks(xStep, a.xTimeUnit) : numericX ? scaleTicks({ min: xMin, max: xMax, step: xStep }) : [];
   const dateMajor = dates?.ticks(xStep, a.xTimeUnit, true);
-  const categoryTexts = dates || numericX ? xTicks.map(v => formatted(v, a.xFormat || data.xStyle?.code, xStep, numericX ? a.xUnits : null)) : data.categories.map((text, i) =>
+  const categoryTexts = dates || numericX ? xTicks.map(v => formatted(v, a.xFormat, xStep, numericX ? a.xUnits : null, data.xStyle)) : data.categories.map((text, i) =>
     a.xFormat && !a.xSourceLinked && data.categoryValues?.[i] != null ? formatValue(data.categoryValues[i], { fmt: 'custom', code: a.xFormat }) : text);
   let categoryLayouts = categoryTexts.map(c => categoryTextLayout(c, a.xStyle,
     dates || numericX ? Infinity : labelWidthLimit(a.xRotation, !horizontal), a.xWrap));
@@ -1489,18 +1498,18 @@ function renderStyledCartesian(data, chart, width, height) {
         const topAxis = valueAxisHigh, y = yOrigin;
         parts.push(`<line x1="${f(x)}" y1="${f(y)}" x2="${f(x)}" y2="${f(y + (topAxis ? -5 : 5))}" stroke="${esc(a.yStyle.color)}"/>`);
       }
-      if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits).trim(), x,
+      if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), x,
         valueLabelOrigin + (valueHigh ? -a.yStyle.size * .5 : a.yStyle.size * 1.5), a.yStyle, 'middle', 'data-el="yAxis"');
       continue;
     }
     const y = sy(v);
     if (chart.gridlines) gridline('y', plot.x, y, plot.x + plot.w, y);
-    if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits).trim(), valueColumns.primary.x,
+    if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), valueColumns.primary.x,
       y + a.yStyle.size * .35, a.yStyle, valueHigh ? 'start' : 'end', 'data-el="yAxis"');
   }
   if (secondary) for (const v of secondaryTicks) {
     if (a.y2Gridlines) gridline('y2', plot.x, sy2(v), plot.x + plot.w, sy2(v));
-    if (secondaryLabels) label(formatted(v, a.y2Format, scale2.step, a.y2Units).trim(), valueColumns.secondary.x, sy2(v) + a.y2Style.size * .35, a.y2Style, secondHigh ? 'start' : 'end', 'data-el="y2Axis"');
+    if (secondaryLabels) label(formatted(v, a.y2Format, scale2.step, a.y2Units, secondarySource).trim(), valueColumns.secondary.x, sy2(v) + a.y2Style.size * .35, a.y2Style, secondHigh ? 'start' : 'end', 'data-el="y2Axis"');
   }
   if (horizontal) {
     if (categoryLabels) {

@@ -193,6 +193,10 @@ export function createGrid(opts) {
   let baseColHeaderH = COL_HEADER_H;
   const OUTLINE_STEP = 12; // px per outline level in the group gutter
   let rendered = { r0: -1, r1: -1, c0: -1, c1: -1, version: -1, sheet: null };
+  // The rows drawn in the last frame that the next one may reuse as they are (see render), and the
+  // count of layouts made, which tells when the lines may have moved under them.
+  let rowCache = { key: null, rows: new Map() };
+  let layoutGeneration = 0;
   let mergeMap = new Map(); // cellKey → merge, only for coordinates actually queried
   let mergeMapVersion = -1;
   let mergeMapSheet = null;
@@ -396,6 +400,7 @@ export function createGrid(opts) {
 
   function rebuildOffsets() {
     offsetsStale = false;
+    layoutGeneration++; // every line may have moved: rows kept from an earlier frame are built afresh
     const s = sheet();
     if (!s) return;
     refreshAutomaticRowHeights();
@@ -1691,7 +1696,10 @@ export function createGrid(opts) {
     return out;
   }
 
-  function buildLayerCells(layer, s, r0, r1, c0, c1) {
+  function buildLayerCells(layer, s, r0, r1, c0, c1, key = null) {
+    // A layer drawn for the same lines of an unchanged sheet is kept, unless a merged block in it
+    // drew only the part of its border then in view.
+    if (key && layer.key === key) return;
     const frag = document.createDocumentFragment();
     const rowEls = new Map();
     const rowEl = (r) => {
@@ -1723,6 +1731,7 @@ export function createGrid(opts) {
     // A merge anchor or spilling label outside the layer's window still reaches into it; the
     // canvas draws it too, but underneath this opaque layer.
     for (const p of cellsReachingInto(s, r0, r1, c0, c1)) appendCell(rowEl(p.r), copy(p.r, p.c));
+    layer.key = key && !frag.querySelector('.merged') ? key : null;
     layer.cells.replaceChildren(frag);
   }
 
@@ -1879,7 +1888,17 @@ export function createGrid(opts) {
     const panes = frozen.split ? `${frozen.top ? paneRows : ''}/${frozen.left ? paneCols : ''}` : `${frozen.rows},${frozen.cols}`;
     const key = `${vr.r0},${vr.r1},${vr.c0},${vr.c1}|${panes}|${editingCell}|${windowKey()}${pageGeo ? `|${visiblePages(view).map((p) => `${p.across}.${p.down}`).join()}` : ''}`;
     if (rendered.sheet !== s.id || rendered.version !== wb.version || rendered.key !== key) {
-      const frag = document.createDocumentFragment();
+      // A scroll that changes only the rows in view keeps the rows still in view as they were drawn and
+      // builds the rows scrolling in: a frame used to build every cell in view again for a scroll of one
+      // row, a hundred milliseconds a frame zoomed out. Anything else — an edit, the columns in view, the
+      // panes, the cell being edited, the layout, a redraw asked for — builds every row afresh.
+      const rowsKey = `${s.id}|${wb.version}|${vr.c0},${vr.c1}|${panes}|${editingCell}|${windowKey()}|${layoutGeneration}${pageGeo ? `|${visiblePages(view).map((p) => `${p.across}.${p.down}`).join()}` : ''}`;
+      if (rendered.key == null || rendered.version !== wb.version || rowCache.key !== rowsKey) {
+        rowCache = { key: rowsKey, rows: new Map() };
+        for (const layer of [frzRows, frzCols, frzCorner]) layer.key = null;
+      }
+      const kept = rowCache.rows;
+      const keep = new Map(); // the rows the next frame may reuse
       const rowEls = new Map();
       const rowEl = (r) => {
         let row = rowEls.get(r);
@@ -1891,13 +1910,22 @@ export function createGrid(opts) {
         row.style.transform = `translateY(${rowY(r)}px)`;
         row.style.height = `${rowH(r)}px`;
         rowEls.set(r, row);
-        frag.append(row);
         return row;
       };
       for (let r = vr.r0; r <= vr.r1; r++) {
         if (rowHidden(s, r)) continue;
+        const was = kept.get(r);
+        if (was) { rowEls.set(r, was); keep.set(r, was); continue; }
         const row = rowEl(r);
-        for (let c = vr.c0; c <= vr.c1; c++) if (!s.hiddenCols.has(c) && !coveredByMerge(r, c)) appendCell(row, buildCell(s, r, c));
+        // A merged block draws the part of its border in view only: its row is built again next frame.
+        let stable = true;
+        for (let c = vr.c0; c <= vr.c1; c++) {
+          if (s.hiddenCols.has(c) || coveredByMerge(r, c)) continue;
+          const node = buildCell(s, r, c);
+          if (node.classList.contains('merged')) stable = false;
+          appendCell(row, node);
+        }
+        if (stable) keep.set(r, row);
       }
       // Cells outside the view that must still exist: merge anchors and spilling labels that
       // reach into it, and the active cell (for aria-activedescendant). Cells sit in their own
@@ -1914,17 +1942,37 @@ export function createGrid(opts) {
         if (node.style.width === '0px' || node.style.height === '0px') node.classList.add('sizeless');
         appendCell(rowEl(r), node);
       };
-      for (const p of cellsReachingInto(s, vr.r0, vr.r1, vr.c0, vr.c1)) addOutside(p.r, p.c);
+      for (const p of cellsReachingInto(s, vr.r0, vr.r1, vr.c0, vr.c1)) {
+        // A label running in from beside the view is the same while the columns in view are: a row
+        // reused holds it already. A merged block reaching in is built afresh, and its row with it.
+        const merged = !!mergeAt(p.r, p.c);
+        if (!merged && kept.has(p.r) && kept.get(p.r) === rowEls.get(p.r)) continue;
+        addOutside(p.r, p.c);
+        if (merged) keep.delete(p.r);
+      }
       // The active cell is always in the DOM, so aria-activedescendant names a node that exists and
       // a screen reader following the grid's cursor does not lose it: outside the rendered window,
       // and inside it on a hidden row or column, which the loop above passes over. A range made of
       // hidden lines alone keeps its active cell (so Unhide still knows which lines are meant).
+      // The row it is added to follows the selection, so it is not reused.
       const activeHidden = rowHidden(s, active.r) || s.hiddenCols.has(active.c);
-      if (activeHidden || active.r < vr.r0 || active.r > vr.r1 || active.c < vr.c0 || active.c > vr.c1) addOutside(active.r, active.c);
-      cellsLayer.replaceChildren(frag);
-      if (frozen.top) buildLayerCells(frzRows, s, paneRows[0], paneRows[1], vr.c0, vr.c1);
-      if (frozen.left) buildLayerCells(frzCols, s, vr.r0, vr.r1, paneCols[0], paneCols[1]);
-      if (frozen.top && frozen.left) buildLayerCells(frzCorner, s, paneRows[0], paneRows[1], paneCols[0], paneCols[1]);
+      if (activeHidden || active.r < vr.r0 || active.r > vr.r1 || active.c < vr.c0 || active.c > vr.c1) { addOutside(active.r, active.c); keep.delete(active.r); }
+      rowCache.rows = keep;
+      // The rows in order down the sheet. Rows kept stay where they are in the layer; the others come and go.
+      const rows = [...rowEls.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]);
+      if (!kept.size) cellsLayer.replaceChildren(...rows);
+      else {
+        const wanted = new Set(rows);
+        for (const child of [...cellsLayer.children]) if (!wanted.has(child)) child.remove();
+        let at = cellsLayer.firstChild;
+        for (const row of rows) {
+          if (row === at) at = at.nextSibling;
+          else cellsLayer.insertBefore(row, at);
+        }
+      }
+      if (frozen.top) buildLayerCells(frzRows, s, paneRows[0], paneRows[1], vr.c0, vr.c1, `${rowsKey}|${paneRows}`);
+      if (frozen.left) buildLayerCells(frzCols, s, vr.r0, vr.r1, paneCols[0], paneCols[1], `${rowsKey}|${vr.r0},${vr.r1}|${paneCols}`);
+      if (frozen.top && frozen.left) buildLayerCells(frzCorner, s, paneRows[0], paneRows[1], paneCols[0], paneCols[1], `${rowsKey}|${paneRows}|${paneCols}`);
       renderHeaders(vr, view);
       renderPaper(view);
       rendered = { ...vr, key, version: wb.version, sheet: s.id, frozen: `${frozen.rows},${frozen.cols}` };
@@ -2174,8 +2222,14 @@ export function createGrid(opts) {
       if (ch.sourceRefs?.length || ch.titleRef || ch.xTitleRef || ch.yTitleRef || ch.y2TitleRef) {
         // A native chart can read formulas on several other sheets. Its local placeholder
         // range cannot tell us whether an edit changed the plotted values.
+        // Cell writes away from every range it reads leave its picture as it is: a keystroke beside a
+        // dashboard of imported charts no longer reads each of their thousands of points again.
+        const changes = box.sig != null && box.reads && !overdue && box.version !== wb.version ? wb.changesSince(box.version) : null;
+        if (changes?.length && changes.every((e) => e.type === 'cells' && !e.formula && e.box && e.sheetId != null
+          && !box.reads.some(({ sheetId: id, range: g }) => id === e.sheetId && e.box.r1 <= g.r2 && e.box.r2 >= g.r1 && e.box.c1 <= g.c2 && e.box.c2 >= g.c1))) box.version = wb.version;
         if (box.version !== wb.version || overdue) {
           box.version = wb.version;
+          box.reads = chartReads(ch);
           const data = chartData(wb, sheetId, ch), sig = `${chartDefinition(ch)}|${themeSeriesKey()}|${JSON.stringify(data)}`;
           if (box.sig !== sig) {
             box.sig = sig;
@@ -2236,6 +2290,38 @@ export function createGrid(opts) {
         if (selectedChart === id) selectedChart = selectedSet.size ? [...selectedSet][0] : null;
       }
     }
+  }
+
+  /**
+   * The ranges a chart with references of its own reads (its series, their names, linked titles), each on
+   * its sheet; null when one is not a plain range (a union, a named formula) or holds a formula or a
+   * spilled value, whose inputs lie anywhere: such a chart reads them again after every change.
+   */
+  function chartReads(ch) {
+    const refs = [ch.titleRef, ch.xTitleRef, ch.yTitleRef, ch.y2TitleRef,
+      ...(ch.sourceRefs || []).flatMap((src) => [src.nameRef, src.categories, src.values, src.sizes, src.labels])].filter(Boolean);
+    const places = refs.map((ref) => wb.rangeFromText(sheetId, ref));
+    // A chart over a range of the sheet with only a linked title reads that range too.
+    if (!ch.sourceRefs?.length) places.push({ sheetId, range: normalizeRange(ch.range) });
+    const reads = [];
+    for (const at of places) {
+      const s = at && wb.sheet(at.sheetId);
+      if (!s) return null;
+      const g = { r1: at.range.r1, c1: at.range.c1, r2: Math.min(at.range.r2, s.rows - 1), c2: Math.min(at.range.c2, s.cols - 1) };
+      if (g.r2 >= g.r1 && g.c2 >= g.c1) {
+        const area = (g.r2 - g.r1 + 1) * (g.c2 - g.c1 + 1);
+        if (area > 100000 || wb.spillEntries(at.sheetId, g).length) return null;
+        if (s.cells.size < area) {
+          for (const [key, cell] of s.cells) {
+            if (cell.f == null) continue;
+            const i = key.indexOf(','), r = +key.slice(0, i), c = +key.slice(i + 1);
+            if (r >= g.r1 && r <= g.r2 && c >= g.c1 && c <= g.c2) return null;
+          }
+        } else for (let r = g.r1; r <= g.r2; r++) for (let c = g.c1; c <= g.c2; c++) if (s.cells.get(cellKey(r, c))?.f != null) return null;
+      }
+      reads.push({ sheetId: at.sheetId, range: at.range });
+    }
+    return reads;
   }
 
   /**
@@ -2435,14 +2521,26 @@ export function createGrid(opts) {
       } else {
         const minW = (ch.type === 'scroll' ? 12 : ch.type === 'image' ? IMAGE_MIN : ch.type === 'text' ? TEXT_MIN : ch.type === 'smartart' ? SMARTART_MIN : CHART_MIN_W) * objectScale;
         const minH = (ch.type === 'scroll' ? 12 : ch.type === 'image' ? IMAGE_MIN : ch.type === 'text' ? TEXT_MIN : ch.type === 'smartart' ? SMARTART_MIN : CHART_MIN_H) * objectScale;
-        let width = Math.max(minW, drag.from.width + dx);
-        let height = Math.max(minH, drag.from.height + dy);
+        // A turned or flipped text box grows along its own sides, the pointer's move read in its frame,
+        // and its opposite corner stays where it is on screen (the box turns about its centre).
+        const turned = ch.type === 'text' && (ch.rotation || ch.flipH || ch.flipV);
+        const angle = turned ? (ch.rotation || 0) * Math.PI / 180 : 0, cos = Math.cos(angle), sin = Math.sin(angle);
+        const sx = turned && ch.flipH ? -1 : 1, sy = turned && ch.flipV ? -1 : 1;
+        const ldx = turned ? (dx * cos + dy * sin) * sx : dx, ldy = turned ? (dy * cos - dx * sin) * sy : dy;
+        let width = Math.max(minW, drag.from.width + ldx);
+        let height = Math.max(minH, drag.from.height + ldy);
         // Images keep their proportions unless Shift is held; one unlocked (Picture Format ▸ Size) the other way round.
         if (ch.type === 'image' && (ch.lockAspect !== false) !== ev.shiftKey) {
           const ratio = drag.from.width / drag.from.height;
           if (Math.abs(dx) >= Math.abs(dy)) height = Math.max(minH, width / ratio); else width = Math.max(minW, height * ratio);
         }
-        drag.rect = { ...drag.from, width, height };
+        let { left, top } = drag.from;
+        if (turned) {
+          const gx = (width - drag.from.width) / 2 * sx, gy = (height - drag.from.height) / 2 * sy;
+          left += drag.from.width / 2 + gx * cos - gy * sin - width / 2;
+          top += drag.from.height / 2 + gx * sin + gy * cos - height / 2;
+        }
+        drag.rect = { ...drag.from, left, top, width, height, turned };
       }
       schedule();
     };
@@ -2467,7 +2565,7 @@ export function createGrid(opts) {
         wb.placeObjects(sheetId, [id, ...d.others.map((m) => m.id)].map((m) => wb.objectRect(sheetId, m)).filter(Boolean)
           .map((r) => ({ id: r.id, x: r.x + shift.x, y: r.y + shift.y })), 'Move objects');
       } else if (d.kind === 'chartmove') placeChart(id, d.rect.left, d.rect.top);
-      else wb.updateChart(sheetId, id, { w: Math.round(d.rect.width / objectScale), h: Math.round(d.rect.height / objectScale) }, 'Resize chart');
+      else wb.updateChart(sheetId, id, { ...(d.rect.turned ? anchorAt(d.rect.left, d.rect.top) : {}), w: Math.round(d.rect.width / objectScale), h: Math.round(d.rect.height / objectScale) }, 'Resize chart');
     };
     // A drag the browser gives up (a touch it decided to scroll with, a lost capture) acts on
     // nothing, as the grid's own drags rule: the box goes back to its stored place.
@@ -2479,21 +2577,26 @@ export function createGrid(opts) {
 
   /** Anchor a chart at a canvas position: the cell under its top-left corner, plus the offset into it. */
   function placeChart(id, left, top) {
+    wb.updateChart(sheetId, id, anchorAt(left, top), 'Move chart');
+  }
+
+  /** The anchor of a canvas position: the cell under it and the offset into that cell (a chart sheet's own origin). */
+  function anchorAt(left, top) {
     if (sheet()?.kind === 'chart') {
       const scale = chartView?.scale ?? zoom;
-      wb.updateChart(sheetId, id, { anchor: { r: 0, c: 0 }, dx: left / scale, dy: top / scale }, 'Move chart');
-      return;
+      return { anchor: { r: 0, c: 0 }, dx: left / scale, dy: top / scale };
     }
     ensureOffsets();
     const c = clamp(colOffsets.indexAt(left), 0, sheet().cols - 1);
     const r = clamp(rowOffsets.indexAt(top), 0, sheet().rows - 1);
-    wb.updateChart(sheetId, id, { anchor: { r, c }, dx: Math.round((left - colX(c)) / zoom), dy: Math.round((top - rowY(r)) / zoom) }, 'Move chart');
+    return { anchor: { r, c }, dx: Math.round((left - colX(c)) / zoom), dy: Math.round((top - rowY(r)) / zoom) };
   }
 
   /** Arrow keys on a selected chart: a nudge of a few pixels, or with Shift a whole cell of the anchor's size, kept inside the sheet. */
   function nudgeChart(id, dr, dc, wholeCell) {
     const ch = wb.chartById(sheetId, id);
-    if (!ch) return;
+    // A slicer or timeline set not to move (Disable resizing and moving) stays put, as under the pointer.
+    if (!ch || ch.lockedPosition) return;
     ensureOffsets();
     const s = sheet();
     const rect = chartBoxRect(ch);
@@ -2508,15 +2611,16 @@ export function createGrid(opts) {
 
   /** Arrow keys with several objects selected: all of them move a few pixels together. */
   function nudgeObjects(dr, dc) {
-    wb.placeObjects(sheetId, selectedObjects().map((id) => wb.objectRect(sheetId, id)).filter(Boolean)
+    wb.placeObjects(sheetId, selectedObjects().filter((id) => !wb.chartById(sheetId, id)?.lockedPosition).map((id) => wb.objectRect(sheetId, id)).filter(Boolean)
       .map((r) => ({ id: r.id, x: Math.max(0, r.x + dc * 8), y: Math.max(0, r.y + dr * 8) })), 'Move objects');
   }
 
   /** Ctrl+Alt+O: select the next floating object (Shift: the previous) in the sheet's order, bringing its anchor into view. */
   function selectNextChart(step) {
     const s = sheet();
-    // Objects hidden in the options cannot be picked from the keyboard either.
-    const charts = appOption('showObjects') ? s.charts : [];
+    // Objects hidden in the options cannot be picked from the keyboard either, nor one hidden in the
+    // Selection Pane: it is not drawn, and Delete would remove an object nobody can see.
+    const charts = appOption('showObjects') ? s.charts.filter((ch) => !ch.hidden || ch.id === selectedChart) : [];
     if (!charts.length) { opts.announce?.('No charts, images or text boxes on this sheet'); return; }
     const at = charts.findIndex((ch) => ch.id === selectedChart);
     const next = charts[at < 0 ? (step > 0 ? 0 : charts.length - 1) : (at + step + charts.length) % charts.length];
@@ -2529,8 +2633,11 @@ export function createGrid(opts) {
     hlLayer.replaceChildren();
     if (!highlights.cells.length) return;
     const frag = document.createDocumentFragment();
+    // A cell in view, or in a frozen band or a split window's top or left pane, which show wherever the sheet is scrolled.
+    const rowShown = (r) => (r >= vr.r0 && r <= vr.r1) || (r >= (frozen.r0 || 0) && r < frozen.rows) || (frozen.split && frozen.top && r >= paneRows[0] && r <= paneRows[1]);
+    const colShown = (c) => (c >= vr.c0 && c <= vr.c1) || (c >= (frozen.c0 || 0) && c < frozen.cols) || (frozen.split && frozen.left && c >= paneCols[0] && c <= paneCols[1]);
     highlights.cells.forEach((m, i) => {
-      if (m.r < vr.r0 || m.r > vr.r1 || m.c < vr.c0 || m.c > vr.c1) return;
+      if (!rowShown(m.r) || !colShown(m.c)) return;
       const node = el('div.find-hl', { className: `find-hl${i === highlights.current ? ' current' : ''}${m.kind === 'invalid' ? ' invalid-circle' : ''}` });
       place(node, rangeBox({ r1: m.r, c1: m.c, r2: m.r, c2: m.c }));
       frag.append(node);
@@ -3802,8 +3909,10 @@ export function createGrid(opts) {
   let pressMenu = false; // the touch still down opened the cell menu: its release is not a tap
   let autoScroll = 0;
 
+  let autoScrollAt = null; // { e, rect, left, top, dx, dy }: the pointer the running autoscroll follows
   function stopAutoScroll() {
     if (autoScroll) { clearInterval(autoScroll); autoScroll = 0; }
+    autoScrollAt = null;
   }
 
   let captured = null; // { el, id }: the pointer a drag holds, let go when the drag is cancelled
@@ -4074,7 +4183,7 @@ export function createGrid(opts) {
       return;
     }
     if (drag.kind === 'colresize' || drag.kind === 'rowresize') { resizeMove(e); return; }
-    if (drag.kind === 'colmove' || drag.kind === 'rowmove') { reorderMove(e); return; }
+    if (drag.kind === 'colmove' || drag.kind === 'rowmove') { reorderMove(e); edgeAutoScroll(e); return; }
     const { r, c } = dragCellAt(e.clientX, e.clientY);
     dragTo(r, c, e);
     edgeAutoScroll(e);
@@ -4134,16 +4243,25 @@ export function createGrid(opts) {
     // headers to its left: only the axis being selected scrolls.
     let dx = e.clientX < left ? -1 : e.clientX > rect.right ? 1 : 0;
     let dy = e.clientY < top ? -1 : e.clientY > rect.bottom ? 1 : 0;
-    if (drag?.kind === 'colsel' || drag?.lines === 'col') dy = 0;
-    if (drag?.kind === 'rowsel' || drag?.lines === 'row') dx = 0;
+    if (drag?.kind === 'colsel' || drag?.kind === 'colmove' || drag?.lines === 'col') dy = 0;
+    if (drag?.kind === 'rowsel' || drag?.kind === 'rowmove' || drag?.lines === 'row') dx = 0;
+    // The pointer moving on outside the view keeps the scroll going: restarting the timer on every
+    // move held it off for as long as the pointer moved, so the sheet scrolled only once it stood still.
+    const next = { e, rect, left, top, dx, dy };
+    if (autoScroll && autoScrollAt?.dx === dx && autoScrollAt?.dy === dy) { autoScrollAt = next; return; }
     stopAutoScroll();
     if (dx || dy) {
+      autoScrollAt = next;
       autoScroll = setInterval(() => {
-        viewport.scrollBy(dx * 24, dy * 24);
+        const at = autoScrollAt;
+        viewport.scrollBy(at.dx * 24, at.dy * 24);
         if (!drag) return;
+        const x = clamp(at.e.clientX, at.left + 1, at.rect.right - 1), y = clamp(at.e.clientY, at.top + 1, at.rect.bottom - 1);
+        // Rows or columns dragged by their headers land beside the line now at the edge.
+        if (drag.kind === 'colmove' || drag.kind === 'rowmove') { reorderMove({ clientX: x, clientY: y }); return; }
         // The selection, and a move, fill or table preview, follow the cell now under the pointer.
-        const { r, c } = dragCellAt(clamp(e.clientX, left + 1, rect.right - 1), clamp(e.clientY, top + 1, rect.bottom - 1));
-        dragTo(r, c, e);
+        const { r, c } = dragCellAt(x, y);
+        dragTo(r, c, at.e);
       }, 50);
     }
   }
@@ -4380,6 +4498,8 @@ export function createGrid(opts) {
     // Inside the editor the browser's own menu (cut, copy, paste, spelling) applies.
     if (e.target === editor) return;
     e.preventDefault();
+    // A right-click on the viewport's own scrollbars is not on a cell: it selects nothing and opens no cell menu.
+    if (onScrollbar(e)) return;
     // A long press on a touch screen arrives twice: from the press timer above and as the browser's
     // own contextmenu for the same press. Whichever comes first opens the menu; the other is dropped.
     if (tap) { clearTimeout(tap.timer); tap = null; longPressAt = Date.now(); }
@@ -5286,6 +5406,8 @@ export function createGrid(opts) {
     if (destroyed) return; // a viewport left in the page must not keep growing the workbook
     syncHeaders();
     schedule();
+    // The function list or argument hint under a formula typed in the cell moves with the cell, rather than staying where it was.
+    if (edit && hints.isOpen && editInput() === editor) updateHints();
     if (sheet()?.kind === 'chart') return;
     followWindows();
     rememberViewOrigin();
@@ -6014,7 +6136,13 @@ export function createGrid(opts) {
     setSelection: (next, o) => setSelection(next, o),
     /** Select all as Ctrl+A does: the block of data around the active cell, then the whole sheet. */
     selectAll: selectAllStep,
-    selectByName,
+    // Going to cells by name (the Name Box, Go To, a link) selects them instead of an object selected
+    // before: Delete would otherwise remove the chart rather than clear the cells gone to.
+    selectByName(text) {
+      const done = selectByName(text);
+      if (done && selectedChart) { selectedChart = null; selectedSet = new Set(); schedule(); }
+      return done;
+    },
     beginEdit,
     setEditText,
     setFormulaInput(input) { formulaInput = input; },
@@ -6107,6 +6235,17 @@ export function createGrid(opts) {
     },
     consumePlainPaste() { const v = plainPaste; plainPaste = false; return v; },
     cellRect,
+    /**
+     * The part of the screen in which cell (r, c) can show: the scrolling pane, clear of the frozen bands
+     * drawn over it, or the frozen band (a split window's top or left pane) the cell belongs to.
+     */
+    paneRect(r, c) {
+      ensureOffsets();
+      const vp = viewport.getBoundingClientRect(), view = viewMetrics();
+      const left = vp.left + (leftBand(c) ? 0 : frozen.w), top = vp.top + (topBand(r) ? 0 : frozen.h);
+      const right = vp.left + (leftBand(c) && frozen.split ? frozen.w : view.vw), bottom = vp.top + (topBand(r) && frozen.split ? frozen.h : view.vh);
+      return { left, top, right, bottom, width: right - left, height: bottom - top };
+    },
     cellAtPoint,
     isHidden(axis, i) { const s = sheet(); return axis === 'row' ? s.hiddenRows.has(i) : s.hiddenCols.has(i); },
     scrollToActive({ avoid } = {}) { scrollIntoView(sel.active); return avoid ? revealBeside(avoid) : true; },

@@ -8,7 +8,8 @@
  *   string   { value }            (double-quoted, "" escapes a quote)
  *   bool     { value }
  *   error    { value }            (#DIV/0!, #N/A, ...)
- *   ref      { text, sheet?, sheetEnd?, spill } (A1, $A$1, A1:B2, A:A, 1:1, Sheet1!A1, Sheet1:Sheet3!A1; spill: A1#)
+ *   ref      { text, sheet?, sheetEnd?, spill, trim? } (A1, $A$1, A1:B2, A:A, 1:1, Sheet1!A1, Sheet1:Sheet3!A1; spill: A1#;
+ *                                 trim: 1 leading A1.:B2, 2 trailing A1:.B2, 3 both A1.:.B2, with text A1:B2)
  *   name     { value, sheet? }    (function or defined name; sheet for Sheet!Name)
  *   tref     { table, spec }      (structured reference Table1[Amount]; table null for a bare [@Col])
  *   op       { value }            (+ - * / ^ & = <> < > <= >= % and @ for implicit intersection)
@@ -26,7 +27,11 @@ const ERRORS = ['#DIV/0!', '#VALUE!', '#REF!', '#NAME?', '#N/A', '#NUM!', '#NULL
 const CELL = String.raw`\$?[A-Za-z]{1,3}\$?\d{1,7}`;
 const COL_ONLY = String.raw`\$?[A-Za-z]{1,3}`;
 const ROW_ONLY = String.raw`\$?\d{1,7}`;
-const REF_BODY = String.raw`(?:${CELL}(?::${CELL})?|${COL_ONLY}:${COL_ONLY}|${ROW_ONLY}:${ROW_ONLY})`;
+const CELL_RE = new RegExp(`^${CELL}$`);
+// A period beside the colon trims blank outer rows and columns (Excel's trim references):
+// A1.:B9 the leading ones, A1:.B9 the trailing ones, A1.:.B9 both, as TRIMRANGE does.
+const TRIM_COLON = String.raw`\.?:\.?`;
+const REF_BODY = String.raw`(?:${CELL}(?:${TRIM_COLON}${CELL})?|${COL_ONLY}${TRIM_COLON}${COL_ONLY}|${ROW_ONLY}${TRIM_COLON}${ROW_ONLY})`;
 // An unquoted sheet or defined name: a letter in any script, an underscore or a backslash, then
 // letters, combining marks (the vowel signs of हिन्दी, the accents of a decomposed Ünïcode), digits,
 // underscores, periods, backslashes and question marks, as a defined name may hold; workbook
@@ -132,7 +137,7 @@ export function tokenize(src) {
     const num = NUMBER_RE.exec(rest);
     // A number must not be the start of a cell ref like "1:1" handled below,
     // nor glue onto letters ("1A" is a syntax error, caught by the parser).
-    if (num && !/^\$?\d{1,7}:\$?\d{1,7}/.test(rest)) {
+    if (num && !/^\$?\d{1,7}\.?:\.?\$?\d{1,7}/.test(rest)) {
       const value = parseDecimal(num[0]);
       // Literals are truncated to 15 significant digits, and an out-of-range
       // decimal scale is rejected before evaluating the expression. A later
@@ -151,7 +156,9 @@ export function tokenize(src) {
     // whole identifier, joined by a period to more, is read as the name below rather than the cell.
     if (ref && ref[1] !== '#REF!' && !external && namedPast(rest.slice(ref[1]?.length || 0), ref[2].length)) ref = null;
     if (ref) {
-      const text = ref[2];
+      // The trim periods are kept apart from the text, which stays a plain reference everywhere it is read.
+      const trim = (ref[2].includes('.:') ? 1 : 0) | (ref[2].includes(':.') ? 2 : 0);
+      const text = trim ? ref[2].replace(/\./g, '') : ref[2];
       let sheet = null;
       let sheetEnd = null;
       // A deleted sheet: no sheet of this name can exist, so the reference evaluates to #REF!.
@@ -177,8 +184,19 @@ export function tokenize(src) {
       // A trailing # names the whole spill of an array formula (A1#).
       let len = (external?.length || 0) + ref[0].length;
       const spill = rest[len] === '#' && !/^#[A-Z]/.test(rest.slice(len));
+      // B1:A1# is the range operator between B1 and the spill A1#, not a block carrying #:
+      // the start cell is its own reference, and the colon then joins it to the spill.
+      const colon = spill && !sheetEnd && !trim ? text.indexOf(':') : -1;
+      if (colon > 0 && CELL_RE.test(text.slice(0, colon))) {
+        const startEnd = i + len - text.length + colon;
+        tokens.push({ type: 'ref', text: text.slice(0, colon), sheet, sheetEnd, spill: false, start: i, end: startEnd });
+        tokens.push({ type: 'colon', start: startEnd, end: startEnd + 1 });
+        tokens.push({ type: 'ref', text: text.slice(colon + 1), sheet, sheetEnd, spill: true, start: startEnd + 1, end: i + len + 1 });
+        i += len + 1;
+        continue;
+      }
       if (spill) len++;
-      tokens.push({ type: 'ref', text, sheet, sheetEnd, spill, start: i, end: i + len });
+      tokens.push({ type: 'ref', text, sheet, sheetEnd, spill, ...(trim ? { trim } : {}), start: i, end: i + len });
       i += len;
       continue;
     }

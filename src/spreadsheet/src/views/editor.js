@@ -157,14 +157,15 @@ import { trackEvent } from '../lib/analytics.js';
 import { VIEW_ONLY, autoSaveEnabled } from '../lib/doc.js';
 import { cellName, colName, normalizeRange, rangeName, parseRange, parseCellRef, parseKey } from '../core/cell.js';
 import { parseRefText, MAX_ROW, MAX_COL } from '../core/refs.js';
-import { formatValue, todaySerial, formatDate, fontStack, indentWidth, parseInput, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, cellCurrency, currencyDecimals, localeInfo, editText } from '../core/format.js';
+import { formatValue, todaySerial, formatDate, fontStack, indentWidth, parseInput, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, cellCurrency, currencyDecimals, localeInfo, editText, hasDecimalPlaces } from '../core/format.js';
+import { stepCodeDecimals } from '../core/numfmt.js';
 import { maxLineWidth, cellLayoutText } from '../core/textfit.js';
 import { toDelimited, parseClipboard, parseDelimited } from '../core/tsv.js';
 import { detectDelimiter, workbookFromFile, rangeToCsv, CSV_MIME } from '../core/io.js';
 import { cellsToHtml, copyMergeLayout, parseHtmlClipboard, cellsFromHtmlRows, isOwnHtmlClipboard } from '../core/clipboard.js';
 import { eachStoredCell, lineSpan } from '../core/sparse-range.js';
 import { MAX_ROWS, MAX_COLS, MIN_COL_WIDTH, MAX_COL_WIDTH, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT, cellFromInput, safeLinkUrl } from '../core/workbook.js';
-import { isSpreadsheetFile } from '../core/filetypes.js';
+import { isSpreadsheetFile, IMPORT_EXTENSIONS, fileProblem } from '../core/filetypes.js';
 import { FUNCTION_NAMES } from '../core/formula/functions.js';
 import { RULE_TYPES } from '../core/condformat.js';
 // Formulas that reach outside the spreadsheet: pasted from a web page they could send the sheet's
@@ -417,7 +418,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   ctx.refused = (what) => refusedByProtection(what);
   ctx.smartArt = createSmartArtUi(ctx);
   // The Paste Options and Auto Fill Options button, at the corner of what was just pasted or filled.
-  const optionButton = createOptionButton({ grid, host: grid.el });
+  // The Quick Analysis button stands at the same corner: it gives way while this one shows.
+  const optionButton = ctx.optionButton = createOptionButton({ grid, host: grid.el, onToggle: () => ctx.quickAnalysis?.place() });
   let lastPaste = null; // { text, html, paste, from, mark, external }: what the Paste Options button pastes again
   let lastFill = null; // { sheetId, source, target, mark, kind }: what the Auto Fill Options button fills again
   ctx.subscribe(() => optionButton.place());
@@ -1579,17 +1581,18 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       }
       case 'dec': {
         // Each cell steps its own decimal places and keeps its own format: a General
-        // cell becomes Number, and a date, time, text or custom code has none to step and is left alone,
+        // cell becomes Number, a custom code (Accounting, #,##0.00_);(#,##0.00)) gains or loses a place in each
+        // section that shows a number, and a date, time or text has none to step and is left alone,
         // rather than every cell taking the active cell's format. The active cell says whether there is
         // anything to step at all, as the menus and toolbar grey the command out by it.
-        const fixed = ['time', 'datetime', 'date', 'text', 'custom'];
         const step = Number(arg) || 0;
-        if (!step || fixed.includes(ctx.style().fmt)) return;
+        if (!step || !hasDecimalPlaces(ctx.style())) return;
         const decimalPatch = (sid, r, c) => {
           // Use displayed formatting, including inherited spill formats. General
           // starts at the places shown; currencies start at their currency's count.
           const s = wb.displayStyleAt(sid, r, c) || {};
-          if (fixed.includes(s.fmt)) return null;
+          if (!hasDecimalPlaces(s)) return null;
+          if (s.fmt === 'custom') { const code = stepCodeDecimals(s.code, step); return code ? { fmt: 'custom', code } : null; }
           const fmt = s.fmt && s.fmt !== 'general' ? s.fmt : 'number';
           const shown = s.dec ?? (s.fmt === 'currency' ? currencyDecimals(s.cur)
             : !s.fmt || s.fmt === 'general' ? generalDecimals(sid, r, c) : 2);
@@ -3254,7 +3257,9 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         let dx = 4, id = null;
         wb.transaction(cmd === 'insertShape' ? 'Insert shape' : 'Insert icons', () => {
           for (const p of pictures.filter(Boolean)) {
-            id = wb.addChart(sheetId, { type: 'image', src: svgDataUrl(p.svg), title: p.label || 'Icon', anchor: { ...grid.active }, dx, dy: 4, w: p.w, h: p.h }) || id;
+            // A shape stretches to any proportions as it is resized, as Excel's do; an icon keeps its own.
+            id = wb.addChart(sheetId, { type: 'image', src: svgDataUrl(p.svg), title: p.label || 'Icon', anchor: { ...grid.active }, dx, dy: 4, w: p.w, h: p.h,
+              ...(cmd === 'insertShape' ? { lockAspect: false } : {}) }) || id;
             dx += p.w + 8;
           }
         });
@@ -5341,9 +5346,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     // one of its own, and this one must leave that in place on the way out — cleared, the conflict that
     // flush's save raises lands in the dialog that cannot leave, after the navigation was already refused.
     const mine = leaving ? { kind: null } : null;
+    // Leaving was chosen while a save hung: the router's flush on the way out neither waits for it again nor
+    // queues another behind it, which would run in the closed document once the first one settled.
+    if (leaving && abandoned && doc.hasPendingWrites) return true;
     try {
       if (leaving) leavingSave = mine;
-      let saved = await doc.save();
+      let saved = await (leaving ? whileSaving(doc.save()) : doc.save());
+      if (saved === LEAVE_NOW) { abandoned = true; return true; }
+      if (saved === STAY) { keepFocus(); return false; }
       while (saved) {
         // A save can finish while a new entry is still in the cell editor.
         // Commit and validate that entry before deciding navigation is safe.
@@ -5374,13 +5384,53 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       // failing must not keep the user in the editor for ever.
       if (abandoned) return true;
       const kept = !wb.dirty || doc.writeDraft();
-      const choice = await saveFailedDialog(e?.message, kept);
+      const choice = await saveFailedDialog(!P.unreachable(e) ? e?.message : navigator.onLine === false ? 'you are offline' : 'Puter could not be reached', kept);
       if (destroyed) return false;
       if (choice === 'retry') return runFlush({ leaving });
       if (choice === 'leave') { abandoned = true; return true; }
       keepFocus();
       return false;
     } finally { if (leavingSave === mine) leavingSave = null; }
+  }
+
+  // A save on the way out still going after this long (a slow or stalled connection) offers to leave anyway: left
+  // alone, the editor sat there with nothing said for as long as the request hung, Back pressed again doing nothing.
+  const SLOW_LEAVE_MS = 10_000;
+  const LEAVE_NOW = Symbol('leave');
+  const STAY = Symbol('stay');
+  /** The save on the way out (`saving`), or LEAVE_NOW or STAY when it takes so long that the user is asked and answers. */
+  async function whileSaving(saving) {
+    const settled = saving.then(() => true, () => true);
+    for (;;) {
+      let timer;
+      const done = await Promise.race([settled, new Promise((resolve) => { timer = setTimeout(resolve, SLOW_LEAVE_MS, false); })]);
+      clearTimeout(timer);
+      if (done || destroyed) return saving;
+      // The draft follows the edits made while it waited: leaving now leaves them on this device.
+      const ask = stillSavingDialog(!wb.dirty || doc.writeDraft());
+      const choice = await Promise.race([ask.answer, settled.then(() => 'saved')]);
+      ask.close();
+      if (destroyed || choice === 'saved') return saving;
+      if (choice === 'leave') return LEAVE_NOW;
+      if (choice === 'stay') return STAY;
+      // 'wait': asked again if it still has not finished a while later.
+    }
+  }
+
+  /** The save on the way out is taking long: wait for it, keep editing (it goes on), or leave (the local draft keeps the edits). */
+  function stillSavingDialog(kept) {
+    let resolve;
+    const answer = new Promise((done) => { resolve = done; });
+    const content = el('div', {},
+      el('p.modal-text', {}, kept
+        ? `"${doc.name}" is still being saved: the connection may be slow. Wait, and it closes once saved; or leave now, and your changes stay in this browser, offered again when you open it here.`
+        : `"${doc.name}" is still being saved: the connection may be slow. Wait, and it closes once saved. This browser could not keep a copy of your changes, so leaving now may lose them.`),
+      el('div.row.row-end', { style: { flexWrap: 'wrap' } },
+        el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Keep editing'),
+        el(`button.btn${kept ? '' : '.btn-danger'}`, { type: 'button', onclick: () => { resolve('leave'); modal.close(); } }, kept ? 'Leave' : 'Leave without saving'),
+        el('button.btn.btn-primary', { type: 'button', onclick: () => { resolve('wait'); modal.close(); } }, 'Wait')));
+    const modal = openModal({ title: 'Still saving', content, onClose: () => resolve('stay') });
+    return { answer, close: () => modal.close() };
   }
 
   /**
@@ -5445,7 +5495,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       const saved = await doc.save();
       if (saved && !wb.dirty) toast('Saved', { icon: 'cloud', duration: 1200 });
     } catch (e) {
-      toast(`Could not save: ${e?.message || 'unknown error'}`, { icon: 'alert', duration: 5000 });
+      toast(P.unreachable(e) ? P.failureText(e, 'Could not save') : `Could not save: ${e?.message || 'unknown error'}`, { icon: 'alert', duration: 5000 });
     }
   }
 
@@ -5525,7 +5575,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   }
 
   const fileInput = el('input', {
-    type: 'file', accept: '.xlsx,.xlsm,.xls,.csv,.tsv,.ods,.txt', hidden: true, 'aria-hidden': 'true', tabindex: -1,
+    type: 'file', accept: IMPORT_EXTENSIONS.join(), hidden: true, 'aria-hidden': 'true', tabindex: -1,
     onchange: async () => { const f = fileInput.files?.[0]; fileInput.value = ''; if (f && await flush() && !destroyed) importFile(f); },
   });
   // Images float over the sheet like charts and travel in the file as data URLs.
@@ -5656,7 +5706,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   }
   // Import into this spreadsheet: a dialog places the file's sheets (new sheets, the current sheet, appended rows, or at the selected cell).
   const sheetsInput = el('input', {
-    type: 'file', accept: '.xlsx,.xlsm,.xls,.csv,.tsv,.ods,.txt', hidden: true, 'aria-hidden': 'true', tabindex: -1,
+    type: 'file', accept: IMPORT_EXTENSIONS.join(), hidden: true, 'aria-hidden': 'true', tabindex: -1,
     onchange: async () => {
       const f = sheetsInput.files?.[0];
       sheetsInput.value = '';
@@ -5673,7 +5723,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       } catch (e) {
         if (destroyed) return;
         console.error(e);
-        toast(`Could not read ${f.name}`, { icon: 'alert', duration: 5000 });
+        toast(fileProblem(e) || `Could not read ${f.name}`, { icon: 'alert', duration: 6000 });
       }
       keepFocus();
     },
@@ -5922,7 +5972,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   const findBar = createFindBar(ctx);
   // Background error checking's smart tag beside the active cell (Convert to Number, Ignore Error…).
   // Quick Analysis: the button at the corner of a selected block of data, and Ctrl+Q.
-  const quickAnalysis = createQuickAnalysis({ ...ctx, run });
+  const quickAnalysis = ctx.quickAnalysis = createQuickAnalysis({ ...ctx, run });
   const errorTag = createErrorSmartTag({ ...ctx, run, focusFormulaBar: () => formulaBar.focusInput(), refreshErrorTag: () => errorTag.sync() });
   // Threaded comments: the card beside a cell and the Comments pane (Review ▸ Comments).
   // @mentions: the people a comment can name, telling them when it is posted, and telling the user when a
@@ -6318,6 +6368,15 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       if (e.key === 'Escape') { e.preventDefault(); grid.cancelEdit(); return; }
       if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Tab') grid.focusEditor();
     }
+    // Escape on a title of the menu bar or the ribbon, a sheet tab or the status bar, with nothing open there to
+    // close, hands the keyboard back to the sheet, as Escape leaves the ribbon in Excel; a ribbon command's
+    // Escape goes up to its tab first, and a menu's back to its title.
+    if (e.key === 'Escape' && !e.defaultPrevented && !isComposing(e) && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+      && e.target.closest?.('.menubar-btn, .ribbon-tab, .ribbon-collapse, .ribbon-scroll, .sheet-tabs button, .sheet-tabs [role="tab"], .status-bar button, .status-bar input')) {
+      e.preventDefault();
+      keepFocus();
+      return;
+    }
     if (e.key === 'F6' && !e.ctrlKey && !e.metaKey && !e.altKey && !isComposing(e)) {
       e.preventDefault();
       const visible = (node) => {
@@ -6326,14 +6385,19 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         }
         return true;
       };
-      const regions = [menubar.el, toolbar.el, formulaBar.el, grid.el, sheetTabs.el, statusBar.el, automate?.paneOpen && automate.pane, aiPanel && (aiPanel.isOpen ? aiPanel.el : aiPanel.rail)].filter(Boolean).filter(visible);
+      // The find bar and any task pane open over the grid's right edge, the Watch Window, and the columns beside the
+      // sheet (Format pane, Comments, Code Editor, assistant) are areas too: a pane left by a click on the sheet
+      // could not be reached again from the keyboard.
+      const regions = [menubar.el, toolbar.el, formulaBar.el, grid.el, findBar.el, accessibilityPane.el, languagePane.el, changesPane.el, selectionPane.el, queriesPane.el, smartArtPane.el,
+        sheetTabs.el, statusBar.el, watchWindow.el, chartUi.pane, comments.el, automate?.paneOpen && automate.pane, aiPanel && (aiPanel.isOpen ? aiPanel.el : aiPanel.rail)].filter(Boolean).filter(visible);
       const at = regions.findIndex((region) => region.contains(e.target));
       if (grid.editing && !grid.commitEdit()) return;
       for (let step = 1; step <= regions.length; step++) {
         const region = regions[(at + (e.shiftKey ? -step : step) + regions.length) % regions.length];
-        // The assistant is entered at its message box, not at the resize handle that comes first in it.
-        const target = region === grid.el ? grid.viewport : region === sheetTabs.el ? sheetTabs.el.querySelector('[role="tab"][aria-selected="true"]') : region === aiPanel?.el ? aiPanel.el.querySelector('.ai-input') : region === aiPanel?.rail ? aiPanel.rail : [...region.querySelectorAll('button, input, textarea, [tabindex]')]
-          .find((node) => node.tabIndex >= 0 && !node.matches(':disabled') && visible(node));
+        // The assistant is entered at its message box and the find bar at its search field; a pane at its first
+        // control, not at the resize handle that comes first in it.
+        const target = region === grid.el ? grid.viewport : region === sheetTabs.el ? sheetTabs.el.querySelector('[role="tab"][aria-selected="true"]') : region === aiPanel?.el ? aiPanel.el.querySelector('.ai-input') : region === findBar.el ? findBar.el.querySelector('.find-input') : region === aiPanel?.rail ? aiPanel.rail : [...region.querySelectorAll('button, input, select, textarea, [tabindex]')]
+          .find((node) => node.tabIndex >= 0 && !node.matches(':disabled, [role="separator"]') && visible(node));
         if (target) { target.focus({ preventScroll: true }); break; }
       }
       return;

@@ -18,6 +18,7 @@ import { parseAppHash, editHash } from './lib/links.js';
 import { roomForFile, openRoom } from './collab/session.js';
 import { appOptions, appOption, syncAppOptions } from './lib/app-options.js';
 import { installAppOptions } from './lib/apply-options.js';
+import { fileProblem } from './core/filetypes.js';
 
 const appRoot = document.getElementById('app');
 let current = null; // { kind: 'home' | 'editor' | 'gate', view }
@@ -191,7 +192,7 @@ async function route({ reload = false, file = null, draftKey = null } = {}) {
         openEditor(imported);
       } catch (e) {
         console.error(e);
-        toast(`Could not read ${file.name}`, { icon: 'alert', duration: 5000 });
+        toast(fileProblem(e) || `Could not read ${file.name}`, { icon: 'alert', duration: 6000 });
         go(HOME);
       }
       return;
@@ -295,7 +296,7 @@ async function route({ reload = false, file = null, draftKey = null } = {}) {
       openEditor(doc, range);
     } catch (e) {
       console.error(e);
-      toast(P.isNotFound(e) ? 'That file no longer exists' : 'Could not open the file', { icon: 'alert', duration: 5000 });
+      toast(P.isNotFound(e) ? 'That file no longer exists' : fileProblem(e) || 'Could not open the file', { icon: 'alert', duration: fileProblem(e) ? 6000 : 5000 });
       if (P.isNotFound(e)) forgetRecent(path);
       go(HOME);
     }

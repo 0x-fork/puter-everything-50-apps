@@ -435,7 +435,11 @@ export function criteriaMatcher(criteria) {
     // A reference to an empty cell as the criterion is the value 0.
     const target = criteria == null ? 0 : criteria;
     // Numbers are equal at 15 significant digits, as they are to the = operator: 1.1*3 is 3.3.
-    if (typeof target === 'number') return (v) => { const n = criteriaNumber(v); return n != null && compareValues(n, target) === 0; };
+    if (typeof target === 'number') {
+      const eq = (v) => { const n = criteriaNumber(v); return n != null && compareValues(n, target) === 0; };
+      eq.numberKey = numberKey(target); // looked up in an index of the range's numbers (numberIndex)
+      return eq;
+    }
     return (v) => typeof v === typeof target && v === target;
   }
   const m = /^(<>|<=|>=|<|>|=)?(.*)$/s.exec(criteria);
@@ -485,6 +489,7 @@ export function criteriaMatcher(criteria) {
     };
     // A plain text key can be looked up in an index of the range (criteriaIndex) instead of tested cell by cell.
     if (op === '=' && !wildcard && !rhsIsNum && rhsBool == null && rhsText !== '') eq.key = rhsLower;
+    if (op === '=' && rhsIsNum) eq.numberKey = numberKey(rhsNum);
     return op === '=' ? eq : (v) => !eq(v);
   }
   return (v) => {
@@ -543,8 +548,58 @@ function criteriaIndex(values) {
   return index;
 }
 
-/** Points a text criterion at the index of its range, when there is one: match.positions lists the cells that can match, as r*match.cols+c. */
+/**
+ * Two numbers the = criterion finds equal have the same 15-digit rounding (see compareValues), so it groups the
+ * candidates for one; a group may still hold a pair across a rounding boundary, which the criterion itself tells apart.
+ */
+const numberKey = (n) => n.toPrecision(15);
+
+/**
+ * Where each number of a range sits, by its numberKey: the cells holding a number, and those holding text that
+ * reads as one, which a numeric criterion counts too. A column of numbers met by COUNTIF(B:B,B2) in every row
+ * was otherwise scanned whole by each of them. Indexed the second time a numeric criterion meets the values, as
+ * criteriaIndex indexes text, and kept no longer than they are.
+ */
+const numberIndexes = new WeakMap();
+function numberIndex(values) {
+  const known = numberIndexes.get(values);
+  if (known) return known;
+  if (known === undefined) { numberIndexes.set(values, false); return null; }
+  let cols = 0;
+  for (const row of values) cols = Math.max(cols, row.length);
+  const groups = new Map();
+  for (let r = 0; r < values.length; r++) {
+    const row = values[r];
+    for (let c = 0; c < row.length; c++) {
+      const n = criteriaNumber(row[c]);
+      if (n == null) continue;
+      const key = numberKey(n);
+      const group = groups.get(key);
+      if (group) group.push(r * cols + c); else groups.set(key, [r * cols + c]);
+    }
+  }
+  const index = { cols, groups, queries: new Map() };
+  numberIndexes.set(values, index);
+  return index;
+}
+
+/** Points a criterion at the index of its range, when there is one: match.positions lists the cells that can match, as r*match.cols+c. */
 function indexCriterion(match, range) {
+  if (match.numberKey !== undefined) {
+    const index = numberIndex(range.values);
+    if (!index) return;
+    let positions = index.queries.get(match.numberKey);
+    if (!positions) {
+      const group = index.groups.get(match.numberKey) || [];
+      const at = (p) => { const r = Math.floor(p / index.cols); return range.values[r][p - r * index.cols]; };
+      positions = group.every((p) => match(at(p))) ? group : group.filter((p) => match(at(p)));
+      // Every position lies in one group, so the answers kept never outgrow the index.
+      index.queries.set(match.numberKey, positions);
+    }
+    match.cols = index.cols;
+    match.positions = positions;
+    return;
+  }
   if (match.key === undefined) return;
   const index = criteriaIndex(range.values);
   if (!index) return;
@@ -910,6 +965,9 @@ function lookupVector(range) {
  * so a lookup index built on it serves every call of one calculation.
  */
 const alignedWindows = new WeakMap(); // values array → Map("rows,cols" → the values padded to that window)
+/** The most cells VSTACK and HSTACK assemble: the evaluator's array budget for a formula (ARRAY_BUDGET). */
+const STACK_LIMIT = 4_000_000;
+
 function alignWindows(ranges, axis) {
   let rows = 0;
   let cols = 0;
@@ -1551,7 +1609,8 @@ export const FUNCTIONS = {
     fn: ([a, b]) => {
       const n = toNumber(a); if (isError(n)) return n;
       const base = b === undefined ? 10 : toNumber(b); if (isError(base)) return base;
-      if (n <= 0 || base <= 0 || base === 1) return err('#NUM!');
+      if (n <= 0 || base <= 0) return err('#NUM!');
+      if (base === 1) return err('#DIV/0!'); // the logarithm of the base is zero, as in Excel
       const v = base === 10 ? Math.log10(n) : base === 2 ? Math.log2(n) : Math.log(n) / Math.log(base);
       // An exact power reads as a whole number, so INT(LOG(1000)) is 3.
       const k = Math.round(v);
@@ -3347,26 +3406,20 @@ export const FUNCTIONS = {
   },
   TRIMRANGE: {
     fn: ([array, trimRows, trimCols]) => {
-      const v = asRange(array).values;
+      const a = asRange(array), v = a.values;
       const tr = trimRows === undefined ? 3 : toNumber(trimRows); if (isError(tr)) return tr;
       const tc = trimCols === undefined ? 3 : toNumber(trimCols); if (isError(tc)) return tc;
       if (![0, 1, 2, 3].includes(Math.trunc(tr)) || ![0, 1, 2, 3].includes(Math.trunc(tc))) return err('#VALUE!');
-      // Empty text is a value, including a formula returning "". Only truly
-      // blank cells trim away; downstream COUNTA and wildcard counts need it.
-      const blank = (x) => x == null;
-      let r1 = 0;
-      let r2 = v.length - 1;
-      let c1 = 0;
-      let c2 = (v[0]?.length || 0) - 1;
-      const rowBlank = (r) => v[r].every(blank);
-      const colBlank = (c) => v.every((row) => blank(row[c]));
-      if (tr & 1) while (r1 <= r2 && rowBlank(r1)) r1++;
-      if (tr & 2) while (r2 >= r1 && rowBlank(r2)) r2--;
-      if (r1 > r2) return err('#CALC!');
-      if (tc & 1) while (c1 <= c2 && colBlank(c1)) c1++;
-      if (tc & 2) while (c2 >= c1 && colBlank(c2)) c2--;
-      if (c1 > c2) return err('#CALC!');
-      return { range: true, values: v.slice(r1, r2 + 1).map((row) => row.slice(c1, c2 + 1).map((x) => x ?? null)) };
+      // A reference stays one, over the cells it keeps: its values are read only to the
+      // data, and a side left untrimmed keeps the reference's own extent past them.
+      const ref = a.ref && !a.ref.sheetEnd && !a.areas ? a.ref : null;
+      const block = ref ? trimmedBlock(v, ref.r2 - ref.r1 + 1, ref.c2 - ref.c1 + 1, Math.trunc(tr), Math.trunc(tc))
+        : trimmedBlock(v, v.length, v[0]?.length || 0, Math.trunc(tr), Math.trunc(tc));
+      if (!block) return err('#CALC!');
+      const { r1, r2, c1, c2 } = block;
+      const values = v.slice(r1, r2 + 1).map((row) => (row || []).slice(c1, c2 + 1).map((x) => x ?? null));
+      if (!ref) return { range: true, values };
+      return { range: true, values, ref: { ...ref, kind: r1 === r2 && c1 === c2 ? 'cell' : 'range', r1: ref.r1 + r1, r2: ref.r1 + r2, c1: ref.c1 + c1, c2: ref.c1 + c2 } };
     },
     array: true,
   },
@@ -3802,12 +3855,24 @@ export const FUNCTIONS = {
     },
   },
   REGEXEXTRACT: {
-    fn: ([text, pattern]) => {
+    fn: ([text, pattern, returnMode, caseSensitivity]) => {
       const t = textArg(text); if (isError(t)) return t;
-      const re = regex(pattern, '', t); if (isError(re)) return re;
+      // Excel's return_mode: 0 the first match, 1 every match as a column, 2 the first match's groups as a row;
+      // case_sensitivity 1 ignores case.
+      const mode = returnMode === undefined ? null : toNumber(returnMode); if (isError(mode)) return mode;
+      if (mode !== null && mode !== 0 && mode !== 1 && mode !== 2) return err('#VALUE!');
+      const cs = caseSensitivity === undefined ? 0 : toNumber(caseSensitivity); if (isError(cs)) return cs;
+      if (cs !== 0 && cs !== 1) return err('#VALUE!');
+      const re = regex(pattern, mode === 1 ? (cs ? 'gi' : 'g') : cs ? 'i' : '', t); if (isError(re)) return re;
+      if (mode === 1) {
+        const all = [...t.matchAll(re)].map((m) => [m[0]]);
+        return all.length ? { range: true, values: all } : err('#N/A');
+      }
       const m = re.exec(t);
       if (!m) return err('#N/A');
-      // Several capture groups come back as a row, one as its text and none as the whole match, as in Sheets.
+      if (mode === 0) return m[0];
+      if (mode === 2) return m.length > 1 ? { range: true, values: [m.slice(1).map((g) => g ?? '')] } : m[0];
+      // Left out, several capture groups come back as a row, one as its text and none as the whole match, as in Sheets.
       if (m.length > 2) return { range: true, values: [m.slice(1).map((g) => g ?? '')] };
       return m.length > 1 ? (m[1] ?? '') : m[0];
     },
@@ -4410,8 +4475,10 @@ export const FUNCTIONS = {
       if (!args.length) return err('#VALUE!');
       const parts = alignWindows(args.map(asRange), 'cols');
       const width = Math.max(...parts.map((p) => p.values[0]?.length || 0));
-      // The same cap as SEQUENCE and MAKEARRAY: a stack cannot assemble what they may not.
-      if (parts.reduce((n, p) => n + p.values.length, 0) * width > 100000) return err('#NUM!');
+      // Stacking only rearranges cells that exist, so the cap is a formula's whole array budget, not the
+      // smaller one of SEQUENCE and MAKEARRAY, which make cells up: two 60,000-row tables stack. It is
+      // checked before building, as padding a narrow part out to a wide one's width can multiply cells.
+      if (parts.reduce((n, p) => n + p.values.length, 0) * width > STACK_LIMIT) return err('#NUM!');
       const out = [];
       for (const p of parts) for (const row of p.values) out.push(padRow(row, width));
       return { range: true, values: out };
@@ -4424,7 +4491,7 @@ export const FUNCTIONS = {
       if (!args.length) return err('#VALUE!');
       const parts = alignWindows(args.map(asRange), 'rows');
       const height = Math.max(...parts.map((p) => p.values.length));
-      if (parts.reduce((n, p) => n + (p.values[0]?.length || 0), 0) * height > 100000) return err('#NUM!');
+      if (parts.reduce((n, p) => n + (p.values[0]?.length || 0), 0) * height > STACK_LIMIT) return err('#NUM!');
       const out = [];
       for (let r = 0; r < height; r++) {
         const row = [];
@@ -7205,6 +7272,30 @@ function regex(pattern, flags = '', subject = '') {
   // Match by character, so "." takes a whole emoji; a pattern the stricter unicode mode rejects falls back.
   try { return new RegExp(p, `${flags}u`); } catch { /* not valid with u */ }
   try { return new RegExp(p, flags); } catch { return err('#VALUE!'); }
+}
+
+/**
+ * The block TRIMRANGE and a trim reference (A1:.B9) keep of values read from the top-left of a
+ * height × width area: `rows` and `cols` each 0 to keep, 1 to drop blank leading lines, 2 trailing,
+ * 3 both. Empty text is a value, including a formula returning "": only truly blank cells trim away.
+ * Values may stop short of the area (a reference is read only to its data); what lies past them is
+ * blank. Offsets are from the top-left; null when trimming leaves nothing.
+ */
+export function trimmedBlock(values, height, width, rows, cols) {
+  let r1 = -1, r2 = -1, c1 = Infinity, c2 = -1;
+  for (let r = 0; r < values.length && r < height; r++) {
+    const row = values[r];
+    if (!row) continue;
+    for (let c = 0; c < row.length && c < width; c++) {
+      if (row[c] == null) continue;
+      if (r1 < 0) r1 = r;
+      r2 = r;
+      if (c < c1) c1 = c;
+      if (c > c2) c2 = c;
+    }
+  }
+  if (r1 < 0) return rows || cols || !height || !width ? null : { r1: 0, r2: height - 1, c1: 0, c2: width - 1 };
+  return { r1: rows & 1 ? r1 : 0, r2: rows & 2 ? r2 : height - 1, c1: cols & 1 ? c1 : 0, c2: cols & 2 ? c2 : width - 1 };
 }
 
 /**

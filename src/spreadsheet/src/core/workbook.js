@@ -54,8 +54,8 @@ import { normalizeFontColor, normalizeColorPalette, sameFontColor, DEFAULT_FONT_
  */
 
 import { cellKey, parseKey, normalizeRange, cellName, MAX_TEXT } from './cell.js';
-import { fontName, parseInput, refineImpliedFormat, formatValue, serialToYMD, ymdToSerial, dateTimeKind, FORMAT_DETAIL_KEYS, getLocale } from './format.js';
-import { MAX_FORMAT_CODE_LENGTH, codeIsFraction } from './numfmt.js';
+import { fontName, parseInput, refineImpliedFormat, formatValue, serialToYMD, ymdToSerial, dateTimeKind, FORMAT_DETAIL_KEYS, getLocale, dateNames } from './format.js';
+import { MAX_FORMAT_CODE_LENGTH, codeIsFraction, codeScalesPercent } from './numfmt.js';
 import { normalizeCalculationCompatibility } from './calculation-compatibility.js';
 import { normalizeIteration, calculateIteratively } from './iteration.js';
 import { normalizeNativeSparklineGroups, mapNativeSparklineReferences, mapNativeSparklineDestinations, nativeSparklineSize, nativeSparklineFlags, nativeSparklineColors, nativeSparklineChoices } from './native-sparklines.js';
@@ -287,8 +287,10 @@ export function cellFromInput(text, prevStyle) {
   if (f != null && (f.length > MAX_FORMULA_LENGTH || formulaNesting(f) > MAX_FORMULA_NESTING)) return { v: raw, f: null, s: prevStyle ? { ...prevStyle } : undefined };
   // A number of one or more typed into a percent cell is that many percent
   // (5 is 5%); a number under one is the share it already is (0.5 is 50%). A typed "5%",
-  // currency, date or time is what it says.
-  const v = prevStyle?.fmt === 'percent' && typeof parsed === 'number' && (!fmt || fmt === 'number' || fmt === 'scientific') && Math.abs(parsed) >= 1 ? parsed / 100 : parsed;
+  // currency, date or time is what it says. A custom code that shows the number as a percentage (0.0%;[Red]-0.0%)
+  // is a percent cell too, as Excel's automatic percent entry treats every percentage format.
+  const percentCell = prevStyle?.fmt === 'percent' || (prevStyle?.fmt === 'custom' && typeof parsed === 'number' && codeScalesPercent(parsed, prevStyle.code));
+  const v = percentCell && typeof parsed === 'number' && (!fmt || fmt === 'number' || fmt === 'scientific') && Math.abs(parsed) >= 1 ? parsed / 100 : parsed;
   let s = prevStyle ? { ...prevStyle } : undefined;
   // A leading apostrophe keeps this one entry as text; it does not make the cell
   // Plain text, so a number typed into it later is a number. The editor shows the apostrophe again itself.
@@ -505,6 +507,42 @@ function staticReads(ast) {
   ast._reads = walk(ast) ? out : null;
   return ast._reads;
 }
+
+/**
+ * The items of a list of rectangles (a sheet's merges, its conditional formatting rules or its validation rules)
+ * whose rectangle may hold (r, c), in list order. The grid asks for every cell it draws, and a file can bring
+ * thousands of each: a long list is filed by bands of rows once, kept while the list is the same array (the
+ * workbook replaces these lists rather than changing them), and only the items filed under the cell's band are
+ * returned, which the caller still tests. A short list comes back whole.
+ */
+const RECT_BAND = 64;
+const rectIndexes = new WeakMap();
+function rectCandidates(list, r, rectOf) {
+  if (list.length < 32) return list;
+  let index = rectIndexes.get(list);
+  if (!index || index.length !== list.length) {
+    const bands = new Map();
+    const tall = []; // items over many bands, a whole column's rule, are checked for every cell instead
+    list.forEach((item, i) => {
+      const g = rectOf(item);
+      if (!g) { tall.push(i); return; }
+      const b1 = Math.floor(g.r1 / RECT_BAND), b2 = Math.floor(g.r2 / RECT_BAND);
+      if (!(b2 >= b1) || b2 - b1 > 64) { tall.push(i); return; }
+      for (let b = b1; b <= b2; b++) { const at = bands.get(b); if (at) at.push(i); else bands.set(b, [i]); }
+    });
+    index = { length: list.length, bands, tall };
+    rectIndexes.set(list, index);
+  }
+  const near = index.bands.get(Math.floor(r / RECT_BAND));
+  const tall = index.tall;
+  if (!tall.length) return near ? near.map((i) => list[i]) : [];
+  if (!near) return tall.map((i) => list[i]);
+  const out = [];
+  for (let i = 0, j = 0; i < near.length || j < tall.length;) out.push(list[j >= tall.length || (i < near.length && near[i] < tall[j]) ? near[i++] : tall[j++]]);
+  return out;
+}
+const ownRect = (item) => item;
+const itemRange = (item) => item.range;
 
 /** The rows and columns a sheet's cells may occupy: the grid's limits, or the sheet's own size when a file brought a larger one. */
 function gridLimits(sheet) {
@@ -800,6 +838,21 @@ const SERIES = [
   quarters('q'), quarters('qtr'), quarters('qtr '), quarters('quarter'), quarters('quarter '),
 ];
 
+// The regional format's own month and weekday names, whole and short, go round as the English ones do
+// (Januar → Februar, lundi → mardi), after them, so an English name keeps its English series.
+const localSeriesCache = new Map();
+function nameSeries(loc) {
+  let list = localSeriesCache.get(loc);
+  if (!list) {
+    const { months, days } = dateNames(loc);
+    const own = [months.long, months.short, days.long, days.short].map((names) => names.map((n) => n.toLowerCase()))
+      .filter((names) => new Set(names).size === names.length && !SERIES.some((seq) => seq.join() === names.join()));
+    list = [...SERIES, ...own];
+    localSeriesCache.set(loc, list);
+  }
+  return list;
+}
+
 function applyCase(word, like) {
   if (like === like.toUpperCase() && like !== like.toLowerCase()) return word.toUpperCase();
   if (like[0] === like[0].toUpperCase()) return word[0].toUpperCase() + word.slice(1);
@@ -810,10 +863,10 @@ function applyCase(word, like) {
  * Recognize a run of names from one calendar sequence. Returns
  * { seq, start, step, like } or null. A single name counts, with step 1.
  */
-export function textSeriesFor(values) {
+export function textSeriesFor(values, loc = getLocale()) {
   if (!values.length || !values.every((v) => typeof v === 'string' && v.trim())) return null;
   const lower = values.map((v) => v.trim().toLowerCase());
-  for (const seq of SERIES) {
+  for (const seq of nameSeries(loc)) {
     const idx = lower.map((v) => seq.indexOf(v));
     if (idx.some((i) => i < 0)) continue;
     // "may" is in both month lists; prefer the one that fits every value.
@@ -3834,12 +3887,14 @@ export class Workbook extends EventTarget {
       if (prev && (prev.f != null || (prev.v != null && typeof prev.v !== 'number'))) return;
       const result = apply(prev?.v ?? 0, v);
       // Dividing by zero writes #DIV/0!, as the formula would, rather than leaving the cell as it was.
-      if (isError(result)) { entries.push({ r, c, cell: { v: result, f: null, s: prev?.s } }); return; }
+      // The cell keeps its format and its link: only the number changes.
+      const kept = { s: prev?.s, ...(prev?.hyperlink ? { hyperlink: prev.hyperlink } : {}) };
+      if (isError(result)) { entries.push({ r, c, cell: { v: result, f: null, ...kept } }); return; }
       if (result == null || !Number.isFinite(result)) return;
       // Remove floating-point noise using significant digits. Scaling by
       // 1e12 overflows large values and rounds small nonzero values to zero.
       const value = Number.isInteger(result) ? result : Number(result.toPrecision(15));
-      entries.push({ r, c, cell: { v: value, f: null, s: prev?.s } });
+      entries.push({ r, c, cell: { v: value, f: null, ...kept } });
     }));
     return this.setCellsWithTableHeaders(sheetId, entries, 'Paste operation');
   }
@@ -5151,6 +5206,8 @@ export class Workbook extends EventTarget {
     }[kind];
     if (!fn) return 0;
     const entries = [];
+    // The link a cell carries is no part of its text, and stays with it.
+    const link = (cell) => (cell.hyperlink ? { hyperlink: cell.hyperlink } : {});
     for (const [key, cell] of sheet.cells) {
       if (cell.f != null || typeof cell.v !== 'string') continue;
       const { r, c } = parseKey(key);
@@ -5174,11 +5231,11 @@ export class Workbook extends EventTarget {
           // do: a cell already set to Percent or Time keeps its own.
           refineImpliedFormat(st, parsed.fmt, cell.v);
         }
-        entries.push({ r, c, cell: { v: parsed.v, f: null, s: Object.keys(st).length ? st : undefined } });
+        entries.push({ r, c, cell: { v: parsed.v, f: null, s: Object.keys(st).length ? st : undefined, ...link(cell) } });
         continue;
       }
       const next = fn(cell.v);
-      if (next !== cell.v) entries.push({ r, c, cell: { v: next, f: null, s: cell.s } });
+      if (next !== cell.v) entries.push({ r, c, cell: { v: next, f: null, s: cell.s, ...link(cell) } });
     }
     if (!entries.length) return 0;
     // Every entry changes its cell, so the only write that changes nothing is one a protected cell refused.
@@ -5653,7 +5710,8 @@ export class Workbook extends EventTarget {
     let tokens;
     try { tokens = tokenize(formula); } catch { return []; }
     const out = [];
-    for (const t of tokens) {
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
       if (t.type === 'ref') {
         const ref = parseRefText(t.text, t.sheet);
         if (!ref) continue;
@@ -5667,6 +5725,12 @@ export class Workbook extends EventTarget {
       } else if (t.type === 'name') {
         const named = this.namedRef(t.value, t.sheet ?? ownerSheet, owner || { r: 0, c: 0 }); // as the formula's own sheet resolves it
         if (named) out.push({ ref: { kind: 'range', ...named }, name: t.value });
+        else if (!t.sheet && tokens[i + 1]?.type !== 'lparen') {
+          // A table named on its own, as in VLOOKUP(x,Sales,2,FALSE), reads its data rows, as the evaluator reads it.
+          const sheet = this.sheetByName(ownerSheet);
+          const ref = sheet ? this._resolveTableRef(sheet, owner || { r: -1, c: -1 }, t.value, '') : null;
+          if (ref && !isError(ref)) out.push({ ref, name: t.value });
+        }
       } else if (t.type === 'tref') {
         // Table1[Column] reads the column's cells, [@Column] the one on the formula's own row; a table or
         // column that is not there reads nothing, as a [@Column] outside any table does.
@@ -6944,7 +7008,7 @@ export class Workbook extends EventTarget {
       this._changed('structure', live.id);
     };
     apply(next);
-    this._push({ label: 'Protect sheet', undo: () => apply(prev), redo: () => apply(next) });
+    this._push({ label: next ? 'Protect sheet' : 'Unprotect sheet', undo: () => apply(prev), redo: () => apply(next) });
   }
 
   /** True (and announced) when the sheet is protected, so a mutation should stop. */
@@ -7098,6 +7162,44 @@ export class Workbook extends EventTarget {
   /* ---------- Outline groups ---------- */
 
   /**
+   * One outline step: grouping, ungrouping, collapsing or expanding changes a sheet's groups and the lines they
+   * hide (and, with a filter on, the rows it hides among them), nothing else, so the step keeps those alone for
+   * its undo. A structural step's snapshot of the whole sheet cost a large sheet a third of a second a click and,
+   * weighed against the history's budget, pushed every older step out of the history.
+   */
+  _outlineStep(sheet, label, change) {
+    recordStep(this, 'structure', label);
+    // The step keeps the lines it hid and showed, not every hidden line: a sheet whose filter hides most of its
+    // rows would otherwise hold them all twice over for each group opened.
+    const sets = ['hiddenRows', 'hiddenCols', 'filterHidden'];
+    const before = normalizeGroups(sheet.groups);
+    const was = sets.map((key) => [...sheet[key]]);
+    change();
+    const after = normalizeGroups(sheet.groups);
+    const deltas = sets.map((key, i) => {
+      const now = sheet[key];
+      // Most steps leave most of these sets as they were (grouping hides nothing): told without building one.
+      if (now.size === was[i].length && was[i].every((x) => now.has(x))) return { hid: [], showed: [] };
+      const old = new Set(was[i]);
+      return { hid: [...now].filter((x) => !old.has(x)), showed: was[i].filter((x) => !now.has(x)) };
+    });
+    const apply = (undo) => {
+      const live = this.sheet(sheet.id);
+      if (!live) return;
+      live.groups = normalizeGroups(undo ? before : after);
+      sets.forEach((key, i) => {
+        const set = new Set(live[key]);
+        for (const x of undo ? deltas[i].hid : deltas[i].showed) set.delete(x);
+        for (const x of undo ? deltas[i].showed : deltas[i].hid) set.add(x);
+        live[key] = set;
+      });
+      this._changed('layout', live.id);
+    };
+    this._changed('layout', sheet.id);
+    this._push({ label, undo: () => apply(true), redo: () => apply(false), snapshotCells: deltas.reduce((n, d) => n + d.hid.length + d.showed.length, 0) });
+  }
+
+  /**
    * Group lines from..to (rows when axis is 'row'). Groups nest when one
    * lies inside another; a group that only partly overlaps an existing one
    * is refused. Returns true when a group was added.
@@ -7117,7 +7219,7 @@ export class Workbook extends EventTarget {
     const partial = list.some((g) => (g.from < lo && g.to >= lo && g.to < hi) || (g.from > lo && g.from <= hi && g.to > hi));
     if (partial) return false;
     if (list.filter((g) => g.from <= lo && g.to >= hi).length >= 7) return false; // eight levels, the .xlsx outline limit
-    this._structural(axis === 'row' ? 'Group rows' : 'Group columns', () => {
+    this._outlineStep(sheet, axis === 'row' ? 'Group rows' : 'Group columns', () => {
       sheet.groups = normalizeGroups({ ...sheet.groups, [key]: [...list, { from: lo, to: hi, collapsed: false }] });
     });
     return true;
@@ -7142,7 +7244,7 @@ export class Workbook extends EventTarget {
       if (around.length) gone = [around[0]];
     }
     if (!gone.length) return 0;
-    this._structural(axis === 'row' ? 'Ungroup rows' : 'Ungroup columns', () => {
+    this._outlineStep(sheet, axis === 'row' ? 'Ungroup rows' : 'Ungroup columns', () => {
       sheet.groups = normalizeGroups({ ...sheet.groups, [key]: list.filter((g) => !gone.includes(g)) });
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
       for (const g of gone) if (g.collapsed) for (let i = g.from; i <= g.to; i++) if (!this._insideCollapsed(sheet, key, i)) hidden.delete(i);
@@ -7159,7 +7261,7 @@ export class Workbook extends EventTarget {
     const group = sheet.groups[key].find((g) => g.from === from && g.to === to);
     if (!group) return;
     const collapse = !group.collapsed;
-    this._structural(collapse ? (axis === 'row' ? 'Collapse rows' : 'Collapse columns') : (axis === 'row' ? 'Expand rows' : 'Expand columns'), () => {
+    this._outlineStep(sheet, collapse ? (axis === 'row' ? 'Collapse rows' : 'Collapse columns') : (axis === 'row' ? 'Expand rows' : 'Expand columns'), () => {
       group.collapsed = collapse;
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
       for (let i = group.from; i <= group.to; i++) {
@@ -7178,7 +7280,7 @@ export class Workbook extends EventTarget {
     const key = axis === 'row' ? 'rows' : 'cols';
     const list = sheet.groups[key];
     if (!list.length || list.every((g) => g.collapsed === !!collapsed)) return;
-    this._structural(collapsed ? (axis === 'row' ? 'Collapse all rows' : 'Collapse all columns') : (axis === 'row' ? 'Expand all rows' : 'Expand all columns'), () => {
+    this._outlineStep(sheet, collapsed ? (axis === 'row' ? 'Collapse all rows' : 'Collapse all columns') : (axis === 'row' ? 'Expand all rows' : 'Expand all columns'), () => {
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
       for (const g of list) {
         g.collapsed = !!collapsed;
@@ -7215,7 +7317,7 @@ export class Workbook extends EventTarget {
     if (!sheet || this._gridLocked(sheet)) return false;
     const wanted = normalizeGroups({ rows: next.rows ?? sheet.groups.rows, cols: next.cols ?? sheet.groups.cols });
     if (JSON.stringify(wanted) === JSON.stringify(normalizeGroups(sheet.groups))) return false;
-    this._structural(label, () => {
+    this._outlineStep(sheet, label, () => {
       for (const [key, hidden] of [['rows', sheet.hiddenRows], ['cols', sheet.hiddenCols]]) {
         if (!next[key]) continue;
         for (const g of sheet.groups[key]) if (g.collapsed) for (let i = g.from; i <= g.to; i++) hidden.delete(i);
@@ -7657,7 +7759,7 @@ export class Workbook extends EventTarget {
       this._changed('layout', live.id);
     };
     apply(next);
-    this._push({ label: 'Freeze panes', undo: () => apply(prev), redo: () => apply(next) });
+    this._push({ label: next.rows || next.cols ? 'Freeze panes' : 'Unfreeze panes', undo: () => apply(prev), redo: () => apply(next) });
   }
 
   /**
@@ -8078,7 +8180,9 @@ export class Workbook extends EventTarget {
     if (!sheet || !sheetFilters(sheet).length) return;
     const before = [...sheet.filterHidden].join(',');
     this._applyFilter(sheet);
-    if ([...sheet.filterHidden].join(',') !== before) this._emit('layout', sheet.id);
+    // The rows shown are saved with the sheet, and SUBTOTAL and AGGREGATE leave out the rows a filter hides: a
+    // change of them is a change to the book, worked out again, saved and shared, though not an undo step.
+    if ([...sheet.filterHidden].join(',') !== before) this._changed('layout', sheet.id);
   }
 
   /**
@@ -8736,7 +8840,7 @@ export class Workbook extends EventTarget {
     // rules in conflict the earlier one wins (see moveRule), while the table coat gives way to any rule.
     const painted = new Set();
     const paint = (patch) => { out = { ...(out || {}), ...patch }; for (const key of Object.keys(patch)) painted.add(key); };
-    for (const rule of sheet.rules) {
+    for (const rule of rectCandidates(sheet.rules, r, itemRange)) {
       const g = rule.range;
       if (r < g.r1 || r > g.r2 || c < g.c1 || c > g.c2) continue;
       if (rule.type === 'scale') {
@@ -9860,8 +9964,9 @@ export class Workbook extends EventTarget {
   validationAt(sheetId, r, c) {
     const sheet = this.sheet(sheetId);
     if (!sheet || !sheet.validations.length) return null;
-    for (let i = sheet.validations.length - 1; i >= 0; i--) {
-      const v = sheet.validations[i];
+    const list = rectCandidates(sheet.validations, r, itemRange);
+    for (let i = list.length - 1; i >= 0; i--) {
+      const v = list[i];
       if (r >= v.range.r1 && r <= v.range.r2 && c >= v.range.c1 && c <= v.range.c2) return v;
     }
     return null;
@@ -10554,7 +10659,7 @@ export class Workbook extends EventTarget {
   mergeAt(sheetId, r, c) {
     const sheet = this.sheet(sheetId);
     if (!sheet || !sheet.merges.length) return null;
-    return sheet.merges.find((m) => r >= m.r1 && r <= m.r2 && c >= m.c1 && c <= m.c2) || null;
+    return rectCandidates(sheet.merges, r, ownRect).find((m) => r >= m.r1 && r <= m.r2 && c >= m.c1 && c <= m.c2) || null;
   }
 
   /** Merges that overlap a range. */

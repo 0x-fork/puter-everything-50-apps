@@ -117,6 +117,7 @@ export function createComments(ctx, host) {
     });
     return ok;
   }
+  let focusEdit = null; // the comment whose edit was just begun, whose box takes the focus when drawn
   let card = null; // { node, sheetId, r, c, mode: 'hover' | 'pinned' | 'compose', editing: id | null, draft: '' }
   let hoverTimer = 0;
   let leaveTimer = 0;
@@ -135,7 +136,7 @@ export function createComments(ctx, host) {
         e.stopPropagation();
         const rect = more.getBoundingClientRect();
         openMenu({ anchor: more, x: rect.left, y: rect.bottom, label: root ? 'Thread actions' : 'Comment actions', items: [
-          { label: 'Edit comment', icon: 'pencil', disabled: !!thread.done, onSelect: () => onEditing(item.id) },
+          { label: 'Edit comment', icon: 'pencil', disabled: !!thread.done, onSelect: () => { focusEdit = item.id; onEditing(item.id); } },
           { label: root ? 'Delete thread' : 'Delete comment', icon: 'trash', onSelect: () => { deleteThreadItem(wb, sheetId, r, c, item.id); host.keepFocus?.(); } },
           root && { separator: true },
           root && { label: thread.done ? 'Reopen thread' : 'Resolve thread', icon: thread.done ? 'undo' : 'check', onSelect: () => setThreadResolved(wb, sheetId, r, c, !thread.done) },
@@ -166,7 +167,11 @@ export function createComments(ctx, host) {
         body = el('div.cmt-edit', {}, area, el('div.cmt-actions', {},
           el('button.btn.btn-sm.btn-ghost', { type: 'button', onclick: () => onEditing(null) }, 'Cancel'),
           el('button.btn.btn-sm.btn-primary', { type: 'button', onclick: save }, 'Save')));
-        queueMicrotask(() => { area.focus({ preventScroll: true }); area.setSelectionRange(area.value.length, area.value.length); });
+        // The box takes the focus as the edit begins, not each time the thread is redrawn (a cell clicked meanwhile keeps it).
+        if (focusEdit === item.id) {
+          focusEdit = null;
+          queueMicrotask(() => { area.focus({ preventScroll: true }); area.setSelectionRange(area.value.length, area.value.length); });
+        }
       } else body = el('div.cmt-text', {}, ...textWithMentions(item));
       return el(`div.cmt-item${root ? '.cmt-root' : ''}`, { dataset: { id: item.id } }, head, body);
     });
@@ -186,12 +191,12 @@ export function createComments(ctx, host) {
       const assign = assignOption(reply, pick);
       const send = () => {
         if (!reply.value.trim()) return;
-        const text = reply.value, assignTo = assign.person();
-        if (postComment(sheetId, r, c, text, pick.picked, assignTo, true)) {
-          reply.value = '';
-          pick.picked.length = 0;
-          told(sheetId, r, c, lastThreadItem(wb, sheetId, r, c), [], assignTo);
-        }
+        const text = reply.value, assignTo = assign.person(), picked = pick.picked.splice(0);
+        // Emptied before the post: the post redraws the thread, carrying the text of a box being typed in over
+        // to the new one, where the reply just posted stayed, ready to be posted twice.
+        reply.value = '';
+        if (postComment(sheetId, r, c, text, picked, assignTo, true)) told(sheetId, r, c, lastThreadItem(wb, sheetId, r, c), [], assignTo);
+        else { reply.value = text; pick.picked.push(...picked); }
       };
       reply.addEventListener('input', () => { post.disabled = !reply.value.trim(); reply.rows = Math.min(6, Math.max(1, reply.value.split('\n').length)); });
       reply.addEventListener('keydown', (e) => {
@@ -285,7 +290,12 @@ export function createComments(ctx, host) {
   function placeCard() {
     if (!card) return;
     const g = grid();
-    if (!g || g.sheetId !== card.sheetId) { hideCard(); return; }
+    if (!g || g.sheetId !== card.sheetId) {
+      // A comment being written waits out of sight while another sheet is shown, as it does for a cell scrolled away.
+      if (g && card.mode === 'compose' && wb.sheet(card.sheetId)) card.node.classList.add('offscreen');
+      else hideCard();
+      return;
+    }
     const m = wb.mergeAt?.(card.sheetId, card.r, card.c);
     const rect = g.cellRect(card.r, card.c), end = m ? g.cellRect(m.r2, m.c2) : rect;
     const vp = g.viewport.getBoundingClientRect();
@@ -331,20 +341,39 @@ export function createComments(ctx, host) {
       return;
     }
     const active = g.active;
-    // Typing in a reply box survives a refresh of the list: its text and focus come back.
-    const focused = document.activeElement && list.contains(document.activeElement) ? document.activeElement : null;
-    const keep = focused?.classList.contains('cmt-reply') ? { key: focused.closest('.cmt-thread')?.dataset.cell, value: focused.value, at: focused.selectionStart, picked: pickedIn(focused) } : null;
-    closeMentionPickers(list);
-    list.replaceChildren(...cells.map(({ r, c }) => {
-      const key = cellKey(r, c);
-      const view = threadView(sheetId, r, c, { inPane: true, editing: paneEditing.key === key ? paneEditing.id : null,
-        onEditing: (id) => { paneEditing.key = id ? key : null; paneEditing.id = id; renderPane(); } });
-      if (view && active.r === r && active.c === c) view.classList.add('active');
-      return view;
-    }).filter(Boolean));
-    if (keep?.key) {
-      const box = list.querySelector(`.cmt-thread[data-cell="${keep.key}"] .cmt-reply`);
-      if (box) { carryPicked(box, keep.picked); box.value = keep.value; box.focus({ preventScroll: true }); box.setSelectionRange(keep.at, keep.at); box.dispatchEvent(new Event('input')); }
+    keepingDrafts(list, () => {
+      closeMentionPickers(list);
+      list.replaceChildren(...cells.map(({ r, c }) => {
+        const key = cellKey(r, c);
+        const view = threadView(sheetId, r, c, { inPane: true, editing: paneEditing.key === key ? paneEditing.id : null,
+          onEditing: (id) => { paneEditing.key = id ? key : null; paneEditing.id = id; renderPane(); } });
+        if (view && active.r === r && active.c === c) view.classList.add('active');
+        return view;
+      }).filter(Boolean));
+    });
+  }
+
+  /**
+   * What is being written in the boxes of `container` (a reply, a comment being edited) survives a redraw: its text,
+   * the people picked in it, and the focus and caret when it had them. The pane is redrawn whenever the selection
+   * moves or the workbook changes, and a box that had lost the focus (a cell clicked, to check a value) came back empty.
+   */
+  function keepingDrafts(container, redraw) {
+    const focused = document.activeElement;
+    const kept = [...container.querySelectorAll('.cmt-thread textarea.cmt-input')].filter((area) => area.value || area === focused).map((area) => ({
+      cell: area.closest('.cmt-thread')?.dataset.cell,
+      item: area.classList.contains('cmt-reply') ? null : area.closest('.cmt-item')?.dataset.id, // a comment being edited
+      value: area.value, at: area.selectionStart, picked: pickedIn(area), focused: area === focused,
+    }));
+    redraw();
+    for (const k of kept) {
+      const thread = k.cell && container.querySelector(`.cmt-thread[data-cell="${k.cell}"]`);
+      const box = k.item ? [...(thread?.querySelectorAll('.cmt-item') || [])].find((n) => n.dataset.id === k.item)?.querySelector('textarea.cmt-input') : thread?.querySelector('.cmt-reply');
+      if (!box) continue;
+      carryPicked(box, k.picked);
+      box.value = k.value;
+      box.dispatchEvent(new Event('input'));
+      if (k.focused) { box.focus({ preventScroll: true }); box.setSelectionRange(k.at, k.at); }
     }
   }
 
@@ -434,11 +463,7 @@ export function createComments(ctx, host) {
       // Undo, another reply or a structural edit: the card follows its thread, or goes with it.
       if (!getThread(wb, card.sheetId, card.r, card.c)) hideCard();
       else if (!card.node.contains(document.activeElement) || card.editing == null) {
-        const reply = card.node.querySelector('.cmt-reply');
-        const keep = reply && document.activeElement === reply ? reply.value : null;
-        const picked = pickedIn(reply);
-        renderCard({ focusReply: keep != null });
-        if (keep) { const next = card?.node.querySelector('.cmt-reply'); if (next) { carryPicked(next, picked); next.value = keep; next.dispatchEvent(new Event('input')); } }
+        keepingDrafts(card.node, () => renderCard());
       }
     }
     renderPane();
@@ -468,7 +493,7 @@ export function createComments(ctx, host) {
     /** Selection or sheet moved: the pane marks the active thread; a card on a cell left behind goes. */
     sync() {
       const g = grid();
-      if (card && g && (g.sheetId !== card.sheetId || (card.mode === 'hover' ? false : (g.active.r !== card.r || g.active.c !== card.c) && card.mode !== 'compose'))) hideCard();
+      if (card && g && card.mode !== 'compose' && (g.sheetId !== card.sheetId || (card.mode !== 'hover' && (g.active.r !== card.r || g.active.c !== card.c)))) hideCard();
       else placeCard();
       renderPane();
     },

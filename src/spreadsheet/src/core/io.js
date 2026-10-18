@@ -56,7 +56,7 @@ import { exportNamedTableReferences } from './export-named-formulas.js';
 import { err, isError } from './formula/functions.js';
 import { parseDelimited } from './tsv.js';
 import { parseInput, refineImpliedFormat, localeInfo, getLocale } from './format.js';
-import { cellsToHtml } from './clipboard.js';
+import { cellsToHtml, copyMergeLayout } from './clipboard.js';
 import { reconcileConditionalFormats } from './xlsx-condformat-reconcile.js';
 import { prepareXlsxValidationLists } from './xlsx-validation.js';
 import { sheetFilters, sameFilterRange, filterRangeKey, mapSheetFilters } from './sheet-filters.js';
@@ -1012,18 +1012,24 @@ export function sheetToHtml(wb, sheetId, { title = '' } = {}) {
   if (!sheet || !used) return `${head}<p>This sheet is empty.</p></body></html>`;
   const rows = [];
   const cols = [];
-  for (let r = 0; r <= used.r2; r++) if (!wb.isRowHidden(sheetId, r)) rows.push(r);
-  for (let c = 0; c <= used.c2; c++) if (!sheet.hiddenCols.has(c)) cols.push(c);
-  // A row without any cell is an empty table row; only rows with content are read cell by cell.
+  // A merged block that starts among the cells is written whole, however far past the last cell it reaches.
+  let lastRow = used.r2, lastColumn = used.c2;
+  for (const m of sheet.merges) if (m.r1 <= used.r2 && m.c1 <= used.c2) { lastRow = Math.max(lastRow, m.r2); lastColumn = Math.max(lastColumn, m.c2); }
+  for (let r = 0; r <= lastRow; r++) if (!wb.isRowHidden(sheetId, r)) rows.push(r);
+  for (let c = 0; c <= lastColumn; c++) if (!sheet.hiddenCols.has(c)) cols.push(c);
+  // Merged blocks span their shown rows and columns, as on screen; a hidden line drops out of the span.
+  const mergeLayout = copyMergeLayout(sheet.merges, rows, cols);
+  const spanRows = new Set([...mergeLayout.spans].filter(([, span]) => span).map(([key]) => Number(key.split(',')[0])));
+  // A row without any cell is an empty table row; only rows with content, or where a merged block starts, are read cell by cell.
   const lastCol = lastContentColumns(wb, sheet);
-  const filled = (r) => lastCol.has(r);
-  const texts = rows.map((r) => (filled(r) ? cols.map((c) => wb.getDisplay(sheetId, r, c)) : []));
-  const cells = rows.map((r) => (filled(r) ? cols.map((c) => wb.getCell(sheetId, r, c) || null) : []));
-  const values = rows.map((r) => (filled(r) ? cols.map((c) => wb.getValue(sheetId, r, c)) : []));
-  const styles = rows.map((r) => (filled(r) ? cols.map((c) => wb.displayStyleAt(sheetId, r, c)) : []));
+  const filled = (r, i) => lastCol.has(r) || spanRows.has(i);
+  const texts = rows.map((r, i) => (filled(r, i) ? cols.map((c) => wb.getDisplay(sheetId, r, c)) : []));
+  const cells = rows.map((r, i) => (filled(r, i) ? cols.map((c) => wb.getCell(sheetId, r, c) || null) : []));
+  const values = rows.map((r, i) => (filled(r, i) ? cols.map((c) => wb.getValue(sheetId, r, c)) : []));
+  const styles = rows.map((r, i) => (filled(r, i) ? cols.map((c) => wb.displayStyleAt(sheetId, r, c)) : []));
   const decorated = sheet.rules.length || sheet.tables?.length;
-  const looks = decorated ? rows.map((r) => (filled(r) ? cols.map((c) => wb.conditionalStyle(sheetId, r, c, wb.getValue(sheetId, r, c)) || null) : [])) : null;
-  const table = cellsToHtml(texts, cells, looks, values, null, { clipboard: false, styles, colorPalette: wb.colorPalette, normalFill: wb.nativeNormalFill, indentUnit: normalIndentUnit(wb.normalFont) })
+  const looks = decorated ? rows.map((r, i) => (filled(r, i) ? cols.map((c) => wb.conditionalStyle(sheetId, r, c, wb.getValue(sheetId, r, c)) || null) : [])) : null;
+  const table = cellsToHtml(texts, cells, looks, values, null, { clipboard: false, styles, mergeLayout, colorPalette: wb.colorPalette, normalFill: wb.nativeNormalFill, indentUnit: normalIndentUnit(wb.normalFont) })
     .replace(/ data-spreadsheet-[\w-]+="[^"]*"/g, '');
   const colgroup = `<colgroup>${cols.map((c) => `<col style="width:${wb.colWidth(sheetId, c)}px">`).join('')}</colgroup>`;
   return `${head}${table.replace(/^(<table[^>]*>)/, `$1${colgroup}`)}</body></html>`;
@@ -2302,6 +2308,21 @@ function declaredUnpackedSize(bytes) {
   return { largest, total };
 }
 
+/**
+ * The reason a file could not be read, worded for the person opening it. The library names its own
+ * internals ("Bad compressed size: 0 != 358" for a download cut short, "Unknown Namespace" for a Word
+ * document): its error stays the cause. Coded errors (`unreadable`, `too-large`) are the ones whose
+ * message the app shows as it is.
+ */
+function readFailure(e) {
+  const text = String(e?.message || '');
+  const tooLarge = /repeat exceeds supported worksheet/.test(text);
+  const message = /password-protected/i.test(text) ? 'This workbook is protected with a password. Remove the password in the program that set it, then open the file here'
+    : tooLarge ? 'This file is too large to open here: it holds more cells than a sheet can'
+    : 'This file could not be read. It may be damaged or incomplete, or not a spreadsheet';
+  return Object.assign(new Error(message, { cause: e }), { code: tooLarge ? 'too-large' : 'unreadable' });
+}
+
 export async function workbookFromFile(data, filename = '', { sourceWorkbook = null } = {}) {
   let bytes = data;
   if (typeof Blob !== 'undefined' && data instanceof Blob) bytes = await data.arrayBuffer();
@@ -2329,19 +2350,22 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
   // Keep prefixes intact for our token-aware decoder; the vendor's default
   // cleanup also removes matching text from strings and sheet names.
   // bookFiles keeps the inflated parts, from which the sheet state the reader leaves in the XML is read.
-  const book = X.read(bytes, { type: 'array', cellNF: true, cellDates: false, cellStyles: true, sheetStubs: true, xlfn: true, bookFiles: true });
+  let book;
+  try {
+    book = X.read(bytes, { type: 'array', cellNF: true, cellDates: false, cellStyles: true, sheetStubs: true, xlfn: true, bookFiles: true });
+  } catch (e) { throw readFailure(e); }
   const fileFormat = recoveredFormat(X);
   const partOf = sheetParts(book);
   // The reader keeps quiet about a sheet whose part it could not parse and
   // leaves it out of the book. Importing that sheet as empty would let the
   // next save overwrite the file without it; refuse the file instead.
   const unreadable = book.Workbook?.UnreadableSheets?.[0];
-  if (unreadable != null) throw new Error(`Sheet "${unreadable}" could not be read; the file may be damaged`);
+  if (unreadable != null) throw Object.assign(new Error(`Sheet "${unreadable}" could not be read; the file may be damaged`), { code: 'unreadable' });
   // The reader keys sheets by name, so the second of two same-named sheets lands on top of
   // the first: one sheet's data would be gone and the other's shown twice, and a save would
   // write the file that way. Excel refuses such a file with a repair prompt; so do we.
   const twice = book.SheetNames.find((name, i) => book.SheetNames.indexOf(name) !== i);
-  if (twice != null) throw new Error(`Two sheets are named "${twice}"; the file may be damaged`);
+  if (twice != null) throw Object.assign(new Error(`Two sheets are named "${twice}"; the file may be damaged`), { code: 'unreadable' });
   const candidates = book.SheetNames.filter((n) => /^_puter_meta\d*$/i.test(n))
     .map((name) => ({ name, data: readMeta(X, book.Sheets[name]) })).filter((m) => m.data);
   // Prefer marked sidecars; older files used the fixed name without a marker.

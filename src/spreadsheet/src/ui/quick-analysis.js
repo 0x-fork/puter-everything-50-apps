@@ -4,6 +4,7 @@
  * choice for the selection in one click, through the editor's own commands.
  */
 import { el } from './dom.js';
+import { cellKey } from '../core/cell.js';
 import { icon } from './icons.js';
 import { ICON_SETS } from '../core/condformat.js';
 import { QUICK_TOTALS } from '../core/quick-totals.js';
@@ -54,27 +55,51 @@ export function createQuickAnalysis(ctx) {
     onclick: () => (panel ? close() : open()) });
 
   /** The block the button belongs to: one range of several cells holding something. */
+  let known = { key: null, holds: false }; // whether the range last asked about holds data, while nothing changes
   function target() {
     const g = ctx.grid;
-    if (!g || g.editing || (g.ranges?.length || 1) !== 1) return null;
+    // A selected chart, picture or shape is what the keys act on, not the cells left selected under it (as
+    // after Insert ▸ Chart): the button would only sit over the object.
+    if (!g || g.editing || g.selectedChart || (g.ranges?.length || 1) !== 1) return null;
     const rg = g.range;
     if (!rg || (rg.r1 === rg.r2 && rg.c1 === rg.c2)) return null;
-    // Only a block with data in it: checked over its stored cells, so a whole column costs what it holds.
     const sheet = ctx.wb.sheet(g.sheetId);
     if (!sheet || sheet.kind === 'chart') return null;
+    // The answer is asked again on every scroll event and selection change; it changes only with the
+    // range or the workbook, so it is kept rather than looking through the sheet each frame.
+    const key = `${ctx.wb.version}|${g.sheetId}|${rg.r1},${rg.c1},${rg.r2},${rg.c2}`;
+    if (known.key !== key) known = { key, holds: holdsData(sheet, g.sheetId, rg) };
+    return known.holds ? rg : null;
+  }
+
+  /** Does the range hold anything: looked up cell by cell when it is smaller than the stored cells, so a whole column costs what it holds. */
+  function holdsData(sheet, sheetId, rg) {
+    const has = (r, c) => ctx.wb.getValue(sheetId, r, c) != null;
+    if ((rg.r2 - rg.r1 + 1) * (rg.c2 - rg.c1 + 1) < sheet.cells.size) {
+      for (let r = rg.r1; r <= rg.r2; r++) for (let c = rg.c1; c <= rg.c2; c++) if (sheet.cells.has(cellKey(r, c)) && has(r, c)) return true;
+      return false;
+    }
     for (const key of sheet.cells.keys()) {
       const i = key.indexOf(','), r = +key.slice(0, i), c = +key.slice(i + 1);
-      if (r >= rg.r1 && r <= rg.r2 && c >= rg.c1 && c <= rg.c2 && ctx.wb.getValue(g.sheetId, r, c) != null) return rg;
+      if (r >= rg.r1 && r <= rg.r2 && c >= rg.c1 && c <= rg.c2 && has(r, c)) return true;
     }
-    return null;
+    return false;
   }
 
   function place() {
     const rg = target();
     if (!rg) { button.hidden = true; if (panel) close(); return; }
+    // The Paste Options or Auto Fill Options button at the same corner is the one shown, as in Excel.
+    if (ctx.optionButton?.visible && !panel) { button.hidden = true; return; }
     const g = ctx.grid;
     const rect = g.cellRect(Math.min(rg.r2, g.lastVisibleRow?.() ?? rg.r2), Math.min(rg.c2, g.lastVisibleCol?.() ?? rg.c2));
     const vp = g.viewport.getBoundingClientRect();
+    // A block scrolled up or left out of sight, past the window's edge or under its frozen panes, takes the
+    // button with it: held at the edge it stood over the formula bar and the ribbon, or over the frozen cells.
+    if (vp.width > 0 || vp.height > 0) {
+      const pane = g.paneRect?.(rg.r2, rg.c2) || vp;
+      if (rect.bottom <= pane.top || rect.right <= pane.left) { button.hidden = true; if (panel) close(); return; }
+    }
     const left = Math.min(rect.right + 2, (vp.right || rect.right + 2) - 24), top = Math.min(rect.bottom + 2, (vp.bottom || rect.bottom + 2) - 24);
     button.style.left = `${Math.round(left)}px`;
     button.style.top = `${Math.round(top)}px`;
