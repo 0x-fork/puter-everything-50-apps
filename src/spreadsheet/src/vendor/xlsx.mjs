@@ -3,6 +3,8 @@ import { writeOdsSettings, readOdsSettings, readOdsViewSettings } from '../core/
 import { odsFilterReader, writeOdsFilter } from '../core/ods-filter.js';
 import { writeOdsValidations, readOdsValidations, odsValidationLayout, addOdsValidation, odsFormulaReader } from '../core/ods-validation.js';
 import { odsCellStyleProperties, odsTextStyleProperties } from '../core/ods-cell-styles.js';
+import { xlmlCellProps } from '../core/xlml-styles.js';
+import { odsConditionalFormatsXml } from '../core/ods-condformat.js';
 /*! xlsx.js (C) 2013-present SheetJS -- http://sheetjs.com */
 /* vim: set ts=2: */
 /*exported XLSX */
@@ -19158,8 +19160,12 @@ function parse_xlml_data(xml, ss, data, cell/*:any*/, base, styles, csty, row, a
 	var i = 0;
 	if(sid === undefined && row) sid = row.StyleID;
 	if(sid === undefined && csty) sid = csty.StyleID;
+	var chain = [];
 	while(styles[sid] !== undefined) {
 		var ssid = styles[sid];
+		/* Puter Spreadsheet local patch: the style chain's font, fill, alignment and borders (see xlml-styles.js). */
+		if(chain.indexOf(ssid) > -1) break;
+		chain.push(ssid);
 		if(ssid.nf) nf = ssid.nf;
 		if(ssid.Interior) interiors.push(ssid.Interior);
 		if(!ssid.Parent) break;
@@ -19215,6 +19221,8 @@ function parse_xlml_data(xml, ss, data, cell/*:any*/, base, styles, csty, row, a
 			if(!S.patternType && x.patternType) S.patternType = x.patternType;
 		});
 		cell.s = S;
+		var props = chain.length ? xlmlCellProps(chain, styles.Default) : null;
+		if(props) cell.odsProps = props;
 	}
 	if(cell.StyleID !== undefined) cell.ixfe = cell.StyleID;
 }
@@ -19267,7 +19275,7 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 	}/*:any*/);
 
 
-	var Rn;
+	var Rn, instyle = false;
 	var state = [], tmp;
 	if(DENSE != null && opts.dense == null) opts.dense = DENSE;
 	var sheets = {}, sheetnames/*:Array<string>*/ = [], cursheet/*:Worksheet*/ = ({}), sheetname = ""; if(opts.dense) cursheet["!data"] = [];
@@ -19390,8 +19398,8 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 			break;
 
 		case 'style' /*case 'Style'*/:
-			if(Rn[1]==='/') process_style_xlml(styles, stag, opts);
-			else stag = xlml_parsexmltag(Rn[0]);
+			if(Rn[1]==='/') { process_style_xlml(styles, stag, opts); instyle = false; }
+			else { stag = xlml_parsexmltag(Rn[0]); instyle = Rn[0].slice(-2) !== "/>"; if(!instyle) process_style_xlml(styles, stag, opts); }
 			break;
 
 		case 'numberformat' /*case 'NumberFormat'*/:
@@ -19439,11 +19447,18 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 		case 'sub' /*case 'Sub'*/: break;
 		case 'sup' /*case 'Sup'*/: break;
 		case 'span' /*case 'Span'*/: break;
+		/* Puter Spreadsheet local patch: a style's alignment, borders and font are kept for its cells. */
 		case 'alignment' /*case 'Alignment'*/:
+			if(instyle && Rn[1]!=='/') stag.Alignment = xlml_parsexmltag(Rn[0]);
 			break;
-		case 'borders' /*case 'Borders'*/: break;
-		case 'border' /*case 'Border'*/: break;
+		case 'borders' /*case 'Borders'*/:
+			if(instyle && Rn[1]!=='/' && !stag.Borders) stag.Borders = [];
+			break;
+		case 'border' /*case 'Border'*/:
+			if(instyle && Rn[1]!=='/') (stag.Borders || (stag.Borders = [])).push(xlml_parsexmltag(Rn[0]));
+			break;
 		case 'font' /*case 'Font'*/:
+			if(instyle) { if(Rn[1]!=='/') stag.Font = xlml_parsexmltag(Rn[0]); break; }
 			if(Rn[0].slice(-2) === "/>") break;
 			else if(Rn[1]==="/") ss += str.slice(fidx, Rn.index);
 			else fidx = Rn.index + Rn[0].length;
@@ -19677,14 +19692,25 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 						Workbook.Views[0].RTL = true;
 						break;
 
-					case 'freezepanes' /*case 'FreezePanes'*/: break;
+					/* Puter Spreadsheet local patch: frozen panes (FreezePanes with the rows above and the columns left of
+					 * the split) and hidden gridlines, as the sheet's '!xlmlView' for the importer. */
+					case 'freezepanes' /*case 'FreezePanes'*/:
+						if(Rn[1]!=='/') (cursheet['!xlmlView'] || (cursheet['!xlmlView'] = {})).frozen = true;
+						break;
 					case 'frozennosplit' /*case 'FrozenNoSplit'*/: break;
 
 					case 'splithorizontal' /*case 'SplitHorizontal'*/:
 					case 'splitvertical' /*case 'SplitVertical'*/:
+						if(Rn[0].slice(-2) === "/>") {/* empty */}
+						else if(Rn[1]==="/") {
+							var split = parseInt(str.slice(pidx, Rn.index), 10);
+							if(split > 0) (cursheet['!xlmlView'] || (cursheet['!xlmlView'] = {}))[Rn[3] == 'splithorizontal' ? 'rows' : 'cols'] = split;
+						}
+						else pidx = Rn.index + Rn[0].length;
 						break;
 
 					case 'donotdisplaygridlines' /*case 'DoNotDisplayGridlines'*/:
+						if(Rn[1]!=='/') (cursheet['!xlmlView'] || (cursheet['!xlmlView'] = {})).gridlines = false;
 						break;
 
 					case 'activerow' /*case 'ActiveRow'*/: break;
@@ -23433,8 +23459,13 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 	var str = xlml_normalize(d);
 	xlmlregex.lastIndex = 0;
 	str = remove_doctype(str_remove_ng(str, "<!--", "-->"));
-	var Rn, NFtag, NF = "", tNF = "", y, etpos = 0, tidx = -1, infmt = false, payload = "";
-	var inCommonStyles = false;
+	var Rn, NFtag, NFmaps = {}, NF = "", tNF = "", y, etpos = 0, tidx = -1, infmt = false, payload = "";
+	var inCommonStyles = false, commonStyle = null;
+	var ods_common_props = function(style, tag) {
+		var attrs = parsexmltag(tag, true, true);
+		style.odsProps = style.odsProps || {};
+		for(var key in attrs) style.odsProps[key] = unescapexml_entities(attrs[key]);
+	};
 	while((Rn = xlmlregex.exec(str))) {
 		switch((Rn[3]=Rn[3].replace(/_[\s\S]*$/,""))) {
 		case 'styles':
@@ -23442,10 +23473,19 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			break;
 		case 'style':
 			/* Local fix: common cell styles in styles.xml also apply to content.xml. */
-			if(_styles && inCommonStyles && Rn[1] !== '/') {
+			if(Rn[1] === '/') commonStyle = null;
+			else if(_styles && inCommonStyles) {
 				y = parsexmltag(Rn[0], false);
 				if(y["family"] == "table-cell" && y["name"]) _styles[y["name"]] = y;
+				commonStyle = y["family"] == "table-cell" && y["name"] && Rn[0].slice(-2) !== "/>" ? y : null;
 			}
+			break;
+		/* Puter Spreadsheet local patch: a common cell style's font, fill, borders and alignment (odsProps, as the
+		 * content reader keeps an automatic style's): LibreOffice's Heading, Accent, Good and Bad styles, applied to
+		 * cells or by conditional formats, carry their look here. */
+		case 'table-cell-properties':
+		case 'paragraph-properties':
+			if(commonStyle && Rn[1] !== '/') ods_common_props(commonStyle, Rn[0]);
 			break;
 		/* Number Format Definitions */
 		case 'number-style': // <number:number-style> 16.29.2
@@ -23461,11 +23501,18 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 					else if(NF.match(/m/)) NF = NF.replace(/m+/, "[$&]");
 					else if(NF.match(/s/)) NF = NF.replace(/s+/, "[$&]");
 				}
+				/* Puter Spreadsheet local patch: the sections a style's maps name come before its own, in Excel's order:
+				 * >=0 then the rest, or >0, <0 and the rest (zero), as LibreOffice writes positive;negative;zero. */
+				var section = function(name) { return typeof number_format_map[name] == "string" ? number_format_map[name] : null; };
+				var ge = section(NFmaps["value()>=0"]), gt = section(NFmaps["value()>0"]), lt = section(NFmaps["value()<0"]);
+				if(gt != null && lt != null) NF = gt + ";" + lt + ";" + NF;
+				else if(ge != null) NF = ge + ";" + NF;
+				else if(gt != null) NF = gt + ";" + NF;
 				number_format_map[NFtag.name] = NF;
-				NF = "";
+				NF = ""; NFmaps = {};
 			} else if(Rn[0].charAt(Rn[0].length-2) !== '/') {
 				infmt = true;
-				NF = "";
+				NF = ""; NFmaps = {};
 				NFtag = parsexmltag(Rn[0], false);
 			} break;
 
@@ -23502,7 +23549,7 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			switch(y["style"]) {
 				case "short": NF += "d"; break;
 				case "long": NF += "dd"; break;
-				default: NF += "dd"; break; // TODO: error condition
+				default: NF += "d"; break; /* Puter Spreadsheet local patch: number:style defaults to short (ODF 19.474.1) */
 			}
 		} break;
 
@@ -23529,7 +23576,7 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			switch(y["style"]) {
 				case "short": NF += "h"; break;
 				case "long": NF += "hh"; break;
-				default: NF += "hh"; break; // TODO: error condition
+				default: NF += "h"; break; /* Puter Spreadsheet local patch: LibreOffice writes a short element without the attribute */
 			}
 		} break;
 
@@ -23538,7 +23585,7 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			switch(y["style"]) {
 				case "short": NF += "m"; break;
 				case "long": NF += "mm"; break;
-				default: NF += "mm"; break; // TODO: error condition
+				default: NF += "m"; break; /* Puter Spreadsheet local patch: number:style defaults to short */
 			}
 		} break;
 
@@ -23558,7 +23605,7 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			switch(y["style"]) {
 				case "short": NF += "s"; break;
 				case "long": NF += "ss"; break;
-				default: NF += "ss"; break; // TODO: error condition
+				default: NF += "s"; break; /* Puter Spreadsheet local patch: number:style defaults to short */
 			}
 			if(y["decimal-places"]) NF += "." + fill("0", +y["decimal-places"]);
 		} break;
@@ -23595,7 +23642,9 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			if(Rn[1]==='/') break;
 			// TODO: find a mapping for all parameters
 			y = parsexmltag(Rn[0], false);
-			NF += "0." + fill("0", +y["min-decimal-places"] || +y["decimal-places"] || 2) + fill("?", +y["decimal-places"] - +y["min-decimal-places"] || 0) + "E" + (parsexmlbool(y["forced-exponent-sign"]) ? "+" : "") + fill("0", +y["min-exponent-digits"] || 2);
+			/* Puter Spreadsheet local patch: forced-exponent-sign defaults to true (ODF 1.3 19.343), as every
+			 * LibreOffice shows E+ for a file without it; false is Excel's E-. A bare E is no Excel code at all. */
+			NF += "0." + fill("0", +y["min-decimal-places"] || +y["decimal-places"] || 2) + fill("?", +y["decimal-places"] - +y["min-decimal-places"] || 0) + "E" + (y["forced-exponent-sign"] != null && !parsexmlbool(y["forced-exponent-sign"]) ? "-" : "+") + fill("0", +y["min-exponent-digits"] || 2);
 			break;
 
 		case 'fraction': // <number:fraction> 16.29.7
@@ -23620,10 +23669,11 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			break;
 
 		case 'text-properties': // <style:text-properties> 16.29.29
+			if(commonStyle && !infmt && Rn[1] !== '/') { ods_common_props(commonStyle, Rn[0]); break; }
 			y = parsexmltag(Rn[0], false);
-			switch((y["color"]||"").toLowerCase().replace("#", "")) {
-				case "ff0000": case "red": NF = "[Red]" + NF; break;
-			}
+			/* Puter Spreadsheet local patch: each colour Excel names, not only red ([Blue]0;[Red]0). */
+			var inkName = { "000000": "Black", "0000ff": "Blue", "00ffff": "Cyan", "00ff00": "Green", "ff00ff": "Magenta", "ff0000": "Red", "red": "Red", "ffffff": "White", "ffff00": "Yellow" }[(y["color"]||"").toLowerCase().replace("#", "")];
+			if(infmt && inkName) NF = "[" + inkName + "]" + NF;
 			break;
 
 		case 'text-content': // <number:text-content> 16.29.28
@@ -23633,10 +23683,9 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 		case 'map': // <style:map> 16.3
 			// TODO: handle more complex maps
 			y = parsexmltag(Rn[0], false);
-			if(unescapexml(y["condition"]) == "value()>=0") {
-				if(y["apply-style-name"] && typeof number_format_map[y["apply-style-name"]] == "string") NF = number_format_map[y["apply-style-name"]] + ";" + NF;
-			}
-			else console.error("ODS number format may be incorrect: " + y["condition"]);
+			/* Puter Spreadsheet local patch: kept until the style closes, where the sections are put in order. */
+			var condition = unescapexml(y["condition"] || "").replace(/\s+/g, "");
+			if(["value()>=0", "value()>0", "value()<0"].indexOf(condition) > -1 && y["apply-style-name"]) NFmaps[condition] = y["apply-style-name"];
 			break;
 
 		case 'number': // <number:number> 16.29.3
@@ -23644,11 +23693,13 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			if(Rn[1]==='/') break;
 			y = parsexmltag(Rn[0], false);
 			tNF = "";
-			tNF += fill("0", +y["min-integer-digits"] || 1);
+			/* Puter Spreadsheet local patch: optional digits are #, as LibreOffice writes "#.##": no required integer
+			 * digit (min-integer-digits="0"), and decimals past min-decimal-places where that is given (ODF 1.3). */
+			tNF += y["min-integer-digits"] != null && +y["min-integer-digits"] === 0 ? "#" : fill("0", +y["min-integer-digits"] || 1);
 			if(parsexmlbool(y["grouping"])) tNF = commaify(fill("#", Math.max(0, 4 - tNF.length)) + tNF);
 			if(+y["min-decimal-places"] || +y["decimal-places"]) tNF += ".";
 			if(+y["min-decimal-places"]) tNF += fill("0", +y["min-decimal-places"] || 1);
-			if(+y["decimal-places"] - (+y["min-decimal-places"]||0)) tNF += fill("0", +y["decimal-places"] - (+y["min-decimal-places"]||0)); // TODO: should this be "#" ?
+			if(+y["decimal-places"] - (+y["min-decimal-places"]||0)) tNF += fill(y["min-decimal-places"] != null ? "#" : "0", +y["decimal-places"] - (+y["min-decimal-places"]||0));
 			/* Puter Spreadsheet local patch: a display factor of a thousand per comma scales the number shown. */
 			for(var factor = +y["display-factor"] || 1; factor >= 1000; factor /= 1000) tNF += ",";
 			NF += tNF;
@@ -23796,6 +23847,7 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 						ws['!ref'] = encode_range(range);
 					}
 					if(merges.length) ws['!merges'] = merges;
+					if(ws['!odsConditionalFormats']) ws['!odsConditionalFormats'] = odsConditionalFormatsXml(ws['!odsConditionalFormats'], { convert: ods_to_csf_formula, address: ods_to_csf_3D });
 					if(rowinfo.length) ws["!rows"] = rowinfo;
 					if(colinfo.length) ws["!cols"] = colinfo;
 					sheetag.name = sheetag['名称'] || sheetag.name;
@@ -24411,8 +24463,30 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 			case 'data-pilot-grand-total': break; // <table:
 			case 'office-document-common-attrs': break; // bare
 			default: switch(Rn[2]) {
+				/* Puter Spreadsheet local patch: LibreOffice's conditional formats, gathered for ods-condformat.js. */
+				case 'calcext:':
+					if(intable && Rn[1] !== '/') {
+						var cfTag = parsexmltag(Rn[0], false), cfList = ws['!odsConditionalFormats'], cfLast = cfList && cfList[cfList.length - 1];
+						var cfEntry = cfLast && cfLast.entries[cfLast.entries.length - 1];
+						var cfText = function(key) { return cfTag[key] == null ? null : unescapexml_entities(cfTag[key]); };
+						switch(Rn[3]) {
+							case 'conditional-format':
+								(ws['!odsConditionalFormats'] || (ws['!odsConditionalFormats'] = [])).push({ targets: cfText('target-range-address'), entries: [] });
+								break;
+							case 'condition':
+								if(cfLast) cfLast.entries.push({ kind: 'condition', value: cfText('value'), base: cfText('base-cell-address'), props: ods_cell_props(cfText('apply-style-name')) });
+								break;
+							case 'color-scale': if(cfLast) cfLast.entries.push({ kind: 'scale', stops: [] }); break;
+							case 'data-bar': if(cfLast) cfLast.entries.push({ kind: 'bar', color: cfText('positive-color'), stops: [] }); break;
+							case 'icon-set': if(cfLast) cfLast.entries.push({ kind: 'icons', set: cfText('icon-set-type'), stops: [] }); break;
+							case 'color-scale-entry':
+							case 'formatting-entry':
+								if(cfEntry && cfEntry.stops) cfEntry.stops.push({ type: cfText('type'), value: cfText('value'), color: cfText('color') });
+								break;
+						}
+					}
+					break;
 				case 'dc:':       // TODO: properties
-				case 'calcext:':  // ignore undocumented extensions
 				case 'loext:':    // ignore undocumented extensions
 				case 'ooo:':      // ignore undocumented extensions
 				case 'chartooo:': // ignore undocumented extensions
@@ -24504,10 +24578,71 @@ function read_ods_format_literal(nf, start) {
 	throw new Error("Cannot export ODS number format: unterminated quoted literal");
 }
 
+/* Puter Spreadsheet local patch: a run of text a number format shows as it is, from `start`: quoted literals,
+ * backslash escapes (Excel writes #,##0.00\ "€" and 0.00\ \k\g), and the characters Excel shows unquoted. */
+function read_ods_format_text_run(nf, start) {
+	var text = "", end = start;
+	while(end < nf.length) {
+		var ch = nf[end];
+		if(ch === '"') { var literal = read_ods_format_literal(nf, end); text += literal.text; end = literal.end + 1; }
+		else if(ch === '\\' && end + 1 < nf.length) { text += nf[end + 1]; end += 2; }
+		else if(/[ \-+()\/:!^&'~{}<>=]/.test(ch) || ch > '\x7f') { text += ch; ++end; }
+		else break;
+	}
+	return { text: text, end: end };
+}
+
 // TODO: find out if anyone actually read the spec.  LO has some wild errors
+/* Puter Spreadsheet local patch: a format's sections, split at the semicolons outside quotes, escapes and brackets. */
+function split_ods_format_sections(nf) {
+	var sections = [], start = 0, inLiteral = false;
+	for(var at = 0; at < nf.length; ++at) {
+		var ch = nf[at];
+		if(ch === '"') inLiteral = !inLiteral;
+		else if(!inLiteral) {
+			if(ch === '\\' || ch === '_' || ch === '*') ++at;
+			else if(ch === ';') { sections.push(nf.slice(start, at)); start = at + 1; }
+			else if(ch === '[') { var close = nf.indexOf(']', at + 1); if(close !== -1) at = close; }
+		}
+	}
+	if(inLiteral) throw new Error("Cannot export ODS number format: unterminated quoted literal");
+	sections.push(nf.slice(start));
+	return sections;
+}
+
+/* Puter Spreadsheet local patch: Excel's sections (positive;negative;zero) as ODF writes them, as LibreOffice
+ * does: one style per section, the last section's style naming the others in style:map conditions. A negative
+ * section shows its number without a sign there as in Excel, so "-" and the red ink of #,##0.00;[Red]-#,##0.00
+ * are its own. A code whose sections test their own conditions ([>100]) or are of different kinds keeps its first. */
 function write_number_format_ods(nf/*:string*/, nfidx/*:string*/)/*:string*/ {
+	var sections = split_ods_format_sections(nf);
+	if(sections.length < 2 || sections.slice(0, 3).some(function(section) { return /\[[<>=]/.test(section.replace(/"(?:[^"]|"")*"/g, "")); }))
+		return write_number_format_ods_section(sections[0], nfidx);
+	var parts = sections.slice(0, 3).map(function(section, k) {
+		var name = k == Math.min(sections.length, 3) - 1 ? nfidx : nfidx + "P" + k;
+		return { name: name, xml: section === "" ? "" : write_number_format_ods_section(section, name) };
+	});
+	var kind = function(xml) { var m = /^<number:(\w+)-style/.exec(xml); return m && m[1]; };
+	var main = parts[parts.length - 1], first = parts.filter(function(part) { return part.xml; })[0];
+	if(!first || parts.some(function(part) { return part.xml && kind(part.xml) !== kind(first.xml); })) return write_number_format_ods_section(sections[0], nfidx);
+	/* An empty section shows nothing, as in Excel. */
+	parts.forEach(function(part) { if(!part.xml) part.xml = writextag("number:" + kind(first.xml) + "-style", "<number:text></number:text>", { "style:name": part.name }); });
+	var maps = parts.length == 2 ? [["value()>=0", parts[0].name]] : [["value()>0", parts[0].name], ["value()<0", parts[1].name]];
+	var mapped = main.xml.replace(/<\/number:\w+-style>$/, function(close) {
+		return maps.map(function(m) { return writextag("style:map", null, { "style:condition": escapexml(m[0]), "style:apply-style-name": m[1] }); }).join("") + close;
+	});
+	return parts.slice(0, -1).map(function(part) { return part.xml; }).join("\n") + "\n" + mapped;
+}
+
+function write_number_format_ods_section(nf/*:string*/, nfidx/*:string*/)/*:string*/ {
 	var type = "number", payload = "", nopts = { "style:name": nfidx }, c = "", i = 0;
 	nf = nf.replace(/"[$]"/g, "$");
+	/* Puter Spreadsheet local patch: a section's colour ([Red]) is the style's text colour. */
+	var ink = /^\[(black|blue|cyan|green|magenta|red|white|yellow)\]/i.exec(nf);
+	var inks = { black: "#000000", blue: "#0000ff", cyan: "#00ffff", green: "#00ff00", magenta: "#ff00ff", red: "#ff0000", white: "#ffffff", yellow: "#ffff00" };
+	if(ink) { nf = nf.slice(ink[0].length); payload += '<style:text-properties fo:color="' + inks[ink[1].toLowerCase()] + '"/>'; }
+	/* A condition of its own ([>100]) has no place in a single style. */
+	nf = nf.replace(/^\[[<>=][^\]]*\]/, "");
 	/* TODO: replace with an actual parser based on a real grammar */
 	j: {
 		// TODO: support style maps
@@ -24538,22 +24673,18 @@ function write_number_format_ods(nf/*:string*/, nfidx/*:string*/)/*:string*/ {
 
 		if(nf == "@") { type = "text"; payload = "<number:text-content/>"; break j; }
 
+		/* opening string literal */
+		/* Puter Spreadsheet local patch: the whole leading run, with the space between "€" and the digits, and the
+		 * sign or parenthesis a negative section starts with. */
+		if(/^["\\ \-+(]/.test(nf)) {
+			var lead = read_ods_format_text_run(nf, i);
+			if(lead.text) payload += '<number:text>' + escapexml(lead.text) + '</number:text>';
+			nf = nf.slice(lead.end); i = 0;
+		}
+
 		/* currency flag */
 		/* Puter Spreadsheet local patch: a leading $ is written as a currency symbol below, which belongs in a currency style. */
 		if(nf[0] == "$") { type = "currency"; }
-
-		/* opening string literal */
-		if(nf[i] == '"') {
-			c = "";
-			var literal = read_ods_format_literal(nf, i); c += literal.text; i = literal.end;
-			if(nf[i+1] == "*") {
-				i++;
-				payload += '<number:fill-character>' + escapexml(c.replace(/""/g, '"')) + '</number:fill-character>';
-			} else {
-				payload += '<number:text>' + escapexml(c.replace(/""/g, '"')) + '</number:text>';
-			}
-			nf = nf.slice(i+1); i = 0;
-		}
 
 		/* fractions */
 		var t = nf.match(/# (\?+)\/(\?+)/);
@@ -24651,20 +24782,19 @@ function write_number_format_ods(nf/*:string*/, nfidx/*:string*/)/*:string*/ {
 
 		/* should be in a char loop */
 		if(nf[0] == "$") { payload += '<number:currency-symbol number:language="en" number:country="US">$</number:currency-symbol>'; nf = nf.slice(1); i = 0; }
-		i = 0; if(nf[i] == '"') {
-			var literal = read_ods_format_literal(nf, i); c += literal.text; i = literal.end;
-			if(nf[i+1] == "*") {
-				i++;
-				payload += '<number:fill-character>' + escapexml(c.replace(/""/g, '"')) + '</number:fill-character>';
-			} else {
-				payload += '<number:text>' + escapexml(c.replace(/""/g, '"')) + '</number:text>';
-			}
-			nf = nf.slice(i+1); i = 0;
+		/* Puter Spreadsheet local patch: the text between the currency symbol and the digits, as the leading run. */
+		i = 0; if(/^["\\ \-+(]/.test(nf)) {
+			var between = read_ods_format_text_run(nf, i);
+			if(between.text) payload += '<number:text>' + escapexml(between.text) + '</number:text>';
+			nf = nf.slice(between.end); i = 0;
 		}
 
 		/* number TODO: interstitial text e.g. 000)000-0000 */
-		var np = nf.match(/([#0][0#,]*)(\.[0#]*|)(E[+]?0*|)/i);
-		if(!np || !np[0]) console.error("Could not find numeric part of " + nf);
+		/* Puter Spreadsheet local patch: E- (a sign on negative exponents only) is a scientific code too, written with
+		 * forced-exponent-sign="false"; it used to stop the whole export on its missing exponent digits. */
+		var np = nf.match(/([#0][0#,]*)(\.[0#]*|)(E[+-]?0*|)/i);
+		/* Puter Spreadsheet local patch: a section of text alone (an accounting zero, "$" "-") has no digits to find. */
+		if(!np || !np[0]) { if(!payload) console.error("Could not find numeric part of " + nf); }
 		else {
 			var base = np[1].replace(/,/g, "");
 			/* Puter Spreadsheet local patch: a comma after the digits scales by a thousand (#,##0,"K" shows 1,235K for
@@ -24675,9 +24805,11 @@ function write_number_format_ods(nf/*:string*/, nfidx/*:string*/)/*:string*/ {
 				' number:min-integer-digits="' + (base.indexOf("0") == -1 ? "0" : base.length - base.indexOf("0")) + '"' +
 				(/[#0],[#0]/.test(np[1]) ? ' number:grouping="true"' : "") +
 				(np[2] && ' number:decimal-places="' + (np[2].length - 1) + '"' || ' number:decimal-places="0"') +
+				/* Puter Spreadsheet local patch: optional decimals (0.## shows 1.5) need the count of required ones. */
+				(!np[3] && np[2].indexOf("#") > -1 ? ' number:min-decimal-places="' + (np[2].match(/0/g) || []).length + '"' : "") +
 				(scaling ? ' number:display-factor="' + Math.pow(1000, scaling) + '"' : "") +
-				(np[3] && np[3].indexOf("+") > -1 ? ' number:forced-exponent-sign="true"' : "" ) +
-				(np[3] ? ' number:min-exponent-digits="' + np[3].match(/0+/)[0].length + '"' : "" ) +
+				(np[3] ? ' number:forced-exponent-sign="' + (np[3].indexOf("-") > -1 ? "false" : "true") + '"' : "" ) +
+				(np[3] ? ' number:min-exponent-digits="' + ((np[3].match(/0+/) || ["0"])[0].length) + '"' : "" ) +
 				'>' +
 				/* TODO: interstitial text placeholders */
 				'</number:' + (np[3] ? "scientific-" : "") + 'number>';
@@ -24685,13 +24817,10 @@ function write_number_format_ods(nf/*:string*/, nfidx/*:string*/)/*:string*/ {
 		}
 
 		/* residual text */
-		/* Puter Spreadsheet local patch: the spaces before a trailing literal (#,##0.00 "€") are part of it. */
-		var spaces = ""; while(nf[i] == ' ') { spaces += ' '; ++i; }
-		if(nf[i] == '"') {
-			c = "";
-			var literal = read_ods_format_literal(nf, i); c += literal.text; i = literal.end;
-			payload += '<number:text>' + escapexml(spaces + c.replace(/""/g, '"')) + '</number:text>';
-		}
+		/* Puter Spreadsheet local patch: the text after the digits is one run: the spaces before a trailing literal
+		 * (#,##0.00 "€"), an escaped one (#,##0.00\ "€", Excel's own euro format), several literals, a bare unit. */
+		var tail = read_ods_format_text_run(nf, i);
+		if(/\S/.test(tail.text)) payload += '<number:text>' + escapexml(tail.text) + '</number:text>';
 	}
 
 	if(!payload) { console.error("Could not generate ODS number format for |" + nf + "|"); return ""; }
@@ -24820,8 +24949,9 @@ var write_content_ods/*:{(wb:any, opts:any):string}*/ = /* @__PURE__ */(function
 		var rowAttrs = function(r) { return ROWS[r] ? ' table:style-name="ro' + ROWS[r].ods + '"' + (ROWS[r].hidden ? ' table:visibility="collapse"' : ROWS[r].filtered ? ' table:visibility="filter"' : '') : ""; };
 		/* Puter Spreadsheet: rows and cells that hold nothing collapse into ODF repeats, so one far-off
 		 * cell does not cost a table-cell element for every coordinate of the rectangle. */
-		var occupied = {};
-		if(!dense) for(var key in ws) { if(key.charCodeAt(0) === 33) continue; var rc = decode_cell(key); occupied[rc.r] = 1; }
+		var occupied = {}, occupiedCols = {};
+		if(!dense) for(var key in ws) { if(key.charCodeAt(0) === 33) continue; var rc = decode_cell(key); occupied[rc.r] = 1; (occupiedCols[rc.r] || (occupiedCols[rc.r] = [])).push(rc.c); }
+		for(var occupiedRow in occupiedCols) occupiedCols[occupiedRow].sort(function(a, b) { return a - b; });
 		/* Puter Spreadsheet local patch: merges are indexed by row, so a sheet of thousands of merged blocks
 		 * is not searched through for every row and cell. rowSpans is the union of their rows, sorted; mergesAt
 		 * gives the merges covering a row in their original order, following the writer's rows downward. */
@@ -24845,11 +24975,19 @@ var write_content_ods/*:{(wb:any, opts:any):string}*/ = /* @__PURE__ */(function
 			}
 			return rowMerges;
 		};
-		var plainEmpty = function(r, c) {
-			if(ws[encode_cell({r:r, c:c})]) return false;
+		/* Puter Spreadsheet local patch: the last column of the run of plain empty cells from c, a cell outside every
+		 * merge, found from the row's own cells and merges: probing each column made a row as costly as the sheet
+		 * was wide, so a far-off cell took a 4,000-row sheet half a minute to save. */
+		var plainEmptyEnd = function(r, c) {
+			var stop = lastCol + 1, cols = occupiedCols[r];
+			if(cols) {
+				var lo = 0, hi = cols.length;
+				while(lo < hi) { var mid = (lo + hi) >> 1; if(cols[mid] <= c) lo = mid + 1; else hi = mid; }
+				if(lo < cols.length && cols[lo] < stop) stop = cols[lo];
+			}
 			var list = mergesAt(r);
-			for(var i = 0; i < list.length; ++i) if(marr[list[i]].s.c <= c && marr[list[i]].e.c >= c) return false;
-			return true;
+			for(var i = 0; i < list.length; ++i) if(marr[list[i]].s.c > c && marr[list[i]].s.c < stop) stop = marr[list[i]].s.c;
+			return stop - 1;
 		};
 		for(R = 0; R < range.s.r; ++R) {
 			H = rowAttrs(R);
@@ -24903,8 +25041,7 @@ var write_content_ods/*:{(wb:any, opts:any):string}*/ = /* @__PURE__ */(function
 				if(!cell) {
 					if(!dense && !validationLayout && !Object.keys(ct).length) {
 						/* A run of empty cells outside every merge is one repeated cell. */
-						var runC = C;
-						while(runC + 1 <= lastCol && plainEmpty(R, runC + 1)) ++runC;
+						var runC = plainEmptyEnd(R, C);
 						o.push(runC > C ? '          <table:table-cell table:number-columns-repeated="' + (runC - C + 1) + '"/>\n' : null_cell_xml);
 						C = runC;
 						continue;

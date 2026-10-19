@@ -55,6 +55,8 @@ export class RoomClient extends EventTarget {
     this.session = crypto.randomUUID().replaceAll('-', '');
     this.timers = [];
     this.closed = false;
+    /** Changes this browser kept from an earlier visit that could not be sent: this person may only view the workbook now. */
+    this.dropped = 0;
     this.queue = Promise.resolve();
     this.lastCheckpoint = 0;
     this.lastCheckpointAt = Date.now();
@@ -73,6 +75,9 @@ export class RoomClient extends EventTarget {
   }
 
   get canEdit() { return canEdit(this.role); }
+
+  /** Whether changes not yet sent outlast this page, to be sent when the workbook is opened here again. */
+  get keepsChanges() { return !this.halted && !this.closed && this.canEdit && this.o.store?.durable !== false; }
 
   /* ---------- Creating, joining and opening ---------- */
 
@@ -117,6 +122,8 @@ export class RoomClient extends EventTarget {
       this.replica.receive(loaded.records.filter((r) => r.rev > saved.rev));
     } else {
       this.replica.receive(loaded.records);
+      // Changes kept for an account that may no longer edit cannot be sent: the editor says so (see `dropped`).
+      if (saved?.pending?.length && !this.canEdit) this.dropped = saved.pending.length;
       if (kept) await this.o.store.delete(this.outboxKey);
     }
     this.replica.addEventListener('local', () => { this.persist(); this.flush(); });
@@ -200,6 +207,7 @@ export class RoomClient extends EventTarget {
     clearTimeout(this.retryTimer);
     this.flushing = this.serial(async () => {
       let limit = MAX_BATCH;
+      let answered = false; // the room was reached: only then does this say anything of the connection
       for (let round = 0; round < 50 && !this.closed;) {
         this.flushAgain = false;
         const changes = batch(this.replica.outgoing(), limit);
@@ -209,6 +217,7 @@ export class RoomClient extends EventTarget {
         let res;
         try {
           res = await this.request({ op: 'commit', base: this.replica.rev, changes, session: this.session });
+          answered = true;
         } catch (error) {
           if (error instanceof CollabError && [400, 413, 422].includes(error.status) && changes.length > 1) {
             limit = Math.ceil(changes.length / 2);
@@ -217,6 +226,7 @@ export class RoomClient extends EventTarget {
           }
           if (error instanceof CollabError && [400, 403, 413, 422].includes(error.status)) {
             // Refused for good: later changes may build on it, so they go too, and the workbook shows the room's state.
+            answered = true;
             this.replica.discardPending();
             await this.persist();
             this.dispatchEvent(new CustomEvent('refused', { detail: { message: error.message } }));
@@ -232,8 +242,8 @@ export class RoomClient extends EventTarget {
           if (!this.flushAgain && !this.replica.pending.length) break;
         } else round++;
       }
-      this.retryDelay = 1000;
-      this.setStatus('connected');
+      // Nothing to send says nothing of the connection: an offline status stands until the room answers.
+      if (answered) { this.retryDelay = 1000; this.setStatus('connected'); } else this.setStatus();
       this.maybeCheckpoint();
     }).catch((error) => {
       this.failed(error);
@@ -462,6 +472,8 @@ export class RoomClient extends EventTarget {
     clearTimeout(this.checkInTimer);
     this.subscription?.off();
     this.peers?.close();
+    // Nobody can be told apart as here any more: their selections leave the grid rather than stay frozen on it.
+    if (this.people.size) { this.people.clear(); this.dispatchEvent(new CustomEvent('people')); }
   }
 
   close() {

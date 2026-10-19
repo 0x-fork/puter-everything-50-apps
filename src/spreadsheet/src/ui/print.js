@@ -41,6 +41,7 @@ import { shrinkCellText } from '../core/shrink-text.js';
 import { cellLayoutText, cellHorizontalPadding, CELL_TEXT_INSET } from '../core/textfit.js';
 import { el } from './dom.js';
 import { cellKey, parseKey, colName, normalizeRange } from '../core/cell.js';
+import { MAX_ROW, MAX_COL } from '../core/refs.js';
 import { formatValue, defaultAlign, fontStack, borderCss, getLocale } from '../core/format.js';
 import { readsRightToLeft } from '../core/bidi.js';
 import { isError } from '../core/formula/functions.js';
@@ -61,8 +62,14 @@ export const PRINT_DEFAULTS = {
 };
 // Each paper's CSS `size` value is a page-size keyword: the grammar lets a keyword take `landscape` after
 // it, where two lengths cannot, so `11in 17in landscape` was an invalid declaration the browser dropped
-// whole. CSS calls the 11 × 17 inch sheet `ledger`.
-export const PAPER_SIZES = [['letter', 'Letter', 'letter'], ['a4', 'A4', 'A4'], ['legal', 'Legal', 'legal'], ['a3', 'A3', 'A3'], ['tabloid', 'Tabloid', 'ledger']];
+// whole. CSS calls the 11 × 17 inch sheet `ledger`. A paper CSS has no name for (null) is asked for by its
+// two lengths, already turned for landscape. The papers after the first five come in with workbooks from
+// Excel, set up for them, and are the ones the Page Layout view draws.
+export const PAPER_SIZES = [['letter', 'Letter', 'letter'], ['a4', 'A4', 'A4'], ['legal', 'Legal', 'legal'], ['a3', 'A3', 'A3'], ['tabloid', 'Tabloid', 'ledger'],
+  ['a5', 'A5', 'A5'], ['b4', 'B4', 'B4'], ['b5', 'B5', 'JIS-B5'], ['executive', 'Executive', null], ['statement', 'Statement', null], ['folio', 'Folio', null]];
+/** The papers by SpreadsheetML paperSize code (2 is Letter Small, 10 A4 Small), and back. */
+const PAPER_CODES = { 1: 'letter', 2: 'letter', 3: 'tabloid', 5: 'legal', 6: 'statement', 7: 'executive', 8: 'a3', 9: 'a4', 10: 'a4', 11: 'a5', 12: 'b4', 13: 'b5', 14: 'folio' };
+const CODE_OF_PAPER = { letter: 1, tabloid: 3, legal: 5, statement: 6, executive: 7, a3: 8, a4: 9, a5: 11, b4: 12, b5: 13, folio: 14 };
 export const MARGINS = [['narrow', 'Narrow', '6mm'], ['normal', 'Normal', '12mm'], ['wide', 'Wide', '20mm']];
 const printLayouts = new WeakMap();
 const HEADER_VARIANTS = ['evenHeader', 'evenFooter', 'firstHeader', 'firstFooter', 'differentFirst', 'differentOddEven', 'scaleWithDoc'];
@@ -70,7 +77,8 @@ const HEADER_VARIANTS = ['evenHeader', 'evenFooter', 'firstHeader', 'firstFooter
 // The papers and margins in CSS pixels (96 to the inch), so a table can be fitted to the page it prints on.
 const IN = 96;
 const MM = 96 / 25.4;
-const PAPER_PX = { letter: [8.5 * IN, 11 * IN], a4: [210 * MM, 297 * MM], legal: [8.5 * IN, 14 * IN], a3: [297 * MM, 420 * MM], tabloid: [11 * IN, 17 * IN] };
+const PAPER_PX = { letter: [8.5 * IN, 11 * IN], a4: [210 * MM, 297 * MM], legal: [8.5 * IN, 14 * IN], a3: [297 * MM, 420 * MM], tabloid: [11 * IN, 17 * IN],
+  a5: [148 * MM, 210 * MM], b4: [250 * MM, 353 * MM], b5: [182 * MM, 257 * MM], executive: [7.25 * IN, 10.5 * IN], statement: [5.5 * IN, 8.5 * IN], folio: [8.5 * IN, 13 * IN] };
 const MARGIN_PX = { narrow: 6 * MM, normal: 12 * MM, wide: 20 * MM };
 
 /** Imported settings take precedence over preferences saved for another workbook. */
@@ -83,7 +91,7 @@ export function sheetPrintPrefs(sheet) {
   if (!p) return { rowBreaks: [], colBreaks: [], alignWithMargins: true, firstPageNumber: 1, useFirstPageNumber: false, differentFirst: false, differentOddEven: false, firstHeader: '', firstFooter: '', evenHeader: '', evenFooter: '',
     ...(sheet?.kind === 'chart' ? { orientation: 'landscape', ...chart } : { titleRows: null, titleCols: null }) };
   return { area: p.areas.length ? 'printArea' : 'sheet', orientation: p.orientation,
-    paper: ({ 1: 'letter', 2: 'letter', 3: 'tabloid', 5: 'legal', 8: 'a3', 9: 'a4', 10: 'a4' })[p.paperSize] || 'letter',
+    paper: PAPER_CODES[p.paperSize] || 'letter',
     pageOrder: p.pageOrder, fit: p.fitToPage ? 'pages' : p.scale === 100 ? 'actual' : 'scale', scale: p.scale, fitWidth: p.fitWidth, fitHeight: p.fitHeight,
     margins: 'custom', customMargins: { ...p.margins }, horizontalCentered: p.horizontalCentered, verticalCentered: p.verticalCentered,
     titleRows: p.titleRows || null, titleCols: p.titleCols || null,
@@ -96,7 +104,7 @@ export function sheetPrintPrefs(sheet) {
 export function printSettingsFromPrefs(sheet, prefs) {
   const original = sheet.printSettings || {};
   return { ...original, titleRows: prefs.titleRows, titleCols: prefs.titleCols, orientation: prefs.orientation,
-    paperSize: sheet.printSettings && prefs.paper === sheetPrintPrefs(sheet).paper ? original.paperSize : ({ letter: 1, tabloid: 3, legal: 5, a3: 8, a4: 9 })[prefs.paper] || original.paperSize,
+    paperSize: sheet.printSettings && prefs.paper === sheetPrintPrefs(sheet).paper ? original.paperSize : CODE_OF_PAPER[prefs.paper] || original.paperSize,
     scale: prefs.fit === 'actual' ? 100 : prefs.scale, fitToPage: ['width', 'pages'].includes(prefs.fit),
     fitWidth: prefs.fit === 'width' ? 1 : prefs.fitWidth, fitHeight: prefs.fit === 'width' ? 0 : prefs.fitHeight,
     margins: { ...original.margins, ...Object.fromEntries(Object.entries(pageMargins(prefs)).map(([k, v]) => [k, prefs.margins === 'custom' && Number.isFinite(prefs.customMargins?.[k]) ? prefs.customMargins[k] : +(v / IN).toFixed(8)])) },
@@ -495,7 +503,7 @@ function printTextBounds(wb, sheetId, sheet, bounds) {
   const widths = new Map();
   const textWidth = (text, font) => {
     const key = `${font}\0${text}`;
-    if (!widths.has(key)) { ctx.font = font; widths.set(key, ctx.measureText(text).width); }
+    if (!widths.has(key)) { ctx.font = font; widths.set(key, ctx.measureText(text)?.width || 0); }
     return widths.get(key);
   };
   let indentUnit;
@@ -560,12 +568,21 @@ function objectExtent(wb, sheetId, sheet, obj) {
  * over merged titles and over every chart, image and text box so an object
  * beside or below the data prints where it sits. Kept inside the sheet.
  */
-function printRange(wb, sheetId, opts) {
+export function printRange(wb, sheetId, opts) {
   const sheet = wb.sheet(sheetId);
   if (!sheet) return null;
   let range = null;
-  if (opts.range) range = normalizeRange(opts.range);
-  else {
+  if (opts.range) {
+    range = normalizeRange(opts.range);
+    // A block reaching the sheet's last row or column (whole columns set as the print area, as $A:$C; a selected
+    // column) prints as far as the sheet's own print reaches, as Excel prints it: taken to the grid's end, it
+    // printed page after page of empty gridlines, as many as the rows the sheet had been scrolled through.
+    if (range.r2 >= MAX_ROW || range.c2 >= MAX_COL) {
+      const whole = printRange(wb, sheetId, { ...opts, range: null });
+      if (range.r2 >= MAX_ROW) range.r2 = Math.max(range.r1, whole?.r2 ?? range.r1);
+      if (range.c2 >= MAX_COL) range.c2 = Math.max(range.c1, whole?.c2 ?? range.c1);
+    }
+  } else {
     range = printBounds(wb, sheetId, sheet);
     for (const obj of sheet.charts || []) {
       if (!obj.anchor || obj.print === false || obj.hidden) continue;
@@ -1226,7 +1243,9 @@ export function buildPrintRoot(wb, sheetId, docName, opts = {}) {
   const pageRules = [];
   const layouts = [];
   const pageStyle = p => {
-    const paper = PAPER_SIZES.find(([k]) => k === p.paper)?.[2] || 'letter';
+    const named = PAPER_SIZES.find(([k]) => k === p.paper);
+    const lengths = () => { const { width, height } = printPaperBox(p); return `${+(width / IN).toFixed(4)}in ${+(height / IN).toFixed(4)}in`; };
+    const paper = !named ? 'letter' : named[2] || null;
     const m = pageMargins(p);
     // Flow content is clipped to the page area. Open the horizontal page margins
     // and give the sheet its original inset so headers can reach the paper edges.
@@ -1236,12 +1255,13 @@ export function buildPrintRoot(wb, sheetId, docName, opts = {}) {
     // headers therefore use a full-height frame with the sheet's insets inside.
     if (p.richHeaderText) m.top = m.bottom = 0;
     const margin = p.margins === 'custom' || paperAlignedFlow || p.richHeaderText ? [m.top, m.right, m.bottom, m.left].map(v => `${+(v / IN).toFixed(8)}in`).join(' ') : MARGINS.find(([k]) => k === p.margins)?.[2] || '12mm';
-    return `size: ${paper} ${p.orientation === 'landscape' ? 'landscape' : 'portrait'}; margin: ${margin};`;
+    return `size: ${paper ? `${paper} ${p.orientation === 'landscape' ? 'landscape' : 'portrait'}` : lengths()}; margin: ${margin};`;
   };
   const sections = sheets.flatMap(sh => {
     const p = sh === sheet ? o : { ...o, ...sheetPrintPrefs(sh) };
     p.richHeaderText = !!p.native && ['header', 'footer', 'firstHeader', 'firstFooter', 'evenHeader', 'evenFooter'].some(k => hasHeaderFormatting(p[k]));
-    const areas = o.area === 'selection' && o.range ? [o.range]
+    // A selection of several ranges prints each on pages of its own, in the order they were selected, as in Excel.
+    const areas = o.area === 'selection' && (o.ranges?.length || o.range) ? (o.ranges?.length ? o.ranges : [o.range])
       : (o.area === 'printArea' || o.area === 'workbook') && sh.printSettings?.areas.length ? sh.printSettings.areas : [null];
     return areas.map(range => {
       const tableOpts = { ...p, range,

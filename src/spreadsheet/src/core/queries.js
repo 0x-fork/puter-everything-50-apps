@@ -9,15 +9,17 @@
  * (a date is its serial, the column's type says it is a date), a boolean, or a cell error { error, message }.
  */
 import { parseDelimited } from './tsv.js';
-import { parseInput, parseDate, serialToYMD } from './format.js';
+import { parseInput, parseDate, serialToYMD, typedDateKind } from './format.js';
 import { tableRows } from './tables.js';
 import { maxOf } from './numeric.js';
 
-export const TYPES = ['any', 'text', 'int', 'decimal', 'date', 'bool'];
-export const TYPE_LABELS = { any: 'Any', text: 'Text', int: 'Whole Number', decimal: 'Decimal Number', date: 'Date', bool: 'True/False' };
+export const TYPES = ['any', 'text', 'int', 'decimal', 'datetime', 'date', 'time', 'bool'];
+export const TYPE_LABELS = { any: 'Any', text: 'Text', int: 'Whole Number', decimal: 'Decimal Number', datetime: 'Date/Time', date: 'Date', time: 'Time', bool: 'True/False' };
 /** The marks the editor puts before a column name, as Power Query's header icons read. */
-export const TYPE_MARKS = { any: 'ABC\n123', text: 'ABC', int: '123', decimal: '1.2', date: '▦', bool: '✓✗' };
-const M_TYPES = { any: 'type any', text: 'type text', int: 'Int64.Type', decimal: 'type number', date: 'type date', bool: 'type logical' };
+export const TYPE_MARKS = { any: 'ABC\n123', text: 'ABC', int: '123', decimal: '1.2', datetime: '▦◷', date: '▦', time: '◷', bool: '✓✗' };
+const M_TYPES = { any: 'type any', text: 'type text', int: 'Int64.Type', decimal: 'type number', datetime: 'type datetime', date: 'type date', time: 'type time', bool: 'type logical' };
+/** The types whose values are date serials: a date, a date with its time of day, or a time of day alone. */
+export const DATE_TYPES = new Set(['date', 'datetime', 'time']);
 
 export const SOURCE_KINDS = ['csv', 'web', 'workbook', 'table', 'query', 'blank'];
 /** Step types and the name Power Query gives a step of each kind. */
@@ -282,7 +284,7 @@ function numberFromText(text) {
   const t = String(text).trim();
   if (t === '') return null;
   const parsed = parseInput(t, 'en-US');
-  if (typeof parsed.v === 'number' && !['date', 'time', 'datetime'].includes(parsed.fmt)) return parsed.v;
+  if (typeof parsed.v === 'number' && !typedDateKind(parsed)) return parsed.v;
   return undefined;
 }
 
@@ -292,7 +294,27 @@ function dateFromText(text) {
   const hit = parseDate(t, new Date(), 'en-US');
   if (hit && Number.isFinite(hit.serial)) return Math.floor(hit.serial);
   const parsed = parseInput(t, 'en-US');
-  if (typeof parsed.v === 'number' && ['date', 'datetime'].includes(parsed.fmt)) return Math.floor(parsed.v);
+  if (['date', 'datetime'].includes(typedDateKind(parsed))) return Math.floor(parsed.v);
+  return undefined;
+}
+
+/** Text as a date-time serial (a date alone is its midnight): null for blank text, undefined for text that is neither. */
+function dateTimeFromText(text) {
+  const t = String(text).trim();
+  if (t === '') return null;
+  const hit = parseDate(t, new Date(), 'en-US');
+  if (hit && Number.isFinite(hit.serial)) return hit.serial;
+  const parsed = parseInput(t, 'en-US');
+  if (typeof parsed.v === 'number' && ['date', 'datetime'].includes(parsed.fmt)) return parsed.v;
+  return undefined;
+}
+
+/** Text as a time of day (a fraction of a day; a date-time gives its time): null for blank text, undefined for text that is neither. */
+function timeFromText(text) {
+  const t = String(text).trim();
+  if (t === '') return null;
+  const parsed = parseInput(t, 'en-US');
+  if (typeof parsed.v === 'number' && ['time', 'datetime'].includes(parsed.fmt)) return parsed.v - Math.floor(parsed.v);
   return undefined;
 }
 
@@ -302,6 +324,23 @@ export function dateText(serial) {
   return `${m}/${d}/${y}`;
 }
 
+/** The time of day of a serial as Power Query writes it (en-US): h:mm:ss AM. */
+export function timeText(serial) {
+  const seconds = Math.round((serial - Math.floor(serial)) * 86400) % 86400;
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds / 60) % 60, sec = seconds % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${h % 12 || 12}:${pad(m)}:${pad(sec)} ${h < 12 ? 'AM' : 'PM'}`;
+}
+
+/** A serial as Power Query writes a date-time in text (en-US): m/d/yyyy h:mm:ss AM, the date taking a second that rounds to midnight. */
+export function dateTimeText(serial) {
+  const day = Math.floor(serial) + (Math.round((serial - Math.floor(serial)) * 86400) >= 86400 ? 1 : 0);
+  return `${dateText(day)} ${timeText(serial)}`;
+}
+
+/** A value of one of the date types as text. */
+const serialText = (v, type) => (type === 'datetime' ? dateTimeText(v) : type === 'time' ? timeText(v) : dateText(v));
+
 /** Convert a value of type `from` to type `to`, or a DataFormat.Error, as Table.TransformColumnTypes does. */
 export function convertValue(v, from, to) {
   if (v == null || isErr(v) || to === 'any') return v ?? null;
@@ -309,7 +348,7 @@ export function convertValue(v, from, to) {
   switch (to) {
     case 'text':
       if (typeof v === 'boolean') return v ? 'true' : 'false';
-      if (typeof v === 'number') return from === 'date' ? dateText(v) : String(v);
+      if (typeof v === 'number') return DATE_TYPES.has(from) ? serialText(v, from) : String(v);
       return v;
     case 'int': case 'decimal': {
       let n;
@@ -328,6 +367,16 @@ export function convertValue(v, from, to) {
       }
       return dataError(`We cannot convert the value ${v} to type Date.`);
     }
+    // A date-time keeps its time of day; a time keeps only that (a date alone is midnight, 12:00:00 AM).
+    case 'datetime': case 'time': {
+      if (typeof v === 'number') return to === 'time' ? v - Math.floor(v) : v;
+      if (text) {
+        const d = to === 'time' ? timeFromText(v) : dateTimeFromText(v);
+        if (d === null) return null;
+        return d === undefined ? dataError(`We couldn't parse the input provided as a ${to === 'time' ? 'Time' : 'DateTime'} value.`) : d;
+      }
+      return dataError(`We cannot convert the value ${v} to type ${to === 'time' ? 'Time' : 'DateTime'}.`);
+    }
     case 'bool': {
       if (typeof v === 'boolean') return v;
       if (typeof v === 'number') return v !== 0;
@@ -345,14 +394,18 @@ export function convertValue(v, from, to) {
 export function detectType(values, hint = null) {
   const sample = values.slice(0, PREVIEW_ROWS).filter((v) => v != null && v !== '' && !isErr(v));
   if (!sample.length) return hint || 'any';
-  if (hint === 'date' && sample.every((v) => typeof v === 'number')) return 'date';
+  if (DATE_TYPES.has(hint) && sample.every((v) => typeof v === 'number')) return hint;
   if (sample.every((v) => typeof v === 'boolean')) return 'bool';
   if (sample.every((v) => typeof v === 'number')) return sample.every(Number.isInteger) ? 'int' : 'decimal';
   if (sample.every((v) => typeof v === 'string')) {
     if (sample.every((v) => /^\s*(true|false)\s*$/i.test(v))) return 'bool';
     const nums = sample.map(numberFromText);
     if (nums.every((n) => typeof n === 'number')) return nums.every(Number.isInteger) && sample.every((v) => !/[.eE%]/.test(v)) ? 'int' : 'decimal';
-    if (sample.every((v) => /\d/.test(v) && /[/\-.]|[A-Za-z]{3}/.test(v)) && sample.map(dateFromText).every((d) => typeof d === 'number')) return 'date';
+    // A time of day on every row is a time; dates are dates, or date-times where any of them gives a time.
+    if (sample.every((v) => typeof timeFromText(v) === 'number' && parseInput(v.trim(), 'en-US').fmt === 'time')) return 'time';
+    if (sample.every((v) => /\d/.test(v) && /[/\-.]|[A-Za-z]{3}/.test(v)) && sample.map(dateTimeFromText).every((d) => typeof d === 'number')) {
+      return sample.some((v) => typeof timeFromText(v) === 'number') ? 'datetime' : 'date';
+    }
     return 'text';
   }
   return 'any';
@@ -363,7 +416,7 @@ export function detectedTypeStep(table, onlyColumns = null) {
   const columns = {};
   table.columns.forEach((name, i) => {
     if (onlyColumns && !onlyColumns.includes(name)) return;
-    const t = detectType(table.rows.map((r) => r[i]), table.types[i] === 'date' ? 'date' : null);
+    const t = detectType(table.rows.map((r) => r[i]), DATE_TYPES.has(table.types[i]) ? table.types[i] : null);
     if (t !== 'any') columns[name] = t;
   });
   return Object.keys(columns).length ? { id: newId(), type: 'changeType', columns } : null;
@@ -385,7 +438,7 @@ function compareValues(a, b) {
 export function displayValue(v, type) {
   if (v == null) return 'null';
   if (isErr(v)) return 'Error';
-  if (type === 'date' && typeof v === 'number') return dateText(v);
+  if (DATE_TYPES.has(type) && typeof v === 'number') return serialText(v, type);
   if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
   return String(v);
 }
@@ -396,6 +449,7 @@ export function parseTyped(text, type) {
   const t = String(text);
   if (type === 'int' || type === 'decimal') { const n = numberFromText(t); return typeof n === 'number' ? n : t; }
   if (type === 'date') { const d = dateFromText(t); return typeof d === 'number' ? d : t; }
+  if (type === 'datetime' || type === 'time') { const d = type === 'time' ? timeFromText(t) : dateTimeFromText(t); return typeof d === 'number' ? d : t; }
   if (type === 'bool') { const l = t.trim().toLowerCase(); return l === 'true' ? true : l === 'false' ? false : t; }
   return t;
 }
@@ -447,7 +501,7 @@ export function workbookTable(wb, name) {
   const types = columns.map((_, i) => {
     const c = table.range.c1 + i;
     const fmt = dataStart <= dataEnd ? wb.styleAt?.(sheet.id, dataStart, c)?.fmt : null;
-    return fmt === 'date' || fmt === 'datetime' ? 'date' : 'any';
+    return DATE_TYPES.has(fmt) ? fmt : 'any';
   });
   return { columns, types, rows };
 }
@@ -642,6 +696,27 @@ function aggregate(op, values, type) {
   return null;
 }
 
+/**
+ * Text cut at each delimiter as Splitter.SplitTextByDelimiter(d, QuoteStyle.Csv) cuts it: a part that opens with a
+ * double quote runs to its closing quote, delimiters inside it included, a doubled quote standing for one.
+ */
+function csvSplit(text, d) {
+  const out = [];
+  let field = '', quoted = false, fresh = true;
+  for (let i = 0; i < text.length;) {
+    if (quoted) {
+      if (text[i] !== '"') { field += text[i++]; continue; }
+      if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+      quoted = false; i++; continue;
+    }
+    if (fresh && text[i] === '"') { quoted = true; fresh = false; i++; continue; }
+    if (text.startsWith(d, i)) { out.push(field); field = ''; fresh = true; i += d.length; continue; }
+    field += text[i++]; fresh = false;
+  }
+  out.push(field);
+  return out;
+}
+
 const TEXT_OPS = {
   lower: (s) => s.toLowerCase(), upper: (s) => s.toUpperCase(), trim: (s) => s.trim(),
   clean: (s) => s.replace(/[\u0000-\u001f\u007f]/g, ''),
@@ -736,7 +811,7 @@ export function applyStep(table, step, refs = {}) {
         if (!d) return [s];
         if (step.mode === 'left') { const k = s.indexOf(d); return k < 0 ? [s] : [s.slice(0, k), s.slice(k + d.length)]; }
         if (step.mode === 'right') { const k = s.lastIndexOf(d); return k < 0 ? [s] : [s.slice(0, k), s.slice(k + d.length)]; }
-        return s.split(d);
+        return csvSplit(s, d);
       });
       const n = step.count || maxOf(parts.map((p) => p.length), 1);
       const names = Array.from({ length: n }, (_, k) => `${step.column}.${k + 1}`);
@@ -745,8 +820,8 @@ export function applyStep(table, step, refs = {}) {
         types: [...types.slice(0, i), ...names.map(() => 'text'), ...types.slice(i + 1)],
         rows: rows.map((r, k) => {
           const p = parts[k];
+          // Parts past the columns asked for are dropped, as Table.SplitColumn drops them.
           const cells = Array.from({ length: n }, (_, j) => (j < p.length ? p[j] : null));
-          if (n < p.length) cells[n - 1] = p.slice(n - 1).join(d);
           return [...r.slice(0, i), ...cells, ...r.slice(i + 1)];
         }),
       };
@@ -1007,7 +1082,7 @@ export function resultCells(table, r0, c0, at = null) {
     if (isErr(v)) errors++;
     if (v == null || isErr(v)) return;
     const cell = { v, f: null };
-    if (table.types[j] === 'date' && typeof v === 'number') cell.s = { fmt: 'date' };
+    if (DATE_TYPES.has(table.types[j]) && typeof v === 'number') cell.s = { fmt: table.types[j] };
     entries.push({ r: r0 + 1 + i, c: col(j), cell });
   }));
   return { entries, errors };
@@ -1036,8 +1111,29 @@ const blockedMessage = (direction) => (direction === 'left'
  * ({ sheetId, r, c }), or over the table it loaded before (a refresh), resized to the new rows and columns.
  * Returns { sheetId, tableId, rows, errors } or { error }.
  */
+/**
+ * The header names a result's columns take in a table: a table's names differ without regard to case (M's need only
+ * differ), so a later "name" beside "Name" reads "name2", and a blank one is ColumnN, as a table names them.
+ */
+function tableHeaderNames(columns) {
+  const present = new Set(columns.map((n) => String(n ?? '').toLowerCase()).filter(Boolean));
+  const seen = new Set();
+  return columns.map((name, i) => {
+    let text = String(name ?? '');
+    const free = (n) => !seen.has(n.toLowerCase()) && !present.has(n.toLowerCase());
+    if (!text) { let k = i + 1; while (!free(`Column${k}`)) k++; text = `Column${k}`; }
+    else if (seen.has(text.toLowerCase())) { let k = 2; while (!free(`${text}${k}`)) k++; text = `${text}${k}`; }
+    seen.add(text.toLowerCase());
+    return text;
+  });
+}
+
 export function loadResult(wb, query, table, { at = null } = {}) {
   if (!table.columns.length) return { error: 'The query returned no columns to load.' };
+  // The result is laid out under the names its columns take in the table, so a refresh finds each column again
+  // (a "name2" the table gave the query's second "name" is the query's, not a column added by hand).
+  const headers = tableHeaderNames(table.columns);
+  if (headers.some((n, i) => n !== table.columns[i])) table = { ...table, columns: headers };
   const height = table.rows.length;
   const existing = loadedTable(wb, query);
   let result = null;
@@ -1111,6 +1207,9 @@ export function loadResult(wb, query, table, { at = null } = {}) {
         if (kept) e.cell.s = e.cell.s && !kept.fmt ? { ...kept, ...e.cell.s } : kept;
       }
       wb.setCells(sheet.id, entries, label);
+      // A filter on the table judges the fresh rows, as Excel's refresh applies it again (Preserve column
+      // sort/filter/layout): the rows it hid were picked by position, and now hold other records.
+      wb._refilterRearranged(sheet, { r1, r2: Math.max(old.r2, next.r2) }, label);
       query.load = { kind: 'table', table: t.name, sheet: sheet.name, tableId: t.id, columns: [...table.columns] };
       result = { sheetId: sheet.id, tableId: t.id, rows: height, errors };
       return;

@@ -11,7 +11,7 @@ import { el, isComposing } from './dom.js';
 import { icon } from './icons.js';
 import { activeChart, isChartObject } from './chart-actions.js';
 import { elementLabel } from './chart-ribbon.js';
-import { chartData, CHART_DISPLAY_UNITS } from '../core/charts.js';
+import { chartData, chartTitles, CHART_DISPLAY_UNITS } from '../core/charts.js';
 import { chartElementPatch, dataLabelPositions, elementFormatPatch, isPieChart } from '../core/chart-design.js';
 import { barSpacing } from '../core/chart-subtypes.js';
 
@@ -138,7 +138,9 @@ export function createChartUi(ctx) {
     cancelTitleEdit();
     const svg = box.querySelector('.chart-body svg'), node = svg?.querySelector('[data-el="title"]');
     const base = box.getBoundingClientRect(), rect = node?.getBoundingClientRect();
-    const input = el('input.chart-title-editor', { type: 'text', value: initial ?? chart.title ?? '', 'aria-label': 'Chart title', maxlength: 200, spellcheck: false });
+    // A title linked to a cell shows that cell's text, not the text saved with the chart: that is what is edited.
+    const shown = chartTitles(ctx.wb, ctx.sheetId(), chart).title ?? chart.title ?? '';
+    const input = el('input.chart-title-editor', { type: 'text', value: initial ?? shown, 'aria-label': 'Chart title', maxlength: 200, spellcheck: false });
     if (rect) Object.assign(input.style, { top: `${rect.top - base.top - 4}px`, left: `${Math.max(4, rect.left - base.left - 20)}px`, width: `${Math.max(160, rect.width + 40)}px` });
     let done = false;
     const finish = commit => {
@@ -146,7 +148,7 @@ export function createChartUi(ctx) {
       done = true;
       const text = input.value.trim();
       cancelTitleEdit();
-      if (commit && text !== (chart.title || '')) ctx.run('chart', { action: 'patch', patch: { title: text, titleRef: undefined }, label: 'Edit chart title' });
+      if (commit && text !== shown.trim()) ctx.run('chart', { action: 'patch', patch: { title: text, titleRef: undefined }, label: 'Edit chart title' });
       ctx.grid.selectChart(chart.id);
       setElement(text ? 'title' : 'chartArea', { announce: false });
     };
@@ -181,7 +183,7 @@ export function createChartUi(ctx) {
         title: ['chartTitle', 'none'], legend: ['legend', 'none'],
         xTitle: ['axisTitles', { axis: chart.type === 'bar' ? 'vertical' : 'horizontal', on: false }],
         yTitle: ['axisTitles', { axis: chart.type === 'bar' ? 'horizontal' : 'vertical', on: false }],
-        xAxis: ['axes', { axis: 'horizontal', on: false }], yAxis: ['axes', { axis: 'vertical', on: false }],
+        xAxis: ['axes', { axis: 'category', on: false }], yAxis: ['axes', { axis: 'value', on: false }],
         'gridlines-y': ['gridlines', { axis: chart.type === 'bar' ? 'vertical' : 'horizontal', on: false }],
         'gridlines-x': ['gridlines', { axis: chart.type === 'bar' ? 'horizontal' : 'vertical', on: false }],
       }[element] || (/^dataLabels:/.test(element) ? ['dataLabels', 'none'] : null);
@@ -219,7 +221,11 @@ export function createChartUi(ctx) {
     ctx.grid.focus();
   }
 
-  const apply = (patch, label = 'Format chart') => { if (patch) ctx.run('chart', { action: 'patch', patch, label }); };
+  // A change made in the pane redraws it at once (a Solid fill shows its colour, a logarithmic scale its base), the
+  // control in use keeping the focus; a change from elsewhere waits until the pane is left, not to upset typing.
+  let ownChange = false;
+  const apply = (patch, label = 'Format chart') => { if (patch) { ownChange = true; ctx.run('chart', { action: 'patch', patch, label }); } };
+  const controlKey = n => n?.getAttribute?.('aria-label') || (n?.closest?.('label') ? `label:${n.closest('label').textContent}` : n?.tagName === 'SUMMARY' ? `summary:${n.textContent}` : null);
   const format = opts => { const chart = activeChart(ctx); if (chart) apply(elementFormatPatch(chart, paneKey, opts)); };
 
   function section(title, ...content) {
@@ -258,6 +264,8 @@ export function createChartUi(ctx) {
     const a = chart.appearance || {};
     const seriesIndex = /^(?:series|point):(\d+)/.exec(key)?.[1];
     const lineOnly = /^(xAxis|yAxis|y2Axis|gridlines-)/.test(key) || (seriesIndex != null && ['line', 'scatter', 'radar'].includes(chart.type) && !/^point/.test(key));
+    // A chart in the app's own style takes a series' colour and nothing else here (see elementFormatPatch).
+    if (!chart.appearance && (!/^series:\d+$/.test(key) || lineOnly)) return null;
     const fills = {
       chartArea: a.background, plotArea: a.plotFill, title: a.titleBox?.fill, legend: a.legendBox?.fill,
     };
@@ -276,7 +284,7 @@ export function createChartUi(ctx) {
         choice('Fill', kind, [['auto', 'Automatic'], ['none', 'No fill'], ['solid', 'Solid fill']], v => format({ fill: v === 'none' ? 'none' : v === 'solid' ? (fill && fill !== 'none' ? fill : '#4472c4') : null })),
         kind === 'solid' ? color('Fill Color', fill, v => format({ fill: v })) : null);
     }
-    if (!/^(xTitle|yTitle|dataLabels|point)/.test(key)) {
+    if (chart.appearance && !/^(xTitle|yTitle|dataLabels|point)/.test(key)) {
       const kind = line === 'none' ? 'none' : line ? 'solid' : 'auto';
       parts.push(el('h3.chart-pane-sub', {}, lineOnly && seriesIndex != null ? 'Line' : 'Border'),
         choice(lineOnly && seriesIndex != null ? 'Line' : 'Border', kind, [['auto', 'Automatic'], ['none', lineOnly ? 'No line' : 'No line'], ['solid', 'Solid line']],
@@ -314,13 +322,14 @@ export function createChartUi(ctx) {
     const a = chart.appearance;
     const out = [];
     if (key === 'title') {
-      out.push(section('Title Options', text('Text', chart.title, v => apply({ title: v.trim(), titleRef: undefined }, 'Edit chart title'))), textOptions(chart, 'titleStyle'));
+      out.push(section('Title Options', text('Text', chartTitles(ctx.wb, ctx.sheetId(), chart).title ?? chart.title, v => apply({ title: v.trim(), titleRef: undefined }, 'Edit chart title'))), textOptions(chart, 'titleStyle'));
     } else if (key === 'legend') {
       out.push(section('Legend Options', choice('Legend Position', chart.legend === false ? 'none' : chart.legendPos, [['top', 'Top'], ['bottom', 'Bottom'], ['right', 'Right'], ['none', 'None']],
         v => apply(chartElementPatch(chart, 'legend', v)))), textOptions(chart, 'legendStyle'));
     } else if (key === 'xTitle' || key === 'yTitle') {
-      out.push(section('Title Options', text('Text', chart[key], v => apply({ [key]: v.trim(), [`${key}Ref`]: undefined }))));
-    } else if (key === 'yAxis' || (key === 'xAxis' && (chart.type === 'scatter' || chart.type === 'bubble'))) {
+      out.push(section('Title Options', text('Text', chartTitles(ctx.wb, ctx.sheetId(), chart)[key] ?? chart[key], v => apply({ [key]: v.trim(), [`${key}Ref`]: undefined }))));
+    } else if (key === 'yAxis' || (key === 'xAxis' && a && (chart.type === 'scatter' || chart.type === 'bubble'))) {
+      // A scatter chart in the app's own style has no x bounds: one set would hand it an empty Excel style.
       const value = key === 'yAxis';
       const minKey = value ? 'yMin' : 'xMin', maxKey = value ? 'yMax' : 'xMax', stepKey = value ? 'yStep' : 'xStep';
       const get = k => (k === 'yMin' || k === 'yMax' ? chart[k] : a?.[k]);
@@ -334,6 +343,8 @@ export function createChartUi(ctx) {
         a ? number('Major', a[stepKey], v => { if (v == null || v > 0) apply({ appearance: { ...a, [stepKey]: v } }); }) : null,
         a ? choice('Display units', units, [['none', 'None'], ...Object.keys(CHART_DISPLAY_UNITS).map(u => [u, u.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())])],
           v => { const next = { ...a }; const k = value ? 'yUnits' : 'xUnits'; if (v === 'none') delete next[k]; else next[k] = { builtIn: v, divisor: CHART_DISPLAY_UNITS[v], label: '', style: a.yStyle, layout: null, rotation: 0 }; apply({ appearance: next }); }) : null,
+        a && !chart.stack100 ? checkbox('Logarithmic scale', (value ? a.yLogBase : a.xLogBase) > 1, on => { const next = { ...a }; const k = value ? 'yLogBase' : 'xLogBase'; if (on) next[k] = 10; else delete next[k]; apply({ appearance: next }); }) : null,
+        a && (value ? a.yLogBase : a.xLogBase) > 1 ? number('Base', value ? a.yLogBase : a.xLogBase, v => { if (v >= 2 && v <= 1000) apply({ appearance: { ...a, [value ? 'yLogBase' : 'xLogBase']: v } }); }, { min: 2, max: 1000, step: 1, placeholder: '10' }) : null,
         a ? checkbox('Values in reverse order', value ? a.reverseValues : a.reverseCategories, on => apply({ appearance: { ...a, [value ? 'reverseValues' : 'reverseCategories']: on } })) : null,
         a ? choice('Label Position', (value ? a.yLabelPosition : a.xLabelPosition) || 'nextTo', [['nextTo', 'Next to Axis'], ['high', 'High'], ['low', 'Low'], ['none', 'None']],
           v => apply({ appearance: { ...a, [value ? 'yLabelPosition' : 'xLabelPosition']: v } })) : null),
@@ -436,7 +447,10 @@ export function createChartUi(ctx) {
     if (!chart) { hidePane(); return; }
     const key = paneKey || 'chartArea';
     const sig = `${chart.id}|${key}|${ctx.wb.version}`;
-    if (sig === paneSig || pane.contains(document.activeElement) && paneSig?.startsWith(`${chart.id}|${key}|`)) return;
+    const own = ownChange, inside = pane.contains(document.activeElement);
+    ownChange = false;
+    if (sig === paneSig || inside && !own && paneSig?.startsWith(`${chart.id}|${key}|`)) return;
+    const focused = inside && paneBody.contains(document.activeElement) ? controlKey(document.activeElement) : null;
     paneSig = sig;
     paneTitleEl.textContent = paneTitle(key);
     const open = new Set([...paneBody.querySelectorAll('details.chart-pane-section:not([open]) > summary')].map(s => s.textContent));
@@ -444,6 +458,7 @@ export function createChartUi(ctx) {
     if (!chart.appearance && !sections.length) sections.push(el('p.chart-pane-note', {}, 'This chart keeps the app’s own style. Change Chart Type gives it the full formatting options.'));
     for (const s of sections) if (open.has(s.querySelector('summary')?.textContent)) s.open = false;
     paneBody.replaceChildren(...sections);
+    if (focused) [...paneBody.querySelectorAll('input, select, button, summary')].find(n => controlKey(n) === focused)?.focus({ preventScroll: true });
   }
   pane.addEventListener('focusout', () => requestAnimationFrame(() => { if (!pane.contains(document.activeElement)) { paneSig = null; renderPane(); } }));
   pane.addEventListener('keydown', e => { if (e.key === 'Escape' && !isComposing(e)) { e.preventDefault(); hidePane(); } });

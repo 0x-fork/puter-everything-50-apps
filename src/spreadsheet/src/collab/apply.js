@@ -64,7 +64,7 @@ export function lineValues(sheet, prop, keys) {
   return out;
 }
 
-function writeLines(live, prop, values) {
+function writeLines(live, prop, values, modes = null) {
   if (prop === 'hiddenRows' || prop === 'hiddenCols') {
     for (const [k, v] of Object.entries(values)) { if (v) live[prop].add(Number(k)); else live[prop].delete(Number(k)); }
     return;
@@ -77,8 +77,9 @@ function writeLines(live, prop, values) {
   const temp = makeSheet({ [prop]: Object.fromEntries(Object.entries(values).filter(([, v]) => v != null)), cells: {} });
   for (const [k, v] of Object.entries(values)) {
     const i = Number(k);
-    // A row sized to fit its contents keeps the height this screen measured for it.
-    if (prop === 'rowHeights' && live.rowHeightModes.get(i) === 'auto') continue;
+    // A row sized to fit its contents keeps the height this screen measured for it; one the same change gives a
+    // height of its own (a row dragged to a size, which the change also marks fixed) takes that height.
+    if (prop === 'rowHeights' && (modes && own(modes, k) ? modes[k] : live.rowHeightModes.get(i)) === 'auto') continue;
     const next = v == null ? undefined : temp[prop].get(i);
     if (next === undefined) live[prop].delete(i);
     else live[prop].set(i, next);
@@ -102,12 +103,29 @@ function reach(wb, sheet, axis, need) {
 }
 
 /**
+ * Never every sheet hidden, nor a hidden sheet in front, as when a file is read: two people hiding the last two
+ * sheets on show at once would leave none (and the next sheet deleted nowhere to go). The first sheet is shown
+ * again, as one step to take back with the rest, the same in every browser; this person moves off a sheet hidden.
+ */
+function keepOneShown(wb, label) {
+  if (!wb.sheets.length) return;
+  if (wb.sheets.every((s) => s.hidden)) {
+    const id = wb.sheets[0].id;
+    const show = (hidden) => { const live = wb.sheet(id); if (!live) return; live.hidden = hidden; wb._changed('structure', id); };
+    show(false);
+    wb._push({ label, undo: () => show(true), redo: () => show(false) });
+  }
+  const active = wb.sheets.findIndex((s) => s.id === wb.activeSheetId);
+  if (active < 0 || wb.sheets[active].hidden) wb.activeSheetId = (wb.sheets.slice(active + 1).find((s) => !s.hidden) || wb.sheets.find((s) => !s.hidden)).id;
+}
+
+/**
  * Apply operations to `wb` in order. Call it inside a transaction: each write hands the workbook an undo step.
  * Operations on a sheet that is gone are skipped, as are structural ones the workbook refuses (a protected
  * sheet, say): the same in every browser, which hold the same state.
  */
 export function applyOps(wb, ops, label = 'Shared edit') {
-  for (const op of ops) {
+  for (const [n, op] of ops.entries()) {
     const sheet = op.s != null ? wb.sheet(op.s) : null;
     switch (op.t) {
       case 'cells': {
@@ -138,6 +156,7 @@ export function applyOps(wb, ops, label = 'Shared edit') {
         const set = (values) => { const live = wb.sheet(id); if (!live) return; writeProps(live, values); wb._changed('structure', id); };
         set(op.v);
         wb._push({ label, undo: () => set(prev), redo: () => set(op.v) });
+        if (own(op.v, 'hidden')) keepOneShown(wb, label);
         break;
       }
       case 'lines': {
@@ -145,7 +164,9 @@ export function applyOps(wb, ops, label = 'Shared edit') {
         const id = sheet.id;
         const prev = lineValues(sheet, op.p, Object.keys(op.v));
         const type = op.p === 'notes' ? 'cells' : 'layout';
-        const set = (values) => { const live = wb.sheet(id); if (!live) return; writeLines(live, op.p, values); wb._changed(type, id); };
+        // How the change leaves each row's sizing, when it says (its modes come after its heights).
+        const modes = op.p === 'rowHeights' ? Object.assign({}, ...ops.slice(n + 1).filter((o) => o.t === 'lines' && o.p === 'rowHeightModes' && o.s === op.s).map((o) => o.v)) : null;
+        const set = (values) => { const live = wb.sheet(id); if (!live) return; writeLines(live, op.p, values, modes); wb._changed(type, id); };
         set(op.v);
         wb._push({ label, undo: () => set(prev), redo: () => set(op.v) });
         break;

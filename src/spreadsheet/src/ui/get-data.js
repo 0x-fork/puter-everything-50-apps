@@ -13,7 +13,7 @@ import { workbookFromFile, detectDelimiter, decodeText } from '../core/io.js';
 import { parseCellRef, colName } from '../core/cell.js';
 import {
   csvTable, initialSteps, applyStep, uniqueQueryName, saveQuery, evaluateQuery, loadResult, unloadQuery, webItems, sheetRows,
-  displayValue, TYPE_MARKS, TYPE_LABELS, queryById, loadedTable,
+  displayValue, TYPE_MARKS, TYPE_LABELS, DATE_TYPES, queryById, loadedTable,
 } from '../core/queries.js';
 
 /** What a query may reach outside the workbook through: the web (through Puter), the drive, and the file readers. */
@@ -51,7 +51,7 @@ export function cellNode(v, type) {
   const td = el('td', {}, text);
   if (v == null) td.classList.add('pq-null');
   else if (typeof v === 'object' && v.error) { td.classList.add('pq-error'); td.title = v.message || v.error; }
-  else if (typeof v === 'number' || type === 'date') td.classList.add('pq-num');
+  else if (typeof v === 'number' || DATE_TYPES.has(type)) td.classList.add('pq-num');
   return td;
 }
 
@@ -317,10 +317,18 @@ export function openImportData(ctx, { query, fresh = false, onDone = null }) {
     const live = queryById(wb, query.id) || saveQuery(wb, query);
     if (view === 'connection') { if (loaded) unloadQuery(wb, live); else saveQuery(wb, { ...live, load: { kind: 'connection' } }); ctx.onQueriesChanged?.(); onDone?.(live); return; }
     if (loaded && where === 'new' && !at) { onDone?.(live); return; }
-    if (loaded) unloadQuery(wb, live);
+    // The data is read before the loaded table is taken away, and a move the new place refuses puts the table
+    // back where it was, still the query's: a failed Load To… must not cost the table it was moving.
     const res = await evaluateQuery(wb, live, queryIo(ctx));
     if (res.error) { toast(res.error.message, { icon: 'alert', duration: 5000 }); return; }
+    const mark = wb.historyTop;
+    const previous = live.load;
+    if (loaded) unloadQuery(wb, live);
     const out = loadResult(wb, live, res.table, { at });
+    if (out.error && loaded) {
+      wb.discardSteps(new Set(wb.historySince(mark) || []));
+      saveQuery(wb, { ...(queryById(wb, live.id) || live), load: previous });
+    }
     if (out.error) toast(out.error, { icon: 'alert', duration: 5000 });
     else { fitQueryTables(ctx, [live]); toast(`${out.rows.toLocaleString()} rows loaded`, { icon: 'table' }); }
     ctx.onQueriesChanged?.();

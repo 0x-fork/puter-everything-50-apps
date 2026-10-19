@@ -11,7 +11,7 @@ import { maxOf, minOf } from '../core/numeric.js';
 import { bandPolygon, boxGroups, boxStats, buildHierarchy, hierarchyDepth, hierarchyNodes, isoSegment, stockSeries, sunburstLayout,
   surfaceBands, surfaceGrid, surfaceTriangles, topAncestor, treemapLayout } from '../core/chart-special.js';
 import { seriesColor, seriesPaint, inkOn, svgEsc as esc, svgNum as f, chartTipText as tipText, layoutLegend, chartAreaRect, elementEffectDefs,
-  effectAttr, chartTextBox, legendBoxRect, axisTextWidth, scaleTicks, chartMarker, categoryShortener, shadeColor, PLOT_STYLE, MAX_LEGEND, MARK_BUDGET } from './chartsvg.js';
+  effectAttr, chartTextBox, legendBoxRect, axisTextWidth, scaleTicks, chartMarker, categoryShortener, shadeColor, PLOT_STYLE, MARK_BUDGET, cappedLegend } from './chartsvg.js';
 
 export const SPECIAL_CHART_TYPES = new Set(['treemap', 'sunburst', 'boxWhisker', 'funnel', 'stock', 'surface']);
 
@@ -59,7 +59,7 @@ function chartFrame(chart, width, height, entries, describe) {
     parts.push(text(fitText(chart.title, W - 16, st.title), x, y, st.title, a?.title ? 'start' : 'middle', 'data-el="title"'));
     titleBottom = y + st.title.size * .35;
   }
-  const shown = entries.filter(e => !a?.legendHidden?.includes(e.i)).slice(0, MAX_LEGEND).map(e => ({ ...e, keyWidth: e.key === 'line' ? st.legend.size * 1.6 : st.legend.size * .7 }));
+  const shown = cappedLegend(entries.filter(e => !a?.legendHidden?.includes(e.i))).map(e => ({ ...e, keyWidth: e.more ? 0 : e.key === 'line' ? st.legend.size * 1.6 : st.legend.size * .7 }));
   const manual = a?.legend && a.legendPos === chart.legendPos ? a.legend : null;
   const box = manual ? { x: manual.x * W, y: manual.y * H, w: (manual.w ?? .25) * W, h: (manual.h ?? .1) * H }
     : chart.legendPos === 'right' ? { x: W * .78, y: Math.max(titleBottom + 12, H * .15), w: W * .21 } : null;
@@ -74,7 +74,7 @@ function chartFrame(chart, width, height, entries, describe) {
     const out = [`<g data-el="legend"${a ? effectAttr(a, 'legend') : ''}>`, a ? legendBoxRect(a.legendBox, legend, st.legend.size) : ''];
     for (const e of legend.entries) {
       const k = e.keyWidth;
-      if (e.key === 'line') out.push(`<line x1="${f(e.x)}" y1="${f(e.y)}" x2="${f(e.x + k)}" y2="${f(e.y)}" stroke="${esc(e.paint)}" stroke-width="2"/>`);
+      if (e.more) { /* the count of the entries not named has no key */ } else if (e.key === 'line') out.push(`<line x1="${f(e.x)}" y1="${f(e.y)}" x2="${f(e.x + k)}" y2="${f(e.y)}" stroke="${esc(e.paint)}" stroke-width="2"/>`);
       else if (e.key === 'marker') out.push(chartMarker(e.symbol || 'circle', e.x + k / 2, e.y, Math.min(k, 7), e.paint, e.stroke || e.paint, '', 'chart-legend-marker'));
       else out.push(`<rect x="${f(e.x)}" y="${f(e.y - k / 2)}" width="${f(k)}" height="${f(k)}" fill="${esc(e.paint)}"${e.stroke ? ` stroke="${esc(e.stroke)}"` : ''}/>`);
       e.lines.forEach((line, i) => out.push(text(line, e.textX, e.baseline + i * legend.lineH, st.legend, 'start', 'class="chart-legend-label"')));
@@ -276,11 +276,28 @@ function renderBoxWhisker(data, chart, width, height) {
   const gap = Math.max(0, opts.gapWidth ?? 100) / 100, boxW = slot / (count + gap), clip = `box-${Math.random().toString(36).slice(2, 8)}`;
   parts.push(`<clipPath id="${clip}"><rect x="${f(plot.x)}" y="${f(plot.y - 2)}" width="${f(plot.w)}" height="${f(plot.h + 4)}"/></clipPath><g clip-path="url(#${clip})">`);
   const labels = [];
+  // Past a box a pixel across, neighbouring groups share their pixels: each run of them draws the one that
+  // reaches furthest, as the cartesian charts thin their points, so thousands of named rows (a box each)
+  // draw a picture the width of the plot rather than hundreds of thousands of nodes that stall the page.
+  const per = Math.max(1, Math.ceil(n * count / Math.max(1, plot.w)));
+  const drawn = stats.map(list => {
+    if (per === 1) return list.map(Boolean);
+    const keep = list.map(() => false);
+    for (let start = 0; start < list.length; start += per) {
+      let best = -1;
+      for (let k = start; k < Math.min(list.length, start + per); k++) if (list[k] && (best < 0 || list[k].max - list[k].min > list[best].max - list[best].min)) best = k;
+      if (best >= 0) keep[best] = true;
+    }
+    return keep;
+  });
+  // The points inside each box and beyond its whiskers: up to 400, fewer when there are many boxes to share them.
+  const boxes = drawn.reduce((sum, keep) => sum + keep.filter(Boolean).length, 0);
+  const pointsPerBox = Math.min(400, Math.max(20, Math.floor(MARK_BUDGET * 4 / Math.max(1, boxes))));
   grouped.series.forEach((series, j) => {
     const style = series.style ?? data.valueStyle, pointColors = new Map((a?.pointColors?.[j] || []).map(p => [p.index, p.color]));
     const means = [];
     stats[j].forEach((s, i) => {
-      if (!s) return;
+      if (!s || !drawn[j][i]) return;
       // A box coloured on its own (Format Data Point) keeps that colour; the rest take the series'.
       const own = pointColors.get(i), color = own && own !== 'none' ? own : seriesColor(chart, j), paint = own || seriesPaint(chart, j), dark = shadeColor(color, -.35);
       const x0 = plot.x + slot * i + boxW * gap / 2 + boxW * j, cxm = x0 + boxW / 2, w = boxW * .8, left = cxm - w / 2;
@@ -290,8 +307,8 @@ function renderBoxWhisker(data, chart, width, height) {
         `<rect class="chart-box-body" x="${f(left)}" y="${f(y(s.q3))}" width="${f(w)}" height="${f(Math.max(.75, y(s.q1) - y(s.q3)))}" fill="${esc(paint)}" stroke="${esc(dark)}" stroke-width="1"/>`,
         `<line class="chart-box-median" x1="${f(left)}" y1="${f(y(s.median))}" x2="${f(left + w)}" y2="${f(y(s.median))}" stroke="${esc(inkOn(color))}" stroke-width="1.5"/>`);
       if (opts.meanMarkers) parts.push(chartMarker('x', cxm, y(s.mean), Math.min(8, w / 2), 'none', inkOn(color), '', 'chart-box-mean'));
-      if (opts.innerPoints) for (const v of s.inner.slice(0, 400)) parts.push(`<circle class="chart-box-point" cx="${f(cxm)}" cy="${f(y(v))}" r="1.8" fill="${esc(dark)}"/>`);
-      if (opts.outliers) for (const v of s.outliers.slice(0, 400)) parts.push(`<circle class="chart-box-outlier" cx="${f(cxm)}" cy="${f(y(v))}" r="2.5" fill="none" stroke="${esc(dark)}" stroke-width="1"><title>${esc(`${series.name}: outlier ${valueText(v, style)}`)}</title></circle>`);
+      if (opts.innerPoints) for (const v of s.inner.slice(0, pointsPerBox)) parts.push(`<circle class="chart-box-point" cx="${f(cxm)}" cy="${f(y(v))}" r="1.8" fill="${esc(dark)}"/>`);
+      if (opts.outliers) for (const v of s.outliers.slice(0, pointsPerBox)) parts.push(`<circle class="chart-box-outlier" cx="${f(cxm)}" cy="${f(y(v))}" r="2.5" fill="none" stroke="${esc(dark)}" stroke-width="1"><title>${esc(`${series.name}: outlier ${valueText(v, style)}`)}</title></circle>`);
       parts.push('</g>');
       means.push([cxm, y(s.mean)]);
       if (labelsOn(chart) && w >= 4) {
@@ -399,8 +416,25 @@ function renderStock(data, chart, width, height) {
 
 /* ---------- Surface ---------- */
 
+/**
+ * A grid of more cells than a surface can draw is sampled down evenly, its first and last rows and columns kept,
+ * so a large range draws whole at a lower resolution rather than as a part of itself.
+ */
+function sampledGrid(grid, budget) {
+  const cells = grid.rows * grid.cols;
+  if (cells <= budget) return grid;
+  const k = Math.sqrt(cells / budget);
+  const pick = (n) => {
+    const m = Math.max(2, Math.min(n, Math.floor(n / k)));
+    return Array.from({ length: m }, (_, i) => Math.round(i * (n - 1) / (m - 1)));
+  };
+  const rows = pick(grid.rows), cols = pick(grid.cols);
+  return { rows: rows.length, cols: cols.length, z: rows.map(r => cols.map(c => grid.z[r][c])),
+    rowNames: rows.map(r => grid.rowNames[r]), colNames: cols.map(c => grid.colNames[c]) };
+}
+
 function renderSurface(data, chart, width, height) {
-  const grid = surfaceGrid(data);
+  const grid = sampledGrid(surfaceGrid(data), MARK_BUDGET * 2);
   if (grid.rows < 2 || grid.cols < 2) return message(chart, width, height, 'A surface needs at least two rows and two columns of numbers');
   const values = grid.z.flat().filter(Number.isFinite);
   if (!values.length) return message(chart, width, height, 'No numbers to chart');
@@ -448,7 +482,9 @@ function drawContour(fr, chart, grid, bands, tris, bandOf, wire) {
     if (r % every || a?.hideXAxis) return;
     parts.push(text(name, X(r), plot.y + plot.h + st.axis.size * 1.3, st.axis, 'middle', 'class="chart-axis-label"'));
   });
-  grid.colNames.forEach((name, c) => parts.push(text(short(name), plot.x - 6, Y(c) + st.axis.size * .35, st.axis, 'end', 'class="chart-axis-label"')));
+  // Series names up the side, every k-th where a line of text each would run them together.
+  const colEvery = Math.max(1, Math.ceil(grid.cols * st.axis.size * 1.2 / Math.max(1, plot.h)));
+  grid.colNames.forEach((name, c) => { if (!(c % colEvery)) parts.push(text(short(name), plot.x - 6, Y(c) + st.axis.size * .35, st.axis, 'end', 'class="chart-axis-label"')); });
 }
 
 function drawSurface3d(fr, chart, grid, bands, tris, bandOf, wire, style) {
@@ -510,7 +546,8 @@ function drawSurface3d(fr, chart, grid, bands, tris, bandOf, wire, style) {
       });
     }
     pieces.sort((x, y) => y.depth - x.depth || x.b - y.b);
-    const shown = pieces.slice(0, MARK_BUDGET * 4);
+    // Past the budget the farthest pieces go, which the nearer ones cover, never the front of the surface.
+    const shown = pieces.slice(-MARK_BUDGET * 4);
     parts.push('<g class="chart-surface" stroke-linejoin="round">');
     for (const { b, poly } of shown) {
       const paint = seriesPaint(chart, b);

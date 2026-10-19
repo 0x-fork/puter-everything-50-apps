@@ -45,7 +45,7 @@ const GROUPS = [
   ]],
   ['Edit', [
     ['Type', 'Replace the cell contents (matching text from the column is suggested)'],
-    ['F2 or double-click', 'Edit in place'],
+    [IS_MAC ? 'F2 or ⌃ + U' : 'F2', 'Edit in place (double-click a cell too)'],
     ['F2 while typing', 'Switch between Enter mode (arrows leave the cell) and Edit mode (arrows move the caret); the status bar shows which'],
     ['Shift + F2', 'Add or edit a note'],
     [`${MOD_KEY} + K`, 'Insert or edit a link'],
@@ -57,7 +57,7 @@ const GROUPS = [
     ['Escape', 'Cancel the edit'],
     ['Alt + Enter', 'New line inside a cell'],
     ['Arrow keys after = ( , or an operator', 'Pick a cell reference into the formula (Shift extends to a range)'],
-    ['Click, then Shift + click, while a formula wants a reference', 'Pick a cell, then stretch it into a range (dragging works too)'],
+    ['Click, then Shift + click, while a formula wants a reference', `Pick a cell, then stretch it into a range (dragging works too); ${MOD_KEY} + click adds another after a comma`],
     ['Click another sheet\'s tab while typing a formula', 'Pick references there (Sheet2!B3); Enter or Escape comes back'],
     ['F4', 'Cycle $ anchors on the reference at the caret'],
     [`${MOD_KEY} + Shift + =`, 'Insert rows (or columns)'],

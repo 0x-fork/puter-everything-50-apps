@@ -25,8 +25,8 @@
 
 import { Workbook, sheetShapeJSON, sameJSON, cloneCell } from '../core/workbook.js';
 import { cellKey, parseKey, cutText } from '../core/cell.js';
-import { LINE_PROPS, SHEET_PROPS, BOOK_PROPS, MAX_LABEL, mapCellKey, mapLineKey, mergeRuns, transformStructure, isStructure } from './ops.js';
-import { applyOps, contentOf, sheetJSON, lineValues } from './apply.js';
+import { LINE_PROPS, SHEET_PROPS, BOOK_PROPS, MAX_LABEL, MAX_CHANGE, mapCellKey, mapLineKey, mergeRuns, transformStructure, isStructure } from './ops.js';
+import { applyOps, contentOf, sheetJSON, lineValues, sheetProps } from './apply.js';
 
 const UNDO_LIMIT = 100;
 const EMPTY = Object.freeze({});
@@ -446,7 +446,8 @@ export class Replica extends EventTarget {
   _flushStep(label, { rollback = null, undoable = true } = {}) {
     this._diff();
     const ops = this.building;
-    const inverse = this.buildingInv.slice().reverse().flat();
+    const inverses = this.buildingInv;
+    const inverse = inverses.slice().reverse().flat();
     this.building = [];
     this.buildingInv = [];
     if (!ops.length) return null;
@@ -458,8 +459,15 @@ export class Replica extends EventTarget {
       this.dispatchEvent(new CustomEvent('refused', { detail: { label } }));
       return null;
     }
-    const change = { id: changeId(), label, ops, rollback: [rollback || (() => this._withMode('rollback', () => applyOps(this.wb, inverse)))] };
-    this.pending.push(change);
+    // A step larger than the room takes in one change (a paste of a long list, say) travels in several.
+    const parts = splitChange(ops, inverses);
+    const change = { id: changeId(), label, ops: parts ? parts[0].ops : ops, rollback: [rollback || (() => this._withMode('rollback', () => applyOps(this.wb, inverse)))] };
+    if (parts) {
+      // Each part is taken back by its own inverse: a room's change can arrive between them.
+      const undoPart = (inv) => () => this._withMode('rollback', () => applyOps(this.wb, inv));
+      change.rollback = [undoPart(parts[0].inverse)];
+      this.pending.push(change, ...parts.slice(1).map((p) => ({ id: changeId(), label, ops: p.ops, rollback: [undoPart(p.inverse)] })));
+    } else this.pending.push(change);
     if (undoable) {
       const entry = { id: change.id, label, ops: inverse };
       if (this.undoing === 'undo') this.redoStack.push(entry);
@@ -508,6 +516,7 @@ export class Replica extends EventTarget {
     const wb = this.wb;
     let rolled = false, applied = false, structural = false;
     const touched = []; // what was applied, when nothing structural was: the shadow is brought up to date for it alone
+    const reshapes = (ops) => ops.some((o) => isStructure(o) || o.t === 'put');
     const moved = []; // structural operations as they landed here (past the pending changes), for the view to follow
     const incoming = []; // everything someone else's changes did
     wb._coalesce(() => {
@@ -517,15 +526,22 @@ export class Replica extends EventTarget {
           if (this.pending[0]?.id === ch.id) {
             this.pending.shift();
             // Taken back for an earlier change: the room's copy is the one to apply.
-            if (rolled) this._applyRemote(ch.ops, null, null, { quiet: true });
+            if (rolled) { this._applyRemote(ch.ops, null, null, { quiet: true }); touched.push(...ch.ops); }
             continue;
           }
-          if (!rolled && this.pending.length) { this._rollback(); rolled = true; }
+          if (!rolled && this.pending.length) {
+            // What the pending changes wrote is what taking them back and putting them on again touches.
+            for (const p of this.pending) touched.push(...p.ops);
+            this._rollback();
+            rolled = true;
+          }
           let theirs = ch.ops;
+          const bases = new Map(); // sheet and list → the list as the pending change being transformed found it
           for (const p of this.pending) {
-            const [mine, past] = this._xform(p.ops, theirs, true);
+            const merged = mergeLists(p.ops, theirs, bases, this.wb);
+            const [mine, past] = this._xform(merged.mine, merged.theirs, true);
             p.ops = mine;
-            theirs = past;
+            theirs = [...past, ...merged.after];
           }
           this._applyRemote(ch.ops, rec.username, ch.label);
           incoming.push(...ch.ops);
@@ -540,7 +556,10 @@ export class Replica extends EventTarget {
       if (rolled) this._replay();
       if (incoming.length) this.dispatchEvent(new CustomEvent('incoming', { detail: { ops: incoming } }));
     });
-    if (rolled || structural) this.shadow = this._fullShadow();
+    // Read again in full only when rows, columns or sheets moved: a long workbook's shadow takes a while to build,
+    // and someone else's edit arriving while this person's own is on its way is the usual case while both type.
+    if (rolled) for (const p of this.pending) touched.push(...p.ops);
+    if (structural || reshapes(touched)) this.shadow = this._fullShadow();
     else this._refreshShadow(touched);
     this._resetDirty();
     if (applied) this.dispatchEvent(new CustomEvent('remote', { detail: { structural, ops: moved } }));
@@ -759,6 +778,179 @@ export class Replica extends EventTarget {
     for (const s of state.sheets) for (const k of ['viewZoom', 'viewMode', 'viewSelection', 'viewOrigin', 'split']) delete s[k];
     return state;
   }
+}
+
+/**
+ * A sheet's comments, objects (charts, pictures, shapes, text boxes), conditional formats, validation and merged
+ * cells are one register each, but people add them in different places at the same time: where a pending change
+ * and someone else's change made at once both write one of these lists, each writes the two merged instead (item
+ * by item, and a thread reply by reply), so that neither person's additions are lost and what someone deleted
+ * stays deleted. `bases` keeps what each list was before the pending change in hand (the state the room's change
+ * was made on, for the first); `after` is what the room's change does once the pending one is in, for the
+ * pending changes after it. Nothing is merged across rows, columns or sheets that move: the later list stands.
+ */
+const MERGED_LISTS = { comments: (b, x, y) => mergeThreads(b, x, y), charts: (b, x, y) => mergeItems(b, x, y, (i) => i?.id),
+  rules: (b, x, y) => mergeItems(b, x, y, (i) => i?.id), validations: (b, x, y) => mergeItems(b, x, y, (i) => i?.id), merges: (b, x, y) => mergeMerges(b, x, y) };
+
+function mergeLists(mine, theirs, bases, wb) {
+  const none = { mine, theirs, after: [] };
+  const listsOf = (op) => (op.t === 'props' ? Object.keys(op.v).filter((k) => own(MERGED_LISTS, k)) : []);
+  if (bases.blocked) return none;
+  if (mine.some(isStructure) || theirs.some(isStructure) || theirs.some((op) => op.t === 'put')) { bases.blocked = true; return none; }
+  if (!mine.some((op) => listsOf(op).length)) return none;
+  const after = [];
+  const next = mine.map((op) => {
+    const keys = listsOf(op);
+    if (!keys.length) return op;
+    const v = { ...op.v };
+    for (const k of keys) {
+      const at = `${op.s}\u0000${k}`;
+      const base = bases.has(at) ? bases.get(at) : wb.sheet(op.s) ? sheetProps(wb.sheet(op.s), [k])[k] : null;
+      bases.set(at, op.v[k]);
+      const other = theirs.filter((t) => t.t === 'props' && t.s === op.s && own(t.v, k)).at(-1);
+      if (!other) continue;
+      const ours = op.v[k], their = other.v[k];
+      // Unchanged on one side, the other's list stands (an emptied list is merged like any other).
+      v[k] = sameJSON(ours, base) ? their : sameJSON(their, base) || sameJSON(ours, their) ? ours : MERGED_LISTS[k](base, ours, their);
+      if (!sameJSON(v[k], op.v[k])) after.push({ t: 'props', s: op.s, v: { [k]: v[k] } });
+    }
+    return { ...op, v };
+  });
+  return { mine: next, theirs, after };
+}
+
+/**
+ * Two edits of a list of items (each known by `idOf`) made at once on `base`, `b` the earlier in the room's order:
+ * the items either kept or added, in the order of `a`, with those `b` added before the first that `a` added.
+ */
+function mergeItems(base, a, b, idOf) {
+  const lists = [base, a, b].map((l) => (Array.isArray(l) ? l : []));
+  // Items not told apart by an id cannot be merged: the later list stands.
+  if (lists.some((l) => l.some((i) => idOf(i) == null)) || lists.some((l) => new Set(l.map(idOf)).size !== l.length)) return a;
+  const [was, mine, theirs] = lists.map((l) => new Map(l.map((i) => [idOf(i), i])));
+  const added = [];
+  for (const [id, item] of theirs) { if (mine.has(id)) continue; const kept = merge3(was.get(id) ?? null, null, item, (x) => x); if (kept) added.push(kept); }
+  const out = [];
+  for (const [id, item] of mine) {
+    if (!was.has(id)) out.push(...added.splice(0));
+    const kept = merge3(was.get(id) ?? null, item, theirs.get(id) ?? null, (x) => x);
+    if (kept) out.push(kept);
+  }
+  return [...out, ...added];
+}
+
+/** Merged cells from two edits: as items, but one of `b`'s that overlaps a block kept from `a` gives way to it (a cell is in one merge). */
+function mergeMerges(base, a, b) {
+  const key = (m) => (m ? `${m.r1},${m.c1},${m.r2},${m.c2}` : null);
+  const all = mergeItems(base, a, b, key);
+  if (all === a) return a;
+  const mine = new Set((Array.isArray(a) ? a : []).map(key));
+  const kept = all.filter((m) => mine.has(key(m)));
+  const overlaps = (m, n) => m.r1 <= n.r2 && n.r1 <= m.r2 && m.c1 <= n.c2 && n.c1 <= m.c2;
+  for (const m of all) if (!mine.has(key(m)) && !kept.some((n) => overlaps(m, n))) kept.push(m);
+  return kept;
+}
+
+/** Three versions of one record: the base, and two edits of it made at once. Unchanged on one side, the other's stands. */
+function merge3(base, a, b, both) {
+  if (sameJSON(a, base)) return b;
+  if (sameJSON(b, base) || sameJSON(a, b)) return a;
+  // Deleted on one side and changed on the other: the change stays, rather than losing what was written.
+  if (a == null || b == null) return a ?? b;
+  return both(a, b);
+}
+
+/** A sheet's stored comments ({ "r,c": { done, items, assignee } }) merged from two edits of `base`. */
+function mergeThreads(base, a, b) {
+  const out = {};
+  for (const key of new Set([...Object.keys(a || {}), ...Object.keys(b || {}), ...Object.keys(base || {})])) {
+    const t = merge3(base?.[key] ?? null, a?.[key] ?? null, b?.[key] ?? null, (x, y) => mergeThread(base?.[key] ?? null, x, y));
+    if (t?.items?.length) out[key] = t;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** One thread changed on both sides: replies added by either are kept, in time order after those both had. */
+function mergeThread(base, a, b) {
+  const byId = (t) => new Map((t?.items || []).map((i) => [i.id, i]));
+  const was = byId(base), mine = byId(a), theirs = byId(b);
+  const items = [];
+  for (const [id, old] of was) {
+    const item = merge3(old, mine.get(id) ?? null, theirs.get(id) ?? null, (x) => x);
+    // A reply deleted on either side is gone, unless the other side rewrote it meanwhile.
+    if (item && mine.has(id) && theirs.has(id)) items.push(item);
+    else if (item && !sameJSON(item, old)) items.push(item);
+  }
+  const added = [...[...mine.values()].filter((i) => !was.has(i.id)), ...[...theirs.values()].filter((i) => !was.has(i.id) && !mine.has(i.id))];
+  added.sort((x, y) => String(x.time).localeCompare(String(y.time)));
+  const pick = (k) => (sameJSON(a[k] ?? null, base?.[k] ?? null) ? b[k] : a[k]);
+  const done = pick('done'), assignee = pick('assignee');
+  return { done: done === true, items: [...items, ...added], ...(assignee ? { assignee } : {}) };
+}
+
+/** A step whose operations take more characters than this travels in parts (the room takes MAX_CHANGE in one change). */
+const SPLIT_AT = MAX_CHANGE * 0.8;
+/** About the most characters of operations one part carries. */
+const PART = MAX_CHANGE / 4;
+const REGISTERS = new Set(['cells', 'lines', 'props', 'book']);
+
+/**
+ * A step too large for one change, as parts that each fit, to apply in order: [{ ops, inverse }]. Null when it
+ * fits, or when it is not register writes alone (rows, columns or sheets that move are taken back by the
+ * workbook's own undo step, whole). A write to many cells or lines is cut into runs of its keys; each part's
+ * inverse puts back what its own registers held, so a part the room has not confirmed is taken back alone.
+ */
+export function splitChange(ops, inverses, limit = PART) {
+  if (!ops.every((op, i) => REGISTERS.has(op.t) && inverses[i]?.length === 1 && inverses[i][0].t === op.t)) return null;
+  const keysOf = (op) => (op.t === 'cells' ? (op.st ? [...new Set([...Object.keys(op.v || {}), ...Object.keys(op.st)])] : Object.keys(op.v || {})) : op.t === 'lines' ? Object.keys(op.v) : null);
+  // Fewer cells or lines than this cannot make a change too large (a cell holds 32,767 characters at most).
+  let count = 0;
+  for (const op of ops) if (op.t === 'cells' || op.t === 'lines') count += Object.keys(op.v || {}).length + Object.keys(op.st || {}).length;
+  if (count < 64) return null;
+  // What each operation, and each key of a write to cells or lines, takes when sent.
+  let total = 0;
+  const sized = ops.map((op) => {
+    const keys = keysOf(op);
+    if (!keys) { const size = JSON.stringify(op).length; total += size; return { size }; }
+    const sizes = keys.map((k) => k.length + 8 + JSON.stringify(op.v?.[k] ?? null).length + (op.st ? JSON.stringify(op.st[k] ?? null).length : 0));
+    const size = sizes.reduce((a, b) => a + b, 0) + 40;
+    total += size;
+    return { size, keys, sizes };
+  });
+  if (total <= SPLIT_AT) return null;
+  const parts = [];
+  let cur = null;
+  const add = (op, inv, size) => {
+    if (!cur || (cur.size && cur.size + size > limit)) parts.push((cur = { ops: [], inverse: [], size: 0 }));
+    cur.ops.push(op);
+    cur.inverse.unshift(inv);
+    cur.size += size;
+  };
+  const piece = (op, keys) => {
+    const out = { ...op };
+    for (const field of ['v', 'st']) {
+      if (!op[field]) continue;
+      const kept = {};
+      let any = false;
+      for (const k of keys) if (own(op[field], k)) { kept[k] = op[field][k]; any = true; }
+      if (any) out[field] = kept; else delete out[field];
+    }
+    return out;
+  };
+  ops.forEach((op, i) => {
+    const inv = inverses[i][0];
+    const { size, keys, sizes } = sized[i];
+    if (!keys || size <= limit) { add(op, inv, size); return; }
+    let run = [], runSize = 0;
+    const flush = () => { if (run.length) add(piece(op, run), piece(inv, run), runSize); run = []; runSize = 0; };
+    keys.forEach((k, j) => {
+      if (runSize && runSize + sizes[j] > limit) flush();
+      run.push(k);
+      runSize += sizes[j];
+    });
+    flush();
+  });
+  return parts.length > 1 ? parts.map(({ ops: o, inverse }) => ({ ops: o, inverse })) : null;
 }
 
 /** Two register writes made at once: where both write one register, the winner's value stands. */

@@ -38,7 +38,10 @@ export function openPrintDialog(ctx) {
   const sheet = ctx.wb.sheet(sheetId);
   const chartSheet = sheet.kind === 'chart';
   const range = ctx.range();
-  const hasSelection = !chartSheet && !S.isSingle(ctx.selection());
+  // Every range of the selection (Ctrl+click adds them), the one selected last among them; each prints on pages of its own.
+  const ranges = (ctx.ranges?.() || [range]).map((rg) => ({ ...rg }));
+  const hasSelection = !chartSheet && (ranges.length > 1 || !S.isSingle(ctx.selection()));
+  const selectionName = ranges.length > 3 ? `${ranges.length} ranges` : ranges.map(rangeName).join(', ');
   const storageKey = accountStorageKey(STORAGE_KEY);
   const prefs = { ...loadPrefs(storageKey), ...sheetPrintPrefs(sheet) };
   const visibleSheets = ctx.wb.sheets.filter((sh) => !sh.hidden).length;
@@ -70,7 +73,7 @@ export function openPrintDialog(ctx) {
   const areaSeg = radios('area', 'Print', [
     ...(!chartSheet && sheet.printSettings?.areas.length ? [['printArea', 'Print area']] : []),
     ['sheet', 'This sheet'],
-    ...(!chartSheet ? [['selection', hasSelection ? `Selection (${rangeName(range)})` : 'Selection', !hasSelection]] : []),
+    ...(!chartSheet ? [['selection', hasSelection ? `Selection (${selectionName})` : 'Selection', !hasSelection]] : []),
     ['workbook', `All sheets (${visibleSheets})`, visibleSheets < 2],
   ], () => prefs.area);
   const orientSeg = radios('orientation', 'Orientation', [['portrait', 'Portrait'], ['landscape', 'Landscape']], () => prefs.orientation);
@@ -114,8 +117,8 @@ export function openPrintDialog(ctx) {
     ...PAPER_SIZES.map(([k, label]) => el('option', { value: k }, label)));
   paperSel.value = PAPER_SIZES.some(([k]) => k === prefs.paper) ? prefs.paper : 'letter';
   const marginBoxes = supportsPageMarginBoxes();
-  const headerInput = el('input.input', { type: 'text', value: prefs.header || '', placeholder: prefs.native ? 'None' : marginBoxes ? 'Nothing (the title prints above the cells)' : (ctx.doc?.name || 'Document title'), 'aria-label': 'Header text', maxlength: 120, oninput: () => { prefs.header = headerInput.value; } });
-  const footerInput = el('input.input', { type: 'text', value: prefs.footer || '', placeholder: prefs.native ? 'None' : marginBoxes ? 'Page &[Page] of &[Pages]' : `Today’s date (${new Date().toLocaleDateString(getLocale())})`, 'aria-label': 'Footer text', maxlength: 120, oninput: () => { prefs.footer = footerInput.value; } });
+  const headerInput = el('input.input', { type: 'text', value: prefs.header || '', placeholder: prefs.native ? 'None' : marginBoxes ? 'Nothing (the title prints above the cells)' : (ctx.doc?.name || 'Document title'), 'aria-label': 'Header text', maxlength: 255, oninput: () => { prefs.header = headerInput.value; } });
+  const footerInput = el('input.input', { type: 'text', value: prefs.footer || '', placeholder: prefs.native ? 'None' : marginBoxes ? 'Page &[Page] of &[Pages]' : `Today’s date (${new Date().toLocaleDateString(getLocale())})`, 'aria-label': 'Footer text', maxlength: 255, oninput: () => { prefs.footer = footerInput.value; } });
   // Token chips type into whichever of the two fields was used last.
   let tokenTarget = footerInput;
   headerInput.addEventListener('focus', () => { tokenTarget = headerInput; });
@@ -184,7 +187,7 @@ export function openPrintDialog(ctx) {
   // Beside the choices, the pages as they will print, following each change (not for a chart sheet, which is one page).
   // The folder the file is in, for &[Path] in the header or footer.
   const filePath = printFolder(resolvedAbsolutePath(ctx.doc?.path));
-  const preview = chartSheet ? null : createPrintPreview({ wb: ctx.wb, sheetId, docName: ctx.doc?.name, filePath, getPrefs: () => prefs, getRange: () => range });
+  const preview = chartSheet ? null : createPrintPreview({ wb: ctx.wb, sheetId, docName: ctx.doc?.name, filePath, getPrefs: () => prefs, getRange: () => ranges });
 
   const controller = new AbortController();
   let preparing = false;
@@ -231,7 +234,7 @@ export function openPrintDialog(ctx) {
     button.disabled = true;
     button.textContent = 'Preparing…';
     content.setAttribute('aria-busy', 'true');
-    const ok = await printSheet(ctx.wb, sheetId, ctx.doc?.name, { ...prefs, range: area === 'selection' ? range : null, filePath, signal: controller.signal });
+    const ok = await printSheet(ctx.wb, sheetId, ctx.doc?.name, { ...prefs, range: area === 'selection' ? range : null, ranges: area === 'selection' ? ranges : null, filePath, signal: controller.signal });
     preparing = false;
     button.disabled = false;
     button.textContent = 'Print';
@@ -273,7 +276,7 @@ export function openPrintDialog(ctx) {
   // dialog would open on an unchecked radio the Tab trap then bounces to the Close button.
   sync();
   if (preview) { content.addEventListener('input', preview.refresh); content.addEventListener('change', preview.refresh); }
-  const modal = openModal({ title: 'Print', content, wide: true, className: preview ? 'print-dialog' : '', onClose: () => { controller.abort(); ctx.grid.focus(); } });
+  const modal = openModal({ title: 'Print', content, wide: true, className: preview ? 'print-dialog' : '', onClose: () => { controller.abort(); preview?.destroy(); ctx.grid.focus(); } });
   preview?.refresh();
   return modal;
 }

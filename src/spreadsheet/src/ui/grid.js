@@ -227,7 +227,23 @@ export function createGrid(opts) {
   }
   let rafId = 0;
   let formulaInput = null;
-  const editInput = () => formulaInput && document.activeElement === formulaInput ? formulaInput : editor;
+  // The field the entry was last typed in. While neither has the focus (a menu, the fx list or a ribbon button
+  // took it mid-entry) a name, a function or a reference still goes in at the formula bar's caret when that is
+  // where the typing was, and the focus goes back there: the cell's editor keeps its caret at the end.
+  let lastEditInput = null;
+  const formulaInputShown = () => !!formulaInput?.isConnected && !formulaInput.closest('[hidden]') && formulaInput.checkVisibility?.() !== false;
+  const editInput = () => {
+    const active = document.activeElement;
+    if (formulaInput && active === formulaInput) return formulaInput;
+    if (active !== editor && lastEditInput === formulaInput && formulaInputShown()) return formulaInput;
+    return editor;
+  };
+  /** The keyboard to the field the entry is typed in, or the cell's own editor when that field cannot take it (the formula bar was hidden). */
+  const focusEntry = () => {
+    const input = editInput();
+    input.focus({ preventScroll: true });
+    if (input !== editor && document.activeElement !== input) { lastEditInput = editor; editor.focus({ preventScroll: true }); }
+  };
   let edit = null; // { r, c, text, mode: 'type' | 'inplace', refInsert: {start,end} | null }
   let fillPreview = null;
   let movePreview = null; // range the selection would move to while dragging its border
@@ -3395,7 +3411,7 @@ export function createGrid(opts) {
     // One line sits where the cell draws its text (centered, or at the top or
     // bottom when the cell says so); several lines start at the top and the
     // box grows downward to show them all, as far as the viewport goes.
-    const lineH = size * (wrap && st?.font !== 'calibri' ? 1.3 : 1.2);
+    const lineH = size * (wrap ? 1.3 : 1.2);
     const single = !wrap && lines.length === 1;
     let padTop;
     if (!single) padTop = 2;
@@ -3824,6 +3840,7 @@ export function createGrid(opts) {
 
   function endEdit() {
     edit = null;
+    lastEditInput = null;
     if (linkPop.parentNode !== canvas) canvas.append(linkPop);
     hints.close();
     editor.hidden = true;
@@ -3841,6 +3858,20 @@ export function createGrid(opts) {
     if (!edit || edit.mode === mode) return;
     edit.mode = mode;
     opts.onEdit?.({ editing: true, text: edit.text, r: edit.r, c: edit.c });
+  }
+
+  /**
+   * Ctrl/Cmd+click while pointing adds another reference after the one just picked, a comma between them, as in
+   * Excel (=SUM(A1,C3)), rather than putting the new cell or line in its place.
+   */
+  function pointAnother() {
+    if (!edit?.refInsert) return;
+    const input = editInput();
+    const at = edit.refInsert.end;
+    const next = `${edit.text.slice(0, at)},${edit.text.slice(at)}`;
+    input.value = next;
+    input.setSelectionRange(at + 1, at + 1);
+    setEditText(next, { fromEditor: input === editor });
   }
 
   /** While typing a formula, can a click insert a reference here? */
@@ -4049,6 +4080,7 @@ export function createGrid(opts) {
   let tap = null;  // touch: { r, c, x, y, t, timer }
   let longPressAt = 0; // when a long press last opened the cell menu
   let pressMenu = false; // the touch still down opened the cell menu: its release is not a tap
+  let headerPress = null; // touch on a row or column heading: { x, y, timer } until it moves, lifts or opens the menu
   let autoScroll = 0;
 
   let autoScrollAt = null; // { e, rect, left, top, dx, dy }: the pointer the running autoscroll follows
@@ -4097,6 +4129,7 @@ export function createGrid(opts) {
    */
   function cancelDrag() {
     if (tap) { clearTimeout(tap.timer); tap = null; }
+    if (headerPress) { clearTimeout(headerPress.timer); headerPress = null; }
     drag = null;
     if (captured) {
       const { el, id } = captured;
@@ -4239,6 +4272,7 @@ export function createGrid(opts) {
 
     e.preventDefault();
     if (edit && acceptsRef()) {
+      if (isMod(e) && !e.shiftKey) pointAnother();
       // Shift+click stretches the reference just picked into a range.
       const anchor = e.shiftKey && edit.point ? edit.point.anchor : { r, c };
       // The formula may be typed in the formula bar: the release gives the focus back to that box.
@@ -4315,6 +4349,7 @@ export function createGrid(opts) {
   }
 
   function pointerMove(e) {
+    if (headerPress && (Math.abs(e.clientX - headerPress.x) > TAP_SLOP || Math.abs(e.clientY - headerPress.y) > TAP_SLOP)) { clearTimeout(headerPress.timer); headerPress = null; }
     if (tap) {
       if (Math.abs(e.clientX - tap.x) > TAP_SLOP || Math.abs(e.clientY - tap.y) > TAP_SLOP) { tap.moved = true; clearTimeout(tap.timer); }
       return;
@@ -4410,6 +4445,7 @@ export function createGrid(opts) {
 
   function pointerUp(e) {
     stopAutoScroll();
+    if (headerPress) { clearTimeout(headerPress.timer); headerPress = null; }
     if (tap) {
       clearTimeout(tap.timer);
       const t = tap;
@@ -4675,6 +4711,7 @@ export function createGrid(opts) {
     if (frozen.split) splitPane[axis === 'col' ? 'left' : 'top'] = !!hcell.closest(axis === 'col' ? '.grid-colhead-frozen' : '.grid-rowhead-frozen');
     const idx = Number(axis === 'col' ? hcell.dataset.c : hcell.dataset.r);
     if (edit && !resizer && acceptsRef()) {
+      if (isMod(e) && !e.shiftKey) pointAnother();
       // While a formula wants a reference, a header gives it the whole column or row (B:B, 2:2),
       // stretched over the headers dragged across; Shift stretches the reference just picked.
       const start = e.shiftKey && edit.point ? (axis === 'col' ? edit.point.anchor.c : edit.point.anchor.r) : idx;
@@ -4713,11 +4750,28 @@ export function createGrid(opts) {
     // Ctrl/Cmd+click on a header adds that row or column to the selection.
     const add = isMod(e) && !e.shiftKey && e.pointerType !== 'touch';
     if (add) addRange(S.selRange(sel, true));
+    const was = { sel, extras: [...extras] };
     if (axis === 'col') setSelection(e.shiftKey ? S.selectCols(sel.anchor.c, idx, b) : S.selectCols(idx, idx, b), { scroll: false, add });
     else setSelection(e.shiftKey ? S.selectRows(sel.anchor.r, idx, b) : S.selectRows(idx, idx, b), { scroll: false, add });
     drag = { kind: axis === 'col' ? 'colsel' : 'rowsel', start: e.shiftKey ? (axis === 'col' ? sel.anchor.c : sel.anchor.r) : idx };
     grab(axis === 'col' ? colClip : rowClip, e);
     viewport.focus({ preventScroll: true });
+    // A finger held still on a heading opens the row or column menu, as a long press on a cell opens the
+    // cell menu: a touch screen has no right-click, and iOS sends no contextmenu for a long press. Held on
+    // a line of whole lines already selected, the menu is for all of them, as a right-click there is.
+    if (e.pointerType === 'touch' && !e.shiftKey) {
+      const x = e.clientX, y = e.clientY;
+      headerPress = { x, y, timer: setTimeout(() => {
+        headerPress = null;
+        if (destroyed) return;
+        cancelDrag();
+        if (insideSel) { extras = was.extras; setSelection(was.sel, { scroll: false, announce: false, add: true }); }
+        if (navigator.vibrate) navigator.vibrate(10);
+        longPressAt = Date.now();
+        pressMenu = true;
+        opts.onContextMenu?.({ x, y, kind: axis });
+      }, LONG_PRESS_MS) };
+    }
   }
 
   /** While dragging headers: where the block would land, shown as a line. */
@@ -4980,12 +5034,22 @@ export function createGrid(opts) {
 
   function headerContextMenu(e, kind) {
     e.preventDefault();
+    // A long press on a touch screen may arrive twice, from the press timer and as the browser's own
+    // contextmenu (Android): whichever comes first opens the menu.
+    if (headerPress) { clearTimeout(headerPress.timer); headerPress = null; longPressAt = Date.now(); }
+    else if (Date.now() - longPressAt < LONG_PRESS_MS * 2) return;
     // A header menu offers structural edits; the open entry lands first, where it was typed.
     if (edit && !commitEdit()) return;
     const hcell = e.target.closest('.hcell');
     if (!hcell) return;
     const idx = Number(kind === 'col' ? hcell.dataset.c : hcell.dataset.r);
-    const inside = [...extras, S.selRange(sel)].some((rg) => (kind === 'col' ? idx >= rg.c1 && idx <= rg.c2 : idx >= rg.r1 && idx <= rg.r2));
+    // The menu is for whole lines, as in Excel and Sheets: lines already selected whole keep their selection (several
+    // columns, Ctrl/Cmd+clicked ones too), while cells selected in the line give way to it. Kept, B3:B5 had column B's
+    // Clear Contents, Copy and Sort act on those three cells alone.
+    const b = bounds();
+    const whole = (rg) => rg.scope === 'sheet' || rg.scope === (kind === 'col' ? 'columns' : 'rows')
+      || (kind === 'col' ? rg.r1 === 0 && rg.r2 >= b.rows - 1 : rg.c1 === 0 && rg.c2 >= b.cols - 1);
+    const inside = [...extras, S.selRange(sel, true)].some((rg) => whole(rg) && (kind === 'col' ? idx >= rg.c1 && idx <= rg.c2 : idx >= rg.r1 && idx <= rg.r2));
     if (!inside) setSelection(kind === 'col' ? S.selectCols(idx, idx, bounds()) : S.selectRows(idx, idx, bounds()), { scroll: false });
     opts.onContextMenu?.({ x: e.clientX, y: e.clientY, kind });
   }
@@ -5118,7 +5182,11 @@ export function createGrid(opts) {
         if (key === 'F10' && !e.shiftKey) return;
         e.preventDefault();
         const rect = cellRect(sel.active.r, sel.active.c);
-        opts.onContextMenu?.({ x: rect.left, y: rect.bottom, kind: 'cell' });
+        // Whole columns or rows selected get their header's menu (Insert, Delete, Hide, Column Width…), as in Excel.
+        const rg = S.selRange(sel, true);
+        const cols = rg.scope === 'columns' || (rg.scope !== 'sheet' && rg.r1 === 0 && rg.r2 >= b.rows - 1 && !(rg.c1 === 0 && rg.c2 >= b.cols - 1));
+        const rows = rg.scope === 'rows' || (rg.scope !== 'sheet' && rg.c1 === 0 && rg.c2 >= b.cols - 1 && !(rg.r1 === 0 && rg.r2 >= b.rows - 1));
+        opts.onContextMenu?.({ x: rect.left, y: rect.bottom, kind: cols ? 'col' : rows ? 'row' : 'cell' });
         return;
       }
       case 'Enter':
@@ -5291,6 +5359,13 @@ export function createGrid(opts) {
     }
     // ⌘+` switches windows on a Mac, so Control+` shows formulas there too.
     if (IS_MAC && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && (key === '`' || e.code === 'Backquote')) { e.preventDefault(); opts.onCommand?.('showFormulas'); return; }
+    // Control+U edits the active cell on a Mac, as F2 does (Excel for Mac's own chord: many Mac keyboards need Fn for F2).
+    if (IS_MAC && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && (key.toLowerCase() === 'u' || e.code === 'KeyU')) {
+      e.preventDefault();
+      if (!appOption('editInCell') && opts.onEditInBar?.() === true) return;
+      beginEdit({ mode: 'inplace' });
+      return;
+    }
 
     if (mod) {
       const k = key.toLowerCase();
@@ -5317,6 +5392,8 @@ export function createGrid(opts) {
       if (map[k]) {
         e.preventDefault();
         if (map[k] === 'selectAll') selectAllStep();
+        // Ctrl+Y repeats the last action once there is nothing left to redo, as Excel's does; Ctrl+Shift+Z only redoes.
+        else if (map[k] === 'redo' && k === 'y') opts.onCommand?.('redo', 'orRepeat');
         else opts.onCommand?.(map[k]);
         return;
       }
@@ -5409,6 +5486,9 @@ export function createGrid(opts) {
     // The ready-mode chords a browser also owns (Ctrl+R reloads, Ctrl+D bookmarks, Ctrl+9, 0, [, ], \ and `
     // switch or zoom its tabs) do nothing while an entry is typed, as in Excel, rather than reaching the browser.
     if (isMod(e) && !e.altKey && (/^[rd[\]\\`90]$/i.test(key) || e.code === 'Digit9' || e.code === 'Digit0')) { e.preventDefault(); return; }
+    // So do F5 (Go To and Find on the sheet, a reload of the page in the browser, Ctrl or Shift with it a hard one)
+    // and F7 (Spelling; the browser's caret browsing): pressed mid-entry they left the app or put up a prompt.
+    if ((key === 'F5' || key === 'F7') && !e.altKey) { e.preventDefault(); return; }
     if (isMod(e) && (key === 'PageDown' || key === 'PageUp')) {
       e.preventDefault();
       opts.onCommand?.('sheet', key === 'PageDown' ? 'next' : 'prev');
@@ -5484,6 +5564,8 @@ export function createGrid(opts) {
     if (key === 'F4' && edit.text.startsWith('=')) { e.preventDefault(); cycleRefAnchors(); return; }
     // F3 offers the workbook's names to paste at the caret, as Paste Name does.
     if (key === 'F3' && !e.shiftKey && !isMod(e) && !e.altKey) { e.preventDefault(); opts.onCommand?.('pasteNameMenu'); return; }
+    // Shift+F3 offers the functions, the one picked going in at the caret, as in Excel (the browser would find the previous match).
+    if (key === 'F3' && e.shiftKey && !isMod(e) && !e.altKey) { e.preventDefault(); opts.onCommand?.('functionMenu'); return; }
     // The insertion chords work mid-edit too: the date, time, the cell above, or a SUM go in at the caret.
     if (isMod(e) && (key === ';' || key === ':')) { e.preventDefault(); opts.onCommand?.(e.shiftKey || key === ':' ? 'insertTime' : 'insertDate'); return; }
     if (isMod(e) && (key === "'" || key === '"')) { e.preventDefault(); opts.onCommand?.('copyAbove', key === '"' || e.shiftKey ? 'value' : 'formula'); return; }
@@ -5588,7 +5670,7 @@ export function createGrid(opts) {
   // events, so those add up and step once every 40px, while a mouse notch is one step.
   let wheelAcc = 0;
   let wheelAt = 0;
-  viewport.addEventListener('wheel', (e) => {
+  function zoomWheel(e) {
     if (destroyed || (!isMod(e) && !e.ctrlKey)) return;
     e.preventDefault();
     const px = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
@@ -5599,7 +5681,53 @@ export function createGrid(opts) {
     if (Math.abs(wheelAcc) < 40) return;
     setZoom(userZoom + (wheelAcc < 0 ? 0.1 : -0.1));
     wheelAcc = 0;
-  }, { passive: false });
+  }
+  viewport.addEventListener('wheel', zoomWheel, { passive: false });
+  // Two fingers pinched on a touch screen zoom the sheet, keeping the spot between them under them, as Excel's
+  // and Sheets' apps do. The browser would zoom the whole page instead, toolbar and tabs and all, leaving the
+  // sheet at its own zoom (grid.css keeps its pinch off the grid; one finger still scrolls natively).
+  let pinch = null; // { gap, zoom, want, at, frame, targets }: the fingers' spread and the zoom when the pinch began, and now
+  const touchGap = (t) => Math.max(1, Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY));
+  const touchMid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  function pinchMove(e) {
+    if (!pinch || e.touches.length !== 2) return;
+    if (e.cancelable) e.preventDefault();
+    pinch.want = pinch.zoom * touchGap(e.touches) / pinch.gap;
+    pinch.at = touchMid(e.touches);
+    // One zoom a frame, and only a change of a whole percent re-lays the sheet out.
+    pinch.frame ||= requestAnimationFrame(pinchZoom);
+  }
+  function pinchZoom() {
+    if (!pinch || destroyed) return;
+    pinch.frame = 0;
+    const next = Math.max(.1, Math.min(4, Math.round(pinch.want * 100) / 100));
+    // The sheet's saved view takes the zoom once, when the fingers lift (pinchEnd), not at every step.
+    if (next !== userZoom) { setZoom(next, true, pinch.at); pinch.moved = true; }
+  }
+  function pinchEnd(e) {
+    if (!pinch || e.touches.length >= 2) return;
+    // The fingers' last spread counts, though the frame that would have shown it has not come yet.
+    if (pinch.frame) { cancelAnimationFrame(pinch.frame); pinchZoom(); }
+    if (pinch.moved) setZoom(userZoom);
+    for (const t of pinch.targets) { t.removeEventListener('touchmove', pinchMove); t.removeEventListener('touchend', pinchEnd); t.removeEventListener('touchcancel', pinchEnd); }
+    pinch = null;
+  }
+  root.addEventListener('touchstart', (e) => {
+    if (destroyed || e.touches.length !== 2) return;
+    // The first finger's tap, long press or drag from the handle gives way to the pinch.
+    cancelDrag();
+    if (pinch) pinchEnd({ touches: [] });
+    pinch = { gap: touchGap(e.touches), zoom: userZoom, want: userZoom, at: touchMid(e.touches), frame: 0, targets: new Set() };
+    // A touch's events go to the node it began on, and the zoom draws the cells afresh: a cell taken out
+    // of the page no longer passes them up to the grid, so the pinch hears them where they land.
+    for (const t of e.touches) {
+      if (!(t.target instanceof EventTarget) || pinch.targets.has(t.target)) continue;
+      pinch.targets.add(t.target);
+      t.target.addEventListener('touchmove', pinchMove, { passive: false });
+      t.target.addEventListener('touchend', pinchEnd);
+      t.target.addEventListener('touchcancel', pinchEnd);
+    }
+  }, { passive: true });
   // A split window's left and top panes scroll on their own: the wheel over one scrolls it along its own
   // axis, and along the other with the pane it shares that axis with.
   viewport.addEventListener('wheel', (e) => {
@@ -5615,6 +5743,25 @@ export function createGrid(opts) {
     scrollSplitPanes(frozen.sl + (inLeft ? dx : 0), frozen.st + (inTop ? dy : 0));
     if ((!inLeft && dx) || (!inTop && dy)) viewport.scrollBy(inLeft ? 0 : dx, inTop ? 0 : dy);
   }, { passive: false });
+  // The wheel over the row numbers or the column letters scrolls the sheet, and with Ctrl or ⌘ (a trackpad's
+  // pinch) zooms it, as over the cells and as in Excel and Sheets: the headings do not scroll themselves, so the
+  // wheel did nothing there, and a pinch zoomed the whole page. In a split window the heading of the top or
+  // left pane scrolls that pane along its own axis.
+  for (const [clip, axis] of [[colClip, 'col'], [rowClip, 'row']]) {
+    clip.addEventListener('wheel', (e) => {
+      if (destroyed || sheet()?.kind === 'chart') return;
+      if (isMod(e) || e.ctrlKey) { zoomWheel(e); return; }
+      e.preventDefault();
+      const k = e.deltaMode === 1 ? 20 : e.deltaMode === 2 ? viewport.clientHeight : 1;
+      let dx = e.deltaX * k, dy = e.deltaY * k;
+      if (e.shiftKey && !dx) { dx = dy; dy = 0; }
+      const vp = viewport.getBoundingClientRect();
+      const inLeft = frozen.split && frozen.left && axis === 'col' && e.clientX - vp.left < frozen.w;
+      const inTop = frozen.split && frozen.top && axis === 'row' && e.clientY - vp.top < frozen.h;
+      if (inLeft || inTop) scrollSplitPanes(frozen.sl + (inLeft ? dx : 0), frozen.st + (inTop ? dy : 0));
+      if ((!inLeft && dx) || (!inTop && dy)) viewport.scrollBy(inLeft ? 0 : dx, inTop ? 0 : dy);
+    }, { passive: false });
+  }
   viewport.addEventListener('pointerdown', cellsPointerDown);
   viewport.addEventListener('pointermove', pointerMove);
   viewport.addEventListener('pointerup', pointerUp);
@@ -5653,6 +5800,7 @@ export function createGrid(opts) {
     updateHints();
   }
   editor.addEventListener('keyup', (e) => { if (!isComposing(e) && /^Arrow|^Home$|^End$/.test(e.key)) caretMoved(); });
+  editor.addEventListener('focus', () => { lastEditInput = editor; });
   // Clicking into the text being typed puts the caret there to edit it, as in Excel: Edit mode.
   editor.addEventListener('pointerdown', () => setEditMode('inplace'));
   editor.addEventListener('click', caretMoved);
@@ -5691,6 +5839,8 @@ export function createGrid(opts) {
   }
   colClip.addEventListener('contextmenu', (e) => headerContextMenu(e, 'col'));
   rowClip.addEventListener('contextmenu', (e) => headerContextMenu(e, 'row'));
+  // The finger that held a heading until its menu opened lifts over the menu: its click must not run the item there.
+  for (const clip of [colClip, rowClip]) clip.addEventListener('touchend', (e) => { if (pressMenu) { pressMenu = false; e.preventDefault(); } }, { passive: false });
   corner.addEventListener('click', () => { if (edit && !commitEdit()) return; setSelection(S.selectAll(bounds()), { scroll: false }); viewport.focus({ preventScroll: true }); });
 
   // The on-screen keyboard that opens as a cell is typed into shrinks the viewport from below, often over
@@ -5799,8 +5949,11 @@ export function createGrid(opts) {
     applyOutlineGutter(); // the headings' size follows the zoom
   }
 
-  /** Zoom the sheet over Excel's 10–400% range. Sizes stay stored unzoomed. */
-  function setZoom(z, initializing = false) {
+  /**
+   * Zoom the sheet over Excel's 10–400% range. Sizes stay stored unzoomed. The top-left cell stays in place
+   * while the scale changes, or, given `at` (a point on the screen over the scrolling cells), the spot under it.
+   */
+  function setZoom(z, initializing = false, at = null) {
     if (!Number.isFinite(z)) return;
     const chartSheet = sheet()?.kind === 'chart';
     // Custom percentages and imported views use the same precision. Stepping or pinching from
@@ -5808,17 +5961,23 @@ export function createGrid(opts) {
     const next = Math.max(.1, Math.min(4, Math.round(z * 100) / 100));
     if (!initializing) { wb.setSheetView(sheetId, { ...(chartSheet ? { zoomToFit: false } : {}), viewZoom: next }); schedule(); }
     if (next === userZoom) return;
-    // Keep the top-left cell in place while the scale changes.
     ensureOffsets();
     const s = sheet();
-    const topRow = rowOffsets.indexAt(viewport.scrollTop - shift.y + frozen.h);
-    const leftCol = colOffsets.indexAt(viewport.scrollLeft - shift.x + frozen.w);
+    // The point kept still, in the viewport, and the line and the part of it found there on each axis.
+    const vp = viewport.getBoundingClientRect();
+    const free = !!at && !frozen.split && !chartSheet;
+    const px = free && at.x - vp.left > frozen.w && at.x < vp.left + viewport.clientWidth ? at.x - vp.left : null;
+    const py = free && at.y - vp.top > frozen.h && at.y < vp.top + viewport.clientHeight ? at.y - vp.top : null;
+    const keep = (offsets, pos, exact) => { const i = offsets.indexAt(pos); return { i, part: exact ? (pos - offsets.at(i)) / Math.max(1, offsets.size(i)) : 0 }; };
+    const row = keep(rowOffsets, viewport.scrollTop - shift.y + (py ?? frozen.h), py != null);
+    const col = keep(colOffsets, viewport.scrollLeft - shift.x + (px ?? frozen.w), px != null);
+    const topRow = row.i, leftCol = col.i;
     zoom = next * (zoom / userZoom || 1);
     userZoom = next;
     applyZoomFont();
     rebuildOffsets();
     windowsFor(topRow, leftCol);
-    if (s) scrollViewportTo(Math.max(-shift.x, colOffsets.at(leftCol) - frozen.w), Math.max(-shift.y, rowOffsets.at(topRow) - frozen.h));
+    if (s) scrollViewportTo(Math.max(-shift.x, Math.round(colOffsets.at(leftCol) + col.part * colOffsets.size(leftCol)) - (px ?? frozen.w)), Math.max(-shift.y, Math.round(rowOffsets.at(topRow) + row.part * rowOffsets.size(topRow)) - (py ?? frozen.h)));
     rendered.key = null;
     schedule();
     opts.onZoom?.(userZoom);
@@ -5991,19 +6150,41 @@ export function createGrid(opts) {
     const changes = previous ? wb.changesSince(previous.version) : null;
     if (changes?.every(ch => ch.type === 'view')) { previous.version = wb.version; return false; }
     const rows = new Set([...s.rowHeightModes].filter(([r, mode]) => mode === 'auto' && r < s.rows).map(([r]) => r));
-    if (!rows.size) { automaticHeightState.set(s, { version: wb.version, formulas: new Set() }); return false; }
-    const all = !changes || changes.some(ch => ch.type !== 'view' && (ch.type !== 'cells' || !ch.box || ch.formula));
-    let formulas = previous?.formulas || new Set();
+    if (!rows.size) { automaticHeightState.set(s, { version: wb.version, formulas: new Map() }); return false; }
+    // What changed on another sheet can move what a formula here shows, but nothing else about this sheet.
+    const own = (ch) => ch.sheetId == null || ch.sheetId === s.id;
+    const area = (b) => (b.r2 - b.r1 + 1) * (b.c2 - b.c1 + 1);
+    const all = !changes || changes.some(ch => ch.type !== 'view' && own(ch) && (ch.type !== 'cells' || !ch.box || (ch.formula && area(ch.box) > s.cells.size)));
+    let formulas = previous?.formulas || new Map(); // automatic row → the columns of its formulas
     if (all) {
-      formulas = new Set();
+      formulas = new Map();
       for (const [key, cell] of s.cells) if (cell.f != null) {
-        const r = Number(key.slice(0, key.indexOf(',')));
-        if (rows.has(r)) formulas.add(r);
+        const comma = key.indexOf(',');
+        const r = Number(key.slice(0, comma));
+        if (rows.has(r)) { if (!formulas.has(r)) formulas.set(r, []); formulas.get(r).push(Number(key.slice(comma + 1))); }
       }
     }
-    const affected = all ? rows : new Set(changes.some(ch => ch.type === 'cells') ? formulas : []);
-    if (!all) for (const ch of changes) if (ch.type === 'cells' && ch.sheetId === sheetId) {
-      for (const r of rows) if (r >= ch.box.r1 && r <= ch.box.r2) affected.add(r);
+    const affected = all ? rows : new Set();
+    if (!all) {
+      let results = false;
+      for (const ch of changes) {
+        if (ch.type === 'view') continue;
+        results = true;
+        if (ch.type !== 'cells' || !own(ch)) continue;
+        const { r1, c1, r2, c2 } = ch.box;
+        for (const r of rows) if (r >= r1 && r <= r2) affected.add(r);
+        // Formulas written or replaced: those rows' formula columns are read again, within the cells written.
+        if (ch.formula) for (let r = r1; r <= r2; r++) {
+          if (!rows.has(r)) continue;
+          const cols = (formulas.get(r) || []).filter((c) => c < c1 || c > c2);
+          for (let c = c1; c <= c2; c++) if (s.cells.get(cellKey(r, c))?.f != null) cols.push(c);
+          if (cols.length) formulas.set(r, cols); else formulas.delete(r);
+        }
+      }
+      // Any edit may change what a formula shows, but only a result that is wrapped (its lines) or turned (its
+      // length) can change its row's height: any other takes one line of its own font, whatever it reads.
+      // Measuring every row holding a formula after every entry made each one on a long sheet wait on all of them.
+      if (results) for (const [r, cols] of formulas) if (cols.some((c) => { const st = styleAt(s, r, c); return st?.wrap || st?.rot; })) affected.add(r);
     }
     // Measurements are batched before changing any cache. Sparse distant rows
     // use a single scan, never one whole-sheet scan per automatic row.
@@ -6248,6 +6429,23 @@ export function createGrid(opts) {
     get active() { return sel.active; },
     get editing() { return !!edit; },
     get editState() { return edit ? { ...edit } : null; },
+    /**
+     * The cell being typed in moved to (r, c): someone else inserted or moved rows or columns of a shared
+     * workbook meanwhile. The entry goes with it, so it lands in the cell it was started in.
+     */
+    moveEdit(r, c) {
+      if (!edit || (edit.r === r && edit.c === c)) return;
+      const dr = r - edit.r, dc = c - edit.c;
+      edit.r = r;
+      edit.c = c;
+      const a = edit.arrayRange;
+      if (a) edit.arrayRange = { r1: a.r1 + dr, c1: a.c1 + dc, r2: a.r2 + dr, c2: a.c2 + dc };
+      edit.point = null;
+      edit.refInsert = null;
+      positionEditor();
+      renderRefHighlights();
+      schedule();
+    },
     get keyMode() { return keyMode; },
     /**
      * Take each sheet's saved selection and scroll position afresh (a custom view was shown): what the grid
@@ -6305,7 +6503,11 @@ export function createGrid(opts) {
     },
     beginEdit,
     setEditText,
-    setFormulaInput(input) { formulaInput = input; },
+    setFormulaInput(input) {
+      formulaInput = input;
+      lastEditInput = null;
+      input?.addEventListener('focus', () => { if (formulaInput === input) lastEditInput = input; });
+    },
     handleEditKey: editorKeyDown,
     /** The formula bar's caret moved: the same bookkeeping as for the cell editor's own caret. */
     updateEditHints: caretMoved,
@@ -6324,11 +6526,11 @@ export function createGrid(opts) {
       input.value = next;
       input.setSelectionRange(a + text.length, a + text.length);
       setEditText(next, { fromEditor: input === editor });
-      input.focus({ preventScroll: true });
+      focusEntry();
     },
     /** Focus the grid: the cell being edited while an edit is open, otherwise the cells. */
-    focus() { if (!validationPending) (edit ? editor : viewport).focus({ preventScroll: true }); },
-    focusEditor() { if (edit && !validationPending) editor.focus({ preventScroll: true }); },
+    focus() { if (!validationPending) { if (edit) focusEntry(); else viewport.focus({ preventScroll: true }); } },
+    focusEditor() { if (edit && !validationPending) focusEntry(); },
     refresh() { rebuildOffsets(); rendered.key = null; schedule(); },
     /** Show where the other people in a shared workbook are: [{ id, name, color, sheet, sel, active, editing }]. */
     setPeers(list) { peers = Array.isArray(list) ? list : []; renderPeers(); },

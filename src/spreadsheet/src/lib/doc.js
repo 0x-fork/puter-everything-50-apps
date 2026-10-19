@@ -378,8 +378,9 @@ export class Doc extends EventTarget {
 
   /** Copy the unsaved book to local storage (no-op once it is clean). */
   writeDraft() {
-    // A shared workbook keeps unsent changes in its own outbox (see collab/outbox.js), not in a draft.
-    if (this.collab) return false;
+    // A shared workbook keeps unsent changes in its own outbox (see collab/outbox.js), not in a draft: they are
+    // kept when it outlasts the page and the room will still take them.
+    if (this.collab) return this.collab.keepsChanges;
     clearTimeout(this._draftTimer);
     if (!this.wb.dirty) { clearDraft(this._ownDraftKey, this._draftRevision); return false; }
     // Timestamps and workbook versions can coincide across tabs. Each write
@@ -980,6 +981,8 @@ export class Doc extends EventTarget {
       throw new Error(client.status.message || 'Your changes are waiting to be sent. They are kept on this device until the connection returns.');
     }
     if (!client.canEdit) { this.wb.markClean(); return true; }
+    // Out of reach, with nothing changed here since the last save: nothing of this person's waits on the file.
+    if (!this.wb.dirty && client.status.state === 'offline') { this._sharedChanged('room'); return true; }
     this._setStatus('saving');
     try {
       // The owner's browser tells the room where the file is now, so that it writes there, not where the file was when sharing started.

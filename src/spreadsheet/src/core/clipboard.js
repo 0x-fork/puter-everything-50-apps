@@ -706,6 +706,13 @@ function typedValue(td, styles, spreadsheet = false, text = '', emptyStrings) {
       }
     } catch { /* not Sheets' JSON: the text speaks for itself */ }
   }
+  // LibreOffice Calc writes a number's own value as sdval beside the text it shows. A logical value is a 1 or 0
+  // to Calc, shown TRUE or FALSE, which stays the logical value it reads as.
+  const sdval = td.getAttribute('sdval');
+  if (sdval != null && sdval.trim() !== '' && Number.isFinite(Number(sdval))) {
+    const n = Number(sdval), shown = text.trim().toUpperCase();
+    return (shown === 'TRUE' && n === 1) || (shown === 'FALSE' && n === 0) ? n === 1 : n;
+  }
   // Office HTML distinguishes General alignment from explicit alignment.
   // With General, the HTML align attribute describes the value's automatic
   // placement: left is text, right is numeric, center is Boolean/error. Some
@@ -773,6 +780,11 @@ function normalizeCellText(raw) {
  * become trailing cell data. The walk is iterative because pasted markup may
  * nest deeper than the call stack allows.
  */
+// A line break stays a line break: Office (and this app's export) writes one a browser hides, display:none with
+// mso-data-placement:same-cell, for a new line within a cell that does not wrap.
+const hiddenContent = (node, styles) => node.tagName !== 'BR'
+  && (node.hasAttribute('hidden') || styles(node).get('display')?.trim().toLowerCase() === 'none');
+
 function cellText(td, styles) {
   const out = [];
   const runs = [], fonts = new WeakMap();
@@ -841,7 +853,8 @@ function cellText(td, styles) {
   while (node) {
     let descend = false;
     if (node.nodeType === 3) text(node);
-    else if (node.nodeType === 1 && !SKIP_TAGS.has(node.tagName)) {
+    // Content the page hides inside a cell (a sort key, a screen-reader label) is not its text.
+    else if (node.nodeType === 1 && !SKIP_TAGS.has(node.tagName) && !hiddenContent(node, styles)) {
       if (node.tagName === 'BR') {
         if (rich) font = fontAt(node);
         newline();
@@ -867,6 +880,22 @@ function cellText(td, styles) {
  * nothing else: mail clients and web pages frame content in such tables,
  * and the framed table is the one meant.
  */
+/**
+ * Google Sheets copies a single cell as a span carrying the cell's value and format (data-sheets-value), not as a
+ * table: that span as a one-cell table, or null when the markup is anything else.
+ */
+function sheetsCellTable(doc) {
+  const span = doc.querySelector('[data-sheets-root]');
+  if (!span || span.tagName === 'TABLE' || !span.hasAttribute('data-sheets-value') || span.querySelector('table')) return null;
+  const table = doc.createElement('table'), td = doc.createElement('td');
+  for (const { name, value } of span.attributes) td.setAttribute(name, value);
+  td.append(...span.childNodes);
+  table.append(doc.createElement('tr'));
+  table.firstChild.append(td);
+  span.replaceWith(table);
+  return table;
+}
+
 function wrappedTable(table) {
   const rows = htmlTableRows(table);
   if (rows.length !== 1) return null;
@@ -1035,7 +1064,7 @@ export function parseHtmlClipboard(html, plainText) {
   };
   let doc;
   try { doc = parseDocument(html); } catch { return null; }
-  let table = doc.querySelector('table');
+  let table = doc.querySelector('table') || sheetsCellTable(doc);
   if (!table) return null;
   for (let inner = wrappedTable(table); inner; inner = wrappedTable(inner)) table = inner;
   // Unsigned older copies and metadata left behind by another application
@@ -1051,7 +1080,7 @@ export function parseHtmlClipboard(html, plainText) {
   // The source tokenizer checks the complete numeric value before changing it.
   if (!snapshot && /[\0\r]|&#(?:0|1[2-5]|x[089])/i.test(html)) {
     doc = parseDocument(html, true, doc);
-    table = doc.querySelector('table');
+    table = doc.querySelector('table') || sheetsCellTable(doc);
     if (!table) return null;
     for (let inner = wrappedTable(table); inner; inner = wrappedTable(inner)) table = inner;
   }
@@ -1116,6 +1145,15 @@ export function parseHtmlClipboard(html, plainText) {
   const merges = [];
   const displaySpans = [];
   const styles = embeddedResult ? null : readClipboardStyles(doc);
+  // Google Sheets draws its gridlines with a page rule (td {border: 1px solid #cccccc}) and writes a border a cell
+  // really has on the cell itself, so a cell copied from it takes only the border declarations of its own.
+  const sheetsGridlines = !snapshot && !!(doc.querySelector('google-sheets-html-origin') || table.hasAttribute('data-sheets-root'));
+  const cellStyles = !styles || !sheetsGridlines ? styles : (el) => {
+    const all = styles(el);
+    if (![...all.keys()].some((name) => name.startsWith('border'))) return all;
+    const own = new Set([...(el.getAttribute('style') || '').matchAll(/(?:^|;)\s*(border[a-z-]*)\s*:/gi)].map((m) => m[1].toLowerCase()));
+    return new Map([...all].filter(([name]) => !name.startsWith('border') || own.has(name)));
+  };
   const tableRows = [];
   // Excel's saved HTML can represent a run of rows with one TR. These are
   // separate worksheet rows, with repeated formatting but only one value.
@@ -1167,7 +1205,7 @@ export function parseHtmlClipboard(html, plainText) {
       // which writes their originally bare markers as x:str="". Their captured
       // values still take precedence, as they did before syntax preservation.
       const typed = embeddedResult || blank ? undefined : typedValue(td, styles, spreadsheet, text, snapshot ? undefined : emptyStrings);
-      row[c] = { text, style: embeddedResult ? undefined : styleFromElement(td, styles, spreadsheet) };
+      row[c] = { text, style: embeddedResult ? undefined : styleFromElement(td, cellStyles, spreadsheet) };
       // Uniform inline formatting is a cell format. Only differences need a
       // character-run list, preserving the existing plain-cell representation.
       if (content.runs.length) {
@@ -1331,7 +1369,7 @@ export function cellsFromHtmlRows(rows, existingStyleAt, { values = false } = {}
     const prev = existingStyleAt?.(i, j);
     const base = style ? { ...(prev || {}), ...style } : prev;
     let cell = link && !values ? { v: text, f: null, s: base ? { ...base } : undefined }
-      : cellFromInput(text, base);
+      : cellFromInput(text, base, { typed: false });
     if (value === undefined && !link && text !== '' && style && (style.fmt === 'custom' || style.fmt === 'time')) {
       // External clock displays are expressed in the source format's units.
       // An explicit raw value (including literal text) always takes priority.

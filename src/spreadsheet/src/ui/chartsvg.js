@@ -113,6 +113,19 @@ export function smoothPath(pts, open = false) {
 const PLOT_STYLE = 'forced-color-adjust: none';
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const MAX_LEGEND = 12;
+/** Past MAX_LEGEND entries a legend names the first eleven and counts the rest (a key-less `more` entry),
+ * rather than leaving the others' slices or series unnamed with no sign that any are missing. */
+function cappedLegend(entries, most = MAX_LEGEND) {
+  if (entries.length <= most) return entries;
+  const named = Math.max(0, most - 1);
+  return [...entries.slice(0, named), { name: `…and ${entries.length - named} more`, i: -1, more: true, keyWidth: 0 }];
+}
+/** A legend down the right keeps to the entries whose rows (`height(entry)` each) fit in `room`, counting the rest. */
+function legendColumn(entries, room, height) {
+  let shown = cappedLegend(entries);
+  while (shown.length > 1 && shown.reduce((sum, e) => sum + height(e), 0) > room) shown = cappedLegend(entries, shown.length - 1);
+  return shown;
+}
 // Past this many marks a chart drops per-mark tooltips (a 5000-row range would otherwise put tens of
 // megabytes of <title> into the page) and thins its marks to what the plot can show anyway.
 const MARK_BUDGET = 2000;
@@ -153,6 +166,30 @@ function scaleTicks({ min, max, step }) {
     if (Math.abs(snapped - value) <= step * 1e-9) value = snapped;
     if (!ticks.length || value > ticks[ticks.length - 1]) ticks.push(value);
   }
+  return ticks;
+}
+
+/**
+ * A logarithmic value axis (Format Axis ▸ Logarithmic scale, or a file's logBase): its bounds are whole powers of
+ * the base around the positive values, unless fixed, and its ticks step by a factor (`step`, the base unless the
+ * major unit names another). Values at or below zero have no place on it.
+ */
+function logScale(values, base, { min = null, max = null, step = null } = {}) {
+  const positive = values.filter(v => Number.isFinite(v) && v > 0);
+  const power = v => Math.log(v) / Math.log(base);
+  // Whole powers are written as such, so 10^-2 reads 0.01 rather than 0.010000000000000002.
+  const whole = k => Number((base ** k).toPrecision(12));
+  let lo = min > 0 ? min : positive.length ? whole(Math.floor(power(minOf(positive)) + 1e-9)) : 1;
+  let hi = max > 0 ? max : positive.length ? whole(Math.ceil(power(maxOf(positive)) - 1e-9)) : base;
+  if (!(hi > lo)) hi = max > 0 && !(min > 0) ? (lo = whole(Math.floor(power(hi) - 1e-9)), hi) : whole(Math.ceil(power(lo) + 1e-9));
+  if (!(hi > lo)) hi = lo * base;
+  return { min: lo, max: hi, step: step > 1 ? step : base, log: base };
+}
+/** Ticks of an axis: steps of `step`, or on a logarithmic one, factors of it from the minimum. */
+function axisTicks(domain) {
+  if (!domain.log) return scaleTicks(domain);
+  const ticks = [];
+  for (let v = domain.min, i = 0; v <= domain.max * (1 + 1e-9) && i < 400; i++, v = Number((domain.min * domain.step ** i).toPrecision(12))) ticks.push(v);
   return ticks;
 }
 
@@ -494,7 +531,14 @@ function renderChartContent(data, chart, width, height) {
       used += widths[i];
     });
     if (row.length) rowsOfItems.push(row);
-    const lines = rowsOfItems.slice(0, 3);
+    let lines = rowsOfItems.slice(0, 3);
+    if (rowsOfItems.length > 3) {
+      // Past three rows the third ends with the count of the entries not shown, as the legend at the right does.
+      const before = lines[0].length + lines[1].length, last = lines[2].slice();
+      const more = () => { const label = `…and ${allItems.length - before - last.length} more`; return { color: null, label, w: 14 + textW(label, 12) + 14 }; };
+      while (last.length && last.reduce((sum, it) => sum + it.w, 0) + more().w > W - 20) last.pop();
+      lines = [lines[0], lines[1], [...last, more()]];
+    }
     const atTop = chart.legendPos === 'top';
     let y0;
     if (atTop) { y0 = top + 6; top += lines.length * 18 + 4; } else { bottom = H - 8 - lines.length * 18; y0 = bottom + 12; }
@@ -1008,7 +1052,9 @@ function renderStyledCartesian(data, chart, width, height) {
     ? { ...s, x: s.x || data.x, sizes: s.sizes || data.sizes, ...(!s.sizePointStyles && data.sizePointStyles ? { sizePointStyles: data.sizePointStyles } : {}),
       ...(s.sizeStyle === undefined && data.sizeStyle ? { sizeStyle: data.sizeStyle } : {}) } : s)
     // A scatter series without x values (text beside its numbers, or none) plots at 1, 2, 3…, as Excel's does.
-    .map(s => chart.type === 'scatter' && !(s.x || data.x)?.some(Number.isFinite) ? { ...s, x: s.values.map((_, i) => i + 1) } : s), n = data.categories.length;
+    .map(s => chart.type === 'scatter' && !(s.x || data.x)?.some(Number.isFinite) ? { ...s, x: s.values.map((_, i) => i + 1) } : s)
+    // A value at or below zero has no place on a logarithmic axis: it is left out, as an empty cell is.
+    .map(s => a.yLogBase > 1 && !chart.stack100 && s.values.some(v => v <= 0) ? { ...s, values: s.values.map(v => (v <= 0 ? null : v)) } : s), n = data.categories.length;
   const layered = chart.type === 'combo' && a.seriesTypes?.length === series.length;
   const pureArea = chart.type === 'area';
   // Stacked lines accumulate as stacked areas do; only the fill is missing.
@@ -1108,11 +1154,16 @@ function renderStyledCartesian(data, chart, width, height) {
       scale2 = { ...scale, step: scale2.step };
     }
   }
-  let categoryCrossing = crossingValue(crossings.x, scale.min, scale.max);
+  // A logarithmic value axis (not on a 100% stack, which reads shares).
+  if (a.yLogBase > 1 && !percentAxis) categoryScale = scale = logScale(values, a.yLogBase, { min: chart.yMin, max: chart.yMax, step: a.yStep });
+  // On a logarithmic axis the automatic crossing is at 1, the place of log 0, as Excel's is.
+  const zeroOf = domain => (domain.log ? 1 : 0);
+  let categoryCrossing = crossingValue(crossings.x, scale.min, scale.max, zeroOf(scale));
   const sameLegend = chart.legendPos === a.legendPos;
-  const legendEntries = series.map((s, i) => ({ s, i, name: s.name,
+  const seriesLegend = series.map((s, i) => ({ s, i, name: s.name,
     keyWidth: a.legendStyle.size * (bubble || pureArea || (layered ? ['area', 'column'].includes(a.seriesTypes[i]) : i < columnCount) ? .65 : 2) }))
-    .filter(({ i }) => !a.legendHidden?.includes(i)).slice(0, MAX_LEGEND);
+    .filter(({ i }) => !a.legendHidden?.includes(i));
+  const legendEntries = cappedLegend(seriesLegend);
   const automaticLegend = chart.legend && chart.legendPos !== 'right' && !(sameLegend && a.legend)
     ? layoutLegend(legendEntries, a.legendStyle, W, H, chart.legendPos,
       chart.title ? (a.title?.y ?? .035) * H + a.titleStyle.size : 0) : null;
@@ -1170,7 +1221,9 @@ function renderStyledCartesian(data, chart, width, height) {
   if (horizontal && bottomTitle) plot.h = Math.max(10, Math.min(plot.h, horizontalTitleLimit - plot.y));
   let bottom = plot.y + plot.h;
   const valueFraction = (v, domain, reverse) => {
-    const fraction = (v - domain.min) / (domain.max - domain.min || 1);
+    // A value at or below zero on a logarithmic axis lies past its foot (and is clipped there).
+    const fraction = domain.log ? (v > 0 ? Math.log(v / domain.min) / Math.log(domain.max / domain.min) : -1)
+      : (v - domain.min) / (domain.max - domain.min || 1);
     return reverse ? 1 - fraction : fraction;
   };
   const sy = v => bottom - valueFraction(v, scale, a.reverseValues) * plot.h;
@@ -1185,13 +1238,15 @@ function renderStyledCartesian(data, chart, width, height) {
     min: a.xMin, max: a.xMax, baseUnit: a.xBaseTimeUnit, between: a.categoryBetween !== false,
   }) : null;
   const xInBounds = dateValues.filter(v => Number.isFinite(v) && (a.xMin == null || v >= a.xMin) && (a.xMax == null || v <= a.xMax));
-  const xScale = numericX ? chartAxisScale(minOf(xInBounds), maxOf(xInBounds), { min: a.xMin, max: a.xMax, step: a.xStep, ticks: 7, numeric: true }) : null;
+  const xScale = !numericX ? null : a.xLogBase > 1 ? logScale(xInBounds, a.xLogBase, { min: a.xMin, max: a.xMax, step: a.xStep })
+    : chartAxisScale(minOf(xInBounds), maxOf(xInBounds), { min: a.xMin, max: a.xMax, step: a.xStep, ticks: 7, numeric: true });
   const xMin = numericX ? xScale.min : dates ? dates.min : layered ? 1 : 0;
   const xMax = numericX ? xScale.max : dates ? dates.max : layered ? Math.max(1, n, maxOf(dateValues.filter(Number.isFinite))) : Math.max(0, n - 1);
   // Between-category axes leave half a base unit at each edge, including date gaps.
   const inset = numericX || a.categoryBetween === false ? 0 : .5;
   const sx = v => {
-    const fraction = dates ? dates.fraction(v) : xMax === xMin && !inset ? .5 : (v - xMin + inset) / (xMax - xMin + 2 * inset || 1);
+    const fraction = dates ? dates.fraction(v) : xScale?.log ? (v > 0 ? Math.log(v / xMin) / Math.log(xMax / xMin) : -1)
+      : xMax === xMin && !inset ? .5 : (v - xMin + inset) / (xMax - xMin + 2 * inset || 1);
     return plot.x + (a.reverseCategories ? 1 - fraction : fraction) * plot.w;
   };
   const dateCoordinate = fraction => horizontal ? plot.y + plot.h * (a.reverseCategories ? fraction : 1 - fraction)
@@ -1223,6 +1278,8 @@ function renderStyledCartesian(data, chart, width, height) {
   // source): 10% not 0.1, $1,000 not 1,000, a date not its serial number.
   const primarySource = (secondary ? series.slice(0, -1) : series).find(s => s.style)?.style || null;
   const secondarySource = secondary ? series.at(-1).style || null : null;
+  // A logarithmic axis's ticks differ by a factor: each is labelled to its own decimals.
+  const stepOf = (domain, v) => (domain.log ? v : domain.step);
   const formatted = (v, code, step, units, source = null) => {
     const divisor = units?.divisor || 1;
     if (!code && source?.fmt === 'custom') code = source.code;
@@ -1236,8 +1293,8 @@ function renderStyledCartesian(data, chart, width, height) {
     // automatic bounds with the new unit so headroom still has a labeled tick.
     {
       while (true) {
-        const ticks = scaleTicks(scale);
-        const widths = ticks.map(v => axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), a.yStyle));
+        const ticks = axisTicks(scale);
+        const widths = ticks.map(v => axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim(), a.yStyle));
         // Centered end labels need space outside the plot. Solve each edge's
         // movement by its fractional contribution to the label position, as
         // for an interior axis crossing. Keep sufficient authored margins.
@@ -1251,7 +1308,7 @@ function renderStyledCartesian(data, chart, width, height) {
         const available = Math.max(0, plot.w - 10), total = left + right;
         if (total > available) { left *= available / total; right *= available / total; }
         plot.x += left; plot.w -= left + right;
-        if (a.yStep > 0) break;
+        if (a.yStep > 0 || scale.log) break;
         const crowded = ticks.some((v, i) => i > 0 && Math.abs(valueX(v) - valueX(ticks[i - 1]))
           < (widths[i - 1] + widths[i]) / 2 + a.yStyle.size / 2);
         if (!crowded) break;
@@ -1259,9 +1316,9 @@ function renderStyledCartesian(data, chart, width, height) {
         if (!Number.isFinite(step) || step <= scale.step || step > scale.max - scale.min) break;
         Object.assign(scale, axisScale(values, { ...primaryOptions, step }));
       }
-      categoryCrossing = crossingValue(crossings.x, scale.min, scale.max);
+      categoryCrossing = crossingValue(crossings.x, scale.min, scale.max, zeroOf(scale));
     }
-    const texts = scaleTicks(scale).map(v => formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim()).filter(Boolean);
+    const texts = axisTicks(scale).map(v => formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim()).filter(Boolean);
     if (texts.length) {
       const boxes = texts.map(t => categoryTextLayout(t, a.yStyle, Infinity, 'none'));
       const ascent = Math.max(...boxes.map(b => b.ascent)), descent = Math.max(...boxes.map(b => b.height - b.ascent));
@@ -1279,8 +1336,8 @@ function renderStyledCartesian(data, chart, width, height) {
       bottom = plot.y + plot.h;
     }
   }
-  const primaryLabelWidth = !horizontal && valueLabels ? Math.max(0, ...scaleTicks(scale).map(v =>
-    axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), a.yStyle))) : 0;
+  const primaryLabelWidth = !horizontal && valueLabels ? Math.max(0, ...axisTicks(scale).map(v =>
+    axisTextWidth(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim(), a.yStyle))) : 0;
   const secondaryLabelWidth = secondaryLabels ? Math.max(0, ...scaleTicks(scale2).map(v =>
     axisTextWidth(formatted(v, a.y2Format, scale2.step, a.y2Units, secondarySource).trim(), a.y2Style))) : 0;
   const primaryTitleSpace = !horizontal && chart.yTitle ? a.yStyle.size * 1.6 : 0;
@@ -1324,9 +1381,9 @@ function renderStyledCartesian(data, chart, width, height) {
   const xStep = dates || numericX ? xScale?.step || a.xStep || (dates && a.xTimeUnit !== 'days' ? 1
     : Math.max(1, niceScale(dates ? dates.unitOf(xMin) : xMin, dates ? dates.unitOf(xMax) : xMax,
       Math.max(2, Math.floor((horizontal ? plot.h : plot.w) / 130))).step)) : 1;
-  const xTicks = dates ? dates.ticks(xStep, a.xTimeUnit) : numericX ? scaleTicks({ min: xMin, max: xMax, step: xStep }) : [];
+  const xTicks = dates ? dates.ticks(xStep, a.xTimeUnit) : numericX ? axisTicks({ min: xMin, max: xMax, step: xStep, log: xScale.log }) : [];
   const dateMajor = dates?.ticks(xStep, a.xTimeUnit, true);
-  const categoryTexts = dates || numericX ? xTicks.map(v => formatted(v, a.xFormat, xStep, numericX ? a.xUnits : null, data.xStyle)) : data.categories.map((text, i) =>
+  const categoryTexts = dates || numericX ? xTicks.map(v => formatted(v, a.xFormat, xScale?.log ? v : xStep, numericX ? a.xUnits : null, data.xStyle)) : data.categories.map((text, i) =>
     a.xFormat && !a.xSourceLinked && data.categoryValues?.[i] != null ? formatValue(data.categoryValues[i], { fmt: 'custom', code: a.xFormat }) : text);
   let categoryLayouts = categoryTexts.map(c => categoryTextLayout(c, a.xStyle,
     dates || numericX ? Infinity : labelWidthLimit(a.xRotation, !horizontal), a.xWrap));
@@ -1342,7 +1399,7 @@ function renderStyledCartesian(data, chart, width, height) {
     // Fit the vertical category title outside its label column. Interior
     // crossings move by only a fraction of a changed plot edge.
     const fraction = fixedLabelSide(a.xLabelPosition) ? Number(categoryHigh)
-      : valueFraction(crossingValue(crossings.x, categoryScale.min, categoryScale.max), categoryScale, a.reverseValues);
+      : valueFraction(crossingValue(crossings.x, categoryScale.min, categoryScale.max, zeroOf(categoryScale)), categoryScale, a.reverseValues);
     const origin = plot.x + fraction * plot.w;
     const space = (categoryLabels ? categoryText.width + 10 : 0) + a.xStyle.size * 2 + 6;
     const overflow = space - (categoryHigh ? W - origin : origin);
@@ -1414,9 +1471,9 @@ function renderStyledCartesian(data, chart, width, height) {
         Object.assign(domain, axisScale(list, { ...options, step }));
       }
     };
-    fit(scale, primaryOptions, values, a.yStyle, valueLabels);
+    if (!scale.log) fit(scale, primaryOptions, values, a.yStyle, valueLabels);
     if (secondary) fit(scale2, secondaryOptions, secondValues, a.y2Style, secondaryLabels);
-    categoryCrossing = crossingValue(crossings.x, scale.min, scale.max);
+    categoryCrossing = crossingValue(crossings.x, scale.min, scale.max, zeroOf(scale));
   }
   // The plot area answers a click even when it has no fill of its own, so it can be selected and formatted.
   parts.push(`<rect data-el="plotArea" x="${f(plot.x)}" y="${f(plot.y)}" width="${f(plot.w)}" height="${f(plot.h)}" fill="${a.plotFill && a.plotFill !== 'none' ? esc(a.plotFill) : 'transparent'}"${effectAttr(a, 'plotArea')}/>`);
@@ -1438,6 +1495,8 @@ function renderStyledCartesian(data, chart, width, height) {
     // Numeric major intervals divide into fifths; date minor intervals
     // use calendar units (one day when unspecified), not fractions of months.
     const step = style.minorUnit || (date ? 1 : major.step / 5);
+    // A logarithmic axis marks the multiples between its powers (2, 3 … 9 × 10ⁿ).
+    if (major.log) return ticks.flatMap(t => Array.from({ length: Math.max(0, Math.ceil(major.log) - 2) }, (_, k) => t * (k + 2))).filter(v => v < major.max);
     const candidates = date ? dates.ticks(step, unit, true)
       : scaleTicks({ ...major, step });
     let index = 0;
@@ -1471,7 +1530,7 @@ function renderStyledCartesian(data, chart, width, height) {
     ticks(major, style.majorTick, 5, 'major');
     ticks(minor, style.minorTick, 3, 'minor');
   };
-  const primaryTicks = scaleTicks(scale), secondaryTicks = secondary ? scaleTicks(scale2) : [];
+  const primaryTicks = axisTicks(scale), secondaryTicks = secondary ? scaleTicks(scale2) : [];
   const tickSkip = a.axisStyles?.x?.tickSkip || 1;
   const categoryTicks = offset => !a.axisStyles?.x || dates || numericX || !n ? [] : Array.from({
     length: Math.min(5001, Math.max(0, Math.floor(((between ? n : n - 1) - offset) / tickSkip) + 1)),
@@ -1479,11 +1538,11 @@ function renderStyledCartesian(data, chart, width, height) {
   // One minor tick goes halfway between category major ticks,
   // including fractional category positions when tickMarkSkip is odd.
   const categoryMajor = categoryTicks(0), categoryMinor = categoryTicks(tickSkip / 2);
-  const crossingFraction = valueFraction(crossingValue(crossings.x, categoryScale.min, categoryScale.max), categoryScale, a.reverseValues);
+  const crossingFraction = valueFraction(crossingValue(crossings.x, categoryScale.min, categoryScale.max, zeroOf(categoryScale)), categoryScale, a.reverseValues);
   const xOrigin = horizontal ? plot.x + crossingFraction * plot.w : bottom - crossingFraction * plot.h;
   axis('x', horizontal, xOrigin, horizontal ? plot.y : plot.x, horizontal ? bottom : plot.x + plot.w,
     dates ? dateMajor.map(v => datePosition(v, true)) : numericX ? xTicks.map(sx) : categoryMajor,
-    dates || numericX ? minorTicks('x', { min: xMin, max: xMax, step: xStep }, dateMajor || xTicks, !!dates)
+    dates || numericX ? minorTicks('x', { min: xMin, max: xMax, step: xStep, log: xScale?.log }, dateMajor || xTicks, !!dates)
       .map(v => dates ? datePosition(v, true) : sx(v)) : categoryMinor, a.hideXAxis);
   if (!horizontal && !a.hideXAxis && !a.axisStyles?.x) parts.push(`<line x1="${f(plot.x)}" y1="${f(xOrigin)}" x2="${f(plot.x + plot.w)}" y2="${f(xOrigin)}" stroke="${esc(a.xStyle.color)}" stroke-opacity=".1" stroke-width=".5"/>`);
   const yOrigin = valueAxisOrigin(crossings.y, valueAxisHigh);
@@ -1519,13 +1578,13 @@ function renderStyledCartesian(data, chart, width, height) {
         const topAxis = valueAxisHigh, y = yOrigin;
         parts.push(`<line x1="${f(x)}" y1="${f(y)}" x2="${f(x)}" y2="${f(y + (topAxis ? -5 : 5))}" stroke="${esc(a.yStyle.color)}"/>`);
       }
-      if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), x,
+      if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim(), x,
         valueLabelOrigin + (valueHigh ? -a.yStyle.size * .5 : a.yStyle.size * 1.5), a.yStyle, 'middle', 'data-el="yAxis"');
       continue;
     }
     const y = sy(v);
     if (chart.gridlines) gridline('y', plot.x, y, plot.x + plot.w, y);
-    if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), scale.step, a.yUnits, primarySource).trim(), valueColumns.primary.x,
+    if (valueLabels) label(formatted(v, percent ? '0%' : a.yFormat || (percentAxis ? '0%' : ''), stepOf(scale, v), a.yUnits, primarySource).trim(), valueColumns.primary.x,
       y + a.yStyle.size * .35, a.yStyle, valueHigh ? 'start' : 'end', 'data-el="yAxis"');
   }
   if (secondary) for (const v of secondaryTicks) {
@@ -1783,25 +1842,28 @@ function renderStyledCartesian(data, chart, width, height) {
     const style = a.legendStyle;
     let vertical = chart.legendPos === 'right';
     const l = sameLegend && a.legend ? a.legend : { x: vertical ? .77 : .03, y: chart.legendPos === 'top' ? .12 : vertical ? .25 : .91, w: vertical ? .21 : .94, h: .06 };
-    const entries = legendEntries;
-    const layout = automaticLegend || (sameLegend && a.legend ? layoutLegend(entries, style, W, H, chart.legendPos, 0,
-      { x: l.x * W, y: l.y * H, w: (l.w ?? .94) * W, h: l.h == null ? null : l.h * H }, vertical) : null);
+    const manual = !automaticLegend && sameLegend && a.legend;
     // A legend down the right wraps each name within the room left to the chart's edge, and shortens a word
-    // too long for it, rather than running the name off the chart.
+    // too long for it, rather than running the name off the chart; it keeps to the rows that fit above its foot.
     const indent = bubble ? 14 : 29, room = Math.max(20, W - l.x * W - indent - 4);
-    const wrapped = vertical && !layout ? entries.map(({ s }) => legendLines(s.name, room, style)) : null;
+    const entries = vertical && !automaticLegend && !manual
+      ? legendColumn(seriesLegend, H - 4 - l.y * H - style.size * .75 - style.size * .5 + style.size * 1.7, e => style.size * (1.7 + (legendLines(e.name, room, style).length - 1) * 1.2))
+      : legendEntries;
+    const layout = automaticLegend || (manual ? layoutLegend(entries, style, W, H, chart.legendPos, 0,
+      { x: l.x * W, y: l.y * H, w: (l.w ?? .94) * W, h: l.h == null ? null : l.h * H }, vertical) : null);
+    const wrapped = vertical && !layout ? entries.map(({ name }) => legendLines(name, room, style)) : null;
     const box = layout ? { x: layout.x, y: layout.y, w: layout.w, h: layout.h }
       : { x: l.x * W, y: l.y * H, w: (l.w ?? .94) * W, h: vertical ? wrapped.reduce((sum, lines) => sum + style.size * (1.7 + (lines.length - 1) * 1.2), 0) : (l.h ?? .06) * H };
     parts.push(`<g data-el="legend"${effectAttr(a, 'legend')}>`, legendBoxRect(a.legendBox, box, style.size));
-    const widths = entries.map(({ s }) => 30 + textW(s.name, style.size));
+    const widths = entries.map(({ name }) => 30 + textW(name, style.size));
     const gap = Math.max(8, ((l.w ?? .94) * W - widths.reduce((sum, w) => sum + w, 0)) / (widths.length + 1));
     let x = l.x * W + (vertical ? 0 : gap), y = l.y * H + (vertical ? style.size * .75 : (l.h ?? .06) * H / 2);
-    entries.forEach(({ s, i, keyWidth }, entry) => {
+    entries.forEach(({ name, i, keyWidth, more }, entry) => {
       const placed = layout?.entries[entry];
       if (placed) { x = placed.x; y = placed.y; }
       const key = placed ? keyWidth : 26, keyH = placed ? style.size * .65 : 10;
       const color = seriesColor(chart, i), line = lineStyle(i);
-      if (bubble) parts.push(`<circle cx="${f(x + (placed ? key / 2 : 4))}" cy="${f(y)}" r="${placed ? key / 2 : 4}" fill="${bubblePaint[i]}"/>`);
+      if (more) { /* the count of the series not named has no key */ } else if (bubble) parts.push(`<circle cx="${f(x + (placed ? key / 2 : 4))}" cy="${f(y)}" r="${placed ? key / 2 : 4}" fill="${bubblePaint[i]}"/>`);
       else if (pureArea || (layered ? ['area', 'column'].includes(a.seriesTypes[i]) : i < columnCount)) parts.push(`<rect x="${f(x)}" y="${f(y - keyH / 2)}" width="${f(key)}" height="${f(keyH)}" fill="${color}"/>`);
       else {
         if (line.visible !== false) parts.push(`<line x1="${f(x)}" y1="${f(y)}" x2="${f(x + key)}" y2="${f(y)}" stroke="${color}" stroke-width="${line.width}" stroke-linecap="round"/>`);
@@ -1812,7 +1874,7 @@ function renderStyledCartesian(data, chart, width, height) {
         const lines = wrapped[entry];
         lines.forEach((text, k) => label(text, x + indent, y + style.size * (.3 + k * 1.2), style));
         y += Math.max(0, lines.length - 1) * style.size * 1.2;
-      } else label(s.name, x + indent, y + style.size * .3, style);
+      } else label(name, x + indent, y + style.size * .3, style);
       if (vertical) y += style.size * 1.7; else x += widths[entry] + gap;
     });
     parts.push('</g>');
@@ -2011,7 +2073,7 @@ function renderNativeRadar(data, chart, width, height) {
   const label = (text, x, y, style, anchor = 'middle', extra = '') => parts.push(`<text x="${f(x)}" y="${f(y)}" text-anchor="${anchor}" font-family="${esc(fontStack(style.font))}" font-size="${style.size}" fill="${esc(style.color)}"${style.bold ? ' font-weight="700"' : ''}${style.italic ? ' font-style="italic"' : ''} ${extra}>${esc(text)}</text>`);
   const titleBottom = chart.title ? (a.title?.y ?? .035) * H + a.titleStyle.size : 0;
   if (chart.title) label(chart.title, a.title ? a.title.x * W : W / 2, titleBottom, a.titleStyle, a.title ? 'start' : 'middle');
-  const entries = series.map((s, i) => ({ name: s.name, i, keyWidth: a.legendStyle.size * 1.5 })).filter(e => !a.legendHidden.includes(e.i)).slice(0, MAX_LEGEND);
+  const entries = cappedLegend(series.map((s, i) => ({ name: s.name, i, keyWidth: a.legendStyle.size * 1.5 })).filter(e => !a.legendHidden.includes(e.i)));
   const manualLegend = a.legend && a.legendPos === chart.legendPos ? a.legend : null;
   const legendBox = manualLegend ? { x: manualLegend.x * W, y: manualLegend.y * H, w: (manualLegend.w ?? .25) * W, h: (manualLegend.h ?? .1) * H }
     : chart.legendPos === 'right' ? { x: W * .76, y: Math.max(titleBottom + 12, H * .15), w: W * .23 } : null;
@@ -2112,6 +2174,7 @@ function renderNativeRadar(data, chart, width, height) {
   });
   if (n && a.plotStroke && a.plotStroke !== 'none') parts.push(`<polygon points="${polygon(1)}" fill="none" ${strokeAttrs({color:a.plotStroke,width:a.plotStrokeWidth,dash:a.plotStrokeDash})}/>`);
   if (legend) for (const item of legend.entries) {
+    if (item.more) { label(item.lines[0], item.textX, item.baseline, a.legendStyle, 'start'); continue; }
     const { appearance, line, color, fill, attrs } = paints[item.i], y = item.y;
     parts.push(`<g class="chart-radar-legend-key" data-series="${item.i}">`);
     if (radar.style === 'filled') parts.push(`<rect x="${f(item.x)}" y="${f(y-a.legendStyle.size*.25)}" width="${f(item.keyWidth)}" height="${f(a.legendStyle.size*.5)}" fill="${esc(fill)}" ${attrs}/>`);
@@ -2154,23 +2217,27 @@ function renderRadar(data, chart, right, top, bottom) {
   const marks = n * series.length <= MARK_BUDGET;
   // Labels a line of text apart around the ring, with a spoke for each, so neither piles into a blur.
   const labelEvery = Math.max(1, Math.ceil((n * 14) / (2 * Math.PI * (R + 10))));
-  let hi = 0;
-  for (const s of series) for (const v of s.values) if (v != null && v > hi) hi = v;
+  let hi = 0, lo = 0;
+  for (const s of series) for (const v of s.values) if (Number.isFinite(v)) { if (v > hi) hi = v; if (v < lo) lo = v; }
   // A fixed maximum of zero (or below) would divide the radius by zero; only a positive one applies.
   const yMax = chart.yMax > 0 ? chart.yMax : null;
-  const scale = niceScale(0, yMax ?? (hi || 1), 4);
-  const max = yMax ?? scale.max;
+  // Negative values move the centre below zero, as in Excel, rather than all sitting on it as if zero.
+  const scale = niceScale(lo, yMax ?? (hi || (lo < 0 ? 0 : 1)), 4);
+  const max = yMax ?? scale.max, min = Math.min(0, scale.min);
   const vs = data.valueStyle || null;
   const angle = (i) => -Math.PI / 2 + (i / n) * Math.PI * 2;
-  const point = (i, v) => [cx + (R * Math.max(0, v) / max) * Math.cos(angle(i)), cy + (R * Math.max(0, v) / max) * Math.sin(angle(i))];
+  const radius = (v) => R * Math.max(0, Math.min(v, max) - min) / (max - min);
+  const point = (i, v) => [cx + radius(v) * Math.cos(angle(i)), cy + radius(v) * Math.sin(angle(i))];
   const out = [];
   // Rings and spokes.
-  for (const v of scaleTicks({ min: scale.step, max, step: scale.step })) {
+  for (const v of scaleTicks({ min: min + scale.step, max, step: scale.step })) {
     const ring = categories.map((_, i) => point(i, v).map(f).join(',')).join(' ');
     out.push(`<polygon points="${ring}" fill="none" stroke="var(--grid)" stroke-width="1"/>`);
     // Ring values sit just right of the top spoke; the outer ring's value would collide with the top label.
-    if (v < max - scale.step / 2) out.push(`<text x="${f(cx + 4)}" y="${f(cy - (R * v) / max - 2)}" font-size="10" fill="var(--ink-3)">${esc(axisLabel(v, vs))}</text>`);
+    if (v < max - scale.step / 2) out.push(`<text x="${f(cx + 4)}" y="${f(cy - radius(v) - 2)}" font-size="10" fill="var(--ink-3)">${esc(axisLabel(v, vs, scale.step))}</text>`);
   }
+  // The centre names the axis's floor when it is not zero.
+  if (min < 0) out.push(`<text x="${f(cx + 4)}" y="${f(cy - 2)}" font-size="10" fill="var(--ink-3)">${esc(axisLabel(min, vs, scale.step))}</text>`);
   categories.forEach((c, i) => {
     if (i % labelEvery) return;
     const [x, y] = point(i, max);
@@ -2238,20 +2305,25 @@ function renderStyledPie(data, chart, width, height) {
   // Legend entries are retained for blank/zero points even though they have
   // no visible slice. Only an explicit legendEntry/delete removes an entry.
   const entries = data.categories.map((name, i) => ({ name, i })).filter(({ i }) => !a.legendHidden.includes(i));
-  const shown = entries.slice(0, MAX_LEGEND);
+  let shown = cappedLegend(entries);
   let top = chart.title ? a.titleStyle.size + 24 : 10, bottom = H - 10, right = W - 10;
+  if (chart.legend && vertical && !(sameLegend && a.legend)) {
+    // Down the right, the rows that fit above the chart's foot (see the row layout below).
+    const st = a.legendStyle, lineH = st.size * 1.7, room = Math.max(20, W - .77 * W - st.size - 8);
+    shown = legendColumn(entries, H - 4 - .2 * H - st.size * 1.3 + lineH, e => lineH + (legendLines(e.name, room, st).length - 1) * st.size * 1.2);
+  }
   if (chart.legend && shown.length) {
     out.push(`<g data-el="legend"${effectAttr(a, 'legend')}>`);
     const legendStart = out.length;
     const st = a.legendStyle, lineH = st.size * 1.7;
     const manual = sameLegend && a.legend;
     const layout = manual || !vertical
-      ? layoutLegend(shown.map(e => ({ ...e, keyWidth: st.size * .65 })), st, W, H, chart.legendPos,
+      ? layoutLegend(shown.map(e => ({ ...e, keyWidth: e.more ? 0 : st.size * .65 })), st, W, H, chart.legendPos,
         chart.title ? (a.title?.y ?? .025) * H + a.titleStyle.size : 0,
         manual ? { x: manual.x * W, y: manual.y * H, w: (manual.w ?? .95) * W, h: manual.h == null ? null : manual.h * H } : null, vertical) : null;
     if (layout) {
       for (const e of layout.entries) {
-        out.push(`<rect x="${f(e.x)}" y="${f(e.y - e.keyWidth / 2)}" width="${f(e.keyWidth)}" height="${f(e.keyWidth)}" fill="${esc(piePaint(chart, e.i, colors))}"/>`);
+        if (!e.more) out.push(`<rect x="${f(e.x)}" y="${f(e.y - e.keyWidth / 2)}" width="${f(e.keyWidth)}" height="${f(e.keyWidth)}" fill="${esc(piePaint(chart, e.i, colors))}"/>`);
         e.lines.forEach((text, k) => out.push(label(text, e.textX, e.baseline + k * layout.lineH, st, 'start', 'class="chart-legend-label"')));
       }
       out.splice(legendStart, 0, legendBoxRect(a.legendBox, layout, st.size));
@@ -2275,8 +2347,8 @@ function renderStyledPie(data, chart, width, height) {
         const gap = vertical ? 0 : Math.max(8, (legendW - row.reduce((n, e) => n + e.width, 0)) / Math.max(1, row.length - 1));
         let x = l.x * W;
         const y = vertical ? next : legendY + ri * lineH + st.size;
-        for (const { name, i, width } of row) {
-          out.push(`<rect x="${f(x)}" y="${f(y - st.size * .7)}" width="${f(st.size * .65)}" height="${f(st.size * .65)}" fill="${esc(piePaint(chart, i, colors))}"/>`);
+        for (const { name, i, width, more } of row) {
+          if (!more) out.push(`<rect x="${f(x)}" y="${f(y - st.size * .7)}" width="${f(st.size * .65)}" height="${f(st.size * .65)}" fill="${esc(piePaint(chart, i, colors))}"/>`);
           if (vertical) {
             const lines = legendLines(name, room, st);
             lines.forEach((text, k) => out.push(label(text, x + st.size + 4, y + k * st.size * 1.2, st)));
@@ -2442,4 +2514,4 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
 
 // The pieces of the chart frame the newer chart types (chartsvg-special.js) draw with too.
 export { esc as svgEsc, f as svgNum, tipText as chartTipText, layoutLegend, chartAreaRect, elementEffectDefs, effectAttr, textBox as chartTextBox,
-  legendBoxRect, axisTextWidth, wrapChartText, scaleTicks, chartMarker, categoryShortener, shade as shadeColor, PLOT_STYLE, MAX_LEGEND, MARK_BUDGET };
+  legendBoxRect, axisTextWidth, wrapChartText, scaleTicks, chartMarker, categoryShortener, shade as shadeColor, PLOT_STYLE, MAX_LEGEND, MARK_BUDGET, cappedLegend };

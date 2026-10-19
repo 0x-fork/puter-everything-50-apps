@@ -13,7 +13,7 @@ import { toast } from './toast.js';
 import { icon } from './icons.js';
 import {
   evaluateQuery, sourceTable, stepNames, stepFormula, saveQuery, loadedTable, refreshQuery, queryNameProblem, uniqueQueryName,
-  displayValue, keyOf, parseTyped, detectedTypeStep, initialSteps, TYPES, TYPE_LABELS, TYPE_MARKS, FILTER_OPS, AGGREGATIONS, JOIN_KINDS, PREVIEW_ROWS, sourceSummary, TEXT_COLUMN_NAMES,
+  displayValue, keyOf, parseTyped, detectedTypeStep, initialSteps, TYPES, TYPE_LABELS, TYPE_MARKS, DATE_TYPES, FILTER_OPS, AGGREGATIONS, JOIN_KINDS, PREVIEW_ROWS, sourceSummary, TEXT_COLUMN_NAMES,
 } from '../core/queries.js';
 import { queryIo, cellNode, loadNew, openImportData, urlProblem, fitQueryTables } from './get-data.js';
 import { maxOf } from '../core/numeric.js';
@@ -23,8 +23,8 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
 const TEXT_FILTERS = ['equals', 'notEquals', 'beginsWith', 'notBeginsWith', 'endsWith', 'notEndsWith', 'contains', 'notContains'];
 const NUMBER_FILTERS = ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte'];
 const DATE_FILTERS = ['equals', 'notEquals', 'before', 'onOrBefore', 'after', 'onOrAfter'];
-const filtersFor = (type) => (type === 'int' || type === 'decimal' ? NUMBER_FILTERS : type === 'date' ? DATE_FILTERS : TEXT_FILTERS);
-const filterMenuName = (type) => (type === 'int' || type === 'decimal' ? 'Number Filters' : type === 'date' ? 'Date Filters' : 'Text Filters');
+const filtersFor = (type) => (type === 'int' || type === 'decimal' ? NUMBER_FILTERS : DATE_TYPES.has(type) ? DATE_FILTERS : TEXT_FILTERS);
+const filterMenuName = (type) => (type === 'int' || type === 'decimal' ? 'Number Filters' : type === 'time' ? 'Time Filters' : DATE_TYPES.has(type) ? 'Date Filters' : 'Text Filters');
 
 /** A small dialog with a form: fields, an error line, OK and Cancel. `submit` returns an error message to refuse. */
 function formDialog({ title, fields, submit, okLabel = 'OK', wide = false }) {
@@ -236,9 +236,14 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
       addStep({ keys: [...keys, { column, desc }] }, { replacePrevious: true });
     } else addStep({ type: 'sortRows', keys: [{ column, desc }] });
   }
-  function filterBy(column, conditions, join = 'and') {
+  /**
+   * `replace`: the conditions were read from the column's filter step just before (the dialog it filled in, the
+   * list it ticked) and take its place; other conditions are a filter of their own on what that step left, so the
+   * rows it took out stay out.
+   */
+  function filterBy(column, conditions, join = 'and', { replace = false } = {}) {
     const prev = previous();
-    if (prev?.type === 'filterRows' && prev.column === column) addStep({ conditions, join }, { replacePrevious: true });
+    if (replace && prev?.type === 'filterRows' && prev.column === column) addStep({ conditions, join }, { replacePrevious: true });
     else addStep({ type: 'filterRows', column, join, conditions });
   }
   const removeColumns = () => needCols() && addStep({ type: 'removeColumns', columns: selected.slice() });
@@ -439,7 +444,7 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
     submit: () => {
       const conds = [first, second].filter((r) => r.o.value).map((r) => ({ op: r.o.value, value: ['isNull', 'notNull'].includes(r.o.value) ? null : parseTyped(r.v.value, type) }));
       if (!conds.length) return { field: first.o, message: 'Choose a condition' };
-      filterBy(column, conds, joinGroup.querySelector('input:checked').value);
+      filterBy(column, conds, joinGroup.querySelector('input:checked').value, { replace: !!existing });
       return null;
     } });
   }
@@ -622,8 +627,8 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
           // 1,000 values names the ones cleared rather than the ones kept, so the values it did not show stay, as in
           // Power Query.
           const cleared = boxes.filter((b) => !b.checked).map((b) => b._value), gone = new Set(cleared.map(keyOf));
-          if (list?.op === 'in') filterBy(column, [{ op: 'in', values: list.values.filter((v) => !gone.has(keyOf(v))) }]);
-          else if (truncated || list?.op === 'notIn') filterBy(column, [{ op: 'notIn', values: [...(list?.values || []), ...cleared] }]);
+          if (list?.op === 'in') filterBy(column, [{ op: 'in', values: list.values.filter((v) => !gone.has(keyOf(v))) }], 'and', { replace: true });
+          else if (truncated || list?.op === 'notIn') filterBy(column, [{ op: 'notIn', values: [...(list?.values || []), ...cleared] }], 'and', { replace: !!list });
           else filterBy(column, [{ op: 'in', values: keep }]);
         } }, 'OK'),
         el('button.btn', { type: 'button', onclick: () => closePopup() }, 'Cancel')));

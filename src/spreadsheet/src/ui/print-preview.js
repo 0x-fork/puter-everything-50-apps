@@ -8,23 +8,35 @@
 
 import { el } from './dom.js';
 import { icon } from './icons.js';
-import { printPaperBox, expandPrintText, splitPrintSections, printPageText, sheetPrintPrefs, manualBreaksApply } from './print.js';
+import { printPaperBox, expandPrintText, splitPrintSections, printPageText, sheetPrintPrefs, manualBreaksApply, printRange } from './print.js';
 import { printBands, printTitleBands } from './print-pagination.js';
 import { fillColorCss } from '../core/fill-color.js';
 import { fontColorCss } from '../core/font-color.js';
 import { fontStack, fontKeyFor, borderCss, getLocale } from '../core/format.js';
 import { hasHeaderFormatting, parsePrintHeader } from '../core/print-header.js';
 import { colName } from '../core/cell.js';
+import { conditionalFontStyle } from '../core/style-values.js';
+import { nativeFillOverridesNormal } from '../core/native-fill.js';
 
 const HEAD_W = 36, HEAD_H = 18, TITLE_H = 28;
 
-/** The block the print takes from the sheet: the selection, the print area, or the cells in use. */
+/**
+ * The block the print takes from the sheet: the selection, the print area, or the whole sheet as the print bounds it,
+ * which reaches past the cells in use to the fills and borders, the charts and pictures, the merges and the text
+ * running on from the last column, so the preview counts the pages the print makes. Worked out once for each change
+ * of the workbook: the dialog lays the preview out again on every key typed in it.
+ */
+const wholeSheets = new WeakMap(); // workbook → "sheet id:block" → { version, range }
 function printedArea(wb, sheetId, prefs, range, only) {
   const sheet = wb.sheet(sheetId);
-  if (only) return only;
-  if (prefs.area === 'selection' && range) return range;
-  if (prefs.area === 'printArea' && sheet.printSettings?.areas?.length) return sheet.printSettings.areas[0];
-  return wb.usedRange(sheetId);
+  // A block given whole (a print area, the selection) is taken as the print takes it, a whole column as far down as the
+  // sheet's print reaches: the preview counted pages down to row 1,048,576, some twenty thousand of them.
+  const given = only || (prefs.area === 'selection' && range) || (prefs.area === 'printArea' && sheet.printSettings?.areas?.[0]) || null;
+  let kept = wholeSheets.get(wb);
+  if (!kept) wholeSheets.set(wb, kept = new Map());
+  const key = `${sheetId}:${given ? `${given.r1},${given.c1},${given.r2},${given.c2}` : ''}`;
+  if (kept.get(key)?.version !== wb.version) kept.set(key, { version: wb.version, range: printRange(wb, sheetId, { range: given }) });
+  return kept.get(key).range;
 }
 
 /**
@@ -71,8 +83,11 @@ export function printPreviewLayout(wb, sheetId, prefs, range = null, only = null
       if (!repeat.length || bodyStart >= lines.length) return plain(printBands(sizes, capacity, 0, forced(breaks, from, to))?.bands || [{ start: 0, end: sizes.length }]);
       const offsets = [0];
       for (const line of lines) offsets.push(offsets.at(-1) + size(line));
-      // A band's pieces are runs of lines, by offset: each run's lines are those that start inside it.
-      const linesIn = ({ offset, size: extent }) => lines.filter((_, i) => offsets[i] >= offset && offsets[i] < offset + extent);
+      // A band's pieces are runs of lines, by offset: each run's lines are those that start inside it. The offsets
+      // only grow, so each run is found by halving rather than by reading every line for every page (a sheet of
+      // 50,000 rows took over a second a keystroke).
+      const firstAt = (at) => { let lo = 0, hi = lines.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (offsets[mid] < at) lo = mid + 1; else hi = mid; } return lo; };
+      const linesIn = ({ offset, size: extent }) => lines.slice(firstAt(offset), firstAt(offset + extent));
       const breakAt = new Set([...forced(breaks, from, to)].map((b) => lines.findIndex((n) => n >= from + b)).filter((i) => i > bodyStart));
       const list = printTitleBands(lines.map(size), capacity, { bodyStart, repeat: [repeat[0], repeat.at(-1) + 1] }, breakAt) || [];
       const out = list.map(({ segments }) => {
@@ -102,7 +117,10 @@ export function printPreviewLayout(wb, sheetId, prefs, range = null, only = null
   const pages = [];
   if (prefs.pageOrder === 'overThenDown') for (const rows of rowBands) for (const cols of colBands) pages.push(page(rows, cols));
   else for (const cols of colBands) for (const rows of rowBands) pages.push(page(rows, cols));
-  return { pages: pages.length ? pages : [null], scale, box, area, headW, headH, titleH };
+  // Fitted to the page's width, a block narrower than the page is stretched across it, its columns (and the row numbers'
+  // column) widened in proportion and its rows and text left as they are, as the print lays it out.
+  const stretch = prefs.fit === 'width' && totalW < contentW ? contentW / Math.max(1, totalW) : 1;
+  return { pages: pages.length ? pages : [null], scale, stretch, box, area, headW, headH, titleH };
 }
 
 /**
@@ -112,10 +130,13 @@ export function printPreviewLayout(wb, sheetId, prefs, range = null, only = null
  */
 export function printPreviewJob(wb, sheetId, prefs, range = null) {
   const sheets = prefs.area === 'workbook' ? wb.sheets.filter((sh) => !sh.hidden) : [wb.sheet(sheetId)].filter(Boolean);
+  // The selection may be several ranges (a list): each prints on pages of its own, as a print area's blocks do.
+  const selected = prefs.area === 'selection' && Array.isArray(range) && range.length ? range : null;
+  if (Array.isArray(range)) range = range[0] || null;
   const job = [];
   for (const sh of sheets) {
     const own = sh.id === sheetId ? prefs : { ...prefs, ...sheetPrintPrefs(sh), area: prefs.area };
-    const areas = (prefs.area === 'printArea' || prefs.area === 'workbook') && sh.printSettings?.areas?.length ? sh.printSettings.areas : [null];
+    const areas = selected || ((prefs.area === 'printArea' || prefs.area === 'workbook') && sh.printSettings?.areas?.length ? sh.printSettings.areas : [null]);
     for (const only of areas) {
       const layout = printPreviewLayout(wb, sh.id, own, range, only);
       for (const page of layout.pages) job.push({ sheetId: sh.id, prefs: own, layout, page });
@@ -175,11 +196,23 @@ export function createPrintPreview({ wb, sheetId, docName, filePath = '', getPre
     });
   }
 
+  // The page is fitted to the room the pane gives it, which a turned tablet or a resized window changes as the dialog
+  // is laid out again (beside the choices, or under them): drawn for the old room, it was cut off or left small.
+  let drawnFor = '';
+  const roomNow = () => `${stage.clientWidth}x${stage.clientHeight}`;
+  const resized = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    if (job && roomNow() !== drawnFor) refresh();
+  }) : null;
+  resized?.observe(stage);
+
   function draw() {
+    drawnFor = roomNow();
     const { sheetId: shown, prefs, layout, page: current } = job[page];
-    const { box, scale, headW = 0, headH = 0, titleH = 0 } = layout;
+    const { box, scale, stretch = 1, headW = 0, headH = 0, titleH = 0 } = layout;
     const total = job.length;
-    count.textContent = `Page ${page + 1} of ${total}`;
+    // A live region: written only when it changes, or a screen reader reads it out again on every key typed in the dialog.
+    const counted = `Page ${page + 1} of ${total}`;
+    if (count.textContent !== counted) count.textContent = counted;
     prev.disabled = page === 0;
     next.disabled = page >= total - 1;
     // The page fits the stage: as wide as it allows, no taller than it allows.
@@ -246,11 +279,12 @@ export function createPrintPreview({ wb, sheetId, docName, filePath = '', getPre
     for (let r = current.rows[0]; r <= current.rows[1]; r++) if (!sheet.hiddenRows?.has(r) && !sheet.filterHidden?.has(r)) rows.push([r, wb.rowHeight(shown, r)]);
     const usedW = cols.reduce((a, [, size]) => a + size, 0) + headW, usedH = rows.reduce((a, [, size]) => a + size, 0) + headH;
     const contentW = box.width - m.left - m.right, contentH = box.height - y0 - m.bottom;
-    if (prefs.horizontalCentered) x0 += Math.max(0, (contentW - usedW * scale) / 2);
+    if (prefs.horizontalCentered) x0 += Math.max(0, (contentW - usedW * scale * stretch) / 2);
     if (prefs.verticalCentered) y0 += Math.max(0, (contentH - usedH * scale) / 2);
-    const left = x0 * k + headW * s, top = y0 * k + headH * s;
+    const sx = s * stretch; // across, the stretch of a block fitted to the page's width
+    const left = x0 * k + headW * sx, top = y0 * k + headH * s;
     const xs = [left], ys = [top];
-    for (const [, size] of cols) xs.push(xs.at(-1) + size * s);
+    for (const [, size] of cols) xs.push(xs.at(-1) + size * sx);
     for (const [, size] of rows) ys.push(ys.at(-1) + size * s);
     g.save();
     g.beginPath(); g.rect(m.left * k, m.top * k, contentW * k, (box.height - m.top - m.bottom) * k); g.clip();
@@ -258,15 +292,25 @@ export function createPrintPreview({ wb, sheetId, docName, filePath = '', getPre
     if (headW) {
       g.fillStyle = '#f1f1f1';
       g.fillRect(x0 * k, y0 * k, xs.at(-1) - x0 * k, headH * s);
-      g.fillRect(x0 * k, y0 * k, headW * s, ys.at(-1) - y0 * k);
+      g.fillRect(x0 * k, y0 * k, headW * sx, ys.at(-1) - y0 * k);
       g.fillStyle = '#666666'; g.textAlign = 'center'; g.textBaseline = 'middle';
       g.font = `${Math.max(3, 11 * s)}px -apple-system, BlinkMacSystemFont, sans-serif`;
       cols.forEach(([c], i) => g.fillText(colName(c), (xs[i] + xs[i + 1]) / 2, y0 * k + headH * s / 2));
-      rows.forEach(([r], i) => g.fillText(String(r + 1), x0 * k + headW * s / 2, (ys[i] + ys[i + 1]) / 2));
+      rows.forEach(([r], i) => g.fillText(String(r + 1), x0 * k + headW * sx / 2, (ys[i] + ys[i + 1]) / 2));
     }
+    // Each cell as it prints: its own style, under its table's colours (header, banded rows) and its conditional
+    // formatting, which paint over it as they do on screen and on paper; a cell's own fill shows through a table's coat.
+    const looked = !!(sheet.rules?.length || sheet.tables?.length);
+    const looks = rows.map(([r]) => cols.map(([c]) => {
+      const own = wb.styleAt(shown, r, c) || {};
+      const value = wb.getValue(shown, r, c);
+      const cf = looked ? wb.conditionalStyle(shown, r, c, value) : null;
+      const bg = cf?.bg && !(nativeFillOverridesNormal(own, wb.nativeNormalFill) && cf.coat) ? cf.bg : own.bg;
+      return { st: conditionalFontStyle(own, cf), cf, bg, value };
+    }));
     // Fills first, then the gridlines, then the text and borders over them.
-    rows.forEach(([r], i) => cols.forEach(([c], j) => {
-      const bg = fillColorCss(wb.styleAt(shown, r, c)?.bg);
+    rows.forEach((_, i) => cols.forEach((__, j) => {
+      const bg = fillColorCss(looks[i][j].bg);
       if (bg && bg !== 'transparent') { g.fillStyle = bg; g.fillRect(xs[j], ys[i], xs[j + 1] - xs[j], ys[i + 1] - ys[i]); }
     }));
     if (prefs.gridlines) {
@@ -276,16 +320,42 @@ export function createPrintPreview({ wb, sheetId, docName, filePath = '', getPre
       for (const y of ys) { g.moveTo(left, y); g.lineTo(xs.at(-1), y); }
       g.stroke();
     }
+    // A cell under a checkbox rule prints a tick box in place of its TRUE or FALSE, blank or not, as the grid shows it.
+    const ruleAt = sheet.validations?.length ? (r, c) => wb.validationAt(shown, r, c) : () => null;
+    const tickBox = (rule, on, cx, cy, cw, ch) => {
+      const excel = rule.checkboxStyle === 'excel', size = (excel ? 12 : 13) * s;
+      const x = excel && Number.isFinite(rule.checkboxOffset) ? cx + Math.max(0, Math.min(rule.checkboxOffset * sx, cw - size)) : cx + (cw - size) / 2;
+      const y = cy + (ch - size) / 2;
+      g.save();
+      g.beginPath(); g.rect(cx, cy, cw, ch); g.clip();
+      g.beginPath();
+      if (excel || !g.roundRect) g.rect(x, y, size, size); else g.roundRect(x, y, size, size, 3.5 * s);
+      g.fillStyle = excel ? '#ffffff' : on ? '#356d49' : '#ffffff';
+      g.fill();
+      g.strokeStyle = excel ? '#000000' : on ? '#356d49' : '#6b6964';
+      g.lineWidth = Math.max(0.5, (excel ? 1 : 1.5) * s);
+      g.stroke();
+      if (on) {
+        g.beginPath();
+        g.moveTo(x + size * 0.23, y + size * 0.52); g.lineTo(x + size * 0.44, y + size * 0.72); g.lineTo(x + size * 0.79, y + size * 0.3);
+        g.strokeStyle = excel ? '#000000' : '#ffffff';
+        g.lineWidth = Math.max(0.5, (excel ? 1.5 : 2) * s);
+        g.stroke();
+      }
+      g.restore();
+    };
     rows.forEach(([r], i) => cols.forEach(([c], j) => {
-      const st = wb.styleAt(shown, r, c) || {};
+      const { st, cf, value } = looks[i][j];
       const cx = xs[j], cy = ys[i], cw = xs[j + 1] - xs[j], ch = ys[i + 1] - ys[i];
-      const text = wb.getDisplay(shown, r, c);
+      const rule = ruleAt(r, c);
+      const checkbox = rule?.type === 'checkbox';
+      if (checkbox) tickBox(rule, value === true, cx, cy, cw, ch);
+      const text = checkbox || cf?.barOnly || cf?.iconOnly ? '' : wb.getDisplay(shown, r, c);
       if (text) {
-        const value = wb.getValue(shown, r, c);
         const align = st.align || (typeof value === 'number' ? 'right' : 'left');
         g.save();
         g.beginPath(); g.rect(cx, cy, cw, ch); g.clip();
-        g.fillStyle = fontColorCss(st.color) || '#000000';
+        g.fillStyle = fontColorCss(cf?.color || st.color) || '#000000';
         g.font = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '400'} ${Math.max(2, (st.size || 13) * s)}px ${fontStack(st.font) || 'sans-serif'}`;
         g.textAlign = align;
         g.textBaseline = st.valign === 'top' ? 'top' : st.valign === 'middle' ? 'middle' : 'bottom';
@@ -308,5 +378,6 @@ export function createPrintPreview({ wb, sheetId, docName, filePath = '', getPre
     g.restore();
   }
 
-  return { el: root, refresh, get page() { return page; }, get pages() { return layout?.pages.length ?? 0; }, go };
+  return { el: root, refresh, get page() { return page; }, get pages() { return layout?.pages.length ?? 0; }, go,
+    destroy() { resized?.disconnect(); cancelAnimationFrame(frame); } };
 }
