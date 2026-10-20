@@ -269,7 +269,10 @@ export const cleanHtml = (html) => {
     // are not markup any more. Unwrapping them is what keeps an editor that
     // has been formatted and unformatted a few times from filling up with
     // empty nesting.
-    if ((tag === 'span' && !style) || (tag === 'a' && !href)) {
+    // A styled span with no words in it is what Undo leaves of a font, a
+    // size or a colour: it styles nothing, and must not make a message that
+    // has no formatting left go out as HTML mail.
+    if ((tag === 'span' && (!style || !element.textContent.trim())) || (tag === 'a' && !href)) {
       element.replaceWith(...element.childNodes);
     }
   }
@@ -398,6 +401,12 @@ function render(node) {
  * does, and is kept -- a list becomes `- item`, a quote becomes `> line`, a
  * link whose text is not its URL keeps the URL beside it.
  */
+const trimSpacesEnd = (line) => {
+  let end = line.length;
+  while (end && (line[end - 1] === ' ' || line[end - 1] === '\t')) end--;
+  return end === line.length ? line : line.slice(0, end);
+};
+
 export const htmlToText = (html) => {
   const doc = new DOMParser().parseFromString(html == null ? '' : String(html), 'text/html');
   return (doc.body ? render(doc.body) : '')
@@ -414,12 +423,18 @@ export const htmlToText = (html) => {
     // grey the signature out and mutt does not trim it from a quote. Every
     // message signed here carried `--` instead, because this pass took the
     // space off on the way out.
-    .replace(/^(.*?)[ \t]+$/gm, (line, kept) => (line === SIGNATURE_SEPARATOR ? line : kept))
+    //
+    // Walked back line by line rather than matched: the regex this was is
+    // quadratic on a run of spaces that does not end its line -- which is what
+    // a reply quoting a hostile message carries, on every autosave.
+    .split('\n')
+    .map((line) => (line === SIGNATURE_SEPARATOR ? line : trimSpacesEnd(line)))
+    .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     // Blank lines either end are the markup's; an indent on the first line
     // that is there is the writer's.
     .replace(/^(?:[ \t]*\n)+/, '')
-    .replace(/\s+$/, '');
+    .trimEnd();
 };
 
 // -- text in, HTML out ------------------------------------------------------------------

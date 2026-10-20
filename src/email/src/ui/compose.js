@@ -56,6 +56,12 @@ import { MOD } from './shortcuts.js';
  * out.
  */
 
+// A minimized composer stays in the document, so one opened beside it must
+// not reuse its ids: a label, aria-describedby and aria-activedescendant all
+// resolve to the first element in the document with the id -- the hidden one.
+let idSeq = 0;
+const idFor = (base) => (document.getElementById(base) ? `${base}-${++idSeq}` : base);
+
 const readBlob = async (blob) => new Uint8Array(await blob.arrayBuffer());
 const pendingDrafts = new Map();
 const openDrafts = new Map();
@@ -107,6 +113,10 @@ export const closeComposers = () => {
       allClosed = false;
     }
   }
+  // A message held for Undo is this account's too. Signing out is leaving,
+  // and leaving keeps the draft rather than posting it once the hold runs
+  // out -- with no session by then, or with whoever signed in next.
+  if (allClosed) for (const held of [...pendingDrafts.values()]) held.cancelHold?.();
   return allClosed;
 };
 
@@ -250,7 +260,10 @@ export function openCompose({
     const dock = dockItem?.parentElement;
     dockItem?.remove();
     dockItem = null;
-    if (dock && !dock.children.length) dock.remove();
+    if (dock && !dock.children.length) {
+      dock.remove();
+      document.documentElement.classList.remove('has-compose-dock');
+    }
   };
 
   /**
@@ -429,7 +442,13 @@ export function openCompose({
         const text = event.clipboardData?.getData('text') ?? '';
         if (!/[,;\n]/.test(text)) return;
         event.preventDefault();
-        commit(input.value + text);
+        // Where the paste goes, over whatever was selected -- as a paste
+        // anywhere else does. Added to the end of the field instead, a list
+        // pasted over a half-typed address was joined onto it.
+        const { value } = input;
+        const from = input.selectionStart ?? value.length;
+        const to = input.selectionEnd ?? value.length;
+        commit(value.slice(0, from) + text + value.slice(to));
       },
       // Moving on ends the address too: clicking Send with a name still in
       // the field is sending to that name, not abandoning it.
@@ -784,12 +803,12 @@ export function openCompose({
     };
   };
 
-  const to = recipientField('compose-to', 'To', start.to, 'someone@example.com');
-  const cc = recipientField('compose-cc', 'Cc', start.cc, 'optional');
+  const to = recipientField(idFor('compose-to'), 'To', start.to, 'someone@example.com');
+  const cc = recipientField(idFor('compose-cc'), 'Cc', start.cc, 'optional');
   // Enter in the subject goes to the message, the way it does in every other
   // mail client -- rather than submitting the form, which on a message with a
   // recipient and a subject and nothing written yet is a send.
-  const subject = field('compose-subject', 'Subject', start.subject, '',
+  const subject = field(idFor('compose-subject'), 'Subject', start.subject, '',
     () => focusMessage());
   const editor = createEditor({
     label: 'Message body',
@@ -809,7 +828,7 @@ export function openCompose({
   // already in them and are both written above it; everything else is written
   // from the end of what is there.
   const writesAbove = !draft && Boolean(start.body || start.html);
-  const focusMessage = () => (writesAbove ? editor.focusStart() : editor.focusEnd());
+  const focusMessage = () => (writesAbove ? editor.focusStart() : editor.focusOwnEnd());
 
   // -- autosave --------------------------------------------------------------
 
@@ -1049,7 +1068,11 @@ export function openCompose({
   const attach = ({ filename, type, read, size }) => {
     if (closed || sending || sent || discarded) return;
     if (restoringFiles) { setStatus('Wait for draft attachments to load.', 'error'); return; }
-    const reserved = attachments.reduce((sum, item) => sum + (item.bytes?.length ?? item.size ?? 0), 0);
+    // What the files already accepted take up. A file refused for its size
+    // is not going anywhere, and counting it refused every file after it --
+    // still, after it had been removed, since they kept the mark.
+    const reserved = attachments.filter((item) => !item.error)
+      .reduce((sum, item) => sum + (item.bytes?.length ?? item.size ?? 0), 0);
     const item = {
       id: ++nextId,
       filename: filename || 'attachment',
@@ -1118,7 +1141,7 @@ export function openCompose({
     },
   });
 
-  const status = el('p.compose-status', { id: 'compose-status', role: 'status' });
+  const status = el('p.compose-status', { id: idFor('compose-status'), role: 'status' });
   // Whether the reader has already been told what closing would cost. Said
   // once per dialog: the second close is the answer.
   const setStatus = (text, kind = '') => {
@@ -1353,11 +1376,17 @@ export function openCompose({
       removeDockItem();
       flushSave();
       clearTimeout(saveTimer);
+      // Nothing was kept -- a forward closed untouched -- but its files may
+      // have been written already, and there is no row left in Drafts to
+      // discard them from: they stayed on the device for good.
+      if (drafts && !sent && !discarded && !holding && !sending && !drafts.get(draftId)) drafts.remove(draftId);
       window.removeEventListener('pagehide', flushSave);
       document.removeEventListener('visibilitychange', saveWhenHidden);
       // A message on its way is not a draft that was put down, even though
       // the store still holds it until the send has gone through.
-      if (wrote && !sent && !holding && !sending) toast('Draft saved.', { iconName: 'pencil' });
+      // Only a draft the store still holds: one emptied before closing has
+      // just been removed, and one past a failed save was never kept.
+      if (wrote && stored && !sent && !holding && !sending) toast('Draft saved.', { iconName: 'pencil' });
     },
   });
   modal.panel.classList.add('compose-panel');
@@ -1396,6 +1425,9 @@ export function openCompose({
       }),
     );
     dock.append(dockItem);
+    // The list and the reader leave room for the dock at their end, so their
+    // last row can be scrolled out from under it.
+    document.documentElement.classList.add('has-compose-dock');
     modal.suspend();
     if (document.activeElement === document.body) dockItem.querySelector('button').focus();
   };
@@ -1448,8 +1480,9 @@ export function openCompose({
     // it unchanged has nothing to write.
     stored = true;
     lastSaved = JSON.stringify(currentDraft());
-    // Carry on where the draft left off.
-    editor.focusEnd();
+    // Carry on where the draft left off: the end of the writer's own text,
+    // which in a reply or a forward is above the signature and the quote.
+    editor.focusOwnEnd();
   } else if (prefill.kind === 'forward') {
     // A forward has no recipient yet, and that is the first thing to fill in.
     to.input.focus();

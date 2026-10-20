@@ -44,6 +44,20 @@ describe('decodeWords (RFC 2047)', () => {
     expect(decodeWords('=?utf-8?X?bogus?=')).toBe('=?utf-8?X?bogus?=');
   });
 
+  it('decodes a character split across two adjacent words as that character', () => {
+    expect(decodeWords('=?UTF-8?Q?caf=C3?= =?UTF-8?Q?=A9?=')).toBe('café');
+    expect(decodeWords(`=?utf-8?B?${Buffer.from([0xe9, 0xa0]).toString('base64')}?==?utf-8?B?${Buffer.from([0x98]).toString('base64')}?= x`)).toBe('領 x');
+    // Words in different charsets, or with text between them, stay apart.
+    expect(decodeWords('=?iso-8859-1?Q?caf=E9?= =?utf-8?Q?=C3=A9?=')).toBe('caféé');
+    expect(decodeWords('=?utf-8?Q?a?= b =?utf-8?Q?c?=')).toBe('a b c');
+    // A word too long to spread into an argument list is still decoded.
+    expect(decodeWords(`=?utf-8?Q?a?==?utf-8?B?${Buffer.from('x'.repeat(300000)).toString('base64')}?=`)).toHaveLength(300001);
+  });
+
+  it('reads a charset that names its language (RFC 2231)', () => {
+    expect(decodeWords('=?iso-8859-1*fr?Q?caf=E9?=')).toBe('café');
+  });
+
   it('falls back to utf-8 for unknown charsets', () => {
     expect(decodeWords(`=?not-a-charset?B?${b64utf8('ok')}?=`)).toBe('ok');
   });
@@ -93,6 +107,17 @@ describe('parseContentType', () => {
 });
 
 describe('parseAddress', () => {
+  it('reads the address off the header as sent, not out of an encoded word', () => {
+    const b64 = (text) => Buffer.from(text, 'utf8').toString('base64');
+    // Every other parser (the receiving server's included) sees
+    // attacker@evil.example: the brackets and parentheses are inside words.
+    const from = `=?utf-8?B?${b64('Boss <boss@bank.example> (')}?= <attacker@evil.example> =?utf-8?B?${b64(')')}?=`;
+    expect(parseAddress(from).email).toBe('attacker@evil.example');
+    expect(parseAddressList(from).map((a) => a.email)).toEqual(['attacker@evil.example']);
+    expect(parseAddress(`=?utf-8?B?${b64('boss@bank.example')}?=`).email).toBe('');
+    expect(parseAddress('jane@example.com (Jane)')).toEqual({ name: 'jane@example.com', email: 'jane@example.com' });
+  });
+
   it('splits display name and address', () => {
     expect(parseAddress('Jane Doe <jane@example.com>'))
       .toEqual({ name: 'Jane Doe', email: 'jane@example.com' });
@@ -203,6 +228,32 @@ describe('extractText', () => {
 });
 
 describe('extractBodyText', () => {
+  it('keeps the text after a photo placed mid-message, in text and in HTML', () => {
+    const part = (type, content, extra = []) => ['--b', `Content-Type: ${type}`, ...extra, '', content];
+    const photo = part('image/jpeg; name="IMG_1.jpeg"', '/9j/4AAQ',
+      ['Content-Disposition: inline; filename="IMG_1.jpeg"', 'Content-Transfer-Encoding: base64']);
+    const headers = parseHeaders('Content-Type: multipart/mixed; boundary="b"');
+    const text = [...part('text/plain; charset=us-ascii', 'Here is the photo:'), ...photo,
+      ...part('text/plain; charset=us-ascii', 'And the address is 12 Main St.'), '--b--', ''].join(CRLF);
+    expect(extractText(text, headers)).toBe('Here is the photo:\n\nAnd the address is 12 Main St.');
+    const html = [...part('text/html; charset=utf-8', '<p>Here is the photo:</p>'), ...photo,
+      ...part('text/html; charset=utf-8', '<p>And the address is 12 Main St.</p>'), '--b--', ''].join(CRLF);
+    expect(extractHtml(html, headers)).toContain('12 Main St.');
+    // A file shown inline is still a file: listed with the attachments, not
+    // read into the message.
+    const card = [...part('text/plain; charset=us-ascii', 'Hi, the card is attached.'),
+      ...part('text/vcard; charset=utf-8; name="Jane.vcf"', 'BEGIN:VCARD\r\nFN:Jane\r\nEND:VCARD',
+        ['Content-Disposition: inline; filename="Jane.vcf"']),
+      ...part('text/plain; charset=us-ascii', 'Talk soon.'), '--b--', ''].join(CRLF);
+    expect(extractText(card, headers)).toBe('Hi, the card is attached.\n\nTalk soon.');
+    const page = [...part('text/html; charset=utf-8', '<p>See the page.</p>'),
+      ...part('text/html; charset=utf-8; name="page.html"', '<p>SAVED PAGE</p>',
+        ['Content-Disposition: inline; filename="page.html"']), '--b--', ''].join(CRLF);
+    expect(extractHtml(page, headers)).not.toContain('SAVED PAGE');
+    // An alternative is still one choice among its parts, not all of them.
+    expect(extractText(multipartAlternative().body, multipartAlternative().headers)).toBe('plain version');
+  });
+
   it('does not call text the sender wrote as text flattened html', () => {
     const { headers, body } = multipartAlternative();
     expect(extractBodyText(body, headers)).toEqual({ text: 'plain version', flattened: false });
@@ -543,6 +594,13 @@ describe('parseAddressList', () => {
 
 
 describe('flattening HTML without losing the links', () => {
+  it('stays linear on a long run of spaces that no line break follows', () => {
+    const headers = parseHeaders('Content-Type: text/html; charset=utf-8');
+    const start = performance.now();
+    expect(extractText(`<pre>a   \n${' '.repeat(16000)}x</pre>`, headers)).toBe(`a\n${' '.repeat(16000)}x`);
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   const flatten = (html) => {
     const raw = `Content-Type: text/html; charset=utf-8${CRLF}${CRLF}${html}`;
     const { head, body } = splitMessage(raw);

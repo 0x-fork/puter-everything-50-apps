@@ -23,9 +23,12 @@ const root = document.getElementById('app');
 // slow network still fetching it.
 const waitForPuter = () => new Promise((resolve) => {
   if (window.puter) return resolve(true);
+  // A script that failed to load has already said so (index.html marks it):
+  // waiting out the poll only kept a skeleton up for ten more seconds.
+  if (window.puterSdkFailed) return resolve(false);
   let tries = 0;
   const timer = setInterval(() => {
-    if (window.puter || ++tries > 100) {
+    if (window.puter || window.puterSdkFailed || ++tries > 100) {
       clearInterval(timer);
       resolve(Boolean(window.puter));
     }
@@ -43,11 +46,27 @@ const accountStore = () => (window.puter?.kv ? {
   set: (key, value) => puter.kv.set(key, value),
 } : null);
 
+/**
+ * A request that never got an answer: the SDK's own network and timeout
+ * errors, a failed fetch, or the bare request object its older transport
+ * rejects with. None of these says anything about access.
+ */
+const unreachable = (error) => !error?.code || error instanceof TypeError
+  || error.code === 'network_error' || error.code === 'request_timeout';
+
+/**
+ * Whether the folder can be read. Puter answers a refused or missing path
+ * with a coded API error, which is the answer "no". A request that failed
+ * to get an answer at all is thrown, not taken for "no": a network blip at
+ * start-up showed the permission screen, whose only way on asked for a
+ * permission already held.
+ */
 const canRead = async (path) => {
   try {
     await puter.fs.stat(path);
     return true;
-  } catch {
+  } catch (error) {
+    if (unreachable(error)) throw error;
     return false;
   }
 };
@@ -109,14 +128,21 @@ async function start() {
   const objectsPath = `${mailPath}/objects`;
 
   // Being able to stat the folder means read access is already held.
-  if (!(await canRead(mailPath))) {
+  let readable;
+  try {
+    readable = await canRead(mailPath);
+  } catch (e) {
+    renderError(root, `Could not reach your mailbox: ${e?.message ?? 'the network request failed'}`, start);
+    return;
+  }
+  if (!readable) {
     renderPermission(root, {
       mailPath,
       requestAccess: async () => {
         try {
           await requestPermission(`fs:${mailPath}:read`);
         } catch {}
-        return canRead(mailPath);
+        return canRead(mailPath).catch(() => false);
       },
       onGranted: start,
       onSignOut: canSignOut() ? signOut : null,

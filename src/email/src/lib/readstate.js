@@ -48,11 +48,16 @@ const capped = (entries) => {
   const ids = Object.keys(entries);
   if (ids.length <= CAP) return entries;
   // Oldest change first out. Sorting by when it changed keeps what the user
-  // touched most recently, which is a better guess than insertion order.
-  return Object.fromEntries(ids
-    .sort((a, b) => Math.abs(entries[b]) - Math.abs(entries[a]))
-    .slice(0, CAP)
-    .map((id) => [id, entries[id]]));
+  // touched most recently, which is a better guess than insertion order. A
+  // burst of changes shares one stamp, and among those the later change -- the
+  // later key, since a change moves its id to the end -- is the one kept.
+  const order = new Map(ids.map((id, at) => [id, at]));
+  const kept = new Set([...ids]
+    .sort((a, b) => Math.abs(entries[b]) - Math.abs(entries[a]) || order.get(b) - order.get(a))
+    .slice(0, CAP));
+  // Written back in the order the changes were made, which is what the next
+  // trim reads as the order they were made in.
+  return Object.fromEntries(ids.filter((id) => kept.has(id)).map((id) => [id, entries[id]]));
 };
 
 /**
@@ -98,13 +103,19 @@ function createFlagStore({ key, storage, remote = null, onChange = null }) {
   let writeQueued = false;
 
   /**
-   * Strictly monotonic stamps: two changes to the same id in the same second
-   * must still be ordered, or a merge could resurrect the older one. The
-   * clock never falls behind a stamp already held, either: a folder marked
-   * read in one burst stamps its flags seconds ahead of the wall clock, and a
-   * store reopened after that must not stamp the next change *behind* them --
+   * Monotonic stamps: two changes to the same id in the same second must
+   * still be ordered, or a merge could resurrect the older one. The clock
+   * never falls behind a stamp already held, either: a store reopened after a
+   * change stamped ahead of the wall clock (another device's, or a flag
+   * toggled twice in a second) must not stamp the next change *behind* it --
    * at the cap that made the message just opened the oldest change in the
    * set, and the one dropped from it.
+   *
+   * Only the id changed again moves the clock past a stamp: a burst over many
+   * ids shares one. Advancing it once per flag put "mark all as read" over
+   * 3,000 messages fifty minutes into the future, and every change another
+   * device made in those fifty minutes lost the merge to it -- a message
+   * marked unread there ten minutes later came back read.
    */
   let clock = 0;
   const catchUp = () => {
@@ -114,8 +125,8 @@ function createFlagStore({ key, storage, remote = null, onChange = null }) {
     }
   };
   catchUp();
-  const stamp = () => {
-    clock = Math.max(Math.floor(Date.now() / 1000), clock + 1);
+  const stamp = (id) => {
+    clock = Math.max(Math.floor(Date.now() / 1000), clock, Math.abs(entries[id] ?? 0) + 1);
     return clock;
   };
 
@@ -149,7 +160,31 @@ function createFlagStore({ key, storage, remote = null, onChange = null }) {
     queueMicrotask(persist);
   };
 
-  const reconcile = async ({ write }) => {
+  /**
+   * One at a time. Two at once could land in either order, and a pull whose
+   * write-back was slow on the wire landed after a push that already held a
+   * newer change, and wrote over it: the change never reached the account
+   * store, and nothing pushed it again. A call made while one is waiting to
+   * start joins that one rather than queueing another round trip.
+   */
+  let tail = Promise.resolve();
+  let waiting = null;
+  const reconcile = ({ write }) => {
+    if (waiting) {
+      waiting.write ||= write;
+      return waiting.run;
+    }
+    const next = { write };
+    next.run = tail.then(() => {
+      if (waiting === next) waiting = null;
+      return reconcileOnce(next);
+    });
+    waiting = next;
+    tail = next.run;
+    return next.run;
+  };
+
+  const reconcileOnce = async ({ write }) => {
     if (!remote) return false;
     try {
       const incoming = clean(JSON.parse((await remote.get(key)) || '{}'));
@@ -182,8 +217,11 @@ function createFlagStore({ key, storage, remote = null, onChange = null }) {
     set(name, on) {
       const id = flagId(name);
       if (!id) return;
-      if (!(id in entries)) size++;
-      entries[id] = on ? stamp() : -stamp();
+      const at = stamp(id);
+      // To the end of the key order, which is the order changes were made in.
+      if (id in entries) delete entries[id];
+      else size++;
+      entries[id] = on ? at : -at;
       scheduleWrite();
       schedulePush();
     },
@@ -228,8 +266,15 @@ export function createStarState(scope, storage = window.localStorage, options = 
  * describes a move this device made a moment ago, and it is cleared as soon
  * as the message is restored.
  */
+// Origin writes waiting for their timer, by storage and key, so a store opened
+// over the same storage before the timer fires reads them -- and a write left
+// behind by an old store cannot later land over a newer one's.
+const pendingOrigins = new WeakMap();
+const ORIGIN_WRITE_MS = 250;
+
 export function createOriginState(scope, storage = window.localStorage) {
   const key = `puter-mail:origin:${scope}`;
+  pendingOrigins.get(storage)?.get(key)?.();
   const load = () => {
     try {
       const value = JSON.parse(storage.getItem(key) || '{}');
@@ -240,8 +285,12 @@ export function createOriginState(scope, storage = window.localStorage) {
   };
 
   let origins = load();
+  let timer = null;
 
-  const persist = () => {
+  const write = () => {
+    clearTimeout(timer);
+    timer = null;
+    pendingOrigins.get(storage)?.delete(key);
     // Entries only matter until the message is restored or purged, so the cap
     // drops the oldest rather than growing without bound.
     const names = Object.keys(origins);
@@ -251,6 +300,17 @@ export function createOriginState(scope, storage = window.localStorage) {
     try {
       storage.setItem(key, JSON.stringify(origins));
     } catch {}
+  };
+
+  // A bulk move records one origin per message as each move lands, each in a
+  // task of its own, and serialising the whole set every time was most of the
+  // CPU of archiving a folder: 17 of 21 seconds for ten thousand messages.
+  // One write per burst instead.
+  const persist = () => {
+    if (timer) return;
+    timer = setTimeout(write, ORIGIN_WRITE_MS);
+    if (!pendingOrigins.has(storage)) pendingOrigins.set(storage, new Map());
+    pendingOrigins.get(storage).set(key, write);
   };
 
   return {
@@ -265,6 +325,10 @@ export function createOriginState(scope, storage = window.localStorage) {
       if (!(id in origins)) return;
       delete origins[id];
       persist();
+    },
+    /** Write anything still waiting for its timer. */
+    flush() {
+      if (timer) write();
     },
   };
 }

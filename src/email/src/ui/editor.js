@@ -40,8 +40,6 @@ import {
  * arriving as three screens of table nesting.
  */
 
-// The size the sentinel below stands in for while it is being rewritten.
-const SENTINEL_SIZE = '7';
 
 /**
  * Whether a computed colour is the one a swatch stands for. A computed style
@@ -199,11 +197,11 @@ export function createEditor({ label = 'Message', placeholder = '', onInput, onF
     } catch { /* the body no longer holds that much text */ }
   };
 
-  const caretTo = (start) => {
+  const caretTo = (start, within = body) => {
     body.focus({ preventScroll: true });
     try {
       const range = document.createRange();
-      range.selectNodeContents(body);
+      range.selectNodeContents(within);
       range.collapse(start);
       const selection = document.getSelection?.();
       selection?.removeAllRanges();
@@ -276,24 +274,38 @@ export function createEditor({ label = 'Message', placeholder = '', onInput, onF
   };
 
   /**
-   * The `<font>` tags execCommand just made, as `<span style>` instead.
+   * The `<font>` tags execCommand made, as `<span style>` instead -- whenever
+   * they turn up. A command over a selection makes them at once; one at a
+   * collapsed caret makes them around the first character typed after it;
+   * and Redo puts back the ones a command made. Left as `<font>`, which
+   * cleanHtml does not keep, words coloured on screen went out plain.
    *
-   * `size` is the only one that cannot be carried across as written -- the
-   * attribute is a step on a 1-7 scale, not a length -- so the command applies
-   * step 7 as a sentinel and the real length is substituted here. No `<font>`
-   * outlives this pass, so nothing else can be wearing the sentinel.
+   * `size` is a step on a 1-7 scale rather than a length, so each size is
+   * applied as the step of its place in SIZES and read back from it here --
+   * at any time, Redo included, not only straight after the command.
+   *
+   * The text moves out of the `<font>` and into the `<span>`, which to the
+   * platform is a removal that collapses a selection inside it: typing after
+   * a colour put the caret back before the coloured words, so the next thing
+   * typed landed in front of them. The text nodes themselves survive the
+   * move, so a selection held in them is put back on the same nodes.
    */
-  let pendingSize = null;
   const normalizeFonts = () => {
     const fonts = [...body.querySelectorAll('font')];
+    if (!fonts.length) return false;
+    const selection = document.getSelection?.();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const held = range && body.contains(range.commonAncestorContainer)
+      ? [range.startContainer, range.startOffset, range.endContainer, range.endOffset]
+      : null;
     for (const font of fonts) {
       const span = document.createElement('span');
       const face = font.getAttribute('face');
       const color = font.getAttribute('color');
-      const sized = font.getAttribute('size') === SENTINEL_SIZE && pendingSize;
+      const sized = SIZES[Number(font.getAttribute('size')) - 1]?.css;
       if (face) span.style.fontFamily = face;
       if (color) span.style.color = color;
-      if (sized) span.style.fontSize = pendingSize;
+      if (sized) span.style.fontSize = sized;
 
       if (span.getAttribute('style')) {
         span.append(...font.childNodes);
@@ -302,17 +314,24 @@ export function createEditor({ label = 'Message', placeholder = '', onInput, onF
         font.replaceWith(...font.childNodes);
       }
     }
-    pendingSize = null;
+    if (held && body.contains(held[0]) && body.contains(held[2])) {
+      try {
+        const kept = document.createRange();
+        kept.setStart(held[0], held[1]);
+        kept.setEnd(held[2], held[3]);
+        selection.removeAllRanges();
+        selection.addRange(kept);
+      } catch { /* the nodes no longer hold those offsets */ }
+    }
     // Whether anything was moved, which is what decides whether the selection
     // has to be put back.
-    return fonts.length > 0;
+    return true;
   };
 
   const setFont = (stack) => command(() => exec('fontName', stack));
 
   const setSize = (css) => command(() => {
-    pendingSize = css;
-    exec('fontSize', SENTINEL_SIZE);
+    exec('fontSize', String(SIZES.findIndex((size) => size.css === css) + 1));
   });
 
   const setColor = (value) => command(() => exec('foreColor', value));
@@ -549,7 +568,18 @@ export function createEditor({ label = 'Message', placeholder = '', onInput, onF
 
   // -- typing, pasting, dropping ----------------------------------------------
 
-  body.addEventListener('input', changed);
+  // Typing after a command at a collapsed caret, and Undo and Redo, which
+  // replay execCommand's own steps, are where a `<font>` turns up now.
+  // Not while a word is being composed with an input method: the browser is
+  // still editing the text it put in the <font>, and taking it out from under
+  // it left the first keystroke of the word behind ("n日本"). Once it is done.
+  body.addEventListener('input', (event) => {
+    if (!event.isComposing && body.querySelector('font')) normalizeFonts();
+    changed();
+  });
+  body.addEventListener('compositionend', () => {
+    if (body.querySelector('font')) normalizeFonts();
+  });
   body.addEventListener('keydown', (event) => {
     if (event.isComposing || event.keyCode === 229) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -585,20 +615,35 @@ export function createEditor({ label = 'Message', placeholder = '', onInput, onF
    * inline images, and silently dropping a pasted screenshot would be worse
    * than attaching it.
    */
-  const receive = (transfer, { atCaret = true } = {}) => {
+  const receive = (transfer, { atCaret = true, at = null } = {}) => {
     if (!transfer) return false;
     const files = [...(transfer.files ?? [])];
-    if (files.length) {
+    const html = transfer.getData?.('text/html') ?? '';
+    const text = transfer.getData?.('text/plain') ?? '';
+    // Word, Excel, Keynote and Pages put a picture of what was copied on the
+    // clipboard beside the markup of it, and the picture used to win: a pasted
+    // table arrived as image.png and no text. Markup with words in it means
+    // words were copied; a copied image or a screenshot carries none.
+    const words = () => {
+      const probe = document.createElement('template');
+      probe.innerHTML = cleanHtml(html);
+      return probe.content.textContent.trim() !== '';
+    };
+    if (files.length && !(html && words())) {
       onFiles?.(files);
       return true;
     }
-    const html = transfer.getData?.('text/html') ?? '';
-    const text = transfer.getData?.('text/plain') ?? '';
     if (!html && !text) return false;
-    // A paste goes where the caret is. A drop goes where it was dropped, and
-    // the browser has already moved the caret there -- putting the remembered
-    // selection back would drag the text somewhere else entirely.
+    // A paste goes where the caret is. A drop goes where it was dropped --
+    // which the selection does not say yet while the drop event runs, so the
+    // point is turned into a caret by the caller. Without one, a drop went
+    // wherever the caret had last been.
     if (atCaret) restore();
+    else if (at) {
+      const selection = document.getSelection?.();
+      selection?.removeAllRanges();
+      selection?.addRange(at);
+    }
     if (html) exec('insertHTML', cleanHtml(html));
     else exec('insertText', text);
     remember();
@@ -613,9 +658,34 @@ export function createEditor({ label = 'Message', placeholder = '', onInput, onF
   // The compose dialog takes a file drag anywhere on it; text dragged into the
   // message is this editor's business, and would otherwise land as whatever
   // markup the source felt like handing over.
+  //
+  // Text dragged from one place in the message to another is the browser's
+  // own move, and its markup is already the editor's: answered here as a
+  // drop from outside, the selection was put back over itself and nothing
+  // moved at all.
+  let draggingOwn = false;
+  body.addEventListener('dragstart', () => { draggingOwn = true; });
+  body.addEventListener('dragend', () => { draggingOwn = false; });
+  const caretAtPoint = (x, y) => {
+    let range = null;
+    try {
+      const position = document.caretPositionFromPoint?.(x, y);
+      if (position) {
+        range = document.createRange();
+        range.setStart(position.offsetNode, position.offset);
+      } else {
+        range = document.caretRangeFromPoint?.(x, y) ?? null;
+      }
+    } catch {
+      range = null;
+    }
+    return range && body.contains(range.startContainer) ? range : null;
+  };
   body.addEventListener('drop', (event) => {
     if ([...(event.dataTransfer?.types ?? [])].includes('Files')) return;
-    if (receive(event.dataTransfer, { atCaret: false })) event.preventDefault();
+    if (draggingOwn) return;
+    const at = caretAtPoint(event.clientX, event.clientY);
+    if (receive(event.dataTransfer, { atCaret: false, at })) event.preventDefault();
   });
 
   // Firefox leaves a bare text node per line unless it is told otherwise, and
@@ -650,5 +720,25 @@ export function createEditor({ label = 'Message', placeholder = '', onInput, onF
 
     focusStart: () => caretTo(true),
     focusEnd: () => caretTo(false),
+
+    /**
+     * The end of what the writer wrote, which in a resumed reply or forward
+     * is above the signature and the message being answered: at the end of
+     * the whole body, carrying on typing went in under sixty lines of quote.
+     * What ends the writer's part is a signature separator (`-- `), the
+     * forwarded-message header, or an attribution line followed by a quote
+     * -- not any quote, since the Quote button makes those in the writer's
+     * own text too. Without any of them, it is the end of the body.
+     */
+    focusOwnEnd() {
+      const blocks = [...body.children];
+      const line = (block) => block.textContent.replace(/\u00a0/g, ' ').trim();
+      const tail = blocks.findIndex((block, index) => line(block) === '--'
+        || /^-{10} Forwarded message -{10}$/.test(line(block))
+        || (/ wrote:$/.test(line(block)) && blocks[index + 1]?.tagName === 'BLOCKQUOTE'));
+      if (tail < 0) return caretTo(false);
+      const own = blocks.slice(0, tail).reverse().find((block) => line(block));
+      return own ? caretTo(false, own) : caretTo(true);
+    },
   };
 }

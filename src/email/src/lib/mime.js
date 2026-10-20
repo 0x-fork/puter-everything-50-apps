@@ -54,7 +54,8 @@ export const subjectFromFilename = (name) => {
 
 // -- RFC 2047 encoded words (=?utf-8?B?...?=) ---------------------------------
 
-export const decodeQuotedPrintable = (text, charset) => {
+// The bytes a quoted-printable run stands for.
+const quotedPrintableBytes = (text) => {
   const bytes = [];
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -67,23 +68,50 @@ export const decodeQuotedPrintable = (text, charset) => {
       bytes.push(ch.charCodeAt(0) & 0xff);
     }
   }
-  return decodeBytes(Uint8Array.from(bytes), charset);
+  return bytes;
 };
+
+export const decodeQuotedPrintable = (text, charset) =>
+  decodeBytes(Uint8Array.from(quotedPrintableBytes(text)), charset);
+
+const ENCODED_WORD = /=\?([^?]+)\?([BQbq])\?([^?]*)\?=/g;
 
 export const decodeWords = (value) => {
   if (!value.includes('=?')) return value;
   // Whitespace *between* two encoded words is separator, not content.
-  return value
-    .replace(/\?=\s+=\?/g, '?==?')
-    .replace(/=\?([^?]+)\?([BQbq])\?([^?]*)\?=/g, (whole, charset, enc, text) => {
-      try {
-        return enc.toUpperCase() === 'B'
-          ? decodeBytes(base64ToBytes(text), charset)
-          : decodeQuotedPrintable(text.replace(/_/g, ' '), charset);
-      } catch {
-        return whole;
-      }
-    });
+  const joined = value.replace(/\?=\s+=\?/g, '?==?');
+  // Adjacent words in one charset are decoded as one run of bytes: a sender
+  // that splits a multi-byte character across two words is read as that
+  // character, not as two replacement characters.
+  let out = '';
+  let at = 0;
+  let run = null;
+  const flush = () => {
+    if (run) out += decodeBytes(Uint8Array.from(run.bytes), run.charset);
+    run = null;
+  };
+  for (const match of joined.matchAll(ENCODED_WORD)) {
+    const [whole, label, encoding, text] = match;
+    // RFC 2231 section 5 lets a word name its language: `charset*language`.
+    const charset = label.split('*')[0];
+    let bytes = null;
+    try {
+      bytes = encoding.toUpperCase() === 'B'
+        ? [...base64ToBytes(text)]
+        : quotedPrintableBytes(text.replace(/_/g, ' '));
+    } catch {
+      bytes = null;
+    }
+    if (match.index > at || !bytes || (run && run.charset.toLowerCase() !== charset.toLowerCase())) flush();
+    out += joined.slice(at, match.index);
+    if (!bytes) out += whole;
+    // A loop, not push(...bytes): one hostile word can be megabytes long.
+    else if (run) for (const byte of bytes) run.bytes.push(byte);
+    else run = { charset, bytes };
+    at = match.index + whole.length;
+  }
+  flush();
+  return out + joined.slice(at);
 };
 
 // -- RFC 822 structure --------------------------------------------------------
@@ -207,14 +235,22 @@ const stripComments = (text) => {
 
 // "Jane Doe <jane@example.com>" -> { name: 'Jane Doe', email: 'jane@example.com' }
 export const parseAddress = (value = '') => {
-  const decoded = stripComments(decodeWords(value)).replace(/\s+/g, ' ').trim();
-  const match = decoded.match(/^(.*?)\s*<([^<>]+)>$/);
+  // The structure -- comments, the angle-address -- is read off the header as
+  // it was sent, and only the display name is decoded. Decoded first, an
+  // encoded word could open a comment around the real address, or supply an
+  // address of its own, and this app would show a sender that no other
+  // parser of the same header -- the receiving server's included -- sees.
+  const raw = stripComments(String(value ?? '')).replace(/\s+/g, ' ').trim();
+  // Text after the angle-address is neither name nor address.
+  const match = raw.match(/^(.*?)\s*<([^<>]+)>[^<>]*$/);
   if (match) {
-    const name = match[1].replace(/^"(.*)"$/, '$1').trim();
+    const name = decodeWords(match[1].replace(/^"(.*)"$/, '$1')).trim();
     const email = match[2].trim();
     return { name: name || email, email };
   }
-  return { name: decoded, email: decoded.includes('@') ? decoded : '' };
+  // A bare address is only an address as written, never as decoded.
+  const decoded = decodeWords(raw);
+  return { name: decoded, email: decoded === raw && raw.includes('@') ? raw : '' };
 };
 
 /**
@@ -394,6 +430,15 @@ export const showsTarget = (label, href) => {
  * see where it pointed. Where the text of a link is not the URL itself, the
  * URL is kept beside it in angle brackets.
  */
+// Spaces and tabs off the end of every line, walked back rather than matched:
+// `/[ \t]+\n/g` is quadratic on a run of spaces that no line break follows,
+// and 16,000 of them inside a <pre> took seconds to flatten.
+const trimLineEnds = (text) => text.split('\n').map((line) => {
+  let end = line.length;
+  while (end && (line[end - 1] === ' ' || line[end - 1] === '\t')) end--;
+  return end === line.length ? line : line.slice(0, end);
+}).join('\n');
+
 const htmlToText = (html) => {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const parts = [];
@@ -457,8 +502,7 @@ const htmlToText = (html) => {
   };
 
   walk(doc.body ?? doc);
-  return parts.join('')
-    .replace(/[ \t]+\n/g, '\n')
+  return trimLineEnds(parts.join(''))
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 };
@@ -525,6 +569,10 @@ const hasText = (part) => part.text.trim() !== '';
 
 // A named file without a disposition is still an attachment. Explicitly
 // inline text may be a body, but an attached multipart must be skipped whole.
+const isNamed = (headers) => Boolean(
+  paramValue(parseContentType(headers.get('content-disposition') || '').attrs, 'filename')
+  || paramValue(parseContentType(headers.get('content-type') || '').attrs, 'name'));
+
 const isBodyAttachment = (headers) => {
   const disposition = parseContentType(headers.get('content-disposition') || '');
   const contentType = parseContentType(headers.get('content-type') || '');
@@ -552,8 +600,17 @@ export const extractBodyText = (body, headers, depth = 0) => {
   const { type, attrs } = parseContentType(headers.get('content-type') || 'text/plain');
 
   if (type.startsWith('multipart/') && attrs.boundary && depth < MAX_MULTIPART_DEPTH) {
-    const decoded = splitParts(body, attrs.boundary)
-      .map((part) => extractBodyText(part.body, part.headers, depth + 1));
+    const parts = splitParts(body, attrs.boundary);
+    const decoded = parts.map((part) => extractBodyText(part.body, part.headers, depth + 1));
+    // The parts of a mixed are all the message, in order: Apple Mail sends a
+    // photo placed mid-message as text, the photo, then the rest of the text.
+    // Reading only the first left everything after the photo unseen, and out
+    // of the quote in a reply. A part with a file name is a file, even shown
+    // inline -- a vCard, a log -- and is listed with the attachments instead.
+    if (type === 'multipart/mixed') {
+      const pieces = decoded.filter((p, i) => hasText(p) && !p.flattened && !isNamed(parts[i].headers));
+      if (pieces.length > 1) return { text: pieces.map((p) => p.text.trimEnd()).join('\n\n'), flattened: false };
+    }
     const written = decoded.find((p) => hasText(p) && !p.flattened);
     return written ?? decoded.find(hasText) ?? NO_TEXT;
   }
@@ -571,7 +628,7 @@ export const extractText = (body, headers, depth = 0) =>
   extractBodyText(body, headers, depth).text;
 
 /**
- * The first `text/html` part of a message, decoded but not sanitized -- that
+ * The `text/html` body of a message, decoded but not sanitized -- that
  * is sanitize.js's job, and it happens on the way into the sandboxed frame.
  * Parts marked as attachments are skipped: an attached .html file is a file,
  * not the body of the message.
@@ -581,11 +638,19 @@ export const extractHtml = (body, headers, depth = 0) => {
   const { type, attrs } = parseContentType(headers.get('content-type') || 'text/plain');
 
   if (type.startsWith('multipart/') && attrs.boundary && depth < MAX_MULTIPART_DEPTH) {
+    // In a mixed every HTML part is a piece of the body, in order -- a file
+    // attached mid-message splits the HTML around it -- so all of them are
+    // kept. The HTML parser reads the joined documents as one body.
+    const mixed = type === 'multipart/mixed';
+    const found = [];
     for (const part of splitParts(body, attrs.boundary)) {
-      const found = extractHtml(part.body, part.headers, depth + 1);
-      if (found) return found;
+      // After the first, a named part is a file shown inline, not more body.
+      if (mixed && found.length && isNamed(part.headers)) continue;
+      const html = extractHtml(part.body, part.headers, depth + 1);
+      if (html) found.push(html);
+      if (html && !mixed) break;
     }
-    return '';
+    return found.join('\n');
   }
 
   return type === 'text/html' ? decodeBody(body, headers) : '';

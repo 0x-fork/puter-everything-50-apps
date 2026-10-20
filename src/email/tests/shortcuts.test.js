@@ -117,12 +117,49 @@ describe('shortcuts that work anywhere in the app', () => {
   it('does not let the second key of a chord also mean what it means alone', async () => {
     mount();
     await settle();
-    // `s` on its own stars; after `g` it is Starred, and nothing else.
-    press('g');
-    press('s');
+    // `s` on its own stars the focused row; after `g` it is Starred, and
+    // nothing else. Pressed on a focused row, which answers `s` itself.
+    const starred = () => root.querySelectorAll('.star-btn[aria-pressed="true"]').length;
+    const before = starred();
+    const row = rows()[0];
+    row.focus();
+    press('g', row);
+    press('s', row);
     await settle();
     expect(currentFolder()).toContain('Starred');
-    expect(root.querySelectorAll('.row-star[aria-pressed="true"]')).toHaveLength(0);
+    press('g');
+    press('i');
+    await settle();
+    expect(starred()).toBe(before);
+  });
+
+  it('does not archive the focused row on g then e', async () => {
+    mount();
+    await settle();
+    const count = rows().length;
+    rows()[0].focus();
+    press('g', rows()[0]);
+    press('e', rows()[0]);
+    await settle(400);
+    expect(currentFolder()).toContain('Inbox');
+    expect(rows()).toHaveLength(count);
+  });
+
+  it('goes to Trash on g then a shifted #, rather than deleting the open message', async () => {
+    mount();
+    await settle();
+    const count = rows().length;
+    await openFirstMessage();
+    press('g');
+    // A real keyboard sends a keydown for Shift before the `#` it shifts.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', shiftKey: true, bubbles: true }));
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '#', shiftKey: true, bubbles: true, cancelable: true }));
+    await settle(400);
+    expect(currentFolder()).toContain('Trash');
+    press('g');
+    press('i');
+    await settle(400);
+    expect(rows()).toHaveLength(count);
   });
 
   it('forgets a chord whose second key names no folder', async () => {
@@ -134,6 +171,21 @@ describe('shortcuts that work anywhere in the app', () => {
     press('j');
     expect(document.activeElement).toBe(rows()[0]);
     expect(currentFolder()).toContain('Inbox');
+  });
+
+  it('still answers with a tick box focused', async () => {
+    mount();
+    await settle();
+    const check = rows()[2].querySelector('.row-check');
+    check.focus();
+    check.click();
+    expect(document.activeElement).toBe(check);
+    press('j', check);
+    expect(document.activeElement).toBe(rows()[3]);
+    const all = root.querySelector('.select-all');
+    all.focus();
+    press('c', all);
+    expect(composed).toHaveLength(1);
   });
 
   it('opens and closes the sheet on ?', async () => {

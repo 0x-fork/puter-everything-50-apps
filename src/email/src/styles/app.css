@@ -1150,13 +1150,22 @@
   position: fixed;
   right: max(16px, env(safe-area-inset-right));
   bottom: max(0px, env(safe-area-inset-bottom));
-  z-index: 90;
+  /* Under the phone's folder drawer (80) and its scrim (70): above them, the
+     dock sat over the bottom of the open drawer and took taps through the
+     scrim meant to close it. */
+  z-index: 65;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   max-width: calc(100% - 32px);
 }
+/* A minimized draft sits over the foot of the window, and on a phone over the
+   whole width of it. The scrollers under it leave room at their end, so the
+   last row of the list -- its star, its tick box -- can be scrolled out from
+   under the dock instead of staying covered by it. */
+.has-compose-dock .msglist,
+.has-compose-dock .msg-scroll { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .compose-dock-item {
   display: flex;
   align-items: center;
@@ -1659,6 +1668,7 @@
   cursor: pointer;
   pointer-events: auto;
   text-decoration: underline;
+  white-space: nowrap;
 }
 /* The toast is the page's ink colour with the page's background as its text,
    so its hover wash has to come from the same pair: a fixed white one was
@@ -1851,7 +1861,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sidebar { transition: none; }
+  /* The open drawer's own rule is the more specific one, and went on sliding
+     it in with reduced motion asked for. */
+  .sidebar, .nav-open .sidebar { transition: none; }
 }
 
 /* -- touch targets -------------------------------------------------------------- */
@@ -2213,3 +2225,16 @@
   /* Reserve the preview line while unthreaded rows receive their headers. */
   .row-snippet { min-height: 1.5em; }
 }
+
+/* -- right-to-left mail ---------------------------------------------------------- */
+
+/* Mail is in whatever script its sender wrote it in. Each run of it takes its
+   direction from its own first strong character -- per paragraph in a body --
+   rather than from the page's: a Hebrew subject's "?" and "10:00" jumped to
+   the wrong ends, and a body of Arabic read left-aligned with its brackets
+   reversed. The preview is isolated so an RTL subject and an RTL preview
+   beside it are not reordered into one run. */
+.row-people, .row-subject, .msg-subject, .msg-from-name,
+.msg-item-snippet, .msg-body:not(.msg-source) { unicode-bidi: plaintext; }
+.row-snippet { unicode-bidi: isolate; }
+.msg-subject, .msg-body { text-align: start; }

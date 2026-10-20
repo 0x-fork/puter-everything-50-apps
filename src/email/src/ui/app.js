@@ -849,6 +849,14 @@ export function renderApp(root, ctx) {
     else menuBtn.focus();
   };
 
+  // Listeners on the document, the window and media queries outlive the
+  // shell: signing out renders the gate over the same root. Each one stood
+  // down when the shell had gone, but went on holding all of it -- every
+  // listing, the header index, the last search -- about 11 MB per sign-out.
+  // This signal removes them when the shell leaves the page.
+  const shellListeners = new AbortController();
+  const listening = { signal: shellListeners.signal };
+
   // Growing past the breakpoint turns the drawer back into a static rail, so
   // an open drawer has to be folded away or the page would stay inert with
   // no scrim left to dismiss it.
@@ -856,7 +864,7 @@ export function renderApp(root, ctx) {
     if (!frame.isConnected) return;
     if (!e.matches) setNavOpen(false);
     syncMenuBtn();
-  });
+  }, listening);
 
   menuBtn.addEventListener('click', () => {
     if (mobile()) {
@@ -883,6 +891,9 @@ export function renderApp(root, ctx) {
     indexNext = 0;
     folder = id;
     folderOffset = 0;
+    // A new folder's results start at their first page, whichever way the
+    // search over it is started.
+    resultOffset = 0;
     clearNewMail();
     clearSelection();
     renderActionBar();
@@ -920,7 +931,10 @@ export function renderApp(root, ctx) {
   // may only contain options, and the empty-state panel and the "Load older
   // messages" button both have to live inside the scroll area.
   const listEl = el('div.msglist');
-  const optionsEl = el('div.msglist-options', { role: 'listbox', 'aria-label': 'Messages' });
+  // Several rows can be ticked at once, and a screen reader is told so.
+  const optionsEl = el('div.msglist-options', {
+    role: 'listbox', 'aria-label': 'Messages', 'aria-multiselectable': 'true',
+  });
   const listRefreshBtn = el('button.icon-btn', {
     type: 'button', html: icon('refresh', 18), 'aria-label': 'Refresh this folder', title: 'Refresh',
   });
@@ -1436,6 +1450,7 @@ export function renderApp(root, ctx) {
         `${unread ? 'Mark as read' : 'Mark as unread'}: ${subject || what}`);
     }
     row.classList.toggle('is-selected', selected.has(unit));
+    row.setAttribute('aria-selected', String(selected.has(unit) || unit === opened));
     row.querySelector('.row-check').checked = selected.has(unit);
     row.querySelector('.row-check').setAttribute('aria-label', `Select ${subject || what}`);
     syncStarBtn(row.querySelector('.star-btn'), unitStarred(unit), subject || what);
@@ -1631,6 +1646,10 @@ export function renderApp(root, ctx) {
     // the browser and the OS: Cmd+S has to save the page rather than star the
     // focused row, and Cmd+Down has to scroll to the end of the list.
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The second key of a `g` chord names a folder and nothing else; the
+    // document's handler answers it after this one. Answered here too, `g s`
+    // starred the focused row on its way to Starred and `g e` archived it.
+    if (chording) return;
     const rows = visibleRows();
     if (!rows.length) return;
     const focused = document.activeElement?.closest?.('.row');
@@ -1738,6 +1757,9 @@ export function renderApp(root, ctx) {
       wholeFolder = false;
     }
     unit.row?.classList.toggle('is-selected', on);
+    // What is ticked is what is selected, to a screen reader as on screen:
+    // ticked rows went on saying "not selected". The open row is selected too.
+    unit.row?.setAttribute('aria-selected', String(on || unit === opened));
     const box = unit.row?.querySelector('.row-check');
     if (box) box.checked = on;
   };
@@ -1876,6 +1898,8 @@ export function renderApp(root, ctx) {
    * seconds, and asks no more of the server than the header reads do.
    */
   const WRITE_CONCURRENCY = 4;
+  // Day folders this shell has asked for, shared by every move it makes.
+  const madeDirs = new Map();
 
   /** `work` over each of `items`, a few at a time, taken in the order given. */
   const eachInFlight = async (items, work) => {
@@ -1887,6 +1911,13 @@ export function renderApp(root, ctx) {
   };
 
   const describe = (count) => `${count} message${count === 1 ? '' : 's'}`;
+
+  // Messages with a move or a delete in flight. A second press of Archive --
+  // a double click, `e` twice -- arrives before the first move has taken the
+  // row away, and moving the same file twice failed the second time: it said
+  // "Could not archive" under "Archived", and asked for write permission.
+  const writing = new Set();
+  const idle = (list) => list.filter((unit) => !unit.messages.some((message) => writing.has(message)));
 
   /**
    * The meta line counting a bulk operation down: "Archiving 40 of 300…".
@@ -1912,9 +1943,22 @@ export function renderApp(root, ctx) {
    *
    * Returns where the row was, so the keyboard can carry on from there.
    */
-  const shrink = (unit, gone) => {
+  const shrink = (unit, gone, from = null) => {
     const at = units.indexOf(unit);
     if (!gone.length) return at === -1 ? 0 : at;
+    // Only in the folder the messages left: by now the list on screen may be
+    // the folder they went to, where the same names are the messages that
+    // have just arrived.
+    if (at === -1 && !searching() && from && view().box === from) {
+      // A listing made while the move was in flight rebuilt this conversation
+      // over entries of its own for the same files, and those are the rows on
+      // screen: left alone, an archived message stayed in the inbox.
+      const names = new Set(gone.map((message) => message.name));
+      for (const other of units.filter((candidate) => candidate !== unit
+        && candidate.messages.some((message) => names.has(message.name)))) {
+        shrink(other, other.messages.filter((message) => names.has(message.name)));
+      }
+    }
     const left = unit.messages.filter((message) => !gone.includes(message));
     for (const message of gone) message.units?.delete(unit);
     // Assigned before the branch below, not after it: an emptied conversation
@@ -1924,6 +1968,10 @@ export function renderApp(root, ctx) {
     unit.messages = left;
     if (!left.length) {
       if (at !== -1) units.splice(at, 1);
+      // A row that never scrolled into view is still observed, and the
+      // observer held it -- and its conversation -- after it had gone. An
+      // undo that puts the row back observes it again if it still needs to.
+      if (unit.row) observer.unobserve(unit.row);
       unit.row?.remove();
       selected.delete(unit);
       if (opened === unit) closeReader({ focusRow: false });
@@ -1941,7 +1989,20 @@ export function renderApp(root, ctx) {
    * newest-first as text, so the position is found rather than remembered --
    * correct even if other mail arrived in between.
    */
-  const grow = (unit, back) => {
+  const grow = (unit, back, owners) => {
+    if (view().box === back[0]?.box && !searching()) {
+      // A listing made while the undo was in flight may already show these
+      // files, as rows of its own; putting this one back as well listed the
+      // conversation twice. `owners` -- which conversation on screen holds
+      // each file -- is built once per undo by the caller: built here, an undo
+      // of a whole folder rebuilt it for every conversation it put back.
+      back = back.filter((message) => {
+        const owner = owners.get(message.name);
+        return !owner || owner === unit;
+      });
+      if (!back.length) return;
+      for (const message of back) owners.set(message.name, unit);
+    }
     Object.assign(unit, makeThread([...unit.messages, ...back]));
     track(unit);
     if (units.includes(unit)) {
@@ -1953,13 +2014,11 @@ export function renderApp(root, ctx) {
     const found = units.findIndex((other) => key(other) < key(unit));
     const at = found === -1 ? units.length : found;
     units.splice(at, 0, unit);
-    const row = unit.row ?? buildRow(unit);
-    updateRow(unit);
-    if (optionsEl.isConnected) {
-      optionsEl.insertBefore(row, optionsEl.children[at] ?? null);
-      // The row may have been built for a filter it no longer passes.
-      row.hidden = !matches(unit);
-    }
+    // The row is left to the render that follows every undo, which builds
+    // rows for the loaded window only. Built here, an undo of a whole folder
+    // made one per conversation put back -- ten thousand rows, nearly all of
+    // them removed again by that render.
+    if (unit.row) updateRow(unit);
   };
 
   /**
@@ -1970,6 +2029,7 @@ export function renderApp(root, ctx) {
    * back into Trash -- and said "Restored to Trash" while doing it.
    */
   const move = async (list, to, { restoring = false, onProgress } = {}) => {
+    list = idle(list);
     const moved = [];
     let failed = 0;
     // A conversation moves whole: filing half of one would leave the rest of
@@ -1978,6 +2038,8 @@ export function renderApp(root, ctx) {
     const gone = new Map(list.map((unit) => [unit, []]));
     const waiting = new Map(list.map((unit) => [unit, unit.messages.length]));
     const jobs = list.flatMap((unit) => unit.messages.map((message) => ({ unit, message })));
+    const fromOf = new Map(list.map((unit) => [unit, unit.messages[0]?.box]));
+    for (const { message } of jobs) writing.add(message);
     await eachInFlight(jobs, async ({ unit, message }) => {
       const from = message.box;
       const was = message.path;
@@ -1986,7 +2048,7 @@ export function renderApp(root, ctx) {
         // reach a shell that has not yet heard of the write.
         own(was, `${boxPath(ctx.mailPath, to)}/${message.day}/${message.name}`);
         const path = await mailWrite(() =>
-          moveMessage({ fs: ctx.fs, mailPath: ctx.mailPath, message, to }));
+          moveMessage({ fs: ctx.fs, mailPath: ctx.mailPath, message, to, dirs: madeDirs }));
         boxes[from].remove(message);
         moved.push({ unit, message, from, was, restoring });
         gone.get(unit).push(message);
@@ -2005,10 +2067,11 @@ export function renderApp(root, ctx) {
       } catch {
         failed++;
       }
+      writing.delete(message);
       onProgress?.();
       const left = waiting.get(unit) - 1;
       waiting.set(unit, left);
-      if (left === 0) shrink(unit, gone.get(unit));
+      if (left === 0) shrink(unit, gone.get(unit), fromOf.get(unit));
     });
     return { moved, failed };
   };
@@ -2025,7 +2088,20 @@ export function renderApp(root, ctx) {
       try {
         own(message.path, was);
         await mailWrite(() =>
-          moveMessage({ fs: ctx.fs, mailPath: ctx.mailPath, message, to: from }));
+          moveMessage({ fs: ctx.fs, mailPath: ctx.mailPath, message, to: from, dirs: madeDirs }));
+        // The folder the move had filed it in may have been opened since, and
+        // listed the file under an entry of its own. The file has left it, so
+        // the entry and its row go too: they stayed, over a file that was no
+        // longer there, after an Undo pressed from that folder.
+        const there = boxes[landed]?.find?.(message.name);
+        if (there) {
+          boxes[landed].remove(there);
+          if (view().box === landed && !searching()) {
+            for (const other of units.filter((candidate) => candidate.messages.includes(there))) {
+              shrink(other, [there]);
+            }
+          }
+        }
         message.path = was;
         message.box = from;
         boxes[from].insert(message);
@@ -2037,14 +2113,18 @@ export function renderApp(root, ctx) {
         // next Restore.
         if (restoring) originState.set(message.name, landed);
         else originState.clear(message.name);
-        outdate(from);
+        // Not outdate(from): insert() has put the message back into the
+        // listing and its catalog in place, and dropping the catalog detached
+        // it from a search running over it, which then went on listing
+        // whatever was archived after the undo.
         back.set(unit, [...(back.get(unit) ?? []), message]);
       } catch {
         failed++;
       }
       onProgress?.();
     });
-    for (const [unit, messages] of back) grow(unit, messages);
+    const owners = new Map(units.flatMap((other) => other.messages.map((message) => [message.name, other])));
+    for (const [unit, messages] of back) grow(unit, messages, owners);
     renderAfterChange();
     toast(
       failed ? `Could not restore ${describe(failed)}.` : `Restored ${describe(moved.length - failed)}.`,
@@ -2072,11 +2152,14 @@ export function renderApp(root, ctx) {
    * and the list has to say something while that happens.
    */
   const deleteForever = async (list, { onProgress } = {}) => {
+    list = idle(list);
+    const fromOf = new Map(list.map((unit) => [unit, unit.messages[0]?.box]));
     let failed = 0;
     let done = 0;
     const gone = new Map(list.map((unit) => [unit, []]));
     const waiting = new Map(list.map((unit) => [unit, unit.messages.length]));
     const jobs = list.flatMap((unit) => unit.messages.map((message) => ({ unit, message })));
+    for (const { message } of jobs) writing.add(message);
     await eachInFlight(jobs, async ({ unit, message }) => {
       try {
         own(message.path);
@@ -2087,10 +2170,11 @@ export function renderApp(root, ctx) {
       } catch {
         failed++;
       }
+      writing.delete(message);
       onProgress?.(++done);
       const left = waiting.get(unit) - 1;
       waiting.set(unit, left);
-      if (left === 0) shrink(unit, gone.get(unit));
+      if (left === 0) shrink(unit, gone.get(unit), fromOf.get(unit));
     });
     return failed;
   };
@@ -2233,6 +2317,8 @@ export function renderApp(root, ctx) {
   };
 
   const runAction = async (id, list) => {
+    // What is already on its way somewhere is not sent again.
+    if (id !== 'discard') list = idle(list);
     if (!list.length) return;
     // Where the keyboard is, so it can be handed on if this takes the control
     // that has it off the page.
@@ -2309,6 +2395,16 @@ export function renderApp(root, ctx) {
   const targets = (unit) => (selected.size ? selection() : [unit]);
 
   /**
+   * Flags changed in one go share a stamp, and the flag store keeps the later
+   * of them when it is full, so they are changed oldest first. Changed in the
+   * order a listing returns them -- newest first -- marking more than the
+   * store holds as read left the *newest* messages unread again.
+   */
+  const oldestFirst = (messages) => messages.map((message) => [`${message.day}/${message.name}`, message])
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, message]) => message);
+
+  /**
    * Mark as read, or back to unread -- which is how people queue mail for
    * later, and until now the app could only go one way.
    */
@@ -2319,7 +2415,7 @@ export function renderApp(root, ctx) {
     const at = Math.max(0, visibleRows().indexOf(list[0]?.row));
     const changed = messagesOf(list).filter((message) =>
       !OUTGOING.has(message.box) && isUnread(message) === read);
-    for (const message of changed) {
+    for (const message of oldestFirst(changed)) {
       if (read) readState.markRead(message.name);
       else readState.markUnread(message.name);
     }
@@ -2380,7 +2476,7 @@ export function renderApp(root, ctx) {
     }
     const at = Math.max(0, visibleRows().indexOf(document.activeElement?.closest?.('.row')));
     const apply = (read) => {
-      for (const message of changed) {
+      for (const message of oldestFirst(changed)) {
         if (read) readState.markRead(message.name);
         else readState.markUnread(message.name);
       }
@@ -2842,11 +2938,17 @@ export function renderApp(root, ctx) {
     indexMore(entries);
   };
 
-  const runSearch = async (value) => {
+  /**
+   * `relist` is the same query asked again because the folder under it was
+   * listed again -- a gap in the watch, mail restored from another device. It
+   * is not the reader searching, so the open message, the ticks and the page
+   * of results stay where they are.
+   */
+  const runSearch = async (value, { relist = false } = {}) => {
     searchController?.abort();
     searchController = new AbortController();
     const { signal } = searchController;
-    resultOffset = 0;
+    if (!relist) resultOffset = 0;
     queryText = (value ?? '').trim();
     query = parseQuery(queryText);
     const token = ++searchToken;
@@ -2860,8 +2962,10 @@ export function renderApp(root, ctx) {
     results = [];
     indexedCount = 0;
     unreadableCount = 0;
-    if (frame.classList.contains('reading')) closeReader({ focusRow: false });
-    clearSelection();
+    if (!relist) {
+      if (frame.classList.contains('reading')) closeReader({ focusRow: false });
+      clearSelection();
+    }
 
     if (!searching()) {
       searchStatus = '';
@@ -2913,6 +3017,30 @@ export function renderApp(root, ctx) {
     searchEntries = entries;
     searchCandidates = candidates;
     searchStatus = '';
+    if (relist) {
+      // The listing built new entries for the same files. What was open or
+      // ticked follows its file to the entry that replaced it, and goes if
+      // the file has left the folder.
+      const byName = new Map(entries.map((entry) => [entry.name, entry]));
+      const follow = (unit) => {
+        const now = byName.get(unit.latest.name);
+        return !now ? null : now === unit.latest ? unit : resultUnit(now);
+      };
+      for (const unit of [...selected]) {
+        const now = follow(unit);
+        if (now === unit) continue;
+        selected.delete(unit);
+        if (now) selected.add(now);
+      }
+      if (opened && frame.classList.contains('reading')) {
+        const now = follow(opened);
+        if (!now) closeReader({ focusRow: false });
+        else if (now !== opened) {
+          opened = now;
+          renderMsgActions(now);
+        }
+      }
+    }
     renderResults({ force: true, rescan: false });
 
     // Subjects come from the filenames, so a subject-only query is already
@@ -2951,6 +3079,18 @@ export function renderApp(root, ctx) {
         drafts: ['pencil', 'No drafts.',
           'A message you close before sending is kept here, on this device, until you send or discard it.'],
       };
+      if (mailbox().listError) {
+        // Nothing is listed because the listing failed. "No mail yet" was a
+        // claim about mail this view could not read, with nothing to press,
+        // and nothing retried it.
+        listEl.append(el('div.center', { role: 'alert' },
+          el('span.center-icon', { html: icon('alert', 28, 1.4) }),
+          el('p', {}, 'Could not load this folder.'),
+          el('p.center-note', {}, String(mailbox().listError?.message ?? mailbox().listError)),
+          el('button.btn.btn-small', { type: 'button', onclick: () => refresh() }, 'Retry')));
+        syncSelection();
+        return;
+      }
       const [iconName, title, note] = EMPTY[folder] ?? [];
       listEl.append(iconName
         ? el('div.center', {},
@@ -3139,8 +3279,14 @@ export function renderApp(root, ctx) {
     clear(msgActions);
     clear(msgScroll);
     if (opened?.row) {
-      opened.row.setAttribute('aria-selected', 'false');
-      if (focusRow) opened.row.focus();
+      opened.row.setAttribute('aria-selected', String(selected.has(opened)));
+      if (focusRow) {
+        // The row the keyboard comes back to is the list's one tab stop;
+        // left on whichever row had it before, Shift+Tab from here jumped to
+        // the top of the list.
+        for (const row of visibleRows()) row.tabIndex = row === opened.row ? 0 : -1;
+        opened.row.focus();
+      }
     }
     opened = null;
   };
@@ -4194,7 +4340,7 @@ export function renderApp(root, ctx) {
     const kept = refresh && opened === unit && stackEl?.isConnected
       ? new Map([...new Set([...cards, latestCard])].filter(Boolean).map((card) => [card.message.path, card]))
       : null;
-    if (opened?.row && opened !== unit) opened.row.setAttribute('aria-selected', 'false');
+    if (opened?.row && opened !== unit) opened.row.setAttribute('aria-selected', String(selected.has(opened)));
     opened = unit;
     unit.row?.setAttribute('aria-selected', 'true');
     frame.classList.add('reading');
@@ -4395,9 +4541,12 @@ export function renderApp(root, ctx) {
    */
 
   // Where a keypress is a character being typed rather than a command.
+  // A tick box or a button takes no characters, and treating it as a field
+  // left every shortcut dead from the moment a row's tick box was clicked.
+  const NOT_TYPED = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'color', 'range', 'file']);
   const typingIn = (target) => target instanceof HTMLElement
     && (target.isContentEditable
-      || target.tagName === 'INPUT'
+      || (target.tagName === 'INPUT' && !NOT_TYPED.has(target.type))
       || target.tagName === 'TEXTAREA'
       || target.tagName === 'SELECT');
 
@@ -4431,6 +4580,11 @@ export function renderApp(root, ctx) {
     // A bare keypress, like the list's own. Shift is not a modifier here:
     // `?` and `#` are typed with it.
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // A key that only changes what the next key types is not a key of its
+    // own. Shift arrives as a keydown before the `#` it shifts, and ended a
+    // `g` chord before it: `g #` deleted the open conversation instead of
+    // going to Trash.
+    if (e.key === 'Shift' || e.key === 'CapsLock' || e.key === 'AltGraph') return;
     if (typingIn(e.target) || overlayOpen()) return;
 
     // Mid-chord, the key means a folder and nothing else -- including when it
@@ -4470,6 +4624,9 @@ export function renderApp(root, ctx) {
         return;
       case '/':
         e.preventDefault();
+        // The open drawer makes the top bar inert, and focusing an inert
+        // field does nothing at all.
+        if (frame.classList.contains('nav-open')) setNavOpen(false);
         searchInput.focus();
         searchInput.select();
         return;
@@ -4480,6 +4637,9 @@ export function renderApp(root, ctx) {
       case 'c':
         if (!ctx.onCompose) return;
         e.preventDefault();
+        // As the Compose pill does: left open, the drawer was still covering
+        // the list when the message was sent.
+        if (frame.classList.contains('nav-open')) setNavOpen(false);
         compose();
         return;
       case 'j':
@@ -4555,7 +4715,7 @@ export function renderApp(root, ctx) {
     }
   };
 
-  document.addEventListener('keydown', onShortcut);
+  document.addEventListener('keydown', onShortcut, listening);
 
   // -- loading ---------------------------------------------------------------------
 
@@ -4583,7 +4743,8 @@ export function renderApp(root, ctx) {
     // read every row was going to cost anyway, and the index keeps it.
     if (threadable()) await readHeads(box.messages, { active });
     if (!active()) return false;
-    listed.add(box.box);
+    // A folder that could not be read at all is listed again when next opened.
+    if (!box.listError || box.messages.length) listed.add(box.box);
     // A listing that could not be read leaves the previous one in place, so
     // there is still something to render; the caller reports the failure.
     // Both paths carry the selection across the rebuild themselves: a
@@ -4591,7 +4752,7 @@ export function renderApp(root, ctx) {
     // otherwise be an object the folder no longer holds -- and the action bar
     // went on offering to act on messages whose rows had been replaced under
     // it.
-    if (searching()) runSearch(searchInput.value);
+    if (searching()) runSearch(searchInput.value, { relist: true });
     else renderList();
     return !box.listError;
   };
@@ -4801,12 +4962,24 @@ export function renderApp(root, ctx) {
       syncAgain = true;
       return;
     }
+    // The inbox on screen has never been read: its first listing failed. A
+    // check now is the next try at reading it, and what it finds is the
+    // folder, not new mail -- listed the way opening it would. Elsewhere the
+    // mailbox lists it again quietly itself, and an inbox that was read once
+    // and failed a check since is checked as usual.
+    if (boxes.inbox.unread && view().box === 'inbox' && !searching()) {
+      loadFolder();
+      return;
+    }
     syncing = true;
     try {
       do {
         syncAgain = false;
+        const unread = boxes.inbox.unread;
         const added = await boxes.inbox.sync();
         if (added.length && frame.isConnected) await receive(added);
+        // Read for the first time, quietly: its count is news to the folders.
+        else if (unread && !boxes.inbox.unread) updateNavCounts();
       } while (syncAgain && frame.isConnected);
     } catch {
       // A failed check is not worth reporting; the next one may succeed, and
@@ -4830,8 +5003,18 @@ export function renderApp(root, ctx) {
   const ownWrites = new Map();
   const own = (...paths) => {
     const now = Date.now();
-    for (const [path, at] of ownWrites) if (now - at > OWN_WRITE_MS) ownWrites.delete(path);
-    for (const path of paths) if (path) ownWrites.set(path, now);
+    // Kept in the order they were marked, so the expired marks are the ones
+    // at the front: a bulk move marking thousands of paths no longer walks
+    // every live mark again for each one.
+    for (const [path, at] of ownWrites) {
+      if (now - at <= OWN_WRITE_MS) break;
+      ownWrites.delete(path);
+    }
+    for (const path of paths) {
+      if (!path) continue;
+      ownWrites.delete(path);
+      ownWrites.set(path, now);
+    }
   };
   const heardOwn = (path) => {
     const at = ownWrites.get(path);
@@ -5049,6 +5232,8 @@ export function renderApp(root, ctx) {
   new MutationObserver((records, observer) => {
     if (frame.isConnected) return;
     observer.disconnect();
+    originState.flush();
+    shellListeners.abort();
     searchController?.abort();
     historyController?.abort();
     indexQueue.length = 0;
@@ -5082,19 +5267,20 @@ export function renderApp(root, ctx) {
         // A tab put away may not come back, and what it has read is worth
         // keeping.
         searchIndex.flush();
+        originState.flush();
         return;
       }
       startWatching();
       syncInbox();
       pullFlags();
-    });
+    }, listening);
     window.addEventListener('online', () => {
       if (!frame.isConnected) return;
       startWatching();
       syncInbox();
-    });
+    }, listening);
     // Offline, every check is a failure waiting to happen.
-    window.addEventListener('offline', stopPolling);
+    window.addEventListener('offline', stopPolling, listening);
     listEl.addEventListener('scroll', () => {
       if (pendingNew && listEl.scrollTop <= 8 && !frame.classList.contains('reading')) clearNewMail();
     }, { passive: true });
@@ -5124,14 +5310,14 @@ export function renderApp(root, ctx) {
       btn.setAttribute('aria-busy', 'false');
     }
     // Confirming a refresh that did not happen is worse than saying nothing:
-    // the rows on screen would be the ones from before. A failure with
-    // nothing listed is left alone, because it cannot be told apart from a
-    // mailbox whose objects folder has not been created yet -- the common
-    // case on a new account, which the empty panel already explains.
-    const stale = !ok && box.messages.length > 0;
+    // the rows on screen would be the ones from before. A mailbox whose
+    // objects folder has not been created yet -- a new account -- is not a
+    // failure, and lists as empty.
     toast(
-      stale ? 'Could not refresh. Showing the last messages loaded.' : `${label} refreshed.`,
-      { iconName: stale ? 'alert' : 'refresh' },
+      ok ? `${label} refreshed.`
+        : box.messages.length ? 'Could not refresh. Showing the last messages loaded.'
+          : `Could not load ${label}.`,
+      { iconName: ok ? 'refresh' : 'alert' },
     );
   };
   refreshBtn.addEventListener('click', () => {

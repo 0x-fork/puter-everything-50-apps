@@ -40,31 +40,59 @@ const ADDRESS_ONLY = new RegExp(`^${ADDRESS}$`, 'i');
 
 const CLOSERS = { ')': '(', ']': '[', '}': '{', '>': '<' };
 
-const count = (text, character) => {
-  let total = 0;
-  for (const char of text) if (char === character) total++;
-  return total;
-};
-
 /**
  * "See https://example.com/page." ends a sentence; the full stop is not part
  * of the URL. Neither is the closing bracket of "(see https://example.com)" --
  * but the one in ".../Foo_(bar)" is.
+ *
+ * One walk back from the end, with the bracket counts kept as it goes: a regex
+ * and two counts for every character trimmed made a URL followed by a long run
+ * of ")" quadratic, and sixteen thousand of them froze the reader for seconds.
  */
+const TRAILING = new Set(['.', ',', ';', ':', '!', '?', "'", '"', '\u201d', '\u2019']);
+
 const trimTrailing = (match) => {
-  let value = match;
-  for (;;) {
-    const stripped = value.replace(/[.,;:!?'"”’]+$/, '');
-    if (stripped !== value) {
-      value = stripped;
-      continue;
+  const tally = {};
+  for (const char of match) if ('()[]{}<>'.includes(char)) tally[char] = (tally[char] || 0) + 1;
+  let end = match.length;
+  while (end > 0) {
+    const last = match[end - 1];
+    if (TRAILING.has(last)) {
+      end -= 1;
+    } else if (last in CLOSERS && (tally[last] || 0) > (tally[CLOSERS[last]] || 0)) {
+      tally[last] -= 1;
+      end -= 1;
+    } else {
+      break;
     }
-    const last = value.slice(-1);
-    if (last in CLOSERS && count(value, last) > count(value, CLOSERS[last])) {
-      value = value.slice(0, -1);
-      continue;
-    }
-    return value;
+  }
+  return match.slice(0, end);
+};
+
+// Whether the host as written differs from `url.host`, the one the browser
+// connects to.
+const disguised = (raw, url) => {
+  const written = (/^\s*(?:https?:\/\/)?([^/?#]+)/i.exec(raw)?.[1] ?? '').toLowerCase();
+  const host = url.host.toLowerCase();
+  // `url.host` drops a port the scheme would have used anyway, so
+  // `https://example.com:443/` came out as a disagreement with itself and
+  // was reported to the reader as a link going somewhere else. Spelling out
+  // the default port is not a lie about where a link goes.
+  const spelledOut = `${host}:${url.protocol === 'https:' ? '443' : '80'}`;
+  return written !== host && written !== spelledOut;
+};
+
+/**
+ * Whether an http(s) href names its host in a form other than the one the
+ * browser connects to: a homograph, or userinfo in front of the real host.
+ */
+export const disguisedHost = (href = '') => {
+  const raw = String(href ?? '').trim();
+  try {
+    const url = new URL(raw);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && disguised(raw, url);
+  } catch {
+    return false;
   }
 };
 
@@ -84,18 +112,11 @@ const asLink = (raw) => {
     // as written -- a homograph, or userinfo smuggled in front of the real
     // host -- the caller is told, so it can show where the link really goes
     // rather than repeating the misleading text.
-    const written = (/^(?:https?:\/\/)?([^/?#]+)/i.exec(raw)?.[1] ?? '').toLowerCase();
-    const host = url.host.toLowerCase();
-    // `url.host` drops a port the scheme would have used anyway, so
-    // `https://example.com:443/` came out as a disagreement with itself and
-    // was reported to the reader as a link going somewhere else. Spelling out
-    // the default port is not a lie about where a link goes.
-    const spelledOut = `${host}:${url.protocol === 'https:' ? '443' : '80'}`;
     return {
       url: url.href,
       host: url.host,
       label: raw,
-      mismatch: written !== host && written !== spelledOut,
+      mismatch: disguised(raw, url),
     };
   } catch {
     return null;
@@ -147,8 +168,12 @@ export const linkHost = (href = '') => {
 };
 
 /** True when the text of a link disagrees with where it actually goes. */
+// Characters that take up no space. One at the end of "paypal.com" made the
+// text claim nothing, so a link to anywhere else went unremarked.
+const INVISIBLE = /[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
 export const misleadingLink = (label, href) => {
-  const claimed = claimedHost(label);
+  const claimed = claimedHost(String(label ?? '').replace(INVISIBLE, ''));
   // Link text claims a hostname; a port does not change that hostname.
   const real = linkHost(href).replace(/:\d+$/, '');
   return Boolean(claimed && real && claimed !== real);

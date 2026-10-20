@@ -115,6 +115,11 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
    * mail that had been there all along. Null until something has been listed.
    */
   let newest = null;
+  // Whether a listing has been started, and whether one has answered -- with
+  // the folder, or with the news that there is no folder yet -- rather than
+  // being cancelled or failing.
+  let attempted = false;
+  let answered = false;
   const keyOf = (message) => `${message.day}/${message.name}`;
   const noteNewest = () => {
     if (messages.length && (!newest || keyOf(messages[0]) > newest)) newest = keyOf(messages[0]);
@@ -456,20 +461,22 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
 
   const relist = async () => {
     const gen = ++generation;
+    attempted = true;
     paging = null;
     let page;
     try {
       page = await readDays(null, CATALOG_PAGE_SIZE);
     } catch (e) {
       if (gen !== generation) return [];
-      // Two different situations arrive as the same error, and the error
-      // shape cannot tell them apart: there is no `objects` folder yet (a
+      if (isMissingDirectory(e)) answered = true;
+      // Two different situations: there is no `objects` folder yet (a
       // mailbox nothing has been delivered to), or the read itself failed.
       // Keeping the previous listing is right for both -- on a first open
-      // there is nothing to keep, so an untouched mailbox still reads as
-      // empty, and on a re-open a blip no longer looks like the mail has
-      // been deleted. `listError` lets the caller say so out loud.
-      listError = e;
+      // there is nothing to keep, and on a re-open a blip does not look like
+      // the mail has been deleted. Only the failed read is an error the
+      // caller has to say out loud and offer to retry: a missing folder is
+      // an empty mailbox, the same distinction the catalog makes.
+      listError = isMissingDirectory(e) ? null : e;
       return [];
     }
     if (gen !== generation) return [];
@@ -492,7 +499,10 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
     recursiveListing = paginated && !page.cursor;
     recursiveDirectories = pendingDays.length;
     recursivePage = { cursor: null, items: null, nextCursor: null, more: pendingDays.length > 0 };
-    return startPage();
+    const added = await startPage();
+    // A page whose every day failed to read has not answered either.
+    if (gen === generation && (messages.length || !listError)) answered = true;
+    return added;
   };
 
   // A second open() while the first is still listing gets the same listing:
@@ -540,6 +550,15 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
     // so there is no boundary to check above; the listing is the check. An
     // emptied page is neither: what it held is remembered, and only what
     // sorts above it has arrived.
+    //
+    // A first listing that was cancelled (the reader went to another folder
+    // before it finished) or failed is not that: what it would have shown
+    // was there before anything was ever shown, and announcing it said "14
+    // new messages" about mail that had been read last week.
+    if (attempted && !answered) {
+      await open();
+      return [];
+    }
     if (!newest) return open();
 
     const gen = generation;
@@ -608,7 +627,9 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
 
     // Only register arrivals after the whole check succeeds. The watch uses
     // known entries to decide whether a delivery has already been handled.
-    const added = arrivals.filter(({ item }) => !removed.has(item.name))
+    // "Load older messages" may have paged an arrival in from the catalog
+    // while this check was on the wire, and it is held already.
+    const added = arrivals.filter(({ item }) => !removed.has(item.name) && !loaded.has(item.name))
       .map(({ item, day }) => entryFor(item, day));
     added.sort((a, b) => `${b.day}/${b.name}`.localeCompare(`${a.day}/${a.name}`));
     // Everything here sorts above the newest message held, so none of it can
@@ -626,6 +647,18 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
     return added;
   };
 
+  // The entry for the same file, which is not always the same object: a
+  // listing made while a move or an undo was in flight builds entries of its
+  // own for the files it finds, and matched by identity the old entry missed
+  // them -- an archived message stayed listed, an undone one was listed twice.
+  //
+  // Identity is asked first and natively; the filename only when that misses,
+  // because a bulk move or undo asks this once per message of the folder.
+  const indexOfFile = (list, message, mayHold = true) => {
+    const at = list.indexOf(message);
+    return at !== -1 || !mayHold ? at : list.findIndex((entry) => entry.name === message.name);
+  };
+
   // A message leaving the folder is a splice, not a re-list: `pendingDays` is
   // untouched, so "Load older messages" carries on from where it was.
   const remove = (message) => {
@@ -633,11 +666,11 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
     known.delete(message.name);
     const buffered = dayFiles.get(message.day);
     if (buffered) dayFiles.set(message.day, buffered.filter((item) => item.name !== message.name));
-    const index = messages.indexOf(message);
+    const index = indexOfFile(messages, message, loaded.has(message.name));
     if (index !== -1) messages.splice(index, 1);
     loaded.delete(message.name);
     if (catalog) {
-      const at = catalog.indexOf(message);
+      const at = indexOfFile(catalog, message);
       if (at !== -1) {
         catalog.splice(at, 1);
         if (at < catalogNext) catalogNext--;
@@ -651,6 +684,9 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
   // correct even if other messages arrived in between.
   const insert = (message) => {
     removed.delete(message.name);
+    // Already listed again under an entry of its own: that one stands.
+    if (loaded.has(message.name)) return indexOfFile(messages, message);
+    const listedAgain = known.get(message.name);
     known.set(message.name, message);
     const key = (m) => `${m.day}/${m.name}`;
     const place = (list) => {
@@ -662,7 +698,7 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
     const index = place(messages);
     loaded.add(message.name);
     noteNewest();
-    if (catalog && !catalog.includes(message)) {
+    if (catalog && !catalog.includes(message) && !(listedAgain && catalog.includes(listedAgain))) {
       if (place(catalog) < catalogNext) catalogNext++;
     }
     return index;
@@ -713,6 +749,11 @@ export function createMailbox({ fs, objectsPath, box = 'inbox', pageSize = PAGE_
     get total() { return catalog ? catalog.length : null; },
     /** The error from the last listing that could not read, else null. */
     get listError() { return listError; },
+    /**
+     * Whether a listing was started and none has answered yet -- the folder
+     * has never been read, as against a later check that failed.
+     */
+    get unread() { return attempted && !answered; },
   };
 }
 
@@ -848,16 +889,33 @@ export const mailFilename = (subject = '', date = new Date(), random) => {
  * `move` would otherwise do to work it out, so this costs no more requests
  * than it did before.
  */
-export async function moveMessage({ fs, mailPath, message, to }) {
+export async function moveMessage({ fs, mailPath, message, to, dirs = null }) {
   const dir = `${boxPath(mailPath, to)}/${message.day}`;
+  // `dirs` remembers the day folders this session has already asked for, so a
+  // bulk move of a busy day asks once rather than once per message: archiving
+  // a folder was one mkdir for every move, twice the requests it needed.
+  const remembered = Boolean(dirs?.has(dir));
+  const ensure = () => {
+    let made = dirs?.get(dir);
+    if (!made) {
+      // Already there, which is every message after the first one filed on
+      // that day. A folder that genuinely cannot be made is the move's to
+      // report: it is the operation that has to succeed.
+      made = fs.mkdir(dir, { createMissingParents: true }).then(() => {}, () => {});
+      dirs?.set(dir, made);
+    }
+    return made;
+  };
+  await ensure();
   try {
-    await fs.mkdir(dir, { createMissingParents: true });
-  } catch {
-    // Already there, which is every message after the first one filed on that
-    // day. A folder that genuinely cannot be made is the move's to report:
-    // it is the operation that has to succeed.
+    await fs.move(message.path, dir, { newName: message.name });
+  } catch (error) {
+    // A remembered folder may have been removed since; ask for it again, once.
+    if (!remembered) throw error;
+    dirs.delete(dir);
+    await ensure();
+    await fs.move(message.path, dir, { newName: message.name });
   }
-  await fs.move(message.path, dir, { newName: message.name });
   return `${dir}/${message.name}`;
 }
 

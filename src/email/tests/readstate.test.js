@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   createReadState, createStarState, createOriginState, createImageState, mergeFlags, flagId,
   memoryStorage,
@@ -233,6 +233,31 @@ describe('createOriginState', () => {
     expect(createOriginState('you', storage).get('a--x')).toBe('inbox');
   });
 
+  it('writes a burst of moves once, not once per message', async () => {
+    const storage = memoryStorage();
+    const setItem = vi.spyOn(storage, 'setItem');
+    const state = createOriginState('me', storage);
+    for (let i = 0; i < 2000; i++) state.set(`m${i}--x`, 'inbox');
+    expect(setItem).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(storage.getItem('puter-mail:origin:me'))['m1999--x']).toBe('inbox');
+  });
+
+  it('writes on flush, and never lets an old store write over a newer one', () => {
+    const storage = memoryStorage();
+    const old = createOriginState('me', storage);
+    old.set('a--x', 'archive');
+    // A store opened before the timer fires reads what is waiting...
+    const fresh = createOriginState('me', storage);
+    expect(fresh.get('a--x')).toBe('archive');
+    fresh.set('b--x', 'sent');
+    fresh.flush();
+    // ...and the old store has nothing left to write over it.
+    old.flush();
+    expect(createOriginState('me', storage).get('b--x')).toBe('sent');
+  });
+
   it('ignores stored junk rather than throwing', () => {
     const storage = memoryStorage();
     storage.setItem('puter-mail:origin:me', '["not", "an", "object"]');
@@ -324,6 +349,81 @@ describe('flags against an account store', () => {
       set: async (key, value) => { calls.set.push(key); values[key] = value; },
     };
   };
+
+  it('does not let a slow write-back land over a newer change', async () => {
+    vi.useFakeTimers();
+    try {
+      const values = { 'puter-mail:read:user': JSON.stringify({ other: 100 }) };
+      let slow = null;
+      const remote = {
+        get: async (key) => values[key] ?? null,
+        set: (key, value) => {
+          if (!slow) {
+            // The pull's write-back is slow on the wire.
+            slow = new Promise((resolve) => setTimeout(() => {
+              values[key] = value;
+              resolve();
+            }, 5000));
+            return slow;
+          }
+          values[key] = value;
+          return Promise.resolve();
+        },
+      };
+      const storage = memoryStorage();
+      storage.setItem('puter-mail:read:user', JSON.stringify({ local: 50 }));
+      const state = createReadState('user', storage, { remote });
+      state.pull();
+      await vi.advanceTimersByTimeAsync(10);
+      // A message read while the pull is still writing back.
+      state.markRead('m1');
+      await vi.advanceTimersByTimeAsync(12000);
+      expect(JSON.parse(values['puter-mail:read:user']).m1).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('joins calls made while one is waiting, rather than queueing each', async () => {
+    const remote = fakeKv({ 'puter-mail:read:user': JSON.stringify({ m1: 500 }) });
+    const state = createReadState('user', memoryStorage(), { remote });
+    await Promise.all([state.pull(), state.pull(), state.pull(), state.pull()]);
+    // None had started when the others were asked for, so they are one.
+    expect(remote.calls.get).toHaveLength(1);
+    // One asked for while another is on the wire waits for it, once.
+    const first = state.pull();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.all([state.pull(), state.pull(), first]);
+    expect(remote.calls.get).toHaveLength(3);
+  });
+
+  it('lets a later change on another device win over an earlier bulk mark', async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.UTC(2026, 9, 20, 12, 0, 0);
+      vi.setSystemTime(start);
+      const remote = fakeKv();
+      const a = createReadState('user', memoryStorage(), { remote });
+      const b = createReadState('user', memoryStorage(), { remote });
+      // Device A marks 3,000 messages read in one go, and pushes.
+      const ids = Array.from({ length: 3000 }, (unused, i) => `0199${String(i).padStart(8, '0')}--x`);
+      for (const id of ids) a.markRead(id);
+      await vi.advanceTimersByTimeAsync(2000);
+      // Ten minutes later device B, which has not pulled since, reads the
+      // newest of them and then marks it unread.
+      const target = ids.at(-1);
+      vi.setSystemTime(start + 10 * 60_000);
+      b.markRead(target);
+      vi.setSystemTime(start + 10 * 60_000 + 5000);
+      b.markUnread(target);
+      await vi.advanceTimersByTimeAsync(2000);
+      await a.pull();
+      expect(b.isRead(target)).toBe(false);
+      expect(a.isRead(target)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('pulls the account state into the local cache and reports the change', async () => {
     const remote = fakeKv({ 'puter-mail:read:user': JSON.stringify({ m1: 500 }) });

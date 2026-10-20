@@ -84,9 +84,14 @@ export const foldHeader = (name, parts, separator) => {
   const lines = [];
   parts.forEach((part, index) => {
     const piece = index < parts.length - 1 ? `${part}${separator.trim()}` : part;
-    if (line.length + 1 + piece.length > 78 && line !== `${name}:`) {
+    // A line of nothing but the fold's space is not one to end: RFC 5322
+    // does not allow a header line that is only whitespace.
+    if (line.length + 1 + piece.length > 78 && line !== `${name}:` && line.trim()) {
       lines.push(line);
-      line = ' ';
+      // The space added below is the fold's one whitespace character. A
+      // second one here was content to a parser that unfolds the way RFC 5322
+      // says, by removing the line break only.
+      line = '';
     }
     line += ` ${piece}`;
   });
@@ -223,7 +228,10 @@ const nameParams = (key, filename) => {
   if (isAscii(safe)) return [`${key}="${safe}"`];
   return [
     `${key}="${encodeWords(safe).join(' ')}"`,
-    `${key}*=UTF-8''${encodeURIComponent(safe)}`,
+    // encodeURIComponent leaves ' ( ) * as they are, and RFC 2231 does not
+    // allow them unencoded: a strict parser reads "(" as the start of a
+    // comment, and "Résumé (final).pdf" arrived as "résumé".
+    `${key}*=UTF-8''${encodeURIComponent(safe).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`,
   ];
 };
 
@@ -308,7 +316,11 @@ export const buildMessage = ({
     // servers reject outright, so it is left out instead.
     ...(to.length ? [foldHeader('To', to, ', ')] : []),
     ...(cc.length ? [foldHeader('Cc', cc, ', ')] : []),
-    foldHeader('Subject', isAscii(subject) ? [subject] : encodeWords(subject), ' '),
+    // An ASCII subject folds between its words. One with a word too long to
+    // fold at goes as encoded words, which fold anywhere, like one that is not
+    // ASCII. Unfolded, a long subject was one header line of any length, past
+    // the 998 characters RFC 5322 allows.
+    foldHeader('Subject', isAscii(subject) && !/[^ ]{900}/.test(subject) ? subject.split(' ') : encodeWords(subject), ' '),
     `Date: ${rfc2822Date(date)}`,
     `Message-ID: ${messageId}`,
     // What makes a reply hold together as a conversation in Gmail, Apple
@@ -480,6 +492,12 @@ export const withSignature = (body = '', signature = '') => {
 export const isSignatureOnly = (body = '', signature = '') => {
   const block = signatureBlock(signature);
   if (!block) return false;
-  const squash = (text) => String(text ?? '').replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').trim();
+  // Line by line and walked back: `/[ \t]+\n/g` is quadratic on a long run
+  // of spaces with no line break after it.
+  const squash = (text) => String(text ?? '').replace(/\r\n?/g, '\n').split('\n').map((line) => {
+    let end = line.length;
+    while (end && (line[end - 1] === ' ' || line[end - 1] === '\t')) end--;
+    return line.slice(0, end);
+  }).join('\n').trim();
   return squash(body) === squash(block);
 };
