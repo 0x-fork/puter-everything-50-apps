@@ -366,6 +366,120 @@ test("leaving the editor saves edits that autosave has not sent yet", async ({
   ).toHaveCount(0);
 });
 
+test("a draft left during a first save notices the file changing later", async ({
+  page,
+}) => {
+  const story = await base64(createDeck("story"));
+  await mockDrive(page, { path: "/" });
+  await expect(title(page)).toHaveText("Untitled presentation");
+  await addText(page);
+  await page.evaluate(() => {
+    const write = puter.fs.write;
+    let gate = new Promise((resolve) => (window.__release = resolve));
+    puter.fs.write = async (...args) => {
+      await gate;
+      gate = null;
+      return write(...args);
+    };
+  });
+  await page.keyboard.press("Control+s");
+  await expect(status(page)).toHaveText("Saving…");
+  // An edit the first save does not carry stays in the draft.
+  await addText(page);
+  await page.getByRole("button", { name: "Back to presentations" }).click();
+  await page.evaluate(() => window.__release());
+  await expect(
+    page.getByRole("button", {
+      name: "Untitled presentation PowerPoint presentation",
+    }),
+  ).toBeVisible();
+  const path = `${APP_FOLDER}/Untitled presentation.pptx`;
+  await page.evaluate(
+    ([path, b64]) => window.__fs.change(path, b64),
+    [path, story],
+  );
+  await page
+    .getByRole("button", { name: "Untitled presentation Recovery draft" })
+    .click();
+  await expect(page.locator(".object-hit")).toHaveCount(2);
+  await addText(page);
+  await expect(
+    page.getByRole("dialog", { name: "This presentation changed elsewhere" }),
+  ).toBeVisible();
+  expect(await writes(page)).toHaveLength(1);
+});
+
+test("an edit made during a first save is autosaved after it", async ({
+  page,
+}) => {
+  await mockDrive(page, { path: "/" });
+  await expect(title(page)).toHaveText("Untitled presentation");
+  await addText(page);
+  await page.evaluate(() => {
+    const write = puter.fs.write;
+    let gate = new Promise((resolve) => (window.__release = resolve));
+    puter.fs.write = async (...args) => {
+      await gate;
+      gate = null;
+      return write(...args);
+    };
+  });
+  await page.keyboard.press("Control+s");
+  await expect(status(page)).toHaveText("Saving…");
+  await addText(page);
+  // The edit's autosave comes due while the save is still running.
+  await page.waitForTimeout(2500);
+  await page.evaluate(() => window.__release());
+  await expect(status(page)).toHaveText("Saved to Puter");
+  const saved = await writes(page);
+  expect(saved).toHaveLength(2);
+  expect(saved[1]).toMatchObject({
+    path: `${APP_FOLDER}/Untitled presentation.pptx`,
+    options: { overwrite: true },
+  });
+});
+
+test("a Puter file's saved edits leave no draft on the device", async ({
+  page,
+}) => {
+  const story = await base64(createDeck("story"));
+  await mockDrive(page, {
+    seed: { "Presentations/Kept.pptx": story },
+    path: "/#/home",
+  });
+  // The library lists no saved draft; count what is stored.
+  const storedDrafts = () =>
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const r = indexedDB.open("presentation-drafts-v1");
+          r.onsuccess = () => {
+            const count = r.result
+              .transaction("drafts")
+              .objectStore("drafts")
+              .count();
+            count.onsuccess = () => {
+              r.result.close();
+              resolve(count.result);
+            };
+          };
+        }),
+    );
+  for (let round = 0; round < 2; round++) {
+    await page
+      .getByRole("button", { name: "Kept PowerPoint presentation" })
+      .click();
+    await expect(title(page)).toHaveText("Kept");
+    await addText(page);
+    await expect(status(page)).toHaveText("Saved to Puter");
+    await page.getByRole("button", { name: "Back to presentations" }).click();
+    await expect(
+      page.getByRole("button", { name: "Kept PowerPoint presentation" }),
+    ).toBeVisible();
+    await expect.poll(storedDrafts).toBe(0);
+  }
+});
+
 test("a failing autosave says so in the status, and leaving asks first", async ({
   page,
 }) => {
@@ -402,6 +516,70 @@ test("a failing autosave says so in the status, and leaving asks first", async (
   await expect(
     page.getByRole("button", { name: "Flaky Recovery draft" }),
   ).toBeVisible();
+});
+
+test("opening a Puter file offers its unsaved recovery draft", async ({
+  page,
+}) => {
+  const story = await base64(createDeck("story"));
+  await mockDrive(page, {
+    seed: { "Presentations/Flaky.pptx": story },
+    path: "/#/home",
+  });
+  const file = page.getByRole("button", {
+    name: "Flaky PowerPoint presentation",
+  });
+  await file.click();
+  await expect(title(page)).toHaveText("Flaky");
+  const saved = await page.locator(".object-hit").count();
+  await page.evaluate(() => {
+    window.__write = puter.fs.write;
+    puter.fs.write = async () => {
+      throw Error("Puter is out of space.");
+    };
+  });
+  await addText(page);
+  await page.getByRole("button", { name: "Back to presentations" }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Leave", exact: true })
+    .click();
+  await page.evaluate(() => (puter.fs.write = window.__write));
+  const prompt = page.getByRole("dialog", { name: "Recover unsaved changes?" });
+  await file.click();
+  await prompt.getByRole("button", { name: "Open the Puter version" }).click();
+  await expect(title(page)).toHaveText("Flaky");
+  await expect(page.locator(".object-hit")).toHaveCount(saved);
+  await page.getByRole("button", { name: "Back to presentations" }).click();
+  await file.click();
+  await prompt.getByRole("button", { name: "Recover changes" }).click();
+  await expect(page.locator(".object-hit")).toHaveCount(saved + 1);
+  await expect(page.locator("#toast")).toContainText("Draft recovered");
+});
+
+test("a recovery draft open in one tab does not open in another", async ({
+  page,
+  context,
+}) => {
+  await mockDrive(page);
+  await expect(title(page)).toHaveText("Untitled presentation");
+  await addText(page);
+  await page.getByRole("button", { name: "Back to presentations" }).click();
+  const draft = (p) =>
+    p.getByRole("button", { name: "Untitled presentation Recovery draft" });
+  await draft(page).click();
+  await expect(page.locator(".object-hit")).toHaveCount(1);
+  const other = await context.newPage();
+  await mockDrive(other, { path: "/#/home" });
+  await draft(other).click();
+  await expect(other.locator("#toast")).toHaveText(
+    "This draft is open in another tab.",
+  );
+  await expect(other.locator(".document-title")).toHaveCount(0);
+  await page.getByRole("button", { name: "Back to presentations" }).click();
+  await expect(draft(page)).toBeVisible();
+  await draft(other).click();
+  await expect(other.locator(".object-hit")).toHaveCount(1);
 });
 
 test("closing the Puter window asks about a presentation never saved", async ({

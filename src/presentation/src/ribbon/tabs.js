@@ -156,8 +156,8 @@ export function buildTabs(api) {
                 options: () => api.fontSizes(),
                 commit: (value) => {
                   const n = parseFloat(value);
-                  if (Number.isFinite(n) && n >= 1 && n <= 4000)
-                    return api.applyText({ size: n });
+                  if (!Number.isFinite(n) || n < 1 || n > 4000) return false;
+                  return api.applyText({ size: n });
                 },
               },
               {
@@ -488,7 +488,8 @@ export function buildTabs(api) {
   }
   const insertShapesGroup = (largeLabels = true) => ({
     id: "drawing-insert",
-    label: "Drawing",
+    // As on PowerPoint for Mac's Home tab: Insert, then Drawing beside it.
+    label: "Insert",
     icon: "shapes",
     items: [
       {

@@ -78,13 +78,13 @@ export const deleteDraft = (id) =>
     return s.delete(id);
   });
 export const getDraft = (id) => transact("readonly", (s) => s.get(id));
-export const linkCloudFile = (id, owner, path, name) =>
+export const linkCloudFile = (id, owner, path, name, baseline = {}) =>
   transact("readwrite", (s, summaries) => {
     const request = s.get(id);
     request.onsuccess = () => {
       const record = request.result;
       if (!record || record.owner !== owner || record.path) return;
-      Object.assign(record, { path, name });
+      Object.assign(record, baseline, { path, name });
       s.put(record);
       summaries.put(metadata(record));
     };
@@ -113,6 +113,22 @@ export const detachCloudFile = (owner, path) =>
   updateCloudDrafts(owner, path, { path: null });
 export const renameCloudFile = (owner, path, renamed, name) =>
   updateCloudDrafts(owner, path, { path: renamed, name });
+// A draft written when its revision was the one saved in Puter has nothing
+// left to recover. Those are removed, all but `keep`, the open presentation's.
+export const pruneSavedDrafts = (owner, keep = null) =>
+  transact("readwrite", (s, summaries) => {
+    const cursor = summaries.index("owner").openCursor(owner);
+    cursor.onsuccess = () => {
+      const entry = cursor.result;
+      if (!entry) return;
+      const { id, cloudSaved, path } = entry.value;
+      if (cloudSaved && path && id !== keep) {
+        summaries.delete(id);
+        s.delete(id);
+      }
+      entry.continue();
+    };
+  });
 export async function listDrafts(owner) {
   return (
     await transact("readonly", (s, summaries) =>

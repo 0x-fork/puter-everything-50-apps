@@ -42,6 +42,7 @@ import {
   slideRotation,
   removeAnyShape,
   pruneUnusedMedia,
+  removeSlides,
   canHoldText,
   hasTextBody,
   firstTextElement,
@@ -446,6 +447,44 @@ const READ_TOOLS = new Set([
 /** Does this tool change the presentation? */
 export const changesDeck = (name) =>
   TOOL_NAMES.has(name) && !READ_TOOLS.has(name);
+
+const SLIDE_ARGS = ["slide", "slides", "position", "to"];
+const toolProperties = (name) =>
+  TOOLS.find((t) => t.function.name === name)?.function.parameters.properties ||
+  {};
+
+/**
+ * Pins a call to the deck as it is when the call is described: a slide it
+ * leaves to "the slide the user is looking at" becomes that slide's number,
+ * and the order of the slides is kept with it. A call that then waits (for
+ * approval, or for the user's typing) acts on the slides that were described,
+ * or fails when the slides have since been added, deleted or moved, never on
+ * whatever slide is current by then. Returns the order to check with
+ * `pinnedSlidesMoved`.
+ */
+export function pinCall(name, args, env) {
+  const properties = toolProperties(name);
+  if (args && typeof args === "object") {
+    const current = env.slideIndex() + 1;
+    if ("slide" in properties && args.slide == null) args.slide = current;
+    if (name === "set_slide_properties" && args.slides == null && !args.all)
+      args.slides = [current];
+    if (name === "add_slide" && args.position == null)
+      args.position = current + 1;
+  }
+  return slideOrder(env.pres());
+}
+/** Whether the slides a pinned call names have moved since it was pinned. */
+export function pinnedSlidesMoved(name, order, env) {
+  const properties = toolProperties(name);
+  return (
+    order != null &&
+    SLIDE_ARGS.some((key) => key in properties) &&
+    order !== slideOrder(env.pres())
+  );
+}
+const slideOrder = (pres) =>
+  P.getSlides(pres).map(P.getSlidePartName).join("\n");
 
 /* ---------- Addresses and values ---------- */
 
@@ -1035,22 +1074,7 @@ async function deleteSlides(pres, args, env) {
       throw new ToolError(
         "At least one slide must remain in the presentation.",
       );
-    // Links to the slides going away would point at parts no longer there.
-    for (const s of slides(pres))
-      if (!parts.has(P.getSlidePartName(s)))
-        for (const shape of P.getSlideShapes(s)) {
-          const action = safe(() => P.getShapeClickAction(shape));
-          if (
-            action?.kind === "slide" &&
-            parts.has(P.getSlidePartName(action.slide))
-          ) {
-            if (hasTextBody(shape) && P.hasShapeText(shape))
-              P.setShapeHyperlink(shape, null);
-            P.setShapeClickAction(shape, null);
-          }
-        }
-    for (const s of targets) P.removeSlide(pres, s);
-    pruneUnusedMedia(pres);
+    removeSlides(pres, targets);
   });
   return {
     content: `Deleted ${numbers.length === 1 ? `slide ${numbers[0]}` : `slides ${numbers.join(", ")}`}. The slides after them have moved up; their numbers have changed.`,

@@ -3,7 +3,7 @@
 // rehearsed timings and recorded narration.
 import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { P, parseDeck } from "../src/model.js";
+import { P, createDeck, parseDeck, text } from "../src/model.js";
 
 test.setTimeout(120_000);
 // A fake camera and microphone for the recording studio.
@@ -208,6 +208,26 @@ test("the show's menu, tools and shortcuts; ink is kept after the show", async (
   expect(ink).toHaveLength(1);
 });
 
+test("menus opened in a fullscreen show appear inside it", async ({ page }) => {
+  await story(page);
+  await tab(page, "Slide Show");
+  await (await command(page, "Play from Start", "Start Slide Show")).click();
+  const d = show(page);
+  await d.getByRole("button", { name: "Toggle fullscreen" }).click();
+  await page.waitForFunction(() => !!document.fullscreenElement);
+  const box = await d.locator(".presenter-frame").boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, {
+    button: "right",
+  });
+  const menu = page.getByRole("menu", { name: "Slide show" });
+  await expect(menu).toBeVisible();
+  expect(
+    await menu.evaluate((m) => document.fullscreenElement.contains(m)),
+  ).toBe(true);
+  await menu.getByRole("menuitem", { name: "Next" }).click();
+  await expect(d.locator(".presenter-counter")).toHaveText("2 / 5");
+});
+
 test("presenter view shows notes, the next slide and a timer, with an audience window", async ({
   page,
 }) => {
@@ -228,6 +248,9 @@ test("presenter view shows notes, the next slide and a timer, with an audience w
   );
   await expect(side.locator(".show-console-next-label")).toHaveText(/^Slide 2/);
   await expect(d.locator(".show-console-counter")).toHaveText("Slide 1 of 5");
+  // One elapsed-time clock: the view's, not the control bar's as well.
+  await expect(d.getByRole("timer", { name: "Time elapsed" })).toBeVisible();
+  await expect(d.getByRole("button", { name: /^Time elapsed/ })).toBeHidden();
   const size = await side
     .locator(".show-console-notes-text")
     .evaluate((n) => parseFloat(getComputedStyle(n).fontSize));
@@ -371,4 +394,90 @@ test("recording narration with the camera, a live camera, and clearing it", asyn
       ),
     ).toBe(true);
   }
+});
+
+test("ending a show before the browser hands over the camera lets it go", async ({
+  page,
+}) => {
+  // The browser takes a while to answer for the devices.
+  await page.addInitScript(() => {
+    const media = navigator.mediaDevices;
+    const ask = media.getUserMedia.bind(media);
+    window.tracks = [];
+    media.getUserMedia = async (want) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      const stream = await ask(want);
+      window.tracks.push(...stream.getTracks());
+      return stream;
+    };
+  });
+  await story(page);
+  await tab(page, "Record");
+  await (await command(page, "Live Camera", "Camera")).click();
+  await (await command(page, "From Beginning", "Record")).click();
+  const d = show(page);
+  await expect(d.getByRole("toolbar", { name: "Recording" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(d).toBeHidden();
+  // The studio's camera and microphone and the slide's live camera.
+  await expect
+    .poll(() => page.evaluate(() => window.tracks.length), { timeout: 10_000 })
+    .toBe(3);
+  expect(
+    await page.evaluate(() => window.tracks.map((t) => t.readyState)),
+  ).toEqual(["ended", "ended", "ended"]);
+});
+
+test("switching to a custom show asks about the ink first", async ({
+  page,
+}) => {
+  const pres = createDeck("blank");
+  for (let i = 0; i < 3; i++)
+    text(
+      i ? P.addBlankSlide(pres) : P.getSlides(pres)[0],
+      `Slide ${i + 1}`,
+      1,
+      1,
+      8,
+      2,
+    );
+  const slides = P.getSlides(pres);
+  P.setCustomShows(pres, [{ name: "Short", slides: [slides[2], slides[1]] }]);
+  await page.route("https://js.puter.com/v2/", (r) =>
+    r.fulfill({
+      contentType: "application/javascript",
+      body: 'window.puter={env:"web",auth:{isSignedIn:async()=>false},ui:{onLaunchedWithItems:()=>{}}};',
+    }),
+  );
+  await page.goto("/#/home");
+  const choose = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Import PPTX", exact: true }).click();
+  await (
+    await choose
+  ).setFiles({
+    name: "Custom.pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from(await P.savePresentation(pres)),
+  });
+  await expect(page.locator(".slide-image")).toBeVisible();
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const d = show(page);
+  await page.keyboard.press("Control+p");
+  const box = await d.locator(".presenter-frame").boundingBox();
+  await page.mouse.move(box.x + 100, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 300, box.y + 160, { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.press("Escape");
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, {
+    button: "right",
+  });
+  await page.getByRole("menuitem", { name: "Custom Show" }).click();
+  await page.getByRole("menuitem", { name: "Short" }).click();
+  const prompt = page.getByRole("dialog", { name: "Keep your ink?" });
+  await expect(prompt).toBeVisible();
+  await expect(d).toHaveCount(0);
+  await prompt.getByRole("button", { name: "Discard", exact: true }).click();
+  await expect(d.locator(".presenter-counter")).toHaveText("1 / 2");
 });

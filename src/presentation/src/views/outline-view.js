@@ -29,6 +29,8 @@ export function createOutlineView(ctx) {
   let titleHints = new Map();
   let timer = null;
   let committing = Promise.resolve();
+  // The deck's outline as the rows were last read from or written to it.
+  let base = null;
   const pres = () => ctx.doc().pres;
   // The deck's outline, read again only when a slide changed: choosing a
   // slide redraws the editor without changing any.
@@ -83,7 +85,8 @@ export function createOutlineView(ctx) {
     pane = null;
   }
   function load() {
-    rows = rowsFromOutline(outlineOfDeck());
+    base = outlineOfDeck();
+    rows = rowsFromOutline(base);
   }
 
   // The slide each row belongs to: the index of its title row.
@@ -272,6 +275,9 @@ export function createOutlineView(ctx) {
     if (extra.length) extra.at(-1).text += tail;
     else next[at.row].text += tail;
     next.splice(at.row + 1, 0, ...extra);
+    // Lines pasted into a folded slide show, as typing would.
+    if (extra.length && isFolded(at.row + 1))
+      toggle(rows[titleRowOf(at.row + 1)].part);
     const last = at.row + extra.length;
     structural(next, {
       row: last,
@@ -359,6 +365,7 @@ export function createOutlineView(ctx) {
     ) {
       e.preventDefault();
       const result = mergeWithPrevious(rows, at.row + 1);
+      if (isFolded(at.row + 1)) toggle(rows[titleRowOf(at.row + 1)].part);
       structural(result.rows, result.focus);
       return;
     }
@@ -418,8 +425,9 @@ export function createOutlineView(ctx) {
     committing = ctx
       .mutate(
         () => {
-          const { changed } = applyOutline(pres(), structure);
+          const { changed } = applyOutline(pres(), structure, { base });
           if (!changed) return ctx.SKIP;
+          base = outlineOfDeck();
           // The slide being written in stays current.
           const at = caret();
           const t = at ? titleRowOf(at.row) : 0;
@@ -440,6 +448,8 @@ export function createOutlineView(ctx) {
     // Typing still to be saved, or a later save of the outline already on
     // its way, is newer than the deck shown.
     if (dirty || inflight > 1) return;
+    // A save on its way sets the base itself once it is written.
+    if (!inflight) base = outlineOfDeck();
     const next = rowsFromOutline(outlineOfDeck());
     // The deck reads a body holding one empty paragraph as no body; the
     // empty line just started here is kept.

@@ -14,7 +14,7 @@
 //   { type: "stack", items, rows? }      controls stacked in rows
 //   { type: "row", items }               controls side by side
 //   { type: "divider" }                  a thin rule between clusters
-//   { type: "combo", value(), options(), commit(value), width }
+//   { type: "combo", value(), options(), commit(value) (false: turned down), width }
 //   { type: "spin", value(), commit(number), min, max, step, format(), parse() }
 //   { type: "check", checked(), commit(boolean) }
 //   { type: "color", color(), run(), menu() }   split button with a colour bar
@@ -105,6 +105,18 @@ export function createRibbon({
       "aria-labelledby": id,
       hidden: true,
       "data-tab": tab.id,
+      onscroll: () => markOverflow(panel),
+      // A wheel turned over a panel that scrolls sideways moves it along.
+      onwheel: (e) => {
+        if (
+          panel.scrollWidth <= panel.clientWidth + 1 ||
+          e.ctrlKey ||
+          Math.abs(e.deltaX) >= Math.abs(e.deltaY)
+        )
+          return;
+        e.preventDefault();
+        panel.scrollLeft += e.deltaY;
+      },
     });
     buildingTab = tab.id;
     for (const group of tab.groups) panel.append(renderGroup(group));
@@ -179,10 +191,11 @@ export function createRibbon({
     if (changed) onTabChange?.(id);
     if (collapsed) flyout(true);
   }
-  function setCollapsed(on) {
+  // `remember: false` folds it for the screen, not as the person's choice.
+  function setCollapsed(on, { remember = true } = {}) {
     const changed = collapsed !== on;
     collapsed = on;
-    if (changed) onCollapse?.(on);
+    if (changed && remember) onCollapse?.(on);
     root.classList.toggle("collapsed", on);
     root.classList.remove("flyout");
     collapse.setAttribute("aria-expanded", String(!on));
@@ -206,14 +219,21 @@ export function createRibbon({
       fit();
     }
   }
-  document.addEventListener("pointerdown", (e) => {
-    if (
-      root.classList.contains("flyout") &&
-      !root.contains(e.target) &&
-      !e.target.closest?.(".menu")
-    )
-      flyout(false);
-  });
+  // Listeners on the document end with the ribbon (see destroy), or every
+  // presentation opened would keep the previous editor alive.
+  const lifetime = new AbortController();
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (
+        root.classList.contains("flyout") &&
+        !root.contains(e.target) &&
+        !e.target.closest?.(".menu")
+      )
+        flyout(false);
+    },
+    { signal: lifetime.signal },
+  );
 
   // ---- Controls ----
   function renderGroup(group) {
@@ -520,6 +540,12 @@ export function createRibbon({
       input.dataset.value = value;
       try {
         const result = item.commit(value);
+        // A value the command turns down (false) gives way to the current
+        // one, rather than staying in the box as if it applied.
+        if (result === false) {
+          input.value = input.dataset.value = String(item.value() ?? "");
+          input.select();
+        }
         result?.catch?.((error) => reportError(error));
       } catch (error) {
         reportError(error);
@@ -1007,6 +1033,10 @@ export function createRibbon({
   function fit() {
     const panel = panels.get(active);
     if (!panel || panel.hidden || !panel.isConnected) return;
+    fitGroups(panel);
+    markOverflow(panel);
+  }
+  function fitGroups(panel) {
     const groups = [...panel.querySelectorAll(":scope > .ribbon-group")];
     for (const group of groups) setFolded(group, false);
     const galleries = [...panel.querySelectorAll(".ribbon-gallery")]
@@ -1048,6 +1078,12 @@ export function createRibbon({
         }
       }
     }
+  }
+  // Which edges of a panel that scrolls sideways have more beyond them.
+  function markOverflow(panel) {
+    const end = panel.scrollWidth - panel.clientWidth;
+    panel.classList.toggle("more-before", end > 1 && panel.scrollLeft > 1);
+    panel.classList.toggle("more-after", end > 1 && panel.scrollLeft < end - 1);
   }
   function setFolded(group, on) {
     group._folded = on;
@@ -1106,6 +1142,10 @@ export function createRibbon({
     },
     onError(fn) {
       reportError = fn;
+    },
+    destroy() {
+      lifetime.abort();
+      observer.disconnect();
     },
     // Every command, for searching: label, the tab it is on, and a way to
     // run it or open its menu.

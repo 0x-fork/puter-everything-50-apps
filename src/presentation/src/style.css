@@ -1624,6 +1624,9 @@ select {
   padding: 4px 0;
   color: var(--muted);
   min-height: 25px;
+  /* A plain text button, without the browser's button face. */
+  border: 1px solid transparent;
+  background: transparent;
 }
 .object-list {
   display: flex;
@@ -2537,6 +2540,17 @@ body:has(.presenter[open]) #toast {
   }
   :root {
     --resize-handle-size: 18px;
+  }
+}
+/* A short screen (a phone on its side, a window zoomed to 200%) keeps its
+   height for the slide: the ribbon starts folded away (see main.js), and the
+   slide's area gives up its minimum height and most of its padding. */
+@media (max-height: 500px) {
+  .canvas-area {
+    min-height: 0;
+  }
+  .editor .canvas-area {
+    padding: 8px 16px;
   }
 }
 @media (max-width: 420px) {

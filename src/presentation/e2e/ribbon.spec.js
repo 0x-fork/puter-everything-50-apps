@@ -147,6 +147,85 @@ test("a dragged rectangle takes the dragged size and a clicked text box opens fo
   );
 });
 
+// A text box left without text stayed as an invisible object that still
+// took clicks. It goes, as in PowerPoint; one just drawn takes its insert's
+// undo step with it.
+test("a text box left without text goes, and a fresh one leaves no undo step", async ({
+  page,
+}) => {
+  await start(page);
+  const hits = page.locator(".object-hit");
+  const before = await hits.count();
+  await rectangle(page, [100, 40], [400, 190]);
+  await expect(hits).toHaveCount(before + 1);
+  await tab(page, "Insert");
+  await command(page, "insert-text-box");
+  const box = await slideBox(page);
+  const k = await scale(page);
+  await page.mouse.click(box.x + 200 * k, box.y + 220 * k);
+  await expect(page.locator(".inline-editor")).toBeFocused();
+  await expect(hits).toHaveCount(before + 2);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".inline-editor")).toHaveCount(0);
+  await expect(hits).toHaveCount(before + 1);
+  // The next undo takes back the rectangle, not an insert nobody can see.
+  await page.keyboard.press(`${mod}+z`);
+  await expect(hits).toHaveCount(before);
+  await page.keyboard.press(`${mod}+Shift+z`);
+  await expect(hits).toHaveCount(before + 1);
+  // Undo from inside a fresh box takes back its insert, and only that.
+  await tab(page, "Insert");
+  await command(page, "insert-text-box");
+  await page.mouse.click(box.x + 200 * k, box.y + 220 * k);
+  await expect(page.locator(".inline-editor")).toBeFocused();
+  await page.keyboard.press(`${mod}+z`);
+  await expect(page.locator(".inline-editor")).toHaveCount(0);
+  await expect(hits).toHaveCount(before + 1);
+  // A box whose text is all deleted goes too, and undo brings it back.
+  await textBox(page, "Kept", [200, 220]);
+  await expect(hits).toHaveCount(before + 2);
+  await hits.last().dblclick();
+  await expect(page.locator(".inline-editor")).toBeFocused();
+  await page.keyboard.press(`${mod}+a`);
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Escape");
+  await expect(hits).toHaveCount(before + 1);
+  await page.keyboard.press(`${mod}+z`);
+  await expect(hits).toHaveCount(before + 2);
+  const { p } = await download(page);
+  expect(
+    P.getSlideShapes(P.getSlides(p)[0]).some(
+      (s) => P.getShapeText(s) === "Kept",
+    ),
+  ).toBe(true);
+});
+
+// Escape put the tool down but the drag still drew its shape on release.
+test("Escape during a drag with a shape tool draws nothing", async ({
+  page,
+}) => {
+  await start(page);
+  const hits = page.locator(".object-hit");
+  const before = await hits.count();
+  await tab(page, "Insert");
+  await command(page, "insert-shapes");
+  await page.getByRole("menuitem", { name: "Rectangle", exact: true }).click();
+  const box = await slideBox(page);
+  const k = await scale(page);
+  await page.mouse.move(box.x + 100 * k, box.y + 40 * k);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 300 * k, box.y + 190 * k, { steps: 4 });
+  await expect(page.locator(".draw-preview")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".draw-preview")).toHaveCount(0);
+  await page.mouse.up();
+  await expect(page.locator(".editor.drawing")).toHaveCount(0);
+  // The download waits for any edit still on its way.
+  const { p } = await download(page);
+  expect(P.getSlideShapes(P.getSlides(p)[0])).toHaveLength(before);
+  await expect(hits).toHaveCount(before);
+});
+
 test("font, size, styles, case and spacing apply to the selected text box", async ({
   page,
 }) => {
@@ -250,12 +329,13 @@ test("the Selection Pane lists and selects objects; sections reach the file", as
   await page.getByRole("tab", { name: "Shape Format" }).click();
   await command(page, "selection-pane");
   const pane = page.getByRole("complementary", { name: "Selection" });
-  await expect(pane.getByRole("option")).toHaveCount(2);
-  await pane.getByRole("option").first().getByRole("button").first().click();
-  await expect(pane.getByRole("option").first()).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  const rows = pane
+    .getByRole("list", { name: "Objects on this slide" })
+    .getByRole("listitem");
+  await expect(rows).toHaveCount(2);
+  const name = rows.first().getByRole("button").first();
+  await name.click();
+  await expect(name).toHaveAttribute("aria-pressed", "true");
   await tab(page, "Home");
   await command(page, "section");
   await page.getByRole("menuitem", { name: "Add Section" }).click();
@@ -360,4 +440,164 @@ test("keyboard: new slide, paragraph alignment and F5", async ({ page }) => {
   expect(P.getSlides(p)).toHaveLength(2);
   const shape = P.getSlideShapes(P.getSlides(p)[0])[0];
   expect(P.getParagraphAlignment(shape, 0)).toBe("ctr");
+});
+
+test("opening presentation after presentation leaves no old ribbon listening", async ({
+  page,
+}) => {
+  await start(page);
+  const cdp = await page.context().newCDPSession(page);
+  const documentListeners = async () => {
+    const { result } = await cdp.send("Runtime.evaluate", {
+      expression: "document",
+    });
+    const { listeners } = await cdp.send("DOMDebugger.getEventListeners", {
+      objectId: result.objectId,
+    });
+    return listeners.filter((l) => l.type === "pointerdown").length;
+  };
+  const reopen = async () => {
+    await page.getByRole("button", { name: "Back to presentations" }).click();
+    await page
+      .getByRole("button", { name: "New presentation", exact: true })
+      .click();
+    await expect(page.getByRole("tab", { name: "Home" })).toBeVisible();
+  };
+  await reopen();
+  const first = await documentListeners();
+  for (let i = 0; i < 3; i++) await reopen();
+  expect(await documentListeners()).toBe(first);
+});
+
+test("a font size the box turns down gives way to the current size", async ({
+  page,
+}) => {
+  await start(page);
+  await textBox(page, "Size");
+  await tab(page, "Home");
+  const size = await reveal(page, "font-size");
+  await expect(size).toBeEnabled();
+  const current = await size.inputValue();
+  expect(current).not.toBe("");
+  for (const value of ["abc", "-5"]) {
+    await size.fill(value);
+    await size.press("Enter");
+    await expect(size).toHaveValue(current);
+  }
+  await size.fill("40");
+  await size.press("Enter");
+  await expect(size).toHaveValue("40");
+});
+
+test("a command from the menu bar hands the keyboard back to the slide", async ({
+  page,
+}) => {
+  await start(page);
+  test.skip(
+    !(await page.getByRole("menubar").isVisible()),
+    "A phone folds the menu bar into the File options menu.",
+  );
+  await page.getByRole("menuitem", { name: "Insert", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Shape", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Rectangle", exact: true }).click();
+  const shape = page.locator(".object-hit").first();
+  await expect(shape).toHaveCount(1);
+  await expect(
+    page.getByRole("menuitem", { name: "Insert", exact: true }),
+  ).not.toBeFocused();
+  const before = await shape.getAttribute("style");
+  await page.keyboard.press("ArrowRight");
+  await expect(shape).not.toHaveAttribute("style", before);
+  await expect(page.getByRole("menu")).toHaveCount(0);
+});
+
+test("a menu bar command while text is edited leaves the editing going", async ({
+  page,
+}) => {
+  await start(page);
+  test.skip(
+    !(await page.getByRole("menubar").isVisible()),
+    "A phone folds the menu bar into the File options menu.",
+  );
+  await page.getByRole("menuitem", { name: "Insert", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Text box", exact: true }).click();
+  await page.locator(".object-hit").first().dblclick();
+  const editor = page.locator(".inline-editor");
+  await page.keyboard.type("Hello");
+  await page.getByRole("menuitem", { name: "Format", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Align", exact: true }).click();
+  await page.getByRole("menuitemcheckbox", { name: "Align center" }).click();
+  await expect(editor).toBeFocused();
+  await page.keyboard.type(" there");
+  await expect(editor).toHaveText("Hello there");
+});
+
+test("the Symbol dialog is one tab stop that the arrow keys move through", async ({
+  page,
+}) => {
+  await start(page);
+  test.skip(
+    !(await page.getByRole("menubar").isVisible()),
+    "A phone folds the menu bar into the File options menu.",
+  );
+  await page.getByRole("menuitem", { name: "Insert", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Text box", exact: true }).click();
+  await page.locator(".object-hit").first().dblclick();
+  await page.keyboard.type("A");
+  await page.getByRole("menuitem", { name: "Insert", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Symbol…", exact: true }).click();
+  const symbols = page.getByRole("group", { name: "Symbols" });
+  await expect(symbols.locator('[tabindex="0"]')).toHaveCount(1);
+  await symbols.getByRole("button").first().focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(symbols.getByRole("button", { name: "®" })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(symbols.getByRole("button").nth(13)).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(symbols.getByRole("button").last()).toBeFocused();
+  await page.keyboard.press("Home");
+  await page.keyboard.press("Tab");
+  await expect(symbols.getByRole("button").first()).not.toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(symbols.getByRole("button").first()).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Symbol" })).toHaveCount(0);
+  await expect(page.locator(".object-hit").first()).toHaveAttribute(
+    "aria-label",
+    /^A®/,
+  );
+});
+
+test("every group of a tab too wide for the screen can be scrolled into reach", async ({
+  page,
+}) => {
+  await start(page);
+  await tab(page, "Insert");
+  const panel = page.locator(".ribbon-panel:not([hidden])");
+  const last = panel.locator(":scope > .ribbon-group").last();
+  const inside = async () => {
+    const [p, g] = await Promise.all([panel.boundingBox(), last.boundingBox()]);
+    return g.x + g.width <= p.x + p.width + 1;
+  };
+  const box = await panel.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  for (let i = 0; i < 10 && !(await inside()); i++)
+    await page.mouse.wheel(0, 200);
+  expect(await inside()).toBe(true);
+});
+
+test("no tab has two groups of the same name", async ({ page }) => {
+  await start(page);
+  const repeated = await page.evaluate(() =>
+    [...document.querySelectorAll(".ribbon-panel")].flatMap((panel) => {
+      const names = [...panel.querySelectorAll(":scope > .ribbon-group")].map(
+        (g) => g.getAttribute("aria-label"),
+      );
+      return names
+        .filter((n, i) => names.indexOf(n) !== i)
+        .map((n) => `${panel.dataset.tab}: ${n}`);
+    }),
+  );
+  expect(repeated).toEqual([]);
 });

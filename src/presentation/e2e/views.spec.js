@@ -121,6 +121,51 @@ test("Outline View writes titles and paragraphs, levels and new slides", async (
   await expect(page.locator("#slide-list")).toBeVisible();
 });
 
+test("Outline View unfolds a slide before Delete or a paste changes its body", async ({
+  page,
+}) => {
+  await start(page);
+  await view(page, "outline");
+  const title = page.getByRole("textbox", { name: "Slide 1 title" });
+  await title.click();
+  await page.keyboard.type("Plan");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
+  await page.keyboard.type("One");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Two");
+  const rows = page.locator(".outline-text");
+  await expect(rows).toHaveText(["Plan", "One", "Two"]);
+  const fold = () =>
+    page.getByRole("button", { name: "Slide 1", exact: true }).dblclick();
+  await fold();
+  await expect(rows).toHaveText(["Plan"]);
+  // Delete at the end of a folded title joins the first paragraph to it,
+  // in view.
+  await title.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Delete");
+  await expect(rows).toHaveText(["PlanOne", "Two"]);
+  // Lines pasted into a folded title show too, with the caret after them.
+  await fold();
+  await expect(rows).toHaveText(["PlanOne"]);
+  await title.click();
+  await page.keyboard.press("End");
+  await page.evaluate(() => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "X\nY");
+    document.activeElement.dispatchEvent(
+      new ClipboardEvent("paste", {
+        clipboardData: data,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await expect(rows).toHaveText(["PlanOneX", "Y", "Two"]);
+  await expect(rows.nth(1)).toBeFocused();
+});
+
 test("Slide Sorter reorders slides across sections and opens a slide", async ({
   page,
 }) => {
@@ -191,6 +236,56 @@ test("Slide Sorter reorders slides across sections and opens a slide", async ({
   ]);
 });
 
+test("sections follow slides moved, deleted and added outside a drag", async ({
+  page,
+}) => {
+  await start(page);
+  await addSlides(page, 3);
+  await expect(page.locator(".slide-item")).toHaveCount(4);
+  await view(page, "sorter");
+  const cards = page.locator(".sorter-card");
+  const parts = await cards.evaluateAll((list) =>
+    list.map((c) => c.dataset.part),
+  );
+  await cards.nth(2).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Add Section" }).click();
+  await page.getByRole("dialog").getByRole("textbox").fill("Later");
+  await page.getByRole("dialog").getByRole("button", { name: "Add" }).click();
+  await expect(page.locator(".sorter-section")).toHaveCount(2);
+  // The second slide moves past the third, into "Later".
+  await cards.nth(1).click();
+  await page.keyboard.press("Alt+ArrowRight");
+  await expect
+    .poll(() => cards.evaluateAll((list) => list.map((c) => c.dataset.part)))
+    .toEqual([parts[0], parts[2], parts[1], parts[3]]);
+  // The last slide goes; a new slide after the first stays in its section,
+  // although it may take the deleted slide's id.
+  await cards.nth(3).click();
+  await page.keyboard.press("Delete");
+  await expect(cards).toHaveCount(3);
+  await cards.nth(0).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "New Slide" }).click();
+  await expect(cards).toHaveCount(4);
+  const { p, files } = await download(page);
+  const added = P.getSlidePartName(P.getSlides(p)[1]);
+  expect(
+    P.getSlideSections(p).map((s) => [
+      s.name,
+      s.slides.map(P.getSlidePartName),
+    ]),
+  ).toEqual([
+    ["Default Section", [parts[0], added]],
+    ["Later", [parts[2], parts[1]]],
+  ]);
+  // Every section entry names a slide still in the deck.
+  const xml = strFromU8(files["ppt/presentation.xml"]);
+  const ids = (s) => [...s.matchAll(/sldId id="(\d+)"/g)].map((m) => m[1]);
+  const deck = ids(xml.match(/<p:sldIdLst>.*?<\/p:sldIdLst>/s)[0]);
+  expect(ids(xml.match(/<p14:sectionLst.*?<\/p14:sectionLst>/s)[0])).toEqual(
+    deck,
+  );
+});
+
 test("Notes Page edits the notes on a page of the notes size", async ({
   page,
 }) => {
@@ -234,7 +329,9 @@ test("Reading View plays in the window and returns with Escape", async ({
   await expect(reading.locator(".reading-counter")).toHaveText("Slide 3 of 3");
   await page.keyboard.press("Escape");
   await expect(reading).toHaveCount(0);
-  // The bar's view buttons leave for another view on the slide reached.
+  // Escape leaves on the slide reached, and so do the bar's view buttons.
+  await expect(page.locator("#slide-position")).toHaveText("Slide 3 of 3");
+  await page.locator(".slide-item .slide-thumb").first().click();
   await view(page, "reading");
   await page
     .getByRole("dialog", { name: "Reading View" })

@@ -229,6 +229,25 @@ describe("undo history", () => {
     expect(fresh.past).toHaveLength(1);
     expect(fillOf(await fresh.undo()).toLowerCase()).toBe("#333333");
   });
+  it("drops the latest snapshot as though its edit had not been made", async () => {
+    const pres = createDeck("story");
+    const s = () => P.getSlideShapes(P.getSlides(pres)[0])[1];
+    const h = new History();
+    await h.reset(pres, "studio");
+    const original = P.getShapeText(s());
+    P.setShapeText(s(), "Edit one");
+    await h.capture(pres, "clay");
+    P.setShapeText(s(), "Edit two");
+    await h.capture(pres, "midnight");
+    P.setShapeText(s(), "Edit one");
+    h.drop(pres);
+    expect(h.past).toHaveLength(1);
+    expect(h.state).toBe("clay");
+    expect(await h.redo()).toBeNull();
+    const undone = await h.undo();
+    expect(P.getSlideText(P.getSlides(undone)[0])).toContain(original);
+    expect(h.state).toBe("studio");
+  });
   it("restores locally generated history larger than the import limit", async () => {
     const pres = createLargeDeck();
     const slide = P.getSlides(pres)[0];
@@ -436,6 +455,14 @@ describe("file validation", () => {
     // The parser reads the per-disk count at +8, not the total at +10.
     expect(P.getSlides(await P.loadPresentation(bytes))).toHaveLength(1);
     expect(() => validateZip(bytes)).toThrow();
+  });
+  it("explains a password-protected or old binary presentation", () => {
+    const bytes = new Uint8Array(1024);
+    bytes.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+    expect(() => validateZip(bytes)).toThrow("password-protected");
+    expect(() => validateZip(new Uint8Array(1024))).toThrow(
+      "This is not a valid PPTX file.",
+    );
   });
   it("rejects a ZIP64 locator instead of validating the legacy directory", async () => {
     const original = await P.savePresentation(createDeck());

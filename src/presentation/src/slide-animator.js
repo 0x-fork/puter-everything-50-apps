@@ -14,6 +14,8 @@
 //                  are hidden) and plays what runs before the first click
 //   next()         plays the next click step; false when none is left, so
 //                  the show moves on to the next slide
+//   played         settles when the step last started by next() ends
+//   snapshot()     a picture of the slide as it now stands
 //   previous()     returns to the state before the last step; false at the
 //                  first step, so the show goes back a slide
 //   finish()       shows the slide's final state at once, as a slide reached
@@ -37,6 +39,8 @@ const NONE = {
   start() {},
   next: () => false,
   previous: () => false,
+  played: Promise.resolve(),
+  snapshot: () => null,
   finish() {},
   playTrigger: () => false,
   destroy() {},
@@ -97,6 +101,12 @@ export function createSlideAnimator({
     next() {
       activate();
       return player.next();
+    },
+    get played() {
+      return player.played;
+    },
+    snapshot() {
+      return player.snapshot(preview.bind(null, pres, slide));
     },
     previous() {
       activate();

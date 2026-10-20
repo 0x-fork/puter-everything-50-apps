@@ -4102,6 +4102,32 @@ test("Enter selects the focused canvas object before editing it", async ({
   ).toHaveText("Make room for\nbig ideas.", { useInnerText: true });
 });
 
+// Delete and the arrows acted on the selected object while another one had
+// the focus, so the object the keyboard was on stayed and an unseen one went.
+test("Delete and the arrows leave the selection alone from an unselected object", async ({
+  page,
+}) => {
+  await story(page);
+  const objects = page.locator(".object-hit");
+  const count = await objects.count();
+  const first = page.locator('[data-object="0"]');
+  const title = page.locator('[data-object="1"]');
+  await first.click();
+  const before = await first.boundingBox();
+  await title.focus();
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Delete");
+  await expect(page.locator("#undo")).toBeDisabled();
+  await expect(objects).toHaveCount(count);
+  expect(await first.boundingBox()).toEqual(before);
+  // Once chosen with Enter, the focused object is the one they act on.
+  await page.keyboard.press("Enter");
+  await expect(title).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Delete");
+  await expect(objects).toHaveCount(count - 1);
+  await expect(first).toHaveAttribute("aria-pressed", "false");
+});
+
 test("queued arrow keys accumulate every movement step", async ({ page }) => {
   await story(page);
   await page.locator('[data-object="1"]').click();
@@ -4591,6 +4617,8 @@ test("a library refresh closes an outdated file menu and preserves its keyboard 
     .click();
   await page.getByRole("button", { name: /^(Save|Sign in to save)$/ }).click();
   await page.waitForFunction(() => window.__releaseWrite);
+  // An edit the save does not carry keeps the draft listed after it.
+  await addText(page);
   await page.getByRole("button", { name: "Back to presentations" }).click();
   const draft = page.locator(".file-row").filter({
     has: page.getByRole("button", {
@@ -6248,6 +6276,10 @@ for (const location of ["library", "editor"]) {
       await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
     } else {
       await cloudFile.click();
+      await page
+        .getByRole("dialog", { name: "Recover unsaved changes?" })
+        .getByRole("button", { name: "Open the Puter version" })
+        .click();
       await expect(page.locator(".object-hit")).toHaveCount(0);
       await page.locator(".document-title").click();
     }
@@ -7047,7 +7079,8 @@ test("sign-in transfers recovery ownership after older guest saves finish", asyn
       }
       export const listDrafts=async owner=>[...records.values()].filter(d=>d.owner===owner&&!d.cloudSaved);
       export const getDraft=async id=>records.get(id);
-      export const deleteDraft=async id=>records.delete(id);`,
+      export const deleteDraft=async id=>records.delete(id);
+      export const pruneSavedDrafts=async()=>{};`,
     }),
   );
   await start(page);
@@ -7552,6 +7585,26 @@ test("an invalid number restores the latest value committed with Enter", async (
   expect(P.getShapeBounds(P.getSlideShapes(P.getSlides(loaded)[0])[1]).w).toBe(
     P.inches(3),
   );
+});
+
+test("undo right after a number is committed takes back the change", async ({
+  page,
+}) => {
+  await story(page);
+  const shape = page.locator('[data-object="1"]');
+  await shape.click();
+  await paneTab(page, "Size & Properties");
+  const width = page.getByRole("spinbutton", {
+    name: "Width (in)",
+    exact: true,
+  });
+  const before = await shape.getAttribute("style");
+  await width.fill("3");
+  await width.press("Enter");
+  await expect(shape).toHaveAttribute("style", /width: 22.5%;/);
+  await expect(width).toBeFocused();
+  await width.press("ControlOrMeta+z");
+  await expect(shape).toHaveAttribute("style", before);
 });
 
 for (const [key, label, value, direction, increment] of [
@@ -10207,6 +10260,31 @@ test("objects can be cut, copied, and pasted across slides and presentations", a
   expect(P.getSlideText(P.getSlides(loaded)[0])).toContain("Make room for");
 });
 
+// A paste after a cut on the same slide stepped aside as though the
+// original were still there.
+test("an object cut and pasted on its own slide goes back where it was", async ({
+  page,
+}) => {
+  await story(page);
+  const objects = page.locator(".object-hit");
+  const count = await objects.count();
+  const title = page.locator('[data-object="1"]');
+  await title.click();
+  const original = await placement(title);
+  await page.keyboard.press("Control+x");
+  await expect(objects).toHaveCount(count - 1);
+  await page.keyboard.press("Control+v");
+  await expect(objects).toHaveCount(count);
+  const pasted = page.locator(".object-hit.selected");
+  expect(await placement(pasted)).toEqual(original);
+  // A second paste steps aside from the first.
+  await page.keyboard.press("Control+v");
+  await expect(objects).toHaveCount(count + 1);
+  const [left, top] = await placement(pasted);
+  expect(left).toBeGreaterThan(original[0]);
+  expect(top).toBeGreaterThan(original[1]);
+});
+
 test("pasting an image or text from another app inserts a picture or a text box", async ({
   page,
 }) => {
@@ -10919,6 +10997,34 @@ test("several objects are selected together, moved, aligned, grouped, and delete
   await expect(objects).toHaveCount(5);
   await page.keyboard.press("Control+z");
   await expect(objects).toHaveCount(7);
+});
+
+// The grey area around the slide took no clicks: a click there kept the
+// selection, and a marquee could not start there.
+test("the area around the slide clears the selection and starts a marquee", async ({
+  page,
+}) => {
+  await story(page);
+  const chosen = page.locator(".object-hit.selected");
+  const canvas = await page.locator("#slide-canvas").boundingBox();
+  const area = await page.locator("#canvas-area").boundingBox();
+  const gap = area.x + area.width - (canvas.x + canvas.width);
+  test.skip(gap < 8, "no room beside the slide");
+  const beside = canvas.x + canvas.width + Math.min(12, gap / 2);
+  await page.locator('[data-object="1"]').click();
+  await expect(chosen).toHaveCount(1);
+  await page.mouse.click(beside, canvas.y + canvas.height / 2);
+  await expect(chosen).toHaveCount(0);
+  await page.mouse.move(beside, canvas.y + canvas.height * 0.8);
+  await page.mouse.down();
+  await page.mouse.move(
+    canvas.x + canvas.width * 0.78,
+    canvas.y + canvas.height * 0.2,
+    { steps: 5 },
+  );
+  await expect(page.locator(".marquee")).toHaveCount(1);
+  await page.mouse.up();
+  await expect(chosen).toHaveCount(2);
 });
 
 test("a copied multi-selection pastes as one and the saved file keeps the alignment", async ({
@@ -14908,6 +15014,82 @@ test("undo and redo inside the canvas text editor step through the typing", asyn
   await expect(box).toHaveAccessibleName("Your text here. Select to edit");
 });
 
+// The text editor kept every key to itself, so alignment, Find, and zoom did
+// nothing while text was edited, and the browser took Ctrl+D, Ctrl+F, and
+// Ctrl+= for a bookmark, its own find, and a page zoom.
+test("shortcuts that leave the object alone work while its text is edited", async ({
+  page,
+}) => {
+  await start(page);
+  await page
+    .getByRole("button", { name: "New presentation", exact: true })
+    .click();
+  await addText(page);
+  const box = page.locator(".object-hit");
+  await expect(box).toHaveCount(1);
+  await box.dblclick();
+  const editor = page.getByRole("textbox", { name: "Edit text" });
+  await expect(editor).toBeFocused();
+  const align = () =>
+    editor.evaluate(
+      (node) => getComputedStyle(node.firstElementChild).textAlign,
+    );
+  const size = () =>
+    editor.evaluate((node) => node.querySelector("span").style.fontSize);
+  await page.keyboard.press("ControlOrMeta+e");
+  await expect.poll(align).toBe("center");
+  await page.keyboard.press("ControlOrMeta+a");
+  const before = await size();
+  await page.keyboard.press("ControlOrMeta+Shift+Period");
+  await expect.poll(size).not.toBe(before);
+  // Undo inside the editor still takes back the editor's own steps.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(size).toBe(before);
+  await expect.poll(align).toBe("center");
+  // Duplicate waits for the text to be left, and the browser does not
+  // bookmark the page instead.
+  const prevented = await editor.evaluate((node) => {
+    const event = new KeyboardEvent("keydown", {
+      key: "d",
+      code: "KeyD",
+      ctrlKey: true,
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    node.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(prevented).toBe(true);
+  await expect(box).toHaveCount(1);
+  await expect(editor).toBeFocused();
+  const canvas = page.locator("#slide-canvas");
+  const width = async () => Math.round((await canvas.boundingBox()).width);
+  const fitWidth = await width();
+  const fontSize = () =>
+    editor.evaluate((node) => parseFloat(node.style.fontSize));
+  const fitSize = await fontSize();
+  await page.keyboard.press("ControlOrMeta+=");
+  await expect.poll(width).toBeGreaterThan(fitWidth);
+  // The text being edited grows with the slide.
+  const zoomed = (fitSize * (await width())) / fitWidth;
+  await expect.poll(fontSize).toBeCloseTo(zoomed, 0);
+  await page.keyboard.press("ControlOrMeta+0");
+  await expect.poll(fontSize).toBeCloseTo(fitSize, 1);
+  await expect.poll(width).toBe(fitWidth);
+  await expect(editor).toBeFocused();
+  // Find leaves the text, keeping what was done to it.
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(
+    page.getByRole("searchbox", { name: "Find", exact: true }),
+  ).toBeFocused();
+  await expect(editor).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await box.dblclick();
+  await expect(editor).toBeFocused();
+  await expect.poll(align).toBe("center");
+});
+
 // Dragging the rotate handle of an object inside a turned group set the
 // object's own turn to the angle the slide showed, so it jumped by the
 // group's turn on top of the drag.
@@ -15532,6 +15714,54 @@ test("editing text beside a slide number field keeps the field", async ({
   const shape = P.getSlideShapes(P.getSlides(loaded)[0])[0];
   expect(P.getShapeText(shape)).toBe("Our Company 1");
   expect(P.getShapeXmlString(shape)).toMatch(/<a:fld [^>]*type="slidenum"/);
+});
+
+// Insert > Slide Number typed the current number in as plain text, which
+// went stale as soon as the slide moved.
+test("Insert > Slide Number puts in a live field, while editing or not", async ({
+  page,
+}) => {
+  await start(page);
+  const pres = createDeck("blank");
+  P.addBlankSlide(pres);
+  const second = P.getSlides(pres)[1];
+  text(second, "Page ", 1, 1, 4, 1);
+  text(second, "Slide  of 2", 1, 3, 4, 1);
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Import PPTX", exact: true }).click();
+  await (
+    await chooser
+  ).setFiles({
+    name: "Numbers.pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from(await P.savePresentation(pres)),
+  });
+  await page.locator(".slide-thumb").nth(1).click();
+  await expect(page.locator("#slide-position")).toHaveText("Slide 2 of 2");
+  const hits = page.locator(".object-hit");
+  // Not editing: the number goes at the end of the selected box.
+  await hits.nth(0).click();
+  await (await ribbonButton(page, "Insert", "slide-number")).click();
+  await expect(hits.nth(0)).toHaveAccessibleName(/^Page 2/);
+  // Editing: at the caret, and typing on after it leaves the field whole.
+  await hits.nth(1).dblclick();
+  const editor = page.getByRole("textbox", { name: "Edit text", exact: true });
+  await editor.press("Home");
+  for (let i = 0; i < 6; i++) await editor.press("ArrowRight");
+  await (await ribbonButton(page, "Insert", "slide-number")).click();
+  await expect(editor).toBeFocused();
+  await page.keyboard.type("!");
+  await editor.press("Escape");
+  await expect(hits.nth(1)).toHaveAccessibleName(/^Slide 2! of 2/);
+  // Moved to the front, both numbers follow the slide.
+  await page
+    .getByRole("button", { name: "Options for slide 2", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Move up", exact: true }).click();
+  await expect(page.locator("#slide-position")).toHaveText("Slide 1 of 2");
+  await expect(hits.nth(0)).toHaveAccessibleName(/^Page 1/);
+  await expect(hits.nth(1)).toHaveAccessibleName(/^Slide 1! of 2/);
 });
 
 // A paragraph spaced by a fixed number of points showed as a "NaN" choice in
@@ -16477,6 +16707,48 @@ test("Tab steps past the cells a merge covers", async ({ page }) => {
   await expect(cell).toHaveAccessibleName("Edit cell, row 1, column 1");
   await page.keyboard.press("Shift+Tab");
   await expect(cell).toHaveCount(0);
+});
+
+// Escape in a table cell threw away what had been typed there, though in a
+// text box it keeps the typing and the shortcut list calls it finishing.
+test("Escape in a table cell keeps what was typed", async ({ page }) => {
+  await start(page);
+  const pres = createDeck("blank");
+  P.addSlideTable(P.getSlides(pres)[0], {
+    x: P.inches(1),
+    y: P.inches(1),
+    w: P.inches(6),
+    h: P.inches(1),
+    rows: [
+      ["a", "b"],
+      ["c", "d"],
+    ],
+  });
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Import PPTX", exact: true }).click();
+  await (
+    await chooser
+  ).setFiles({
+    name: "Cells.pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from(await P.savePresentation(pres)),
+  });
+  const hit = page.locator(".object-hit");
+  const cell = page.getByRole("textbox", { name: /^Edit cell/ });
+  await hit.dblclick({ position: { x: 20, y: 10 } });
+  await expect(cell).toHaveAccessibleName("Edit cell, row 1, column 1");
+  await page.keyboard.type("Quarterly revenue");
+  await page.keyboard.press("Escape");
+  await expect(cell).toHaveCount(0);
+  await expect(hit).toBeFocused();
+  await hit.dblclick({ position: { x: 20, y: 10 } });
+  await expect(cell).toHaveValue("Quarterly revenue");
+  await page.keyboard.press("Escape");
+  // Undo takes the typing back.
+  await page.keyboard.press("ControlOrMeta+z");
+  await hit.dblclick({ position: { x: 20, y: 10 } });
+  await expect(cell).toHaveValue("a");
 });
 
 // The panel's Apply to all slides passed the placeholder the panel shows for

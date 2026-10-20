@@ -1133,6 +1133,54 @@ const unchangedField = (run) => {
     run.text.startsWith(value) && /^\u000b*$/.test(run.text.slice(value.length))
   );
 };
+// Text typed at either edge of a field lands in the field's run in the
+// editor; it is split off into a run of its own, so the field stays whole
+// while its value is left alone. Line breaks after the value stay with it.
+export function splitFieldEdges(runs) {
+  return runs.flatMap((run) => {
+    if (!run.fld) return [run];
+    const value = nodeText(fieldText(run.fld));
+    const at = value ? run.text.indexOf(value) : -1;
+    if (at < 0) return [run];
+    const { fld, ...rest } = run;
+    const plain = (text) => ({
+      ...rest,
+      format: { ...run.format },
+      changes: { ...run.changes },
+      text,
+    });
+    let end = at + value.length;
+    while (end < run.text.length && /[\n\u000b]/.test(run.text[end])) end++;
+    const before = run.text.slice(0, at),
+      after = run.text.slice(end);
+    if (!before && !after) return [run];
+    return [
+      ...(before ? [plain(before)] : []),
+      { ...run, text: run.text.slice(at, end) },
+      ...(after ? [plain(after)] : []),
+    ];
+  });
+}
+// A run holding a live slide number (<a:fld type="slidenum">) that shows
+// `value` now, formatted as the run `source` beside it.
+export function slideNumberRun(source, value) {
+  const rpr = source?.rpr ? structuredClone(source.rpr) : null;
+  const fld = xmlNode(
+    xmlName("a", "fld", NS_A),
+    [xmlAttr("id", P.newCommentGuid()), xmlAttr("type", "slidenum")],
+    [
+      ...(rpr ? [rpr] : []),
+      xmlNode(xmlName("a", "t", NS_A), [], [{ kind: "text", data: value }]),
+    ],
+  );
+  return {
+    text: value,
+    format: { ...(source?.format || {}) },
+    rpr: source?.rpr ?? null,
+    changes: { ...(source?.changes || {}) },
+    fld,
+  };
+}
 // A field is formatted as one character atom. Expand formatting
 // selections that touch its displayed value, without including the soft or
 // paragraph breaks the canvas editor appends to a run. Edited field values
@@ -1626,6 +1674,48 @@ export function pruneUnusedMedia(pres, slide = null) {
   }
   return P.compactPackage(pres).removed;
 }
+// Removes slides from the deck. Links to them on the slides that stay would
+// point at parts no longer in the file, so they go first; media only the
+// removed slides showed goes after.
+export function removeSlides(pres, slides) {
+  const parts = new Set(slides.map(P.getSlidePartName));
+  for (const s of P.getSlides(pres))
+    if (!parts.has(P.getSlidePartName(s)))
+      for (const shape of P.getSlideShapes(s)) {
+        let action = null;
+        try {
+          action = P.getShapeClickAction(shape);
+        } catch {}
+        if (
+          action?.kind === "slide" &&
+          parts.has(P.getSlidePartName(action.slide))
+        ) {
+          if (hasTextBody(shape) && P.hasShapeText(shape))
+            P.setShapeHyperlink(shape, null);
+          P.setShapeClickAction(shape, null);
+        }
+      }
+  for (const s of slides) P.removeSlide(pres, s);
+  // The relationships those links used stay behind; drop the ones nothing
+  // refers to any more.
+  const pkg = P._internalPackageOf(pres);
+  for (const s of P.getSlides(pres)) {
+    const part = P.getSlidePartName(s);
+    const rels = pkg.getRels(part);
+    if (!rels) continue;
+    const xml = P.getSlideXmlString(s);
+    const kept = rels.items.filter(
+      (rel) =>
+        rel.targetMode === "External" ||
+        !rel.type.endsWith("/slide") ||
+        !parts.has(new URL(rel.target, `file://${part}`).pathname) ||
+        xml.includes(`="${rel.id}"`),
+    );
+    if (kept.length !== rels.items.length)
+      pkg.setRels(part, { ...rels, items: kept });
+  }
+  pruneUnusedMedia(pres);
+}
 // Pasting an object imported from another package brings its picture along as
 // a new media part even when the deck already holds the same bytes. Point
 // the slide's relationships at the earliest identical part and drop the
@@ -1922,6 +2012,14 @@ export class History {
     this.bytes = next;
     this.future = [];
   }
+  // Take the latest snapshot back out, as though its edit had not been made:
+  // `pres` is as it was before that edit.
+  drop(pres) {
+    if (!this.past.length) return;
+    this.presentation = pres;
+    this.bytes = this.past.pop();
+    this.future = [];
+  }
   async undo() {
     if (!this.past.length) return null;
     // These snapshots come from our own serializer, rather than file imports.
@@ -1962,7 +2060,16 @@ export function validateZip(input) {
       end = i;
       break;
     }
-  if (end < 0) throw new Error("This is not a valid PPTX file.");
+  if (end < 0) {
+    // An OLE compound file: PowerPoint's encrypted package or its old binary
+    // format, neither of which is a ZIP.
+    const ole = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    if (bytes.length >= 8 && ole.every((b, i) => bytes[i] === b))
+      throw new Error(
+        "This presentation is password-protected or in the old .ppt format. Open it in PowerPoint, remove the password or save it as .pptx, and try again.",
+      );
+    throw new Error("This is not a valid PPTX file.");
+  }
   if (
     (end >= 20 && view.getUint32(end - 20, true) === 0x07064b50) ||
     view.getUint32(end + 12, true) === 0xffffffff ||

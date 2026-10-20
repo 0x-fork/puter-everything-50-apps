@@ -361,6 +361,76 @@ test("typing a slide number holds auto advance and elapsed-time reset does not c
   await expect(counter(page)).toHaveText("2 / 3");
 });
 
+test("timers and slide-number jumps move past click-sequence media", async ({
+  page,
+}) => {
+  const pres = deck([
+    { effect: "none", advanceAfterMs: 400 },
+    { effect: "none" },
+    { effect: "none" },
+  ]);
+  // A silent WAV; inserted media plays on the next click by default.
+  const wav = new Uint8Array(44 + 800);
+  const view = new DataView(wav.buffer);
+  const tag = (at, s) =>
+    [...s].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+  tag(0, "RIFF");
+  view.setUint32(4, 36 + 800, true);
+  tag(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true);
+  view.setUint32(28, 8000, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);
+  tag(36, "data");
+  view.setUint32(40, 800, true);
+  wav.fill(128, 44);
+  for (const slide of P.getSlides(pres).slice(0, 2))
+    P.addSlideMedia(
+      slide,
+      { kind: "audio", data: wav, contentType: "audio/wav" },
+      { x: 914400, y: 914400, w: 914400, h: 914400 },
+    );
+  await load(page, pres);
+  await page.clock.runFor(400);
+  await expect(counter(page)).toHaveText("2 / 3");
+  await page.keyboard.press("3");
+  await page.keyboard.press("Enter");
+  await expect(counter(page)).toHaveText("3 / 3");
+  await page.keyboard.press("2");
+  await page.keyboard.press("Enter");
+  await expect(counter(page)).toHaveText("2 / 3");
+  // A click still plays the media before the show moves on.
+  await page.keyboard.press("ArrowRight");
+  await expect(counter(page)).toHaveText("2 / 3");
+  await page.keyboard.press("ArrowRight");
+  await expect(counter(page)).toHaveText("3 / 3");
+});
+
+test("a stroke drawn as the slide advances stays on its own slide", async ({
+  page,
+}) => {
+  await load(
+    page,
+    deck([{ effect: "none", advanceAfterMs: 400 }, { effect: "none" }]),
+  );
+  await page.keyboard.press("Control+p");
+  const box = await page.locator(".presenter-frame").boundingBox();
+  await page.mouse.move(box.x + 100, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 200, box.y + 140, { steps: 4 });
+  await page.clock.runFor(400);
+  await expect(counter(page)).toHaveText("2 / 2");
+  await page.mouse.move(box.x + 300, box.y + 160, { steps: 4 });
+  await page.mouse.up();
+  await expect(page.locator(".show-ink path")).toHaveCount(0);
+  await page.keyboard.press("ArrowLeft");
+  await expect(counter(page)).toHaveText("1 / 2");
+  await expect(page.locator(".show-ink path")).toHaveCount(1);
+});
+
 test("white blank screens retain keyboard focus and a click restores without advancing", async ({
   page,
 }) => {

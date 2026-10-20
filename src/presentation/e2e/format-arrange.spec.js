@@ -2,6 +2,7 @@
 // rotation and the Size and Rotation dialog, Regroup, aligning to the slide,
 // Replace Fonts, Paste Special, Repeat, and the Format Object shortcut.
 import { test, expect } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import {
   P,
   addShape,
@@ -52,6 +53,33 @@ test("the Selection Pane renames, hides and shows all, and reorders", async ({
     expect.stringMatching(/^Rectangle/),
   ]);
   expect(shapes.some((s) => P.isShapeHidden(s))).toBe(false);
+});
+
+test("the Selection Pane takes the keyboard, marks the selection, and gives the keyboard back", async ({
+  page,
+}) => {
+  await start(page);
+  await addShape(page, "Rectangle");
+  await addShape(page, "Circle");
+  await tab(page, "Shape Format");
+  await (await command(page, "selection-pane")).click();
+  const pane = page.getByRole("complementary", { name: "Selection" });
+  const circle = pane.getByRole("button", { name: /^Circle/ });
+  const rectangle = pane.getByRole("button", { name: /^Rectangle/ });
+  // The selected object's row has the focus, and shows it is selected.
+  await expect(circle).toBeFocused();
+  await expect(circle).toHaveAttribute("aria-pressed", "true");
+  await expect(rectangle).toHaveAttribute("aria-pressed", "false");
+  await rectangle.click();
+  await expect(rectangle).toHaveAttribute("aria-pressed", "true");
+  await expect(circle).toHaveAttribute("aria-pressed", "false");
+  const { violations } = await new AxeBuilder({ page })
+    .include(".selection-pane")
+    .analyze();
+  expect(violations).toEqual([]);
+  await pane.getByRole("button", { name: "Close Selection Pane" }).click();
+  await expect(pane).toHaveCount(0);
+  await expect(page.locator("#main")).toBeFocused();
 });
 
 test("rotate, the Size and Rotation dialog, Regroup and aligning to the slide", async ({
@@ -115,6 +143,48 @@ test("rotate, the Size and Rotation dialog, Regroup and aligning to the slide", 
       return r === 45 ? Math.round(b.y + b.h / 2) : b.y;
     });
   expect(Math.min(...tops)).toBeLessThan(400000);
+});
+
+// Align and Distribute moved the unturned box, so Align Top put a long
+// rectangle turned upright half off the slide.
+test("a turned object aligns and distributes where the slide shows it", async ({
+  page,
+}) => {
+  await start(page);
+  for (const name of ["Rectangle", "Rectangle", "Rectangle"])
+    await addShape(page, name);
+  await tab(page, "Shape Format");
+  await (await command(page, "rotate")).click();
+  await page.getByRole("menuitem", { name: "More Rotation Options…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Size and Rotation" });
+  await dialog.getByLabel("Width", { exact: true }).fill("4");
+  await dialog.getByLabel("Height", { exact: true }).fill("1");
+  await dialog.getByLabel("Rotation", { exact: true }).fill("90");
+  await dialog.getByLabel("Rotation", { exact: true }).press("Tab");
+  await dialog.getByRole("button", { name: "OK" }).click();
+  await (await command(page, "align")).click();
+  await page.getByRole("menuitem", { name: "Align Top" }).click();
+  await (await command(page, "align")).click();
+  await page.getByRole("menuitem", { name: "Align Left" }).click();
+  const shown = (s) => {
+    const b = P.getShapeBounds(s);
+    const turned = P.getShapeRotation(s) === 90;
+    const w = turned ? b.h : b.w,
+      h = turned ? b.w : b.h;
+    return { x: b.x + b.w / 2 - w / 2, y: b.y + b.h / 2 - h / 2, w, h };
+  };
+  let { shapes } = await download(page);
+  const turned = shapes.find((s) => P.getShapeRotation(s) === 90);
+  expect(shown(turned).y).toBe(0);
+  expect(shown(turned).x).toBe(0);
+  // Spread out, the gaps between the shown boxes are equal.
+  await selectAll(page);
+  await (await command(page, "align")).click();
+  await page.getByRole("menuitem", { name: "Distribute Horizontally" }).click();
+  ({ shapes } = await download(page));
+  const boxes = shapes.map(shown).sort((a, b) => a.x - b.x);
+  const gaps = boxes.slice(1).map((b, i) => b.x - (boxes[i].x + boxes[i].w));
+  expect(Math.abs(gaps[0] - gaps[1])).toBeLessThan(2);
 });
 
 test("Replace Fonts, Paste Special as a picture, Repeat, and Format Object", async ({

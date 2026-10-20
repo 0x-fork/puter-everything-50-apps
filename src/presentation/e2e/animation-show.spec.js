@@ -103,6 +103,89 @@ test("the slide show plays click steps before moving to the next slide", async (
   await expect.poll(() => visibleLayers(page)).toEqual([false, true, true]);
 });
 
+test("a timed advance plays the slide's remaining click steps first", async ({
+  page,
+}) => {
+  const pres = createDeck("blank");
+  const slide = P.getSlides(pres)[0];
+  const boxes = [1, 4].map((x) => shape(slide, x, 1, 2, 1.5, "#2266cc"));
+  P.setSlideAnimations(
+    slide,
+    boxes.map((box) => ({
+      shapeId: String(P.getShapeId(box)),
+      presetClass: "entr",
+      presetId: 10,
+      presetSubtype: 0,
+      start: "click",
+      delayMs: 0,
+      durationMs: 1500,
+    })),
+  );
+  P.setSlideTransition(slide, { effect: "none", advanceAfterMs: 500 });
+  P.addBlankSlide(pres);
+  await load(page, pres);
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const counter = page.locator(".presenter-counter");
+  await expect.poll(() => visibleLayers(page)).toEqual([true, false]);
+  await expect(counter).toHaveText("1 / 2");
+  await expect.poll(() => visibleLayers(page)).toEqual([true, true]);
+  await expect(counter).toHaveText("1 / 2");
+  await expect(counter).toHaveText("2 / 2");
+});
+
+test("going to an earlier slide from See All Slides starts it over", async ({
+  page,
+}) => {
+  await load(page, animatedDeck());
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const counter = page.locator(".presenter-counter");
+  await page.keyboard.press("End");
+  await expect(counter).toHaveText("2 / 2");
+  await page.keyboard.press("g");
+  await page
+    .getByRole("region", { name: "All slides" })
+    .getByRole("button", { name: /^Slide 1/ })
+    .click();
+  await expect(counter).toHaveText("1 / 2");
+  // Unlike going back a slide, the jump shows the slide as it opens.
+  await expect.poll(() => visibleLayers(page)).toEqual([false, false, false]);
+});
+
+test("presenter view counts a slide's clicks after jumping back to it", async ({
+  page,
+}) => {
+  await load(page, animatedDeck());
+  await page.keyboard.press("Alt+F5");
+  const next = page.locator(".show-console-next-label");
+  await expect(next).toHaveText(/^Next click: animation 1 of 3/);
+  await page.keyboard.press("End");
+  await expect(next).toHaveText("End of slide show");
+  await page.keyboard.press("1");
+  await page.keyboard.press("Enter");
+  await expect(next).toHaveText(/^Next click: animation 1 of 3/);
+});
+
+test("with an audience window the presenter's copy follows the builds", async ({
+  page,
+  context,
+}) => {
+  await load(page, animatedDeck());
+  await page.keyboard.press("Alt+F5");
+  const opened = context.waitForEvent("page");
+  await page.getByRole("button", { name: "Audience window" }).click();
+  const audience = await opened;
+  const slide = audience.locator(".presenter-slide");
+  await expect(slide).toHaveAttribute("src", /./);
+  // The slide as it opens, its click effects not yet played.
+  const opening = await slide.getAttribute("src");
+  const copy = page.locator(".show-mirror img");
+  await expect(copy).toHaveAttribute("src", opening);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => copy.getAttribute("src")).not.toBe(opening);
+  await page.keyboard.press("ArrowLeft");
+  await expect(copy).toHaveAttribute("src", opening);
+});
+
 test("reduced motion still steps through effects", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await load(page, animatedDeck());

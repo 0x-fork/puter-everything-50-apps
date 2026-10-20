@@ -878,6 +878,7 @@ export function createShowSession(ctx, show) {
     };
     win.addEventListener("pagehide", closed);
     mirror = createMirror();
+    mirror.update();
     audience.cleanup = () => {
       observer.disconnect();
       win.removeEventListener("resize", fit);
@@ -971,12 +972,22 @@ export function createShowSession(ctx, show) {
       if (show.isEnded()) show.close();
       else if (!kiosk) show.next();
     });
+    // The picture is drawn again only when the slide or its build changed.
+    let stale = true;
     return {
       frame: inner,
+      invalidate() {
+        stale = true;
+      },
       update() {
         const n = show.current();
-        if (show.isEnded()) image.removeAttribute("src");
-        else image.src = show.picture(all[n]);
+        if (show.isEnded()) {
+          image.removeAttribute("src");
+          stale = true;
+        } else if (stale) {
+          image.src = show.currentPicture?.() ?? show.picture(all[n]);
+          stale = false;
+        }
         image.alt = show.isEnded() ? "End of slide show" : `Slide ${n + 1}`;
       },
       dispose() {
@@ -1202,17 +1213,16 @@ export function createShowSession(ctx, show) {
   let disposed = false;
   return {
     keydown: handleKey,
-    /** After the show draws slide `i`. */
-    shown(i) {
+    /** After the show draws slide `i`; `finished` when it opens with its
+     * animations done (reached by going back, or shown without animation). */
+    shown(i, { finished = false } = {}) {
       const changed = i !== index;
-      // A slide reached by going back, or shown without animation, opens
-      // with its animations done.
-      step =
-        i < index || !setup.showAnimation ? (show.animationSteps?.() ?? 0) : 0;
+      step = finished ? (show.animationSteps?.() ?? 0) : 0;
       index = i;
       if (history[history.length - 1] !== i) history.push(i);
       if (changed) resetZoom();
       ink.setSlide(P.getSlidePartName(all[i]));
+      mirror?.invalidate();
       clearCameras();
       clearCameras = placeCameras({
         P,
@@ -1237,11 +1247,18 @@ export function createShowSession(ctx, show) {
     inkColor: () => ink.colors.pen,
     setInkColor: (color) => ink.setColor("pen", color),
     clearInk: () => ink.clear(),
-    /** An animation click step played (1) or was taken back (-1). */
+    /** An animation click step played (1) or was taken back (-1), or the
+     * slide's opening effects started (0). */
     stepped(by) {
       const steps = show.animationSteps?.() ?? 0;
       step = Math.max(0, Math.min(steps, step + by));
       consoleView?.update();
+      // The presenter's copy follows the audience's slide once it settles.
+      if (mirror)
+        Promise.resolve(by < 0 ? null : show.animationPlayed?.()).then(() => {
+          mirror?.invalidate();
+          mirror?.update();
+        });
     },
     /** The show reached its end screen. */
     ended() {
@@ -1277,7 +1294,7 @@ export function createShowSession(ctx, show) {
       mirror?.dispose();
       consoleView?.dispose();
       cleanups.forEach((f) => f());
-      if (!studio?.ownsCamera) cameras.stop();
+      cameras.stop();
       ctx.afterShow?.(result);
     },
   };
