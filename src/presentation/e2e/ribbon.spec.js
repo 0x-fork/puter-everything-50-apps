@@ -3,6 +3,7 @@
 import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { strFromU8, unzipSync } from "fflate";
+import { Pipette } from "lucide";
 import { P, parseDeck } from "../src/model.js";
 
 const isMac = process.platform === "darwin";
@@ -114,6 +115,13 @@ test("tabs follow the arrow keys, collapse, and a contextual tab follows the sel
   await expect(page.getByRole("tab", { name: "Shape Format" })).toBeHidden();
   await page.getByRole("button", { name: "Collapse the ribbon" }).click();
   await expect(page.locator(".ribbon-body")).toBeHidden();
+  // A tab opens the folded ribbon over the slide; Escape folds it again.
+  await page.getByRole("tab", { name: "Insert" }).click();
+  await expect(page.locator(".ribbon-body")).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".ribbon-body")).toBeHidden();
+  await expect(page.getByRole("tab", { name: "Insert" })).toBeFocused();
   await page.getByRole("button", { name: "Expand the ribbon" }).click();
   await expect(page.locator(".ribbon-body")).toBeVisible();
   await rectangle(page, [100, 100], [300, 200]);
@@ -283,6 +291,32 @@ test("the colour palettes write theme colours as lumMod/lumOff tints", async ({
     /<a:solidFill><a:schemeClr val="accent2"><a:lumMod val="60000"\/><a:lumOff val="40000"\/><\/a:schemeClr><\/a:solidFill>/,
   );
   expect(slideXml()).toMatch(/<a:ln w="38100"/);
+});
+
+test("the arrow keys move through a colour palette as the grid it shows", async ({
+  page,
+}) => {
+  await start(page);
+  await rectangle(page, [100, 100], [300, 200]);
+  await reveal(page, "format-shape-fill");
+  await page.getByRole("button", { name: "Fill colors", exact: true }).click();
+  const swatch = (name) => page.getByRole("menuitem", { name, exact: true });
+  await swatch("Text 1").focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(swatch("Text 1, Lighter 90%")).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(swatch("Text 1")).toBeFocused();
+  // Below the last row the menu moves on, past the palette.
+  await swatch("Purple").focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menuitem", { name: "No Fill" })).toBeFocused();
+  // The Eyedropper shows its own icon, not the stand-in for a missing one.
+  const eyedropper = page.getByRole("menuitem", { name: "Eyedropper" });
+  if (await eyedropper.count())
+    await expect(eyedropper.locator("svg path").first()).toHaveAttribute(
+      "d",
+      Pipette[0][1].d,
+    );
 });
 
 test("Shape Styles, Shape Effects and Format Painter restyle shapes", async ({
@@ -489,6 +523,25 @@ test("a font size the box turns down gives way to the current size", async ({
   await expect(size).toHaveValue("40");
 });
 
+test("Escape from a ribbon box puts its value back and returns to the slide", async ({
+  page,
+}) => {
+  await start(page);
+  await textBox(page, "Size");
+  await tab(page, "Home");
+  const size = await reveal(page, "font-size");
+  // A folded group's drop-down takes Escape itself, closing over its button.
+  test.skip(
+    (await page.locator(".ribbon-fold-panel").count()) > 0,
+    "the Font group is folded at this width",
+  );
+  const current = await size.inputValue();
+  await size.fill("40");
+  await size.press("Escape");
+  await expect(size).toHaveValue(current);
+  await expect(page.locator("#main")).toBeFocused();
+});
+
 test("a command from the menu bar hands the keyboard back to the slide", async ({
   page,
 }) => {
@@ -509,6 +562,15 @@ test("a command from the menu bar hands the keyboard back to the slide", async (
   await page.keyboard.press("ArrowRight");
   await expect(shape).not.toHaveAttribute("style", before);
   await expect(page.getByRole("menu")).toHaveCount(0);
+  // So does a dialog the menu bar opened, once it closes.
+  await page.getByRole("menuitem", { name: "Format", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Font…", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Font" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Font" })).toHaveCount(0);
+  const moved = await shape.getAttribute("style");
+  await page.keyboard.press("ArrowRight");
+  await expect(shape).not.toHaveAttribute("style", moved);
 });
 
 test("a menu bar command while text is edited leaves the editing going", async ({
@@ -600,4 +662,41 @@ test("no tab has two groups of the same name", async ({ page }) => {
     }),
   );
   expect(repeated).toEqual([]);
+});
+
+test("a command run from a folded group keeps the keyboard on the ribbon", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  await start(page);
+  await textBox(page, "Fold");
+  await tab(page, "Home");
+  const fold = page.locator(
+    '.ribbon-panel:not([hidden]) .ribbon-fold[title="Paragraph"]',
+  );
+  await expect(fold).toBeVisible();
+  await fold.focus();
+  await page.keyboard.press("Enter");
+  const center = page.locator('.ribbon-fold-panel [aria-label="Center"]');
+  await center.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".ribbon-fold-panel")).toHaveCount(0);
+  await expect(fold).toBeFocused();
+});
+
+test("no ribbon command shows the stand-in for a missing icon", async ({
+  page,
+}) => {
+  await start(page);
+  // Lucide's presentation screen stands in for an icon name the app lacks.
+  const standIns = await page
+    .locator('.ribbon-btn svg:not([data-icon]) path[d="M2 3h20"]')
+    .evaluateAll((paths) =>
+      paths.map(
+        (p) =>
+          p.closest(".ribbon-btn").getAttribute("title") ||
+          p.closest(".ribbon-btn").getAttribute("aria-label"),
+      ),
+    );
+  expect(standIns).toEqual([]);
 });

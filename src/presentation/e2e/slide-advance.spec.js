@@ -190,6 +190,28 @@ test("timed loops restart at the first visible slide", async ({ page }) => {
   await expect(counter(page)).toHaveText("2 / 2");
 });
 
+test("a kiosk's timed loop plays through before an idle restart", async ({
+  page,
+}) => {
+  const pres = deck([
+    { effect: "none", advanceAfterMs: 2000 },
+    { effect: "none", advanceAfterMs: 2000 },
+    { effect: "none", advanceAfterMs: 2000 },
+    { effect: "none" },
+  ]);
+  P.setSlideShowSetup(pres, { showType: "kiosk", kioskRestartMs: 3000 });
+  await load(page, pres);
+  await page.clock.runFor(4000);
+  await expect(counter(page)).toHaveText("3 / 4");
+  await page.clock.runFor(2000);
+  await expect(counter(page)).toHaveText("4 / 4");
+  // The last slide waits for no one: once idle, the show starts over.
+  await page.clock.runFor(2999);
+  await expect(counter(page)).toHaveText("4 / 4");
+  await page.clock.runFor(1);
+  await expect(counter(page)).toHaveText("1 / 4");
+});
+
 test("the advance clock waits for the actual incoming transition to finish", async ({
   page,
 }) => {
@@ -407,6 +429,96 @@ test("timers and slide-number jumps move past click-sequence media", async ({
   await expect(counter(page)).toHaveText("2 / 3");
   await page.keyboard.press("ArrowRight");
   await expect(counter(page)).toHaveText("3 / 3");
+});
+
+// A second of silence, looping, set to start with its slide.
+function addLoopingSound(slide) {
+  const wav = new Uint8Array(44 + 8000);
+  const view = new DataView(wav.buffer);
+  const tag = (at, s) =>
+    [...s].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+  tag(0, "RIFF");
+  view.setUint32(4, 36 + 8000, true);
+  tag(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true);
+  view.setUint32(28, 8000, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);
+  tag(36, "data");
+  view.setUint32(40, 8000, true);
+  wav.fill(128, 44);
+  P.addSlideMedia(
+    slide,
+    { kind: "audio", data: wav, contentType: "audio/wav" },
+    { x: 914400, y: 914400, w: 914400, h: 914400 },
+    { start: "automatically", loop: true },
+  );
+}
+// Every media element asked to play, kept after it leaves the page; the
+// count of those still playing.
+async function trackMedia(page) {
+  await page.addInitScript(() => {
+    const play = HTMLMediaElement.prototype.play;
+    window.played = [];
+    HTMLMediaElement.prototype.play = function () {
+      window.played.push(this);
+      return play.call(this);
+    };
+  });
+  return () =>
+    page.evaluate(() => window.played.filter((m) => !m.paused).length);
+}
+
+test("media that starts by itself stays silent once the show has left its slide", async ({
+  page,
+}) => {
+  const pres = deck([
+    { effect: "none" },
+    { effect: "none" },
+    { effect: "none" },
+  ]);
+  addLoopingSound(P.getSlides(pres)[1]);
+  const sounding = await trackMedia(page);
+  await load(page, pres);
+  // Passing the slide before its sound starts.
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await expect(counter(page)).toHaveText("3 / 3");
+  await page.clock.runFor(200);
+  expect(await sounding()).toBe(0);
+  // Staying on it plays it.
+  await page.keyboard.press("ArrowLeft");
+  await page.clock.runFor(200);
+  await expect.poll(sounding).toBe(1);
+  // Ending the show just after reaching the slide.
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("dialog.presenter")).toHaveCount(0);
+  await page.clock.runFor(200);
+  expect(await sounding()).toBe(0);
+});
+
+test("a zoom still growing when the show ends opens nothing", async ({
+  page,
+}) => {
+  const pres = deck([{ effect: "none" }, { effect: "none" }]);
+  const [first, second] = P.getSlides(pres);
+  const zoom = text(first, "Zoom", 3, 2, 3, 2);
+  P.setShapeClickAction(zoom, { kind: "slide", slide: second });
+  P.setShapeObjectData(zoom, { type: "zoom", kind: "slide", duration: 1000 });
+  addLoopingSound(second);
+  const sounding = await trackMedia(page);
+  await load(page, pres);
+  await page.getByRole("button", { name: "Zoom to slide 2" }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("dialog.presenter")).toHaveCount(0);
+  // Past the zoom's end, and past the sound's start had it opened.
+  await page.clock.runFor(1500);
+  expect(await sounding()).toBe(0);
 });
 
 test("a stroke drawn as the slide advances stays on its own slide", async ({

@@ -5,6 +5,7 @@ import { test, expect as baseExpect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { strFromU8, unzipSync } from "fflate";
 import { P, parseDeck } from "../src/model.js";
+import { addText, openNewSlideMenu } from "./editor-commands.js";
 
 test.setTimeout(120_000);
 // Phones render each stroke at three times the pixels; give them time.
@@ -281,6 +282,45 @@ test("Ink to Text and Ink to Math ask the AI to read the ink", async ({
   await page.keyboard.press("Escape");
 });
 
+test("Ink to Text puts the words on the ink's slide when another is shown meanwhile", async ({
+  page,
+}) => {
+  await start(page);
+  // The AI answers when the test says.
+  await page.evaluate(() => {
+    window.puter.ai.chat = () =>
+      new Promise((resolve) => {
+        window.__read = () => resolve({ message: { content: "Hello" } });
+      });
+  });
+  // Slide 2 holds a text box with the same id the ink on slide 1 will get.
+  await openNewSlideMenu(page);
+  await page.getByRole("menuitem").filter({ hasText: /Blank/ }).first().click();
+  await expect(page.locator(".slide-thumb")).toHaveCount(2);
+  await addText(page);
+  await page.keyboard.press("Escape");
+  await expect(hits(page)).toHaveCount(1);
+  const other = await hits(page).first().getAttribute("data-shape-id");
+  await page.locator(".slide-thumb").first().click();
+  await page.getByRole("tab", { name: "Draw" }).click();
+  await page.locator('[data-command="draw-pen1"]').click();
+  await stroke(page, wave(100, 150));
+  await expect(hits(page)).toHaveCount(1);
+  expect(await hits(page).first().getAttribute("data-shape-id")).toBe(other);
+  await command(page, "draw-ink-to-text");
+  await expect(page.locator("#toast")).toContainText("Reading");
+  await page.keyboard.press("Escape");
+  await page.locator(".slide-thumb").nth(1).click();
+  await page.evaluate(() => window.__read());
+  await expect(page.locator("#toast")).toContainText("Ink converted to text");
+  // Slide 2's own box is untouched; the words replace the ink on slide 1.
+  await expect(hits(page)).toHaveCount(1);
+  await expect(hits(page).first()).not.toHaveAttribute("aria-label", /^Hello/);
+  await page.locator(".slide-thumb").first().click();
+  await expect(hits(page)).toHaveCount(1);
+  await expect(hits(page).first()).toHaveAttribute("aria-label", /^Hello/);
+});
+
 test("Ink Replay plays the strokes back over the slide and closes with Escape", async ({
   page,
 }) => {
@@ -345,6 +385,88 @@ test("a stroke begun on the ruler's edge is drawn straight along it", async ({
   );
   await page.locator('[data-command="draw-pen1"]').click();
   await expect(page.locator(".ink-layer")).toHaveClass(/touch-pans/);
+});
+
+test("the ruler follows the first finger laid on it, not a second", async ({
+  page,
+}) => {
+  await start(page);
+  await command(page, "draw-ruler");
+  const ruler = page.locator(".ink-ruler");
+  await expect(ruler).toBeVisible();
+  const box = await ruler.boundingBox();
+  const cdp = await page.context().newCDPSession(page);
+  const touch = (type, points) =>
+    cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points });
+  // Two fingers on the ruler, both moving 40px to the right.
+  const fingers = (dx) => [
+    { x: box.x + box.width * 0.4 + dx, y: box.y + box.height / 2, id: 1 },
+    { x: box.x + box.width * 0.6 + dx, y: box.y + box.height / 2, id: 2 },
+  ];
+  await touch("touchStart", fingers(0).slice(0, 1));
+  await touch("touchStart", fingers(0));
+  for (let dx = 10; dx <= 40; dx += 10) await touch("touchMove", fingers(dx));
+  await touch("touchEnd", []);
+  const after = await ruler.boundingBox();
+  expect(after.x - box.x).toBeCloseTo(40, -1);
+  expect(after.y).toBeCloseTo(box.y, 0);
+});
+
+test("two fingers draw one stroke, and a palm under the pen draws nothing", async ({
+  page,
+}) => {
+  await start(page);
+  await page.locator('[data-command="draw-pen1"]').click();
+  const b = await page.locator("#slide-canvas").boundingBox();
+  const at = (x, y) => ({
+    x: b.x + (x / 800) * b.width,
+    y: b.y + (y / 450) * b.height,
+  });
+  const cdp = await page.context().newCDPSession(page);
+  const touch = (type, points) =>
+    cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points });
+  const pen = (type, x, y) =>
+    cdp.send("Input.dispatchMouseEvent", {
+      type,
+      ...at(x, y),
+      button: "left",
+      buttons: type === "mouseReleased" ? 0 : 1,
+      clickCount: 1,
+      pointerType: "pen",
+    });
+  // Two fingers moving at once, one along the top and one along the bottom.
+  const fingers = (i) => [
+    { ...at(100 + i * 20, 100), id: 1 },
+    { ...at(100 + i * 20, 350), id: 2 },
+  ];
+  await touch("touchStart", fingers(0).slice(0, 1));
+  await touch("touchStart", fingers(0));
+  for (let i = 1; i <= 10; i++) await touch("touchMove", fingers(i));
+  await touch("touchEnd", fingers(10).slice(0, 1));
+  await touch("touchEnd", []);
+  await expect(hits(page)).toHaveCount(1);
+  // The first finger's line, flat: no zigzag through the second's.
+  const first = await hits(page).first().boundingBox();
+  expect(first.height).toBeLessThan(b.height / 10);
+  // A palm resting on the glass before the pen comes down, and moving with
+  // it, leaves only the pen's line.
+  const palm = (type, i = 0) =>
+    touch(type, type === "touchEnd" ? [] : [{ ...at(500 + i, 380), id: 7 }]);
+  await palm("touchStart");
+  await palm("touchMove", 5);
+  await pen("mousePressed", 100, 220);
+  for (let i = 1; i <= 10; i++) {
+    await pen("mouseMoved", 100 + i * 20, 220);
+    await palm("touchMove", 5 + i);
+  }
+  await pen("mouseReleased", 300, 220);
+  await palm("touchEnd");
+  await expect(hits(page)).toHaveCount(2);
+  const { shapes } = await download(page);
+  for (const s of shapes) {
+    const box = P.getShapeBounds(s);
+    expect(box.h).toBeLessThan(box.w / 10);
+  }
 });
 
 test("ink drawn in a slide show can be kept on the slide", async ({ page }) => {

@@ -164,6 +164,13 @@ export function createRibbon({
     all[(at + step + all.length) % all.length]?.focus();
   });
 
+  // Escape from a box puts its value back and hands the keyboard to the
+  // slide, rather than dropping it onto the page.
+  function leave(input) {
+    const next = focusFallback?.();
+    if (next) next.focus({ preventScroll: true });
+    else input.blur();
+  }
   function focusables(panel) {
     return [
       ...panel.querySelectorAll(
@@ -219,6 +226,12 @@ export function createRibbon({
       fit();
     }
   }
+  // Escape folds it away too, handing the keyboard back to its tab.
+  root.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !root.classList.contains("flyout")) return;
+    flyout(false);
+    if (body.contains(document.activeElement)) tabButtons.get(active)?.focus();
+  });
   // Listeners on the document end with the ribbon (see destroy), or every
   // presentation opened would keep the previous editor alive.
   const lifetime = new AbortController();
@@ -305,11 +318,19 @@ export function createRibbon({
       if (e && (pop.contains(e.target) || e.target.closest?.(".menu"))) return;
       document.removeEventListener("pointerdown", close, true);
       document.removeEventListener("keydown", onKey, true);
+      const focused = pop.contains(document.activeElement)
+        ? document.activeElement
+        : null;
       node.insertBefore(content, node.firstChild);
       content.hidden = node._folded;
       pop.remove();
       fit();
       anchor.setAttribute("aria-expanded", "false");
+      // A command chosen in the drop-down keeps the keyboard on the ribbon:
+      // on the group's button, or on the command if the group has unfolded.
+      // A press outside it takes the focus where it lands instead (moving it
+      // here would scroll a phone's ribbon from under that press).
+      if (focused && !e) (node._folded ? anchor : focused).focus();
     };
     // Escape is the panel's while the focus is in it; a command that moved
     // the focus on (into the Format pane, say) leaves Escape to its new
@@ -525,7 +546,7 @@ export function createRibbon({
           item.afterCommit?.();
         } else if (e.key === "Escape") {
           input.value = input.dataset.value || "";
-          input.blur();
+          leave(input);
         } else if (e.key === "ArrowDown" && e.altKey) {
           e.preventDefault();
           openList();
@@ -628,7 +649,7 @@ export function createRibbon({
           nudge(e.key === "ArrowUp" ? 1 : -1);
         } else if (e.key === "Escape") {
           input.value = input.dataset.value || "";
-          input.blur();
+          leave(input);
         }
       },
       onchange: () => commit(),
@@ -999,6 +1020,17 @@ export function createRibbon({
         );
       }
       document.body.append(pop);
+      // On a narrow screen the choices give up columns until the panel fits,
+      // rather than running off its edge out of reach.
+      const room = document.documentElement.clientWidth - 8;
+      const grids = [...pop.querySelectorAll(".ribbon-gallery-grid")];
+      for (
+        let columns = item.panelColumns || fullColumns;
+        pop.offsetWidth > room && columns > 1;
+        columns--
+      )
+        for (const grid of grids)
+          grid.style.gridTemplateColumns = `repeat(${columns - 1}, auto)`;
       const r = node.getBoundingClientRect();
       pop.style.left = `${Math.max(4, Math.min(r.left, document.documentElement.clientWidth - pop.offsetWidth - 8))}px`;
       pop.style.top = `${r.top}px`;

@@ -131,6 +131,9 @@ export function createDrawTools({
     const node = canvas();
     ruler.attach();
     if (!node) return;
+    // A stroke under way goes with its layer: when the pen is put down, or
+    // the slide is drawn again under it.
+    if (!tool || !layer?.isConnected) active?.cancel();
     if (!tool) {
       layer?.remove();
       layer = null;
@@ -194,26 +197,57 @@ export function createDrawTools({
       },
     };
   }
-  // Runs `step(event)` for each pointer move (coalesced points included)
-  // until the pointer is let go, then `end()`.
-  function track(step, end) {
+  // The pointer drawing now, { id, type, cancel }. One draws at a time.
+  let active = null;
+  // Runs `step(event)` for each move of the pointer that pressed `e`
+  // (coalesced points included) until it is let go, then `end()`. Other
+  // pointers' moves are not its own: two fingers on the glass would
+  // otherwise zigzag between them. `drop()` clears what it shows when the
+  // stroke is given up.
+  function track(e, step, end, drop = () => {}) {
+    const id = e.pointerId;
+    const target = layer;
     const move = (ev) => {
+      if (ev.pointerId !== id) return;
       for (const c of ev.getCoalescedEvents?.() || [ev]) step(c);
     };
-    const up = () => {
-      layer.removeEventListener("pointermove", move);
-      layer.removeEventListener("pointerup", up);
-      layer.removeEventListener("pointercancel", up);
+    const stop = () => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      target.removeEventListener("pointercancel", up);
+      if (active?.id === id) active = null;
+    };
+    const up = (ev) => {
+      if (ev.pointerId !== id) return;
+      stop();
       end();
     };
-    layer.addEventListener("pointermove", move);
-    layer.addEventListener("pointerup", up);
-    layer.addEventListener("pointercancel", up);
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+    target.addEventListener("pointercancel", up);
+    active = {
+      id,
+      type: e.pointerType,
+      cancel: () => {
+        stop();
+        drop();
+      },
+    };
   }
   function down(e) {
     if (e.button !== 0) return;
     // With drawing by touch off, a finger scrolls and zooms as usual.
     if (e.pointerType === "touch" && !prefs.drawWithTouch) return;
+    // A second finger, or the palm resting while a pen draws, adds nothing.
+    // A pen coming down while a finger draws is the hand that holds it
+    // having touched first: the finger's stroke goes, and the pen draws.
+    if (active) {
+      if (e.pointerType === "pen" && active.type === "touch") active.cancel();
+      else {
+        e.preventDefault();
+        return;
+      }
+    }
     e.preventDefault();
     e.stopPropagation();
     layer.setPointerCapture(e.pointerId);
@@ -251,6 +285,7 @@ export function createDrawTools({
     const snap = 18 * emuPerPx();
     let shown = raw;
     track(
+      e,
       (c) => {
         raw.push(toEmu(c));
         times.push(Math.round(performance.now() - t0));
@@ -261,6 +296,7 @@ export function createDrawTools({
         live.svg.remove();
         commit(shown, p, { times, start }).catch(report);
       },
+      () => live.svg.remove(),
     );
   }
   async function commit(points, p, timing) {
@@ -353,6 +389,7 @@ export function createDrawTools({
     check(path[0], path[0]);
     live?.set(path);
     track(
+      e,
       (c) => {
         const at = toEmu(c);
         check(path.at(-1), at);
@@ -372,6 +409,7 @@ export function createDrawTools({
           }
         }).catch(report);
       },
+      () => live?.svg.remove(),
     );
   }
   function rubOut(slide, shape, path, reach) {
@@ -407,6 +445,7 @@ export function createDrawTools({
     const live = livePath({ class: "ink-lasso" });
     const loop = [toEmu(e)];
     track(
+      e,
       (c) => {
         loop.push(toEmu(c));
         live.set(loop, true);
@@ -421,6 +460,7 @@ export function createDrawTools({
         }
         selectShapes(ids);
       },
+      () => live.svg.remove(),
     );
   }
   function lassoed(slide, loop) {
@@ -473,6 +513,9 @@ export function createDrawTools({
     }
     const picture = inkToPng(P, shapes);
     if (!picture) return;
+    // The words take the ink's place on its own slide, whichever slide is
+    // shown by the time the AI has read it.
+    const target = currentSlide();
     busy = true;
     canvas()?.classList.add("ink-reading");
     changed();
@@ -486,7 +529,7 @@ export function createDrawTools({
         toast("No writing could be read in that ink.");
         return;
       }
-      await placeWords(shapes, value, mode, picture.bounds);
+      await placeWords(target, shapes, value, mode, picture.bounds);
       toast(
         mode === "math" ? "Ink converted to math." : "Ink converted to text.",
       );
@@ -496,8 +539,7 @@ export function createDrawTools({
       changed();
     }
   }
-  async function placeWords(shapes, value, mode, box) {
-    const target = currentSlide();
+  async function placeWords(target, shapes, value, mode, box) {
     const ids = shapes.map((s) => P.getShapeId(s));
     const color = (() => {
       try {
@@ -548,7 +590,11 @@ export function createDrawTools({
       if (mode === "math")
         P.setShapeDescription(made, `Equation (LaTeX): ${value}`);
     });
-    if (made) selectShapes([P.getShapeId(made)]);
+    if (
+      made &&
+      P.getSlidePartName(currentSlide()) === P.getSlidePartName(target)
+    )
+      selectShapes([P.getShapeId(made)]);
   }
   async function convertToShapes() {
     const shapes = inkTargets();

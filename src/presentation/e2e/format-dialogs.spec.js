@@ -2,6 +2,7 @@
 // the ribbon's bullet and numbering galleries, checked by what they write to
 // the downloaded file.
 import { test, expect } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import {
   P,
   addTextBox,
@@ -37,6 +38,10 @@ test("the Font dialog sets the face, underline, effects and character spacing", 
   await dialog.getByLabel("Underline style").selectOption("dbl");
   await dialog.getByRole("button", { name: /^Underline color/ }).click();
   await page.getByRole("menuitem", { name: "Red", exact: true }).click();
+  // The button names the colour now chosen.
+  await expect(
+    dialog.getByRole("button", { name: "Underline color: #FF0000" }),
+  ).toBeVisible();
   await dialog.getByRole("checkbox", { name: "Double strikethrough" }).check();
   await dialog.getByRole("checkbox", { name: "Small caps" }).check();
   await dialog.getByRole("checkbox", { name: "Superscript" }).check();
@@ -65,6 +70,35 @@ test("the Font dialog sets the face, underline, effects and character spacing", 
   expect(fmt.baseline).toBeCloseTo(0.2, 5);
 });
 
+test("the Font dialog's sample can be read in a dark window", async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await start(page);
+  await addTextBox(page);
+  await menu(page, "Format", "Font…");
+  await expect(page.getByRole("dialog", { name: "Font" })).toBeVisible();
+  const axe = await new AxeBuilder({ page })
+    .include(".fmt-font-preview")
+    .withRules(["color-contrast"])
+    .analyze();
+  expect(axe.violations).toEqual([]);
+});
+
+test("the Font dialog's tabs stay put when switched", async ({ page }) => {
+  await start(page);
+  await addTextBox(page);
+  await menu(page, "Format", "Font…");
+  const dialog = page.getByRole("dialog", { name: "Font" });
+  const spacing = dialog.getByRole("tab", { name: "Character Spacing" });
+  const before = await spacing.boundingBox();
+  await spacing.click();
+  const after = await spacing.boundingBox();
+  expect(Math.abs(after.y - before.y)).toBeLessThan(1);
+  await dialog.getByRole("tab", { name: "Font", exact: true }).click();
+  expect(Math.abs((await spacing.boundingBox()).y - before.y)).toBeLessThan(1);
+});
+
 test("the Paragraph and Tabs dialogs set alignment, indents, spacing and tab stops", async ({
   page,
 }) => {
@@ -85,7 +119,13 @@ test("the Paragraph and Tabs dialogs set alignment, indents, spacing and tab sto
   await number(tabs, "Tab stop position", 2);
   await tabs.getByRole("radio", { name: "Right" }).click();
   await tabs.getByRole("button", { name: "Set", exact: true }).click();
-  await expect(tabs.getByRole("option")).toHaveCount(1);
+  await expect(
+    tabs.getByRole("list", { name: "Tab stops" }).getByRole("listitem"),
+  ).toHaveCount(1);
+  const axe = await new AxeBuilder({ page })
+    .include(".format-dialog")
+    .analyze();
+  expect(axe.violations).toEqual([]);
   await tabs.getByRole("button", { name: "OK" }).click();
   await dialog.getByRole("button", { name: "OK" }).click();
   await expect(dialog).toBeHidden();

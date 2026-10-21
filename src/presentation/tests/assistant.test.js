@@ -24,6 +24,7 @@ import {
   NO_CHANGE,
 } from "../src/assistant-tools.js";
 import { aiChatStream } from "../src/cloud.js";
+import { addInkStroke } from "../src/draw/ink-model.js";
 import { fixture } from "./slide-transition-fixture.js";
 import { solidPaintInheritanceFixture } from "./solid-paint-inheritance-fixture.js";
 import { parseDeck } from "../src/model.js";
@@ -148,6 +149,22 @@ describe("assistant tools", () => {
     expect(read.content).toMatch(/id \d+, text box, at x 0\.8/);
     expect(read.content).toContain("Where we are today.");
     expect(read.changed).toBe(false);
+  });
+  it("tells ink drawn on a slide from an outlined shape", async () => {
+    const pres = createDeck("blank");
+    const slide = P.getSlides(pres)[0];
+    addInkStroke(
+      P,
+      slide,
+      Array.from({ length: 12 }, (_, i) => ({
+        x: 1000000 + i * 80000,
+        y: 1000000 + (i % 3) * 40000,
+      })),
+      { type: "pen", color: "#E81224", width: 1, texture: "solid" },
+    );
+    const read = await runTool("read_slide", { slide: 1 }, envFor(pres));
+    expect(read.content).toMatch(/id \d+, ink stroke, at x 1\.09/);
+    expect(read.content).toContain("outline #E81224");
   });
 
   it("reports inherited transformed fills and outlines as they are painted", async () => {
@@ -395,7 +412,7 @@ describe("assistant tools", () => {
     await runTool("delete_slides", { slides: [4, 2] }, env);
     expect(P.getSlides(pres)).toHaveLength(4);
   });
-  it("pins a call to the slides it was described on", () => {
+  it("pins a call to the slides it was described on", async () => {
     const pres = createDeck("story");
     let index = 0;
     const env = { ...envFor(pres), slideIndex: () => index };
@@ -412,6 +429,22 @@ describe("assistant tools", () => {
     const all = { all: true };
     pinCall("set_slide_properties", all, env);
     expect(all.slides).toBeUndefined();
+    // An empty list means the current slide too, and is pinned the same:
+    // the slide described is the one changed, wherever the user is by then.
+    const none = { slides: [], hidden: true };
+    pinCall("set_slide_properties", none, env);
+    expect(none.slides).toEqual([2]);
+    index = 2;
+    await runTool("set_slide_properties", none, env);
+    expect(P.getSlides(pres).map((s) => P.isSlideHidden(s))).toEqual([
+      false,
+      true,
+      false,
+      ...P.getSlides(pres)
+        .slice(3)
+        .map(() => false),
+    ]);
+    index = 1;
     // Slides moved, added or deleted meanwhile make the numbers stale.
     const numbers = { slides: [3] };
     const before = pinCall("delete_slides", numbers, env);

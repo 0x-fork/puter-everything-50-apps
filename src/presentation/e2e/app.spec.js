@@ -767,7 +767,9 @@ test("an oversized cloud import is rejected before its blob is copied into memor
     .getByRole("button", { name: "The big idea A clear, considered story" })
     .click();
   await page.evaluate(() => {
-    const blob = new Blob([new Uint8Array(41 * 1024 * 1024)]);
+    // Only the reported size matters; the bytes stay small.
+    const blob = new Blob([new Uint8Array(8)]);
+    Object.defineProperty(blob, "size", { value: 201 * 1024 * 1024 });
     const read = blob.arrayBuffer.bind(blob);
     window.__bufferReads = 0;
     blob.arrayBuffer = () => {
@@ -785,7 +787,7 @@ test("an oversized cloud import is rejected before its blob is copied into memor
     .getByRole("menuitem", { name: "Open from Puter", exact: true })
     .click();
   await expect(page.locator("#toast")).toHaveText(
-    "Please choose a PPTX file smaller than 40 MB.",
+    "Please choose a PPTX file smaller than 200 MB.",
   );
   expect(await page.evaluate(() => window.__bufferReads)).toBe(0);
   await expect(page).toHaveTitle("The big idea | Presentation");
@@ -1080,7 +1082,7 @@ for (const title of ["The big idea", "Plan.pptx"]) {
   });
 }
 
-test("a locally saved presentation larger than the import limit can be recovered and downloaded", async ({
+test("a large locally saved presentation can be recovered and downloaded", async ({
   page,
 }) => {
   test.setTimeout(60000);
@@ -11110,15 +11112,22 @@ test("slides are reordered by dragging their thumbnails along the navigator", as
   const horizontal = third.x > first.x + first.width / 2;
   // Drag the first slide past the third; a drop line shows on the way. The
   // press is above the slide's options button, which a phone always shows.
+  // The release follows the last step at once: on a phone the third slide
+  // lies at the row's end, where a held pointer scrolls the row on.
+  const second = await thumbs.nth(1).boundingBox();
   await page.mouse.move(first.x + first.width / 2, first.y + first.height / 4);
   await page.mouse.down();
   await page.mouse.move(
-    horizontal ? third.x + third.width * 0.9 : third.x + third.width / 2,
-    horizontal ? third.y + third.height / 2 : third.y + third.height * 0.9,
+    second.x + second.width / 2,
+    second.y + second.height / 2,
     { steps: 8 },
   );
   await expect(page.locator(".slide-drop")).toHaveCount(1);
   await expect(page.locator(".slide-item.dragging")).toHaveCount(1);
+  await page.mouse.move(
+    horizontal ? third.x + third.width * 0.9 : third.x + third.width / 2,
+    horizontal ? third.y + third.height / 2 : third.y + third.height * 0.9,
+  );
   await page.mouse.up();
   await expect(page.locator(".slide-drop")).toHaveCount(0);
   await expect(thumbs.nth(2)).toHaveAccessibleName(/^Slide 3: YOUR NEXT/);
@@ -13352,6 +13361,33 @@ test("Delete in the navigator removes the focused slide", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+// A slide added with Enter in the navigator became current while the focus
+// stayed on the thumbnail before it: the next Enter added a slide in front
+// of the new one, and Delete removed the slide the new one was added after.
+test("the keyboard follows a slide added from the navigator", async ({
+  page,
+}) => {
+  await story(page);
+  const thumbs = page.locator(".slide-thumb");
+  await thumbs.first().click();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#slide-count")).toHaveText("6");
+  await expect(thumbs.nth(1)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#slide-count")).toHaveText("7");
+  await expect(page.locator("#slide-position")).toHaveText("Slide 3 of 7");
+  await expect(thumbs.nth(2)).toBeFocused();
+  // Delete takes the new slide, not the first one it was added after.
+  await page.keyboard.press("Delete");
+  await expect(page.locator("#slide-count")).toHaveText("6");
+  await expect(thumbs.first()).toHaveAttribute(
+    "aria-label",
+    /YOUR NEXT CHAPTER/,
+  );
+  await expect(thumbs.nth(1)).toHaveAttribute("aria-label", /^Slide 2: Blank/);
+  await expect(thumbs.nth(2)).toHaveAttribute("aria-label", /THE CONTEXT/);
+});
+
 // The link region sat where the unrotated object would be.
 test("a rotated object's link region turns with it while presenting", async ({
   page,
@@ -13634,6 +13670,23 @@ test("deleting a slide removes the links to it", async ({ page }) => {
   expect(P.getShapeXmlString(title)).not.toContain("hlinksldjump");
 });
 
+// A mail address typed alone took the web's scheme, so the link opened the
+// address's domain as a web page instead of a message to it.
+test("a mail address typed as a link writes to it", async ({ page }) => {
+  await story(page);
+  await page.locator('[data-object="1"]').click();
+  await page.keyboard.press("Control+k");
+  const dialog = page.getByRole("dialog", { name: "Add link" });
+  await dialog
+    .getByRole("textbox", { name: "Web address" })
+    .fill("team@example.com");
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await paneTab(page, "Size & Properties");
+  await expect(panel(page).locator(".link-target")).toHaveText(
+    "mailto:team@example.com",
+  );
+});
+
 // Find counted matches in the flattened text while Replace found them run
 // by run, so the counts disagreed and Replace could change the wrong one.
 test("find counts the matches that Replace can reach", async ({ page }) => {
@@ -13809,6 +13862,93 @@ test("a press released outside a thumbnail before dragging arms no drag", async 
     /YOUR NEXT CHAPTER/,
   );
   await expect(page.locator("#slide-position")).toHaveText("Slide 1 of 5");
+});
+
+// A quick flick reached the next thumbnail before the pressed one heard any
+// movement, so no drag began: the slide stayed where it was and the press
+// stayed armed until the pointer next passed over its thumbnail.
+test("a slide flicked along the navigator in one movement still moves", async ({
+  page,
+}) => {
+  await story(page);
+  const thumbs = page.locator(".slide-thumb");
+  const first = await thumbs.nth(0).boundingBox();
+  const third = await thumbs.nth(2).boundingBox();
+  const horizontal = third.x > first.x + first.width / 2;
+  await page.mouse.move(first.x + first.width / 2, first.y + first.height / 4);
+  await page.mouse.down();
+  await page.mouse.move(
+    horizontal ? third.x + third.width * 0.9 : third.x + third.width / 2,
+    horizontal ? third.y + third.height / 2 : third.y + third.height * 0.9,
+  );
+  await page.mouse.up();
+  await expect(page.locator(".slide-drop")).toHaveCount(0);
+  await expect(thumbs.nth(2)).toHaveAccessibleName(/^Slide 3: YOUR NEXT/);
+  await expect(page.locator("#slide-position")).toHaveText("Slide 3 of 5");
+});
+
+// The navigator stood still under a slide dragged to its end, so a slide
+// could only travel as far as the thumbnails already in view.
+test("a slide dragged to the navigator's end scrolls it on to later slides", async ({
+  page,
+}) => {
+  await start(page);
+  const pres = createDeck("story");
+  const originals = P.getSlides(pres);
+  while (P.getSlides(pres).length < 12)
+    P.duplicateSlide(pres, originals[P.getSlides(pres).length % 5]);
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Import PPTX", exact: true }).click();
+  await (
+    await chooser
+  ).setFiles({
+    name: "Twelve.pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from(await P.savePresentation(pres)),
+  });
+  await expect(page.locator("#slide-count")).toHaveText("12");
+  // The distant thumbnails are drawn first, so the drag has the page to
+  // itself.
+  await expect(page.locator(".slide-thumb img:not([src])")).toHaveCount(0, {
+    timeout: 20000,
+  });
+  const list = page.locator("#slide-list");
+  const thumbs = page.locator(".slide-thumb");
+  const first = await thumbs.nth(0).boundingBox();
+  const second = await thumbs.nth(1).boundingBox();
+  const horizontal = second.x > first.x + first.width / 2;
+  const area = await list.boundingBox();
+  await page.mouse.move(first.x + first.width / 2, first.y + first.height / 4);
+  await page.mouse.down();
+  // Held just inside the list's far end, the list scrolls on to its end.
+  const end = horizontal
+    ? [area.x + area.width - 4, first.y + first.height / 2]
+    : [first.x + first.width / 2, area.y + area.height - 4];
+  await page.mouse.move(...end, { steps: 8 });
+  await expect
+    .poll(() => list.evaluate((node) => node.scrollTop + node.scrollLeft), {
+      timeout: 15000,
+    })
+    .toBeGreaterThan(200);
+  await expect
+    .poll(
+      () =>
+        list.evaluate((node) =>
+          Math.max(
+            node.scrollHeight - node.clientHeight - node.scrollTop,
+            node.scrollWidth - node.clientWidth - node.scrollLeft,
+          ),
+        ),
+      { timeout: 15000 },
+    )
+    .toBeLessThanOrEqual(1);
+  await page.mouse.up();
+  // The slide lands among the last ones and stays current.
+  await expect(page.locator("#slide-position")).toHaveText(
+    /^Slide 1[12] of 12$/,
+  );
+  await expect(page.locator(".slide-drop")).toHaveCount(0);
 });
 
 // On a Mac, Ctrl-click opens the context menu; the modifier that adds a
@@ -15110,10 +15250,14 @@ test("shortcuts that leave the object alone work while its text is edited", asyn
   const fontSize = () =>
     editor.evaluate((node) => parseFloat(node.style.fontSize));
   const fitSize = await fontSize();
+  // The text's size on the slide at a canvas width, kept legible at 14px or
+  // more (a phone's fitted slide is below that).
+  const points = await editor.evaluate((node) => Number(node.dataset.points));
+  const sizeAt = (w) => Math.max(14, (points * w) / 13.333 / 72);
   await page.keyboard.press("ControlOrMeta+=");
   await expect.poll(width).toBeGreaterThan(fitWidth);
   // The text being edited grows with the slide.
-  const zoomed = (fitSize * (await width())) / fitWidth;
+  const zoomed = (fitSize * sizeAt(await width())) / sizeAt(fitWidth);
   await expect.poll(fontSize).toBeCloseTo(zoomed, 0);
   await page.keyboard.press("ControlOrMeta+0");
   await expect.poll(fontSize).toBeCloseTo(fitSize, 1);
@@ -15350,10 +15494,11 @@ test("ungrouping a mirrored group keeps its children where they were shown", asy
   });
   await expect(page.locator(".object-hit")).toHaveCount(3);
   // The mirrored group shows its first child on the right, its second on
-  // the left and turned the other way.
+  // the left and turned the other way. The group frames the turned child
+  // as the slide shows it, from 1 inch to 4.18.
   await expect(page.locator('[data-object="1"]')).toHaveAttribute(
     "style",
-    /left: 22\.5/,
+    /left: 23\.8/,
   );
   await expect(page.locator('[data-object="2"]')).toHaveAttribute(
     "style",
@@ -15381,14 +15526,133 @@ test("ungrouping a mirrored group keeps its children where they were shown", asy
     [b.x, b.y, b.w, b.h].map((v) => Math.round((v / 914400) * 100) / 100);
   const shapes = P.getSlideShapes(P.getSlides(loaded)[0]);
   expect(shapes.map((s) => inches(P.getShapeBounds(s)))).toEqual([
-    [3, 1, 1, 1],
-    [1, 1, 1, 1],
+    [3.18, 1, 1, 1],
+    [1.18, 1, 1, 1],
   ]);
   expect(shapes.map((s) => P.getShapeRotation(s) || 0)).toEqual([0, 330]);
   expect(shapes.map((s) => !!P.getShapeFlip(s)?.horizontal)).toEqual([
     true,
     true,
   ]);
+});
+
+// A file mirrors an object before turning it, so a flip that kept the turn
+// mirrored a turned object the wrong way: an arrow turned to point down and
+// right came out pointing up and left rather than down and left.
+test("flipping a turned object mirrors it as the slide shows it", async ({
+  page,
+}) => {
+  await start(page);
+  const pres = createDeck("blank");
+  const arrow = P.addSlideShape(P.getSlides(pres)[0], {
+    x: P.inches(4),
+    y: P.inches(3),
+    w: P.inches(3),
+    h: P.inches(1),
+    preset: "rightArrow",
+  });
+  P.setShapeRotation(arrow, 30);
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Import PPTX", exact: true }).click();
+  await (
+    await chooser
+  ).setFiles({
+    name: "Turned arrow.pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from(await P.savePresentation(pres)),
+  });
+  const object = page.locator(".object-hit");
+  await expect(object).toHaveCount(1);
+  await object.click();
+  await paneTab(page, "Size & Properties");
+  await panel(page).getByRole("button", { name: "Flip horizontal" }).click();
+  await expect(object).toHaveAttribute("style", /rotate\(330deg\)/);
+  await expect(
+    panel(page).getByRole("spinbutton", { name: "Rotation (°)" }),
+  ).toHaveValue("330");
+  // Flipped back, it is as it was.
+  await panel(page).getByRole("button", { name: "Flip horizontal" }).click();
+  await expect(object).toHaveAttribute("style", /rotate\(30deg\)/);
+  await panel(page).getByRole("button", { name: "Flip vertical" }).click();
+  await expect(object).toHaveAttribute("style", /rotate\(330deg\)/);
+  const close = page.getByRole("button", { name: "Close format panel" });
+  if (await close.isVisible()) await close.click();
+  await openFileMenu(page);
+  const downloaded = page.waitForEvent("download");
+  await page
+    .getByRole("menuitem", { name: "Download PowerPoint (.pptx)" })
+    .click();
+  const loaded = await parseDeck(
+    new Uint8Array(await readFile(await (await downloaded).path())),
+  );
+  const saved = P.getSlideShapes(P.getSlides(loaded)[0])[0];
+  expect(P.getShapeRotation(saved)).toBe(330);
+  expect(P.getShapeFlip(saved)).toEqual({ horizontal: false, vertical: true });
+  expect(P.getShapeBounds(saved)).toEqual(P.getShapeBounds(arrow));
+});
+
+// With several objects selected, Flip flipped the one with the handles and
+// left the others as they were.
+test("flipping several selected objects flips each where it stands", async ({
+  page,
+}) => {
+  await start(page);
+  const pres = createDeck("blank");
+  const slide = P.getSlides(pres)[0];
+  const add = (x, preset) =>
+    P.addSlideShape(slide, {
+      x: P.inches(x),
+      y: P.inches(2),
+      w: P.inches(2),
+      h: P.inches(1),
+      preset,
+    });
+  const [left, right] = [add(1, "rightArrow"), add(5, "triangle")];
+  P.setShapeRotation(right, 30);
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Import PPTX", exact: true }).click();
+  await (
+    await chooser
+  ).setFiles({
+    name: "Two shapes.pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    buffer: Buffer.from(await P.savePresentation(pres)),
+  });
+  const objects = page.locator(".object-hit");
+  await expect(objects).toHaveCount(2);
+  await objects.nth(0).click();
+  await objects.nth(1).click({ modifiers: ["Shift"] });
+  await expect(page.locator(".object-hit.selected")).toHaveCount(2);
+  await (await ribbonButton(page, "Shape Format", "rotate")).click();
+  await page
+    .getByRole("menuitem", { name: "Flip Horizontal", exact: true })
+    .click();
+  await expect(objects.nth(1)).toHaveAttribute("style", /rotate\(330deg\)/);
+  await expect(page.locator(".object-hit.selected")).toHaveCount(2);
+  await openFileMenu(page);
+  const downloaded = page.waitForEvent("download");
+  await page
+    .getByRole("menuitem", { name: "Download PowerPoint (.pptx)" })
+    .click();
+  const loaded = await parseDeck(
+    new Uint8Array(await readFile(await (await downloaded).path())),
+  );
+  const shapes = P.getSlideShapes(P.getSlides(loaded)[0]);
+  expect(shapes.map((s) => P.getShapeFlip(s)?.horizontal)).toEqual([
+    true,
+    true,
+  ]);
+  expect(shapes.map((s) => P.getShapeRotation(s) || 0)).toEqual([0, 330]);
+  // Each stays where it stood.
+  expect(shapes.map((s) => P.getShapeBounds(s))).toEqual([
+    P.getShapeBounds(left),
+    P.getShapeBounds(right),
+  ]);
+  // One undo step takes both back.
+  await page.keyboard.press("Control+z");
+  await expect(objects.nth(1)).toHaveAttribute("style", /rotate\(30deg\)/);
 });
 
 // An image relationship whose target was an address rather than a part path

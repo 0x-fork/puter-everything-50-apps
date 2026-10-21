@@ -125,6 +125,12 @@ import { createInsertFeatures } from "./insert/index.js";
 import { createShowFeatures } from "./show/index.js";
 import { createAnimationTools } from "./animations/editor.js";
 import { createViews, readingBar, placeReadingDialog } from "./views/index.js";
+import {
+  groupSlides,
+  addSectionAt,
+  renameSectionAt,
+  removeSectionAt,
+} from "./views/sections-model.js";
 import "./chrome/chrome.css";
 import { NO_CHANGE } from "./assistant-tools.js";
 import { AI_MODEL } from "./assistant.js";
@@ -3062,6 +3068,19 @@ async function slideSizeDialog(preset = null) {
               P.setShapeRunFormat(obj, pi, ri, { size: scaleText(size) });
           }
       }
+      // Comments stay by the content they were left on.
+      const threads = P.getSlideCommentThreads(s);
+      if (threads.some((t) => t.pos))
+        P.setSlideCommentThreads(
+          s,
+          threads.map((t) => ({
+            ...t,
+            pos: t.pos && {
+              x: Math.round(t.pos.x * k + dx),
+              y: Math.round(t.pos.y * k + dy),
+            },
+          })),
+        );
     }
     stretchTemplates();
   });
@@ -3801,7 +3820,7 @@ const backgroundPane = createBackgroundPane({
   pres: () => doc.pres,
   target: () => slide(),
   slides: () => P.getSlides(doc.pres),
-  mutateTarget: (fn, options) => mutateSlide(slide(), fn, options),
+  mutateTarget: (fn, options) => mutateBackgrounds(slide(), fn, options),
   mutateDeck: (fn) => mutate(fn),
   skip: SKIP_MUTATION,
   fail,
@@ -3814,7 +3833,7 @@ const backgroundPane = createBackgroundPane({
       "Background color",
       slideBackground(target).color,
       (c) =>
-        mutateSlide(target, (s) => P.setSlideBackground(s, c), {
+        mutateBackgrounds(target, (s) => P.setSlideBackground(s, c), {
           coalesce: coalesceKey("background", target),
         }),
       {
@@ -3848,6 +3867,17 @@ const backgroundPane = createBackgroundPane({
     dedupeSlideMedia(doc.pres, target);
   },
 });
+// A background edit reaches every selected slide when the slide shown is
+// one of them, as one undo step; it is skipped when no slide changed.
+function mutateBackgrounds(target, fn, options) {
+  const parts = partsOf(actionSlides(target));
+  return mutate(() => {
+    let changed = false;
+    for (const s of resolveSlides(parts))
+      if (fn(s) !== SKIP_MUTATION) changed = true;
+    return changed ? undefined : SKIP_MUTATION;
+  }, options);
+}
 // Comments, proofing, accessibility, compare and the read-only mark
 // (review/). It reaches the editor through this surface.
 const review = createReview({
@@ -5505,6 +5535,7 @@ function tableMenu() {
     class: "table-picker",
     role: "grid",
     "aria-label": "Insert table",
+    "data-arrow-keys": "",
   });
   const label = el("div", { class: "table-picker-label" }, "Insert Table");
   const cells = [];
@@ -5528,6 +5559,28 @@ function tableMenu() {
       cells.push(cell);
       grid.append(cell);
     }
+  // Arrow keys size the table as the pointer does, across and down; Down
+  // from the last row goes on to Insert Table….
+  grid.addEventListener("keydown", (e) => {
+    const at = cells.indexOf(document.activeElement);
+    if (at < 0 || !e.key.startsWith("Arrow")) return;
+    const r = Math.floor(at / 10),
+      c = at % 10;
+    const [nr, nc] = {
+      ArrowRight: [r, c + 1],
+      ArrowLeft: [r, c - 1],
+      ArrowDown: [r + 1, c],
+      ArrowUp: [r - 1, c],
+    }[e.key] ?? [r, c];
+    e.preventDefault();
+    e.stopPropagation();
+    if (nr > 7)
+      grid
+        .closest(".table-picker-wrap")
+        ?.parentElement?.querySelector(".menu-item")
+        ?.focus();
+    else if (nr >= 0 && nc >= 0 && nc < 10) cells[nr * 10 + nc].focus();
+  });
   function mark(r, c) {
     for (const cell of cells)
       cell.classList.toggle(
@@ -5621,41 +5674,34 @@ function setSelectionSize(axis, inches) {
   });
 }
 // The Section command: sections group the slides in the thumbnails pane.
+// It changes them as the Slide Sorter does, through views/sections-model.js.
 function sectionMenu() {
-  const sections = (() => {
-    try {
-      return P.getSlideSections(doc.pres) || [];
-    } catch {
-      return [];
-    }
-  })();
-  const part = P.getSlidePartName(slide());
-  const here = sections.find((sec) =>
-    sec.slides?.some((s) => P.getSlidePartName(s) === part),
-  );
+  const sections = sectionList();
+  const here = sectionIndexOf(sections);
   return [
     { label: "Add Section", icon: "o:section", onSelect: run(addSection) },
     {
       label: "Rename Section",
       icon: "Pencil",
-      disabled: !here,
+      disabled: here < 0,
       onSelect: run(() => renameSection(here)),
     },
     {
       label: "Remove Section",
       icon: "Trash2",
-      disabled: !here,
-      onSelect: () => removeSections(here ? [here] : []),
+      disabled: here < 0,
+      onSelect: () => removeSection(here),
     },
     { separator: true },
     {
       label: "Remove All Sections",
       icon: "Trash2",
       disabled: !sections.length,
-      onSelect: () => removeSections(sections),
+      onSelect: () => writeSections([]),
     },
   ];
 }
+const slideOrder = () => P.getSlides(doc.pres).map(P.getSlidePartName);
 function sectionList() {
   try {
     return (P.getSlideSections(doc.pres) || []).map((sec) => ({
@@ -5665,6 +5711,14 @@ function sectionList() {
   } catch {
     return [];
   }
+}
+// The index of the current slide's section, or -1 without sections.
+function sectionIndexOf(sections) {
+  if (!sections.length) return -1;
+  const part = P.getSlidePartName(slide());
+  return groupSlides(slideOrder(), sections).findIndex((g) =>
+    g.slides.includes(part),
+  );
 }
 function writeSections(list) {
   mutate(() => {
@@ -5685,65 +5739,28 @@ async function addSection() {
     confirm: "Rename",
   });
   if (!name) return;
-  const parts = P.getSlides(doc.pres).map(P.getSlidePartName);
-  const at = Math.max(0, index);
-  let list = sectionList();
-  if (!list.length) {
-    list =
-      at > 0
-        ? [
-            { name: "Default Section", slides: parts.slice(0, at) },
-            { name, slides: parts.slice(at) },
-          ]
-        : [{ name, slides: parts }];
-  } else {
-    const part = parts[at];
-    const i = list.findIndex((sec) => sec.slides.includes(part));
-    const sec = list[i];
-    const k = sec.slides.indexOf(part);
-    const head = { ...sec, slides: sec.slides.slice(0, k) };
-    const tail = { name, slides: sec.slides.slice(k) };
-    list.splice(i, 1, ...(head.slides.length ? [head, tail] : [tail]));
-  }
-  writeSections(list);
+  const plan = addSectionAt(
+    slideOrder(),
+    sectionList(),
+    P.getSlidePartName(slide()),
+    name,
+  );
+  writeSections(plan.sections);
 }
-async function renameSection(section) {
-  if (!section) return;
-  const name = await promptName("Rename Section", section.name, null, {
-    confirm: "Rename",
-  });
+async function renameSection(i) {
+  const name = await promptName(
+    "Rename Section",
+    groupSlides(slideOrder(), sectionList())[i]?.name ?? "",
+    null,
+    { confirm: "Rename" },
+  );
   if (!name) return;
-  const list = sectionList();
-  const first = P.getSlidePartName(section.slides[0]);
-  const target = list.find(
-    (sec) => sec.slides[0] === first && sec.name === section.name,
-  );
-  if (target) target.name = name;
-  writeSections(list);
+  const plan = renameSectionAt(slideOrder(), sectionList(), i, name);
+  if (plan) writeSections(plan.sections);
 }
-function removeSections(sections) {
-  if (!sections.length) return;
-  const names = new Set(
-    sections.map(
-      (sec) => `${sec.name}|${P.getSlidePartName(sec.slides[0] || slide())}`,
-    ),
-  );
-  const list = sectionList();
-  const kept = [];
-  for (const sec of list) {
-    if (
-      names.has(`${sec.name}|${sec.slides[0] || P.getSlidePartName(slide())}`)
-    ) {
-      // A removed section's slides join the section before it.
-      if (kept.length) kept.at(-1).slides.push(...sec.slides);
-      else if (list.length > 1) kept.push({ ...sec, name: "Default Section" });
-    } else kept.push(sec);
-  }
-  writeSections(
-    kept.length === list.length - sections.length || kept.length
-      ? kept.filter((s) => s.slides.length)
-      : [],
-  );
+function removeSection(i) {
+  const plan = removeSectionAt(slideOrder(), sectionList(), i);
+  if (plan) writeSections(plan.sections);
 }
 // The Symbol command: a grid of characters to insert at the text cursor.
 const SYMBOLS =
@@ -8409,6 +8426,13 @@ function renderSlideArea(refreshNavigator = true) {
     list
       .querySelector(".slide-item.active, .master-pane-item.active")
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    // The keyboard follows a slide made current from another thumbnail, one
+    // added with Enter or duplicated there, so Delete and the arrows go on
+    // from the slide shown rather than the one before it.
+    const focused = focusTarget || document.activeElement;
+    if (list.contains(focused) && focused.matches(".slide-thumb"))
+      focusTarget =
+        list.querySelector(".slide-item.active .slide-thumb") || focusTarget;
   }
   updateSlideCount();
   document.querySelector("#slide-label").textContent = masterView.active
@@ -8606,9 +8630,49 @@ function startSlideDrag(e, target) {
       indicator.style.width = `${r.width}px`;
     }
   }
+  // Held near the navigator's top or bottom (its ends, on a phone), or past
+  // them, for a moment, the list scrolls on, faster the closer the pointer
+  // comes, so a slide can travel past the thumbnails in view. A drop made
+  // at once beside the last thumbnail in view lands before the list moves.
+  let pointer = null,
+    scrolling = 0,
+    heldSince = 0,
+    scrolledAt = 0;
+  function autoScroll(now = performance.now()) {
+    scrolling = 0;
+    if (!dragging || !pointer) return;
+    const r = list.getBoundingClientRect();
+    const [at, from, to] = horizontal
+      ? [pointer.clientX, r.left, r.right]
+      : [pointer.clientY, r.top, r.bottom];
+    const edge = Math.min(48, (to - from) / 4);
+    const reach =
+      at < from + edge ? at - from - edge : at > to - edge ? at - to + edge : 0;
+    if (!reach) {
+      heldSince = 0;
+      return;
+    }
+    if (!heldSince) heldSince = scrolledAt = now;
+    if (now - heldSince >= 250) {
+      // Up to about a thousand pixels a second, however often frames come.
+      const elapsed = Math.min(250, now - scrolledAt);
+      const step = Math.max(
+        1,
+        (Math.min(edge, Math.abs(reach)) * elapsed) / 48,
+      );
+      const axis = horizontal ? "scrollLeft" : "scrollTop";
+      const before = list[axis];
+      list[axis] += Math.sign(reach) * Math.round(step);
+      if (list[axis] === before) return;
+      place(pointer);
+    }
+    scrolledAt = now;
+    scrolling = requestAnimationFrame(autoScroll);
+  }
+  // The page hears the press's movements, as a quick flick can leave the
+  // thumbnail before the first of them arrives.
   function move(ev) {
-    // A release outside the thumbnail before the drag began never reached
-    // it; the pointer coming back with no button down ends the press.
+    if (ev.pointerId !== e.pointerId) return;
     if (!ev.buttons) {
       finish(false);
       return;
@@ -8627,14 +8691,18 @@ function startSlideDrag(e, target) {
       });
       list.append(indicator);
     }
-    place(ev);
+    pointer = { clientX: ev.clientX, clientY: ev.clientY };
+    place(pointer);
+    if (!scrolling) autoScroll();
   }
   function finish(apply) {
     if (slideDragCancel === cancel) slideDragCancel = null;
-    thumb.removeEventListener("pointermove", move);
-    thumb.removeEventListener("pointerup", end);
-    thumb.removeEventListener("pointercancel", cancel);
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", end);
+    document.removeEventListener("pointercancel", cancel);
     document.removeEventListener("keydown", escape, true);
+    cancelAnimationFrame(scrolling);
+    scrolling = 0;
     if (!dragging) return;
     if (thumb.hasPointerCapture(e.pointerId))
       thumb.releasePointerCapture(e.pointerId);
@@ -8680,8 +8748,8 @@ function startSlideDrag(e, target) {
       clearSelection();
     });
   }
-  const end = () => finish(true);
-  const cancel = () => finish(false);
+  const end = (ev) => ev.pointerId === e.pointerId && finish(true);
+  const cancel = (ev) => (!ev || ev.pointerId === e.pointerId) && finish(false);
   function escape(ev) {
     if (ev.key === "Escape" && dragging) {
       ev.preventDefault();
@@ -8689,9 +8757,9 @@ function startSlideDrag(e, target) {
       finish(false);
     }
   }
-  thumb.addEventListener("pointermove", move);
-  thumb.addEventListener("pointerup", end);
-  thumb.addEventListener("pointercancel", cancel);
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", end);
+  document.addEventListener("pointercancel", cancel);
   document.addEventListener("keydown", escape, true);
   slideDragCancel = cancel;
 }
@@ -9022,10 +9090,15 @@ function pruneSelection() {
     if (!present.has(id) || (primary && P.getShapeId(primary) === id))
       extras.delete(id);
 }
-// Several selected objects share one dashed outline around them all.
+// Several selected objects share one dashed outline around them all, a
+// turned one where the slide shows it.
 function multiBox(size) {
+  const parents = groupParents(slide());
   const bounds = selectedShapes()
-    .map((s) => slideBounds(doc.pres, s))
+    .map((s) => {
+      const b = slideBounds(doc.pres, s, parents);
+      return b && turnedBounds(b, slideRotation(s, parents));
+    })
     .filter(Boolean);
   const box = el("div", {
     class: "selection-box multi",
@@ -9505,8 +9578,12 @@ function startDrag(e, shape, mode = "move") {
   // The objects in motion stay on the slide, and they move as one: by the
   // step the pointer asks for, or by the room the one nearest the slide's
   // edge has left, so their arrangement holds. Artwork already past an edge
-  // keeps the overflow it came with.
-  const held = [...(carried ? [] : [b]), ...companions.map((c) => c.bounds)];
+  // keeps the overflow it came with, and a turned object meets the edge
+  // where the slide shows it.
+  const held = [
+    ...(carried ? [] : [turnedBounds(b, rotation)]),
+    ...companions.map((c) => turnedBounds(c.bounds, c.rotation)),
+  ];
   const withinSlide = (candidate) => {
     let dx = candidate.x - b.x,
       dy = candidate.y - b.y;
@@ -11667,22 +11744,23 @@ function insertImage() {
 // any earlier background image, leave the file with it.
 async function setBackgroundImage(file) {
   const target = doc,
-    part = P.getSlidePartName(slide());
+    parts = partsOf(actionSlides(slide()));
   const bytes = await readImageFile(file);
   if (doc !== target) return;
   await mutate(() => {
-    const destination = slideByPart(part);
-    if (!destination) throw new Error("The slide was removed.");
-    P.setSlideBackgroundImage(destination, bytes);
-    // New bytes under the same part name leave the slide's XML as it was.
-    doc.previews.delete(part);
-    pruneUnusedMedia(doc.pres, destination);
-    dedupeSlideMedia(doc.pres, destination);
+    const destinations = resolveSlides(parts);
+    if (!destinations.length) throw new Error("The slide was removed.");
+    for (const destination of destinations) {
+      P.setSlideBackgroundImage(destination, bytes);
+      // New bytes under the same part name leave the slide's XML as it was.
+      doc.previews.delete(P.getSlidePartName(destination));
+      pruneUnusedMedia(doc.pres, destination);
+      dedupeSlideMedia(doc.pres, destination);
+    }
   });
 }
 function removeBackgroundImage() {
-  const target = slide();
-  mutateSlide(target, (target) => {
+  mutateBackgrounds(slide(), (target) => {
     if (P.getSlideBackground(target).kind !== "image") return SKIP_MUTATION;
     P.setSlideBackground(target, THEMES[theme].bg);
     pruneUnusedMedia(doc.pres, target);
@@ -12970,13 +13048,35 @@ function multiModel() {
     ],
   };
 }
+// A flip mirrors the object as the slide shows it. A file mirrors an object
+// before turning it, so a turned object turns the other way as it flips: an
+// arrow turned to point down and right points down and left. Of several
+// selected objects, each shape and picture flips where it stands, as in
+// PowerPoint.
 function flipObject(obj, axis) {
-  mutateShape(obj, (obj) => {
-    const flip = P.getShapeFlip(obj) || {};
-    P.setShapeFlip(obj, {
-      horizontal: axis === "horizontal" ? !flip.horizontal : !!flip.horizontal,
-      vertical: axis === "vertical" ? !flip.vertical : !!flip.vertical,
-    });
+  const flippable = (s) => ["shape", "picture"].includes(P.getShapeKind(s));
+  const ids = (
+    selectionIds().has(P.getShapeId(obj))
+      ? selectedApart().filter(flippable)
+      : [obj]
+  ).map(P.getShapeId);
+  mutateSlide(P.getShapeSlide(obj), (targetSlide) => {
+    const parents = groupParents(targetSlide);
+    const list = ids
+      .map((id) => P.findShapeById(targetSlide, id))
+      .filter(Boolean);
+    if (!list.length) return SKIP_MUTATION;
+    for (const target of list) {
+      const shown = slideRotation(target, parents);
+      const flip = P.getShapeFlip(target) || {};
+      P.setShapeFlip(target, {
+        horizontal:
+          axis === "horizontal" ? !flip.horizontal : !!flip.horizontal,
+        vertical: axis === "vertical" ? !flip.vertical : !!flip.vertical,
+      });
+      if (shown)
+        P.setShapeRotation(target, ownRotation(target, 360 - shown, parents));
+    }
   });
 }
 // The six alignments as icon buttons: to the slide for one object, to each
@@ -14232,11 +14332,14 @@ const slideLabel = (s) =>
 // scheme would run in the page the moment it was followed while presenting.
 const OPENABLE_URL = /^\s*(https?:|mailto:|tel:)/i;
 const canOpenUrl = (url) => OPENABLE_URL.test(String(url || ""));
-// Web addresses without a scheme are taken as https.
+// Web addresses without a scheme are taken as https, and a mail address
+// typed alone as one to write to.
 function normalizeUrl(value) {
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (canOpenUrl(trimmed)) return trimmed;
+  if (/^[^\s@/:?#]+@[^\s@/:?#]+\.[^\s@/:?#]+$/.test(trimmed))
+    return `mailto:${trimmed}`;
   // Another scheme is refused; "localhost:3000" or "example.com:8080/x"
   // carry a port, not a scheme.
   if (/^[a-z][a-z0-9+.-]*:(?!\d+(\/|$))/i.test(trimmed)) return null;
@@ -15635,17 +15738,30 @@ async function present(options = {}) {
   // Once a timed slide's time is up, its remaining click steps play one
   // after another before the show moves on.
   let timeUp = false;
+  // Previous takes back the first slide's builds, and goes no further.
+  function syncPrevious() {
+    previous.disabled = n === 0 && !showTiming.loop && !animator?.step;
+    if (previous.disabled && document.activeElement === previous) image.focus();
+  }
   function advance(auto = false) {
     if (!ended && animator?.next()) {
+      syncPrevious();
       session?.stepped(1);
-      if (timeUp) advanceClock.select(0, animator.played);
+      // A step with nothing to wait for (media, which the timer passes by)
+      // moves straight on.
+      if (timeUp)
+        if (animator.playing) advanceClock.select(0, animator.played);
+        else advance(true);
       return;
     }
     show(n + 1, { step: auto ? "auto" : "click" });
   }
   const advanceClock = createSlideAdvanceClock(() => {
     timeUp = true;
-    advance(true);
+    // Effects still playing (such as those that start by themselves with
+    // the slide) end first, as their own clicks would wait for them.
+    if (animator?.playing) advanceClock.select(0, animator.played);
+    else advance(true);
   });
   const pauseButton = iconButton(
     "Pause automatic advance",
@@ -15686,6 +15802,7 @@ async function present(options = {}) {
   }
   function showPrevious() {
     if (!ended && animator?.previous()) {
+      syncPrevious();
       session?.stepped(-1);
       // Stepping back starts the slide's time over.
       if (timeUp) {
@@ -15696,6 +15813,9 @@ async function present(options = {}) {
       }
       return;
     }
+    // Before the first slide there is nothing to go back to: the slide
+    // stays as it opened, its builds still to come.
+    if (!ended && n === 0 && !showTiming.loop) return;
     show(ended ? n : n - 1, { backward: true });
   }
   // The transition playing over the frame (see src/transitions/player.js).
@@ -15707,6 +15827,8 @@ async function present(options = {}) {
   // `step` marks a plain advance ("click", or "auto" from the timer), as
   // opposed to a jump to a slide.
   function show(i, { backward = false, step } = {}) {
+    // A zoom finishing after the show has ended goes nowhere.
+    if (!d.isConnected) return;
     const redirected = ended ? i : showInserted.navigate(i, n, { step });
     if (redirected === null) return;
     i = redirected;
@@ -15791,7 +15913,15 @@ async function present(options = {}) {
     // distant ones render once here and are kept for the navigator.
     image.src = arriving;
     image.alt = slideDescription(all[n], pres) || `Slide ${n + 1}`;
-    animator = createSlideAnimator({ pres, slide: all[n], frame, image });
+    animator = createSlideAnimator({
+      pres,
+      slide: all[n],
+      frame,
+      image,
+      // Only a click plays media: once a slide's time is up, the show
+      // moves past it.
+      onMedia: (effect) => timeUp || showInserted.mediaStep(effect),
+    });
     // Set Up Show can show every slide without its animations.
     if (backward || !plan.setup.showAnimation) animator.finish();
     else {
@@ -15808,7 +15938,7 @@ async function present(options = {}) {
     counter.textContent = reading
       ? `Slide ${n + 1} of ${all.length}`
       : `${n + 1} / ${all.length}`;
-    previous.disabled = n === 0 && !showTiming.loop;
+    syncPrevious();
     next.disabled = false;
     const text = P.getSlideNotes(all[n]) || "";
     notesText.textContent = text || "No notes for this slide.";
@@ -15914,7 +16044,8 @@ async function present(options = {}) {
         counter,
         count: all.length,
         current: () => n,
-        show: (i) => show(i, { backward: i < n }),
+        // Go to Slide opens the slide at its start, as See All Slides does.
+        show: (i) => show(i),
         close,
         titleOf: (i) => slideTitle(all[i], pres),
         // Another view from the bar: the show ends on the slide it reached.
@@ -16179,6 +16310,8 @@ async function present(options = {}) {
   }
   const releaseFonts = retainDocumentFonts(pres);
   document.body.append(d);
+  // Media playing on the editing canvas stops: the show plays its own.
+  insertFeatures.leaveSlide();
   try {
     show(n);
     d.showModal();
@@ -16681,10 +16814,12 @@ document.addEventListener("keydown", (e) => {
         if (b) items.push({ obj, b });
       }
       // The objects move as one: by the step, or by the room the one nearest
-      // the slide's edge has left, so their arrangement holds.
+      // the slide's edge has left, so their arrangement holds. A turned
+      // object meets the edge where the slide shows it.
       let stepX = dx,
         stepY = dy;
-      for (const { b } of items) {
+      for (const { obj, b: own } of items) {
+        const b = turnedBounds(own, slideRotation(obj, parents));
         const roomX = clampMovement(b.x + dx, b.x, size.cx - b.w) - b.x;
         const roomY = clampMovement(b.y + dy, b.y, size.cy - b.h) - b.y;
         if (Math.abs(roomX) < Math.abs(stepX)) stepX = roomX;
@@ -16834,14 +16969,12 @@ window.addEventListener("offline", () => {
 // Files on the drive handed to the app by the Puter desktop: the one it was
 // launched with (a double-click, "Open with"), or those dragged onto the
 // window. A presentation opens where it lives, so its edits go back to it;
-// an image goes on the current slide, as one dropped from the device does.
+// a picture goes on the current slide, as one dropped from the device does,
+// in the kinds Insert > Picture takes.
 const DRIVE_IMAGE_TYPES = {
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  svg: "image/svg+xml",
 };
 function openDriveItems(items) {
   const item = items.find((it) => it?.path && !cloud.isDirItem(it));
@@ -16872,7 +17005,7 @@ function openDriveItems(items) {
     return;
   }
   toast(
-    `“${name}” can't be opened here. Choose a PowerPoint (.pptx) file${view === "editor" ? " or an image" : ""}.`,
+    `“${name}” can't be opened here. Choose a PowerPoint (.pptx) file${view === "editor" ? " or a PNG or JPEG picture" : ""}.`,
   );
 }
 // The presentation the app was launched with is the first screen, in place

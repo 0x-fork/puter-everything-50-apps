@@ -35,6 +35,38 @@ export function penStrokeColor(pen) {
   return hex;
 }
 
+// Graphite is drawn twice, a hair apart, so the pencil's grain shows where
+// the passes overlap: this far apart for a stroke `width` EMUs wide.
+const graphiteGrain = (width) => Math.max(1, width * 0.35);
+
+// The box and smooth paths of a stroke through `kept` (slide EMUs), with
+// the second, offset pass of graphite when `grain` is given.
+function strokeGeometry(kept, grain = 0) {
+  const b = bounds(kept);
+  const minX = b.x - grain,
+    minY = b.y - grain;
+  const w = Math.round(Math.max(1, b.w + grain * 2)),
+    h = Math.round(Math.max(1, b.h + grain * 2));
+  const local = kept.map((q) => ({ x: q.x - minX, y: q.y - minY }));
+  const paths = [{ w, h, fill: false, commands: smoothCommands(local) }];
+  if (grain)
+    paths.push({
+      w,
+      h,
+      fill: false,
+      commands: smoothCommands(
+        local.map((q, i) => ({
+          x: q.x + (i % 2 ? grain : -grain) * 0.6,
+          y: q.y + (i % 3 ? grain : -grain) * 0.6,
+        })),
+      ),
+    });
+  return {
+    box: { x: Math.round(minX), y: Math.round(minY), w, h },
+    paths,
+  };
+}
+
 /**
  * Adds a stroke drawn through `points` (slide EMUs) with `pen`, thinned to
  * `tolerance`. `times` (ms since `start`, one per point) records the pace it
@@ -55,41 +87,13 @@ export function addInkStroke(
     keptTimes?.push(keptTimes[0]);
   }
   const width = penWidthEmu(pen);
-  // Graphite is drawn twice, a hair apart, so the pencil's grain shows
-  // where the passes overlap.
-  const grain = pen.texture === "graphite" ? Math.max(1, width * 0.35) : 0;
-  const box = bounds(kept);
-  const minX = box.x - grain,
-    minY = box.y - grain;
-  const w = Math.max(1, box.w + grain * 2),
-    h = Math.max(1, box.h + grain * 2);
-  const local = kept.map((q) => ({ x: q.x - minX, y: q.y - minY }));
-  const paths = [
-    {
-      w: Math.round(w),
-      h: Math.round(h),
-      fill: false,
-      commands: smoothCommands(local),
-    },
-  ];
-  if (grain)
-    paths.push({
-      w: Math.round(w),
-      h: Math.round(h),
-      fill: false,
-      commands: smoothCommands(
-        local.map((q, i) => ({
-          x: q.x + (i % 2 ? grain : -grain) * 0.6,
-          y: q.y + (i % 3 ? grain : -grain) * 0.6,
-        })),
-      ),
-    });
+  const { box, paths } = strokeGeometry(
+    kept,
+    pen.texture === "graphite" ? graphiteGrain(width) : 0,
+  );
   const shape = P.addSlideShape(slide, {
     preset: "rect",
-    x: Math.round(minX),
-    y: Math.round(minY),
-    w: Math.round(w),
-    h: Math.round(h),
+    ...box,
     name: name || `${INK_NAME} ${Date.now() % 100000}`,
   });
   P.setShapeFreeformPaths(shape, paths);
@@ -106,30 +110,26 @@ export function addInkStroke(
   return shape;
 }
 
-/** Redraws a stroke through new points (slide EMUs): one smooth path, its
- * box fitted to them. */
+/** Redraws a stroke through new points (slide EMUs): one smooth path (two
+ * for graphite, which keeps its grain), its box fitted to them, neither
+ * turned nor flipped. */
 export function setStrokeGeometry(P, shape, points, tolerance = 1) {
+  if (P.getShapeRotation?.(shape)) P.setShapeRotation(shape, 0);
+  const flip = P.getShapeFlip?.(shape);
+  if (flip?.horizontal || flip?.vertical)
+    P.setShapeFlip(shape, { horizontal: false, vertical: false });
   const kept = simplifyIndices(points, tolerance).map((i) => points[i]);
   if (kept.length === 1) kept.push({ x: kept[0].x + tolerance, y: kept[0].y });
-  const box = bounds(kept);
-  const w = Math.max(1, box.w),
-    h = Math.max(1, box.h);
-  P.setShapeBounds(shape, {
-    x: Math.round(box.x),
-    y: Math.round(box.y),
-    w: Math.round(w),
-    h: Math.round(h),
-  });
-  P.setShapeFreeformPaths(shape, [
-    {
-      w: Math.round(w),
-      h: Math.round(h),
-      fill: false,
-      commands: smoothCommands(
-        kept.map((q) => ({ x: q.x - box.x, y: q.y - box.y })),
-      ),
-    },
-  ]);
+  let passes = 1;
+  try {
+    passes = P.getShapeCustomGeometry(shape)?.paths?.length || 1;
+  } catch {}
+  const { box, paths } = strokeGeometry(
+    kept,
+    passes > 1 ? graphiteGrain(P.getShapeStrokeWidth?.(shape) || PT) : 0,
+  );
+  P.setShapeBounds(shape, box);
+  P.setShapeFreeformPaths(shape, paths);
 }
 
 // The first path of a stroke and the scale from its grid to the slide.
@@ -143,22 +143,47 @@ function strokePath(P, shape) {
   return { b, path };
 }
 
+// Where a point within the stroke's box lands on the slide: a stroke turned
+// or flipped since it was drawn is drawn so about its box's centre (flipped
+// first, then turned clockwise).
+function placement(P, shape, b) {
+  const turn = P.getShapeRotation?.(shape) || 0;
+  let flip = null;
+  try {
+    flip = P.getShapeFlip?.(shape);
+  } catch {}
+  const fx = !!flip?.horizontal,
+    fy = !!flip?.vertical;
+  if (!turn && !fx && !fy) return (p) => p;
+  const cx = b.x + b.w / 2,
+    cy = b.y + b.h / 2;
+  const a = (turn * Math.PI) / 180,
+    cos = Math.cos(a),
+    sin = Math.sin(a);
+  return (p) => {
+    const dx = fx ? cx - p.x : p.x - cx,
+      dy = fy ? cy - p.y : p.y - cy;
+    return { ...p, x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
+  };
+}
+
 /** A stroke's on-curve points on the slide, in drawing order. */
 export function strokePoints(P, shape) {
   const found = strokePath(P, shape);
   if (!found) return [];
   const { b, path } = found;
+  const place = placement(P, shape, b);
   if (!path)
     return [
       { x: b.x, y: b.y },
       { x: b.x + b.w, y: b.y + b.h },
-    ];
+    ].map(place);
   const sx = b.w / (path.w || b.w || 1),
     sy = b.h / (path.h || b.h || 1);
   const out = [];
   for (const c of path.commands) {
     const pt = c.pt || c.pts?.at(-1);
-    if (pt) out.push({ x: b.x + pt.x * sx, y: b.y + pt.y * sy });
+    if (pt) out.push(place({ x: b.x + pt.x * sx, y: b.y + pt.y * sy }));
   }
   return out;
 }
@@ -170,13 +195,16 @@ export function strokeSamples(P, shape, steps = 8) {
   if (!found?.path)
     return strokePoints(P, shape).map((p, i) => ({ ...p, at: i, f: 0 }));
   const { b, path } = found;
+  const place = placement(P, shape, b);
   const sx = b.w / (path.w || b.w || 1),
     sy = b.h / (path.h || b.h || 1);
-  return sampleCommands(path.commands, steps).map((p) => ({
-    ...p,
-    x: b.x + p.x * sx,
-    y: b.y + p.y * sy,
-  }));
+  return sampleCommands(path.commands, steps).map((p) =>
+    place({
+      ...p,
+      x: b.x + p.x * sx,
+      y: b.y + p.y * sy,
+    }),
+  );
 }
 
 /** How a stroke is drawn: colour (#RRGGBB), opacity, and width in EMUs. */

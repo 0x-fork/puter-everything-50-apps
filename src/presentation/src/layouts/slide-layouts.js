@@ -1,7 +1,7 @@
 // Slide commands built on layouts: New Slide on a layout, changing the
 // layout of the selected slides, and Reset. The editor hands in what these
 // need through `host`.
-import { P } from "../model.js";
+import { P, matchHeaderFooter } from "../model.js";
 import { layoutGallery, nextLayoutFor } from "./gallery.js";
 
 export const SLIDE_LIMIT = 300;
@@ -37,6 +37,12 @@ export function createLayoutCommands(host) {
       const added = P.addSlide(pres, { layout });
       const position = previous ? slides.indexOf(previous) + 1 : slides.length;
       P.moveSlide(pres, added, position);
+      matchHeaderFooter(
+        pres,
+        P.getSlides(pres)[position],
+        previous,
+        position + 1,
+      );
       host.afterAdd(position);
     });
   }
@@ -118,8 +124,10 @@ export function createLayoutCommands(host) {
     });
   }
 
+  // Asked on every toolbar refresh (each keystroke and caret move): count
+  // the layout parts rather than reading every layout.
   const hasLayouts = () =>
-    host.available() && P.getSlideLayouts(host.pres()).length > 0;
+    host.available() && P.getSlideLayoutCount(host.pres()) > 0;
 
   return {
     addSlide,

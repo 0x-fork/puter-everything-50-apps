@@ -41,6 +41,27 @@ const underlineToken = (u) =>
 const strikeToken = (s) =>
   s === true ? "sngStrike" : !s || s === "noStrike" ? "noStrike" : s;
 
+// The colour the sample is drawn in: its own, or the theme's text colour.
+const previewInk = (f, theme) =>
+  cssColor(f.color, theme) || cssColor("scheme:tx1", theme);
+// The sample stands on the theme's light or dark background, whichever its
+// colour reads against, as it would on a slide: on the window's own surface
+// dark text all but vanished in dark mode.
+const luma = (hex) => {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+function previewPaper(f, theme) {
+  const ink = previewInk(f, theme);
+  if (!ink) return "";
+  const papers = [
+    cssColor("scheme:bg1", theme) || "#FFFFFF",
+    cssColor("scheme:tx1", theme) || "#000000",
+  ];
+  const gap = (paper) => Math.abs(luma(paper) - luma(ink));
+  return gap(papers[0]) >= gap(papers[1]) ? papers[0] : papers[1];
+}
+
 // CSS that approximates a format for the preview.
 function previewStyle(f, theme) {
   const u = underlineToken(f.underline);
@@ -48,7 +69,7 @@ function previewStyle(f, theme) {
   const deco = [u !== "none" && "underline", s !== "noStrike" && "line-through"]
     .filter(Boolean)
     .join(" ");
-  const color = cssColor(f.color, theme) || "currentColor";
+  const color = previewInk(f, theme) || "currentColor";
   return [
     `font-family:"${f.font || "Arial"}", system-ui`,
     `font-size:${Math.max(8, Math.min(48, f.size || 18))}px`,
@@ -98,6 +119,7 @@ export async function fontDialog({ format, sample, fonts, theme, tab = 0 }) {
   );
   function updatePreview() {
     previewText.style.cssText = previewStyle(f, theme);
+    preview.style.background = previewPaper(f, theme);
     preview.setAttribute(
       "aria-label",
       `Preview: ${f.font || "Default font"}, ${f.size ? `${f.size} point` : "default size"}${f.bold ? ", bold" : ""}${f.italic ? ", italic" : ""}`,
@@ -612,11 +634,9 @@ export async function tabsDialog({ tabs: initial, defaultTab }) {
   let spacing = defaultTab / IN;
   let position = 1;
   let align = "l";
-  const list = el("ul", {
-    class: "fmt-tab-list",
-    role: "listbox",
-    "aria-label": "Tab stops",
-  });
+  // A plain list: each stop is read out with its Clear button, which a
+  // listbox's options could not hold.
+  const list = el("ul", { class: "fmt-tab-list", "aria-label": "Tab stops" });
   const label = (a) =>
     ({ l: "Left", ctr: "Center", r: "Right", dec: "Decimal" })[a];
   const render = () => {
@@ -625,7 +645,7 @@ export async function tabsDialog({ tabs: initial, defaultTab }) {
       ...stops.map((stop, i) =>
         el(
           "li",
-          { role: "option", "aria-selected": "false" },
+          {},
           el("span", {}, `${(stop.pos / IN).toFixed(2)}″`),
           el("span", { class: "muted" }, label(stop.align)),
           el(

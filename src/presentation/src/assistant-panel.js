@@ -680,10 +680,13 @@ export function createAssistantPanel(env) {
     });
     lastCard = card;
     // The question takes the focus only from within the panel: it never
-    // pulls the keyboard off text being typed on the slide.
-    if (root.contains(document.activeElement))
+    // pulls the keyboard off text being typed, on the slide or in the
+    // message box, where the next space typed would press Allow.
+    const writing = () =>
+      document.activeElement === input && input.value.length > 0;
+    if (root.contains(document.activeElement) && !writing())
       requestAnimationFrame(() => {
-        if (card.isConnected) allow.focus();
+        if (card.isConnected && !writing()) allow.focus();
       });
     return card;
   }
@@ -773,8 +776,13 @@ export function createAssistantPanel(env) {
             {
               type: "button",
               class: "btn ai-btn-sm",
-              onclick: () => {
-                reply.foot.hidden = true;
+              onclick: (e) => {
+                // The error goes; the reply's changes keep their Undo, and
+                // the keyboard moves to the message box.
+                const hadFocus = e.currentTarget === document.activeElement;
+                e.currentTarget.closest(".ai-error").remove();
+                reply.foot.hidden = !reply.foot.childElementCount;
+                if (hadFocus) input.focus({ preventScroll: true });
                 retry();
               },
             },
@@ -1020,6 +1028,16 @@ export function createAssistantPanel(env) {
     close,
     /** Opens the chat and sends `text` as if the user had typed it. */
     ask(text) {
+      // While a reply is under way the request waits in the message box,
+      // after anything already written there, to be sent when it is done.
+      if (agent.busy) {
+        const draft = input.value.trimEnd();
+        open({ prompt: draft ? `${draft}\n\n${text}` : text });
+        toast(
+          "The assistant is still answering. Your request is in the message box: send it when the reply is done.",
+        );
+        return;
+      }
       open({ focus: false });
       submit(text);
     },

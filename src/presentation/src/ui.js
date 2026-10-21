@@ -127,6 +127,7 @@ import {
   Lightbulb,
   GripVertical,
   Lock,
+  Pipette,
 } from "lucide";
 import { commandIcon } from "./chrome/icons.js";
 const icons = {
@@ -257,6 +258,7 @@ const icons = {
   Lightbulb,
   GripVertical,
   Lock,
+  Pipette,
 };
 // A name prefixed "o:" is one of the app's own command icons
 // (src/chrome/icons.js); any other is a Lucide icon.
@@ -369,7 +371,8 @@ export async function dialog({
     const finish = (result) => {
       d.close();
       d.remove();
-      (returnFocus ? returnFocus() : before)?.focus();
+      if (returnFocus) returnFocus()?.focus();
+      else refocus(before);
       resolve(result);
     };
     d.append(
@@ -762,10 +765,25 @@ function onScroll(e) {
   closeFrom(0, { focus: false });
   if (restoreFocus) anchor.focus({ preventScroll: true });
 }
-function onKey(e) {
+function onKey(e, pastGrid = false) {
   if (e.isComposing || !chain.length) return;
   clearTimeout(hoverTimer);
   hoveredItem = null;
+  // A grid in a menu (a gallery, the table picker) moves the focus with the
+  // arrow keys itself; the menu takes a key only when the grid leaves it, at
+  // the grid's edges. This listener runs first, so it waits for the grid.
+  if (
+    !pastGrid &&
+    e.key.startsWith("Arrow") &&
+    document.activeElement?.closest?.("[data-arrow-keys]")
+  ) {
+    const after = (event) => {
+      document.removeEventListener("keydown", after);
+      if (event === e && !e.defaultPrevented) onKey(e, true);
+    };
+    document.addEventListener("keydown", after);
+    return;
+  }
   // Keys belong to the menu the focus is in, and to the innermost one when
   // focus has gone elsewhere.
   const focused = panelAt(document.activeElement);
@@ -949,6 +967,17 @@ const menubarReturns = new WeakMap();
 function handBackFromMenubar(anchor) {
   const bar = anchor?.closest?.('[role="menubar"]');
   if (bar && document.activeElement === anchor) menubarReturns.get(bar)?.();
+}
+/**
+ * Gives the keyboard back to what had it before a dialog opened. A menu bar's
+ * name had it only while the dialog's command was chosen, so from there it
+ * goes on to the document, as it does after a command that opens no dialog.
+ */
+export function refocus(node) {
+  const bar = node?.closest?.('[role="menubar"]');
+  const back = bar && menubarReturns.get(bar);
+  if (back) back();
+  else node?.focus?.();
 }
 export function createMenubar(
   entries,

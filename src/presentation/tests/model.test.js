@@ -25,6 +25,8 @@ import {
   slideRotation,
   ownRotation,
   pruneUnusedMedia,
+  removeAnyShape,
+  removeSlides,
   dedupeSlideMedia,
   relativePartName,
   resolvePartName,
@@ -36,6 +38,23 @@ import {
   SOFT_BREAK,
 } from "../src/model.js";
 describe(".pptx interoperability", () => {
+  it("keeps text pasted with control characters, as a file that opens", async () => {
+    const pres = createDeck("blank");
+    const [slide] = P.getSlides(pres);
+    // Text copied from a PDF separates its pages with form feeds.
+    P.setSlideNotes(slide, "Page one\fPage two\u0007");
+    P.addSlideTextBox(slide, {
+      x: 0,
+      y: 0,
+      w: P.inches(2),
+      h: P.inches(1),
+      text: "Line\u000bbreak",
+    });
+    const loaded = await parseDeck(await P.savePresentation(pres));
+    const [back] = P.getSlides(loaded);
+    expect(P.getSlideNotes(back)).toBe("Page one Page two");
+    expect(P.getSlideText(back)).toContain("Line break");
+  });
   it("omits hidden artwork and group descendants without changing the saved deck", async () => {
     const pres = createDeck();
     const s = P.getSlides(pres)[0];
@@ -248,14 +267,13 @@ describe("undo history", () => {
     expect(P.getSlideText(P.getSlides(undone)[0])).toContain(original);
     expect(h.state).toBe("studio");
   });
-  it("restores locally generated history larger than the import limit", async () => {
+  it("restores locally generated history of a large presentation", async () => {
     const pres = createLargeDeck();
     const slide = P.getSlides(pres)[0];
     const history = new History();
     await history.reset(pres, "studio");
     const originalNotes = P.getSlideNotes(slide);
     expect(history.bytes.byteLength).toBeGreaterThan(40 * 1024 * 1024);
-    await expect(parseDeck(history.bytes)).rejects.toThrow("40 MB");
     P.setSlideNotes(slide, "New notes");
     await history.capture(pres, "clay");
     const undone = await history.undo();
@@ -429,6 +447,12 @@ describe("file validation", () => {
       await expect(parseDeck(bytes)).rejects.toThrow("valid PPTX");
     },
   );
+  it("opens again a presentation made here with photos past 40 MB", async () => {
+    const bytes = await P.savePresentation(createLargeDeck());
+    expect(bytes.byteLength).toBeGreaterThan(40 * 1024 * 1024);
+    const loaded = await parseDeck(bytes);
+    expect(P.getSlideShapes(P.getSlides(loaded)[0])).toHaveLength(4);
+  }, 15000);
   it("rejects invalid archives", async () => {
     await expect(parseDeck(new Uint8Array([1, 2, 3]))).rejects.toThrow(
       "valid PPTX",
@@ -626,6 +650,99 @@ it("gives a copied group's children ids of their own", async () => {
   expect(P.validatePresentation(saved)).toEqual([]);
 });
 describe("deleted media", () => {
+  it("drops a deleted chart's workbook and a deleted SmartArt's parts, keeping the others'", async () => {
+    const pres = createDeck("blank");
+    const [slide] = P.getSlides(pres);
+    const box = { x: 0, y: 0, w: P.inches(3), h: P.inches(2) };
+    const smartArt = (text) =>
+      P.addSlideSmartArt(slide, {
+        ...box,
+        model: {
+          layout: "arrow-steps",
+          colors: P.DEFAULT_SMARTART_COLORS,
+          style: P.DEFAULT_SMARTART_STYLE,
+          items: [{ text, level: 0 }],
+        },
+      });
+    const chart = P.addSlideChart(slide, {
+      ...box,
+      spec: {
+        kind: "bar",
+        categories: ["Q1"],
+        series: [{ name: "Revenue", values: [42] }],
+      },
+    });
+    const gone = smartArt("Gone");
+    smartArt("Kept");
+    const parts = async () =>
+      Object.keys(unzipSync(await P.savePresentation(pres)))
+        .filter((n) => /^ppt\/(charts|embeddings|diagrams)\/[^_]/.test(n))
+        .sort();
+    // Nothing goes while everything is still on the slide.
+    pruneUnusedMedia(pres, slide);
+    expect(await parts()).toHaveLength(12);
+    removeAnyShape(slide, chart);
+    removeAnyShape(slide, gone);
+    pruneUnusedMedia(pres, slide);
+    expect(await parts()).toEqual([
+      "ppt/diagrams/colors2.xml",
+      "ppt/diagrams/data2.xml",
+      "ppt/diagrams/drawing2.xml",
+      "ppt/diagrams/layout2.xml",
+      "ppt/diagrams/quickStyle2.xml",
+    ]);
+    const saved = await parseDeck(await P.savePresentation(pres));
+    expect(P.validatePresentation(saved)).toEqual([]);
+    const svg = decodeURIComponent(preview(saved, P.getSlides(saved)[0]));
+    expect(svg).toContain("Kept");
+    expect(svg).not.toContain("Gone");
+  });
+  it("takes a deleted slide's notes, comments, chart and SmartArt out of the file", async () => {
+    const pres = createDeck("story");
+    const [kept, gone] = P.getSlides(pres);
+    const box = { x: 0, y: 0, w: P.inches(3), h: P.inches(2) };
+    const chart = {
+      kind: "bar",
+      categories: ["A", "B"],
+      series: [{ name: "Units", values: [1, 2] }],
+    };
+    P.addSlideChart(kept, { ...box, spec: chart });
+    P.setSlideNotes(kept, "Kept notes");
+    P.addSlideChart(gone, { ...box, spec: chart });
+    P.addSlideSmartArt(gone, {
+      ...box,
+      model: {
+        layout: "arrow-steps",
+        colors: P.DEFAULT_SMARTART_COLORS,
+        style: P.DEFAULT_SMARTART_STYLE,
+        items: [{ text: "Step", level: 0 }],
+      },
+    });
+    P.addSlideComment(gone, { author: { name: "Ana" }, text: "Private" });
+    P.setSlideNotes(gone, "Confidential notes");
+    removeSlides(pres, [gone]);
+    const files = unzipSync(await P.savePresentation(pres));
+    const names = Object.keys(files).sort();
+    expect(names.filter((n) => /^ppt\/(charts|embeddings)\//.test(n))).toEqual([
+      "ppt/charts/_rels/chart1.xml.rels",
+      "ppt/charts/chart1.xml",
+      "ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx",
+    ]);
+    expect(names.filter((n) => /^ppt\/(diagrams|comments)\//.test(n))).toEqual(
+      [],
+    );
+    expect(names.filter((n) => n.startsWith("ppt/notesSlides/"))).toHaveLength(
+      2,
+    );
+    const text = names.map((n) => new TextDecoder().decode(files[n])).join();
+    expect(text).not.toContain("Confidential notes");
+    expect(text).not.toContain("Private");
+    const types = new TextDecoder().decode(files["[Content_Types].xml"]);
+    expect(types).not.toMatch(/diagrams|chart2|comments\//);
+    const saved = await parseDeck(await P.savePresentation(pres));
+    expect(P.getSlideNotes(P.getSlides(saved)[0])).toBe("Kept notes");
+    expect(P.validatePresentation(saved)).toEqual([]);
+  });
   it("drops the image parts deleted pictures and slides leave behind while keeping shared ones", async () => {
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGMwSJjwH4QZYAwARzQIfaOzYgMAAAAASUVORK5CYII=",
@@ -791,6 +908,32 @@ describe("grouped shapes", () => {
     });
     const saved = await parseDeck(await P.savePresentation(pres));
     expect(P.validatePresentation(saved)).toEqual([]);
+  });
+  // A group took a turned member's upright box, so a bar turned a quarter
+  // turn stood far out of its group's outline, handles, and alignment.
+  it("frames a turned member as the slide shows it when grouping", () => {
+    const pres = createDeck("blank");
+    const slide = P.getSlides(pres)[0];
+    const square = shape(slide, 1, 3, 1, 1, "#ff0000");
+    const bar = shape(slide, 5, 3, 4, 0.5, "#0000ff");
+    P.setShapeRotation(bar, 90);
+    const before = P.getShapeBounds(bar);
+    const group = P.groupShapes([square, bar]);
+    // The bar shows 0.5 inches wide from 6.75 and 4 tall from 1.25.
+    expect(P.getShapeBounds(group)).toEqual({
+      x: P.inches(1),
+      y: P.inches(1.25),
+      w: P.inches(6.25),
+      h: P.inches(4),
+    });
+    const fresh = P.findShapeById(slide, P.getShapeId(bar));
+    expect(slideBounds(pres, fresh)).toEqual(before);
+    expect(slideRotation(fresh)).toBe(90);
+    // Nothing moves when the group goes again.
+    P.ungroupShapes(P.findShapeById(slide, P.getShapeId(group)));
+    expect(P.getShapeBounds(P.findShapeById(slide, P.getShapeId(bar)))).toEqual(
+      before,
+    );
   });
 });
 it("adapts added template slides to an imported 4:3 canvas", () => {

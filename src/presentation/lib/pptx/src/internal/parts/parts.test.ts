@@ -111,6 +111,30 @@ describe("OpcPackage round-trip", () => {
     const out = reread.getRels(partName("/ppt/slides/slide1.xml"));
     expect(out?.items.map((i) => i.id)).toEqual(["rId1", "rId2", "rId3"]);
   });
+
+  it("hands out a fresh copy of the relationships on every read", () => {
+    const pkg = OpcPackage.load(buildSyntheticPackageBytes());
+    const slide = partName("/ppt/slides/slide1.xml");
+    const first = pkg.getRels(slide);
+    if (!first) throw new Error("expected slide rels");
+    first.items[1]!.target = "../media/changed.png";
+    first.items.pop();
+    const second = pkg.getRels(slide);
+    expect(second?.items.length).toBe(2);
+    expect(second?.items[1]?.target).toBe("../media/image1.png");
+    // Writing them back is what the next read sees.
+    pkg.setRels(slide, first);
+    expect(pkg.getRels(slide)?.items.map((i) => i.target)).toEqual([
+      first.items[0]?.target,
+    ]);
+    // So is a part whose bytes are replaced directly.
+    const part = pkg.getPart(partName("/ppt/slides/_rels/slide1.xml.rels"));
+    if (!part) throw new Error("expected the rels part");
+    part.data = new TextEncoder().encode(
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
+    );
+    expect(pkg.getRels(slide)?.items).toEqual([]);
+  });
 });
 
 describe("OpcPackage authoring", () => {
@@ -133,6 +157,27 @@ describe("OpcPackage authoring", () => {
     expect(() =>
       pkg.addPart(partName("/A.XML"), "application/xml", new Uint8Array()),
     ).toThrow();
+  });
+
+  it("finds parts after the part list is changed directly", () => {
+    const pkg = OpcPackage.empty();
+    const bytes = new Uint8Array();
+    for (const n of ["/a.xml", "/b.xml", "/c.xml"])
+      pkg.addPart(partName(n), "application/xml", bytes);
+    expect(pkg.getPart(partName("/C.xml"))?.name).toBe("/c.xml");
+    pkg.parts.splice(0, 1);
+    expect(pkg.getPart(partName("/a.xml"))).toBeNull();
+    expect(pkg.getPart(partName("/c.xml"))?.name).toBe("/c.xml");
+    pkg.parts.reverse();
+    expect(pkg.getPart(partName("/b.xml"))).toBe(pkg.parts[1]);
+    const replaced = { name: partName("/d.xml"), contentType: "", data: bytes };
+    pkg.parts[0] = replaced;
+    expect(pkg.getPart(partName("/c.xml"))).toBeNull();
+    expect(pkg.getPart(partName("/d.xml"))).toBe(replaced);
+    pkg.parts.length = 0;
+    pkg.parts.push(replaced);
+    expect(pkg.getPart(partName("/b.xml"))).toBeNull();
+    expect(pkg.getPart(partName("/d.xml"))).toBe(replaced);
   });
 
   it("removes a part and its Override entry", () => {

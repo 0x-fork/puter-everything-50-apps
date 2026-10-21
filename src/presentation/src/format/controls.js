@@ -2,7 +2,7 @@
 // labelled number fields with units, selects, checkboxes, color buttons that
 // open the palette, sliders paired with a number, segmented choices, tabs,
 // collapsible sections, galleries, and a modal dialog with OK and Cancel.
-import { el, icon, openMenu, closeMenu } from "../ui.js";
+import { el, icon, openMenu, closeMenu, refocus } from "../ui.js";
 import { colorMenuItems } from "../color-palette.js";
 import "./format.css";
 
@@ -321,6 +321,7 @@ export function colorButton({
             onPick: (v, hex) => {
               swatch.style.background = hex;
               swatch.classList.remove("empty");
+              say(hex.toUpperCase());
               onPick(v, hex);
             },
             none: none && {
@@ -329,6 +330,7 @@ export function colorButton({
               onSelect: () => {
                 swatch.classList.add("empty");
                 swatch.style.background = "";
+                say(none.label);
                 onPick(none.value ?? null, null);
               },
             },
@@ -340,6 +342,7 @@ export function colorButton({
                 swatch.style.background = auto || "";
                 swatch.classList.toggle("auto", !auto);
                 swatch.classList.remove("empty");
+                say(auto ? auto.toUpperCase() : automatic.label);
                 onPick(automatic.value, auto);
               },
             },
@@ -349,6 +352,8 @@ export function colorButton({
     swatch,
     el("span", { class: "fmt-caret", "aria-hidden": "true" }),
   );
+  // The name says the colour now chosen, as the swatch shows it.
+  const say = (text) => button.setAttribute("aria-label", `${label}: ${text}`);
   if (hideLabel) return button;
   return el(
     "div",
@@ -382,6 +387,11 @@ export function tabs(list, { label = "Sections", initial = 0, onChange } = {}) {
   );
   const rendered = [];
   function select(i, focus = false) {
+    // The panels keep the height of the tallest one shown, so a dialog does
+    // not move its tabs from under the pointer as they change.
+    const tallest = panels.offsetHeight;
+    if (tallest > (parseFloat(panels.style.minHeight) || 0))
+      panels.style.minHeight = `${tallest}px`;
     buttons.forEach((b, k) => {
       b.setAttribute("aria-selected", String(k === i));
       b.tabIndex = k === i ? 0 : -1;
@@ -480,6 +490,7 @@ export function galleryGrid(
     class: "fmt-gallery",
     role: "group",
     "aria-label": label,
+    "data-arrow-keys": "",
     style: `--fmt-columns:${columns}`,
   });
   const cells = items.map((item) =>
@@ -545,7 +556,7 @@ export function formatDialog({
       if (ok && onOk && (await onOk()) === false) return;
       d.close();
       d.remove();
-      before?.focus?.();
+      refocus(before);
       resolve(ok);
     };
     const form = el(

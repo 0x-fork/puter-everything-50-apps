@@ -103,6 +103,128 @@ test("the slide show plays click steps before moving to the next slide", async (
   await expect.poll(() => visibleLayers(page)).toEqual([false, true, true]);
 });
 
+test("going back on the first slide takes back its builds and goes no further", async ({
+  page,
+}) => {
+  await load(page, animatedDeck());
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const counter = page.locator(".presenter-counter");
+  const previous = page.getByRole("button", { name: "Previous slide" });
+  await expect.poll(() => visibleLayers(page)).toEqual([false, false, false]);
+  await expect(previous).toBeDisabled();
+  // Nothing before the first slide: its builds stay to come.
+  await page.keyboard.press("ArrowLeft");
+  await expect(counter).toHaveText("1 / 2");
+  await expect.poll(() => visibleLayers(page)).toEqual([false, false, false]);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => visibleLayers(page)).toEqual([true, false, false]);
+  // The button takes back the build just played.
+  await expect(previous).toBeEnabled();
+  await previous.click();
+  await expect.poll(() => visibleLayers(page)).toEqual([false, false, false]);
+  await expect(previous).toBeDisabled();
+  await expect(counter).toHaveText("1 / 2");
+});
+
+test("Reading View's menu steps through builds and opens slides at their start", async ({
+  page,
+}) => {
+  const pres = animatedDeck();
+  P.setSlideShowSetup(pres, { showType: "browse" });
+  await load(page, pres);
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const reading = page.getByRole("dialog", { name: "Reading View" });
+  const counter = reading.locator(".reading-counter");
+  const choose = async (...names) => {
+    await reading.getByRole("button", { name: "Reading View menu" }).click();
+    for (const name of names) await page.getByRole("menuitem", name).click();
+  };
+  await expect(counter).toHaveText("Slide 1 of 2");
+  await expect.poll(() => visibleLayers(page)).toEqual([false, false, false]);
+  await choose({ name: "Next" });
+  await expect.poll(() => visibleLayers(page)).toEqual([true, false, false]);
+  await expect(counter).toHaveText("Slide 1 of 2");
+  await choose({ name: "Previous" });
+  await expect.poll(() => visibleLayers(page)).toEqual([false, false, false]);
+  await reading.getByRole("button", { name: "Reading View menu" }).click();
+  await expect(page.getByRole("menuitem", { name: "Previous" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("End");
+  await expect(counter).toHaveText("Slide 2 of 2");
+  await reading.getByRole("button", { name: "Reading View menu" }).click();
+  await page.getByRole("menuitem", { name: "Go to Slide" }).click();
+  await page.getByRole("menuitemcheckbox", { name: /^1\./ }).click();
+  await expect(counter).toHaveText("Slide 1 of 2");
+  await expect.poll(() => visibleLayers(page)).toEqual([false, false, false]);
+});
+
+test("media in the click sequence plays at its own click among the builds", async ({
+  page,
+}) => {
+  const pres = createDeck("blank");
+  const slide = P.getSlides(pres)[0];
+  // A second of silence; inserted media plays on the next click by default.
+  const wav = new Uint8Array(44 + 8000);
+  const view = new DataView(wav.buffer);
+  const tag = (at, s) =>
+    [...s].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+  tag(0, "RIFF");
+  view.setUint32(4, 36 + 8000, true);
+  tag(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true);
+  view.setUint32(28, 8000, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);
+  tag(36, "data");
+  view.setUint32(40, 8000, true);
+  wav.fill(128, 44);
+  P.addSlideMedia(
+    slide,
+    { kind: "audio", data: wav, contentType: "audio/wav" },
+    { x: 6 * 914400, y: 914400, w: 914400, h: 914400 },
+  );
+  // The box comes in on the click after the sound.
+  const box = shape(slide, 1, 1, 2, 1.5, "#2266cc");
+  P.setSlideAnimations(slide, [
+    ...P.getSlideAnimations(slide),
+    {
+      shapeId: String(P.getShapeId(box)),
+      presetClass: "entr",
+      presetId: 10,
+      presetSubtype: 0,
+      start: "click",
+      delayMs: 0,
+      durationMs: 300,
+    },
+  ]);
+  P.addBlankSlide(pres);
+  await page.addInitScript(() => {
+    const play = HTMLMediaElement.prototype.play;
+    window.played = [];
+    HTMLMediaElement.prototype.play = function () {
+      window.played.push(this);
+      return play.call(this);
+    };
+  });
+  const sounding = () =>
+    page.evaluate(() => window.played.filter((m) => !m.paused).length);
+  await load(page, pres);
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const counter = page.locator(".presenter-counter");
+  await expect.poll(() => visibleLayers(page)).toEqual([false]);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(sounding).toBe(1);
+  expect(await visibleLayers(page)).toEqual([false]);
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => visibleLayers(page)).toEqual([true]);
+  await expect(counter).toHaveText("1 / 2");
+  await page.keyboard.press("ArrowRight");
+  await expect(counter).toHaveText("2 / 2");
+});
+
 test("a timed advance plays the slide's remaining click steps first", async ({
   page,
 }) => {
@@ -130,6 +252,39 @@ test("a timed advance plays the slide's remaining click steps first", async ({
   await expect(counter).toHaveText("1 / 2");
   await expect.poll(() => visibleLayers(page)).toEqual([true, true]);
   await expect(counter).toHaveText("1 / 2");
+  await expect(counter).toHaveText("2 / 2");
+});
+
+test("a timed advance waits for effects that start with the slide", async ({
+  page,
+}) => {
+  const pres = createDeck("blank");
+  const slide = P.getSlides(pres)[0];
+  const box = shape(slide, 1, 1, 2, 1.5, "#2266cc");
+  P.setSlideAnimations(slide, [
+    {
+      shapeId: String(P.getShapeId(box)),
+      presetClass: "entr",
+      presetId: 10,
+      presetSubtype: 0,
+      start: "after",
+      delayMs: 0,
+      durationMs: 1500,
+    },
+  ]);
+  // A self-running slide: on as soon as its effects are done.
+  P.setSlideTransition(slide, { effect: "none", advanceAfterMs: 0 });
+  P.addBlankSlide(pres);
+  await load(page, pres);
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  const counter = page.locator(".presenter-counter");
+  await expect.poll(() => visibleLayers(page)).toEqual([true]);
+  await expect(counter).toHaveText("1 / 2");
+  expect(
+    await page.evaluate(() =>
+      document.getAnimations().some((a) => a.playState === "running"),
+    ),
+  ).toBe(true);
   await expect(counter).toHaveText("2 / 2");
 });
 
@@ -165,10 +320,30 @@ test("presenter view counts a slide's clicks after jumping back to it", async ({
   await expect(next).toHaveText(/^Next click: animation 1 of 3/);
 });
 
+test("presenter view counts the last slide's clicks before the end", async ({
+  page,
+}) => {
+  const pres = animatedDeck();
+  P.removeSlide(pres, P.getSlides(pres)[1]);
+  await load(page, pres);
+  await page.keyboard.press("Alt+F5");
+  const next = page.locator(".show-console-next-label");
+  await expect(next).toHaveText(
+    "Next click: animation 1 of 3 on this slide, then the end of the slide show",
+  );
+  await page.keyboard.press("ArrowRight");
+  await expect(next).toHaveText(/^Next click: animation 2 of 3/);
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await expect(next).toHaveText("End of slide show");
+});
+
 test("with an audience window the presenter's copy follows the builds", async ({
   page,
   context,
-}) => {
+}, info) => {
+  // Phones have no second screen and do not offer an audience window.
+  test.skip(info.project.name === "mobile", "no audience window on a phone");
   await load(page, animatedDeck());
   await page.keyboard.press("Alt+F5");
   const opened = context.waitForEvent("page");

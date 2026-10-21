@@ -202,11 +202,55 @@ test("icons are inserted as SVG pictures, restyled, and converted to shapes", as
     })
     .toBe(true);
 
+  // Every entry of the fill menu has a name, and No Fill is there once.
+  await commandMenu(page, "graphics-fill", "Graphics Fill");
+  const entries = await page
+    .locator(".menu > .menu-item")
+    .evaluateAll((nodes) => nodes.map((n) => n.textContent.trim()));
+  expect(entries).not.toContain("");
+  expect(entries.filter((n) => n === "No Fill")).toHaveLength(1);
+  await page.keyboard.press("Escape");
+
   await command(page, "graphics-convert");
   await expect(page.getByRole("tab", { name: "Graphics Format" })).toBeHidden();
   saved = await download(page);
   expect(saved.slide()).toContain("<a:custGeom>");
   expect(saved.slide()).not.toContain("<p:pic>");
+});
+
+test("the Icons dialog takes one Tab for its categories and one for its icons", async ({
+  page,
+}) => {
+  await start(page);
+  await command(page, "icons");
+  const dialog = page.getByRole("dialog", { name: "Insert Icons" });
+  await expect(
+    dialog.getByRole("searchbox", { name: "Search icons" }),
+  ).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("tab", { name: "All" })).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  const people = dialog.getByRole("tab", { name: "People" });
+  await expect(people).toBeFocused();
+  await expect(people).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Tab");
+  const first = dialog.getByRole("option").first();
+  await expect(first).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  const second = dialog.getByRole("option").nth(1);
+  await expect(second).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(second).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(
+    dialog.getByRole("button", { name: "Insert", exact: true }),
+  ).toBeFocused();
+  // Back into the icons, at the one last reached.
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(second).toBeFocused();
 });
 
 test("equations are pictures that keep their source and reopen for editing", async ({
@@ -290,6 +334,61 @@ test("video plays on the canvas and in the slide show, with its playback setting
   await expect(page.locator(".presenter-end")).toBeHidden();
 });
 
+test("a video's bytes are let go once another presentation opens", async ({
+  page,
+}) => {
+  await start(page);
+  const video = await webm(page);
+  await choose(page, () => command(page, "video"), {
+    name: "clip.webm",
+    mimeType: "video/webm",
+    buffer: video,
+  });
+  await page
+    .locator(".media-bar")
+    .getByRole("button", { name: "Play" })
+    .click();
+  const src = await page
+    .locator("video.media-surface")
+    .evaluate((v) => (v.pause(), v.src));
+  const read = (url) =>
+    page.evaluate(
+      (u) =>
+        fetch(u).then(
+          (r) => r.arrayBuffer().then((b) => b.byteLength),
+          () => null,
+        ),
+      url,
+    );
+  expect(await read(src)).toBe(video.length);
+  await page.getByRole("button", { name: "Back to presentations" }).click();
+  await page
+    .getByRole("button", { name: "New presentation", exact: true })
+    .click();
+  await expect(page.locator(".object-hit")).toHaveCount(0);
+  await expect.poll(() => read(src)).toBeNull();
+});
+
+test("the table picker sizes a table with the arrow keys", async ({ page }) => {
+  await start(page);
+  await command(page, "table");
+  const label = page.locator(".table-picker-label");
+  await expect(
+    page.getByRole("gridcell", { name: "1 by 1 table" }),
+  ).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowDown");
+  await expect(
+    page.getByRole("gridcell", { name: "3 by 2 table" }),
+  ).toBeFocused();
+  await expect(label).toHaveText("3x2 Table");
+  await page.keyboard.press("Enter");
+  const { slide } = await download(page);
+  expect(slide().match(/<a:gridCol /g)).toHaveLength(3);
+  expect(slide().match(/<a:tr /g)).toHaveLength(2);
+});
+
 test("audio from a file and from a recording is saved as media", async ({
   page,
 }) => {
@@ -327,6 +426,73 @@ test("audio from a file and from a recording is saved as media", async ({
   expect(strFromU8(recorded.slice(0, 4))).toBe("RIFF");
 });
 
+test("playing a recording back keeps one copy of it, let go on closing", async ({
+  page,
+}) => {
+  // Every blob URL the page makes and has not revoked.
+  await page.addInitScript(() => {
+    const live = (window.liveBlobUrls = new Set());
+    const make = URL.createObjectURL;
+    const revoke = URL.revokeObjectURL;
+    URL.createObjectURL = (blob) => {
+      const url = make(blob);
+      live.add(url);
+      return url;
+    };
+    URL.revokeObjectURL = (url) => {
+      live.delete(url);
+      revoke(url);
+    };
+  });
+  await start(page);
+  const live = () => page.evaluate(() => window.liveBlobUrls.size);
+  const before = await live();
+  await commandMenu(page, "audio", "Audio sources");
+  await page.getByRole("menuitem", { name: "Record Audio…" }).click();
+  const record = page.getByRole("dialog", { name: "Record Sound" });
+  await record.getByRole("button", { name: "Record" }).click();
+  await page.waitForTimeout(700);
+  await record.getByRole("button", { name: "Stop" }).click();
+  for (let i = 0; i < 3; i++)
+    await record.getByRole("button", { name: "Play" }).click();
+  expect(await live()).toBe(before + 1);
+  await record.getByRole("button", { name: "Cancel" }).click();
+  await expect(record).toHaveCount(0);
+  expect(await live()).toBe(before);
+});
+
+test("media playing on the canvas stops when the slide show starts", async ({
+  page,
+}) => {
+  // Every media element asked to play, kept after it leaves the page.
+  await page.addInitScript(() => {
+    const play = HTMLMediaElement.prototype.play;
+    window.played = [];
+    HTMLMediaElement.prototype.play = function () {
+      window.played.push(this);
+      return play.call(this);
+    };
+  });
+  const sounding = () =>
+    page.evaluate(() => window.played.filter((m) => !m.paused).length);
+  await start(page);
+  await choose(
+    page,
+    async () => {
+      await commandMenu(page, "audio", "Audio sources");
+      await page.getByRole("menuitem", { name: "Audio from File…" }).click();
+    },
+    { name: "tone.wav", mimeType: "audio/wav", buffer: wav(5) },
+  );
+  await tab(page, "Playback");
+  await command(page, "playback-play");
+  await expect.poll(sounding).toBe(1);
+  await page.getByRole("button", { name: "Present", exact: true }).click();
+  await expect(page.locator(".presenter-counter")).toHaveText("1 / 1");
+  // The show's own copy waits for its click.
+  expect(await sounding()).toBe(0);
+});
+
 test("header and footer apply to every slide", async ({ page }) => {
   await start(page);
   await command(page, "insert-new-slide");
@@ -339,13 +505,34 @@ test("header and footer apply to every slide", async ({ page }) => {
     .getByLabel("Footer text", { exact: true })
     .fill("Board review");
   await dialog.getByRole("button", { name: "Apply to All" }).click();
+  // A slide added afterwards shows them too.
+  await command(page, "insert-new-slide");
   const saved = await download(page);
-  for (const n of [1, 2]) {
+  for (const n of [1, 2, 3]) {
     expect(saved.slide(n)).toContain('type="ftr"');
     expect(saved.slide(n)).toContain('type="sldNum"');
     expect(saved.slide(n)).toContain("Board review");
     expect(saved.slide(n)).toContain('type="slidenum"');
   }
+});
+
+// The dialog's two tabs are one stop for Tab, moved between with the arrows.
+test("header and footer tabs move with the arrow keys", async ({ page }) => {
+  await start(page);
+  await command(page, "header-footer");
+  const dialog = page.getByRole("dialog", { name: "Header and Footer" });
+  const slideTab = dialog.getByRole("tab", { name: "Slide" });
+  const notesTab = dialog.getByRole("tab", { name: "Notes and Handouts" });
+  await expect(notesTab).toHaveAttribute("tabindex", "-1");
+  await slideTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(notesTab).toBeFocused();
+  await expect(notesTab).toHaveAttribute("aria-selected", "true");
+  await expect(dialog.locator("#hf-notes")).toBeVisible();
+  await expect(dialog.locator("#hf-slide")).toBeHidden();
+  await page.keyboard.press("ArrowRight");
+  await expect(slideTab).toBeFocused();
+  await expect(dialog.locator("#hf-slide")).toBeVisible();
 });
 
 // WordArt presets went in with their fill color only, so white text meant to
@@ -433,7 +620,14 @@ test("action buttons get a default action and action settings", async ({
       .getByLabel("Hyperlink to", { exact: true }),
   ).toHaveValue("lastSlide");
   await dialog.locator("#action-panel-click").getByLabel("Play sound:").check();
-  await dialog.getByRole("tab", { name: "Mouse Over" }).click();
+  // The tabs are one Tab stop, and the arrow keys move between them.
+  const over = dialog.getByRole("tab", { name: "Mouse Over" });
+  await expect(over).toHaveAttribute("tabindex", "-1");
+  await dialog.getByRole("tab", { name: "Mouse Click" }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(over).toBeFocused();
+  await expect(over).toHaveAttribute("aria-selected", "true");
+  await expect(dialog.locator("#action-panel-hover")).toBeVisible();
   await dialog.locator("#action-panel-hover").getByLabel("Play sound:").check();
   await dialog.getByRole("button", { name: "OK" }).click();
   const saved = await download(page);
@@ -484,6 +678,33 @@ test("photo album makes slides of the chosen pictures", async ({ page }) => {
     saved.slide(3).indexOf(">one<"),
   );
   expect(saved.slide(4).match(/<p:pic>/g)).toHaveLength(1);
+});
+
+test("a picture the album can't use is left out, not the whole album", async ({
+  page,
+}) => {
+  await start(page);
+  await command(page, "photo-album");
+  const dialog = page.getByRole("dialog", { name: "Photo Album" });
+  await choose(
+    page,
+    () => dialog.getByRole("button", { name: "Add Pictures…" }).click(),
+    [
+      { name: "one.png", mimeType: "image/png", buffer: PNG },
+      {
+        name: "huge.png",
+        mimeType: "image/png",
+        buffer: Buffer.concat([PNG, Buffer.alloc(13 * 1024 * 1024)]),
+      },
+      { name: "two.png", mimeType: "image/png", buffer: PNG },
+    ],
+  );
+  await dialog.getByRole("button", { name: "Create" }).click();
+  // A title slide and the two usable pictures follow the first slide.
+  await expect(page.locator(".slide-item")).toHaveCount(4);
+  await expect(page.locator("#toast")).toHaveText(
+    "“huge.png” was left out. Choose an image smaller than 12 MB.",
+  );
 });
 
 test("objects are embedded as packages and handed back on opening", async ({

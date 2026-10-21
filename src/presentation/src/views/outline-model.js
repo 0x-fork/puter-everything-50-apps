@@ -12,6 +12,7 @@ import {
   setRichText,
   SOFT_BREAK,
   removeSlides,
+  matchHeaderFooter,
 } from "../model.js";
 
 export const MAX_LEVEL = 9;
@@ -33,25 +34,28 @@ function shapeParagraphs(pres, shape) {
 
 // The deck's outline, slide by slide.
 export function readOutline(pres) {
-  return P.getSlides(pres).map((slide) => {
-    const { title, body } = P.getSlideOutlineShapes(slide);
-    const titleParagraphs = shapeParagraphs(pres, title);
-    const bodyParagraphs = shapeParagraphs(pres, body);
-    const bodyRows = bodyParagraphs.map((p) => ({
-      text: runText(p),
-      level: Math.min(MAX_LEVEL, (p.level || 0) + 1),
-    }));
-    return {
-      part: P.getSlidePartName(slide),
-      hidden: P.isSlideHidden(slide),
-      hasTitle: !!title,
-      hasBody: !!body,
-      // A title's paragraphs read as lines of one title.
-      title: titleParagraphs.map(runText).join("\n"),
-      // An empty body (one paragraph with no text) has nothing to outline.
-      body: bodyRows.length === 1 && !bodyRows[0].text.trim() ? [] : bodyRows,
-    };
-  });
+  return P.getSlides(pres).map((slide) => readSlideOutline(pres, slide));
+}
+
+// One slide's entry in the outline.
+export function readSlideOutline(pres, slide) {
+  const { title, body } = P.getSlideOutlineShapes(slide);
+  const titleParagraphs = shapeParagraphs(pres, title);
+  const bodyParagraphs = shapeParagraphs(pres, body);
+  const bodyRows = bodyParagraphs.map((p) => ({
+    text: runText(p),
+    level: Math.min(MAX_LEVEL, (p.level || 0) + 1),
+  }));
+  return {
+    part: P.getSlidePartName(slide),
+    hidden: P.isSlideHidden(slide),
+    hasTitle: !!title,
+    hasBody: !!body,
+    // A title's paragraphs read as lines of one title.
+    title: titleParagraphs.map(runText).join("\n"),
+    // An empty body (one paragraph with no text) has nothing to outline.
+    body: bodyRows.length === 1 && !bodyRows[0].text.trim() ? [] : bodyRows,
+  };
 }
 
 export function rowsFromOutline(outline) {
@@ -213,12 +217,22 @@ export function createSlide(pres, after) {
     P.getSlideLayoutPlaceholders(prior).some(
       (p) => p.type === null || p.type === "body" || p.type === "obj",
     );
-  if (fits) return P.addSlide(pres, { layout: prior });
-  try {
-    return P.addContentSlide(pres, {});
-  } catch {
-    return P.addBlankSlide(pres);
-  }
+  let slide;
+  if (fits) slide = P.addSlide(pres, { layout: prior });
+  else
+    try {
+      slide = P.addContentSlide(pres, {});
+    } catch {
+      slide = P.addBlankSlide(pres);
+    }
+  const parts = P.getSlides(pres).map(P.getSlidePartName);
+  matchHeaderFooter(
+    pres,
+    slide,
+    after,
+    after ? parts.indexOf(P.getSlidePartName(after)) + 2 : parts.length,
+  );
+  return slide;
 }
 
 // Applies an outline (from structureFromRows) to the deck. Slides whose

@@ -193,6 +193,76 @@ test("the assistant asks before deleting and keeps a declined change out", async
   await expect(panel.getByRole("button", { name: "Undo" })).toBeEnabled();
 });
 
+test("a question to allow a change leaves the next message being typed alone", async ({
+  page,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "one layout covers the flow");
+  await page.getByRole("button", { name: "Ask AI" }).click();
+  const panel = page.locator("#ai-panel");
+  const box = page.getByRole("textbox", { name: "Message the assistant" });
+  await reply(
+    page,
+    [
+      { type: "gate" },
+      toolCall("add_slide", { layout: "blank" }),
+      toolCall("delete_slides", { slides: [1] }),
+    ],
+    [{ type: "text", text: "Left as it was." }],
+  );
+  await box.fill("Start over");
+  await box.press("Enter");
+  // The user writes their next message while the assistant works.
+  await box.pressSequentially("and then make ");
+  await page.evaluate(() => window.__gate());
+  const card = panel.getByRole("group", { name: "Allow this change?" });
+  await expect(card).toBeVisible();
+  await expect(box).toBeFocused();
+  // A space typed there is theirs, not an Allow.
+  await box.pressSequentially("the title bigger");
+  await expect(box).toHaveValue("and then make the title bigger");
+  await expect(card).toBeVisible();
+  await expect(page.locator(".slide-thumb")).toHaveCount(2);
+  await card.getByRole("button", { name: "Don’t allow" }).click();
+  await expect(panel.getByText("Left as it was.")).toBeVisible();
+  await expect(page.locator(".slide-thumb")).toHaveCount(2);
+});
+
+test("a request made while the assistant answers waits in the message box", async ({
+  page,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "one layout covers the flow");
+  await page.getByRole("button", { name: "Ask AI" }).click();
+  const panel = page.locator("#ai-panel");
+  const box = page.getByRole("textbox", { name: "Message the assistant" });
+  await reply(page, [
+    { type: "text", text: "Thinking… " },
+    { type: "gate" },
+    { type: "text", text: "There." },
+  ]);
+  await box.fill("Summarize the deck");
+  await box.press("Enter");
+  await expect(panel.getByText("Thinking…")).toBeVisible();
+  await box.fill("Also check");
+  await (await ribbonButton(page, "Home", "new-slide-prompt")).click();
+  const dialog = page.getByRole("dialog", { name: "New Slide from Prompt" });
+  await dialog
+    .getByRole("textbox", { name: "Describe the slide" })
+    .fill("Our goals for next year");
+  await dialog.getByRole("button", { name: "Draft Slide" }).click();
+  // Not dropped: it follows what was written, ready to send.
+  await expect(box).toHaveValue(/^Also check\n\nAdd one new slide right after/);
+  await expect(box).toHaveValue(/Our goals for next year$/);
+  await expect(page.locator("#toast")).toContainText("still answering");
+  await page.evaluate(() => window.__gate());
+  await expect(panel.getByText("There.")).toBeVisible();
+  await box.press("Enter");
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__requests.at(-1).messages.at(-1).content),
+    )
+    .toMatch(/Our goals for next year$/);
+});
+
 test("a reply's Undo turns off once the user edits after it", async ({
   page,
 }, info) => {
@@ -239,6 +309,44 @@ test("a failed request says what to do and can be tried again", async ({
   await reply(page, [{ type: "text", text: "Hi there." }]);
   await alert.getByRole("button", { name: "Try again" }).click();
   await expect(panel.getByText("Hi there.")).toBeVisible();
+});
+
+test("changes made before a failure keep their Undo when tried again", async ({
+  page,
+}, info) => {
+  test.skip(info.project.name !== "desktop", "one layout covers the flow");
+  // The request after the tool call fails once.
+  await page.evaluate(() => {
+    const chat = window.puter.ai.chat;
+    let calls = 0;
+    window.puter.ai.chat = async (...args) => {
+      if (++calls === 2)
+        throw { error: { message: "Too many requests", code: "rate_limited" } };
+      return chat(...args);
+    };
+  });
+  await page.getByRole("button", { name: "Ask AI" }).click();
+  const panel = page.locator("#ai-panel");
+  const box = page.getByRole("textbox", { name: "Message the assistant" });
+  await reply(
+    page,
+    [toolCall("add_text", { text: "Kept", x: 1, y: 1, w: 4, h: 1 })],
+    [{ type: "text", text: "Added it." }],
+  );
+  await box.fill("Add a box");
+  await box.press("Enter");
+  const alert = panel.getByRole("alert");
+  await expect(alert).toContainText("The AI service is busy.");
+  await expect(panel.getByText("1 change made")).toBeVisible();
+  await alert.getByRole("button", { name: "Try again" }).click();
+  await expect(panel.getByText("Added it.")).toBeVisible();
+  await expect(alert).toHaveCount(0);
+  await expect(box).toBeFocused();
+  await expect(panel.getByText("1 change made")).toBeVisible();
+  const object = page.locator('.object-hit[aria-label^="Kept"]');
+  await expect(object).toHaveCount(1);
+  await panel.getByRole("button", { name: "Undo" }).click();
+  await expect(object).toHaveCount(0);
 });
 
 test("the assistant fits beside or over the slide on every screen", async ({

@@ -2,7 +2,7 @@
 // with a raster stand-in, video and audio with their playback options,
 // action settings, embedded files and the slide footer.
 import { describe, expect, it } from "vitest";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { P } from "../src/model.js";
 import {
   readCfb,
@@ -10,6 +10,7 @@ import {
   writeCfb,
   writeOlePackage,
 } from "../lib/pptx/src/internal/opc/cfb.ts";
+import { objectIconSvg } from "../src/insert/object.js";
 
 const PNG = Uint8Array.from(
   atob(
@@ -73,6 +74,34 @@ describe("vector pictures", () => {
 });
 
 describe("media", () => {
+  it("reads media With or After Previous in a click step as playing at that click", async () => {
+    const video = new Uint8Array([0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70, 1, 2]);
+    const startOf = async (start, edit = (xml) => xml) => {
+      const pres = P.createPresentation();
+      const slide = P.addBlankSlide(pres);
+      P.addSlideMedia(
+        slide,
+        { kind: "video", data: video, contentType: "video/mp4", poster: PNG },
+        box,
+        { start },
+      );
+      const files = unzipSync(await P.savePresentation(pres));
+      files["ppt/slides/slide1.xml"] = strToU8(
+        edit(strFromU8(files["ppt/slides/slide1.xml"])),
+      );
+      const back = await P.loadPresentation(zipSync(files));
+      const shape = P.getSlideShapes(P.getSlides(back)[0])[0];
+      return P.getShapeMedia(shape).options.start;
+    };
+    expect(await startOf("automatically")).toBe("automatically");
+    // A click step whose media call follows the click's other effects.
+    for (const nodeType of ["afterEffect", "withEffect"])
+      expect(
+        await startOf("inClickSequence", (xml) =>
+          xml.replace('nodeType="clickEffect"', `nodeType="${nodeType}"`),
+        ),
+      ).toBe("inClickSequence");
+  });
   it("stores video as a linked and embedded media part with options", async () => {
     const pres = P.createPresentation();
     const slide = P.addBlankSlide(pres);
@@ -229,6 +258,17 @@ describe("compound files and embedded objects", () => {
     expect(object.file.name).toBe("data.csv");
     expect(new TextDecoder().decode(object.file.data)).toBe("hello, résumé");
     expect(P.getShapeEmbeddedObjectPreview(frame)).toEqual(PNG);
+  });
+
+  it("names a file with emoji in its icon without splitting a character", () => {
+    const short = `${"😀".repeat(12)}.pdf`;
+    expect(objectIconSvg(short)).toContain(`>${short}<`);
+    const long = objectIconSvg(`${"😀".repeat(30)}.pdf`);
+    expect(long).toContain(`>${"😀".repeat(19)}…<`);
+    expect(() => encodeURIComponent(long)).not.toThrow();
+    expect(objectIconSvg(`notes.${"😀".repeat(6)}`)).toContain(
+      `>${"😀".repeat(5)}<`,
+    );
   });
 });
 
