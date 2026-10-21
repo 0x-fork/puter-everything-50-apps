@@ -98,6 +98,27 @@ describe('Markdown text that looks like markup', () => {
     const back = reopen(documentMarkdown(doc));
     expect(back.map(t => t.trim())).toEqual(lines.map(t => t.trim()));
   });
+  it('keeps emphasis that starts or ends with punctuation inside a word', () => {
+    const doc = blankDoc();
+    doc.replace('snake_case, readme.txt, un(usual) and price $5!');
+    const format = (word, apply) => { const at = doc.text.indexOf(word); doc.select(at, at + word.length); apply(); };
+    format('_case', () => doc.toggleBold());
+    format('.txt', () => doc.toggleBold());
+    format('(usual)', () => doc.setRunFormat({ italic: true }));
+    format('$5', () => doc.toggleBold());
+    const markdown = documentMarkdown(doc);
+    // Asterisks between a letter and punctuation do not mark emphasis, so it is written as HTML there.
+    expect(markdown).toBe('snake<strong>\\_case</strong>, readme<strong>.txt</strong>, un<em>(usual)</em> and price **$5**!\n');
+    const back = blankDoc(), fragment = htmlFragment(markdownHtml(markdown));
+    for (const p of fragment.paragraphs) p.mark = true;
+    pasteFragment(back, fragment);
+    const styled = d => d.paragraphs[0].runs.map(r => `${r.bold ? '**' : r.italic ? '*' : ''}${r.text}`);
+    expect(styled(back)).toEqual(styled(doc));
+    // A bold line break alone writes no empty pair of markers.
+    const lines = new TextDocument([paragraph('A\vB')]);
+    lines.select(1, 2); lines.toggleBold();
+    expect(documentMarkdown(lines)).toBe('A\\\nB\n');
+  });
   it('after a line break too', () => {
     const doc = blankDoc();
     doc.replace('Intro\v- dash\v===\v3. three');
@@ -134,6 +155,9 @@ describe('exported lists', () => {
     expect(body(documentHtml(doc))).toBe('<ol><li>a<ol><li>a1</li><li>a2</li></ol></li><li>b<ul><li>b1</li></ul></li><li>c</li></ol>');
     expect(shape(reopen(documentHtml(doc), true))).toEqual(shape(doc));
   });
+  it('keep their numbers and bullets in plain text', () => {
+    expect(documentPlainText(nested())).toBe('1.\ta\n  1.1.\ta1\n  1.2.\ta2\n2.\tb\n  ◦\tb1\n3.\tc\n');
+  });
   it('keep the number a list continues from after a paragraph between its items', () => {
     const doc = blankDoc();
     doc.replace('one'); doc.toggleList('number');
@@ -147,3 +171,28 @@ describe('exported lists', () => {
   });
 });
 
+
+describe('hidden text', () => {
+  const doc = () => {
+    const d = blankDoc();
+    d.replace('Answer: 42 (teacher only)');
+    d.select(10, 25); d.setRunFormat({ vanish: true });
+    return d;
+  };
+  it('is left out of every format, as it is left off the page', () => {
+    expect(body(documentHtml(doc()))).toBe('<p>Answer: 42</p>');
+    expect(documentMarkdown(doc())).toBe('Answer: 42\n');
+    expect(documentPlainText(doc())).toBe('Answer: 42\n');
+  });
+});
+
+describe('paragraph alignment', () => {
+  it('is kept in a web page', () => {
+    const doc = new TextDocument([paragraph('Title'), paragraph('Body'), paragraph('Signed'), paragraph('Left')]);
+    for (const [i, alignment] of [[0, 'center'], [1, 'both'], [2, 'right']]) {
+      const at = doc.paragraphs.slice(0, i).reduce((n, p) => n + p.runs[0].text.length + 1, 0);
+      doc.select(at); doc.setParagraphFormat({ alignment });
+    }
+    expect(body(documentHtml(doc))).toBe('<p style="text-align:center">Title</p><p style="text-align:justify">Body</p><p style="text-align:right">Signed</p><p>Left</p>');
+  });
+});

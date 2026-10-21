@@ -56,16 +56,17 @@ export function replacedBodyFields(ranges, start, end, inserted, discardContaine
   // when they share its start/end position. Order distinguishes adjacent fields.
   const growing = new Set();
   // Ranges are in opening order. Walk children before parents without scanning
-  // every field against every empty result on each keystroke.
+  // every field against every empty result on each keystroke. Of empty results
+  // side by side, the last is filled; growing two siblings made them cross.
   if(start===end)for(let i=ranges.length-1;i>=0;i--){
     const r=ranges[i];
-    if(!emptyEntry(r)&&!hiddenResult(r)&&(r.start===start&&r.end===start||growing.has(r.field.id))){
+    if(!emptyEntry(r)&&!hiddenResult(r)&&(r.start===start&&r.end===start&&!growing.size||growing.has(r.field.id))){
       growing.add(r.field.id);if(r.parentId)growing.add(r.parentId);
     }
   }
   for (const r of ranges) {
     if (start === end) {
-      if((emptyEntry(r)||hiddenResult(r)&&r.start===r.end)&&r.start===start)result.push(r);
+      if((emptyEntry(r)||hiddenResult(r)&&r.start===r.end||r.end===start&&!growing.has(r.field.id))&&r.start===start)result.push(r);
       else if (growing.has(r.field.id)) result.push({ ...r, end: r.end+inserted });
       else if (start <= r.start) result.push({ ...r, start:r.start+inserted, end:r.end+inserted });
       else result.push(start < r.end ? { ...r, end:r.end+inserted } : r);
@@ -75,7 +76,27 @@ export function replacedBodyFields(ranges, start, end, inserted, discardContaine
     else if (r.start <= start && end <= r.end) result.push({ ...r, end:r.end+delta });
     else throw new Error('Editing across part of a body field boundary is not supported yet.');
   }
-  return result;
+  return inTextOrder(ranges, result);
+}
+
+// Markers at one position are ordered by their `order`, which follows the order fields were inserted in,
+// not their order in the text. Field boundaries an edit brings together (deleting the text between two
+// fields) keep the order they had in the text: the order values they hold are handed out again in it.
+function inTextOrder(before, after) {
+  const old = new Map(before.map(r => [r.field.id, r])), atPosition = new Map();
+  for (const [index, r] of after.entries()) for (const key of ['start', 'end']) {
+    const was = old.get(r.field.id), marker = { index, key: key + 'Order', order: r[key + 'Order'] ?? 0, was: [was[key], was[key + 'Order'] ?? 0] };
+    if (!atPosition.has(r[key])) atPosition.set(r[key], []);
+    atPosition.get(r[key]).push(marker);
+  }
+  for (const group of atPosition.values()) {
+    if (group.length < 2) continue;
+    const orders = group.map(m => m.order).sort((a, b) => a - b);
+    group.sort((a, b) => a.was[0] - b.was[0] || a.was[1] - b.was[1]).forEach((m, i) => {
+      if (m.order !== orders[i]) after[m.index] = { ...after[m.index], [m.key]: orders[i] };
+    });
+  }
+  return after;
 }
 
 export function macroButtonSelection(ranges, start, end) {
@@ -97,6 +118,13 @@ export function placeBodyFields(paragraphs, ranges) {
   bodyFieldRanges(output);
   return output;
 }
+
+/**
+ * The order of a new field's end marker at `offset` in paragraph p, after its result was inserted: before
+ * the field markers already there. Those were at the insertion point and moved past the new result (the
+ * start of a field the new one was inserted before), or end an empty field the result filled.
+ */
+export const newFieldEndOrder = (p, offset, order) => Math.min(order, ...(p.fieldMarkers || []).filter(m => m.offset === offset).map(m => (m.order ?? 0) - 1));
 
 // Whole-cell/row deletion removes its field markers with the owned paragraphs.
 // New blank cells must never inherit those markers from a formatting template.

@@ -144,7 +144,17 @@ function tableContent(doc, table) {
     byCell.get(owner).push(p); count++;
   }
   const selection = Object.fromEntries(Object.entries(doc.selection).map(([key, value]) => { const at = locate(doc.paragraphs, value); return [key, { id: doc.paragraphs[at.index].id, offset: at.offset }]; }));
-  return { start, count, byCell, selection, bookmarks: bookmarkStructureState(doc.paragraphs, doc.tables) };
+  const comments = doc.comments?.length ? new Set(commentAnchors(doc.paragraphs).map(a => a.id)) : null;
+  return { start, count, byCell, selection, bookmarks: bookmarkStructureState(doc.paragraphs, doc.tables), comments };
+}
+/**
+ * A comment anchored only in cells a table edit removed goes with them (and its replies), as in Word: left
+ * without an anchor it could not be reached and was written to the file again on every save.
+ */
+function removeUnanchoredComments(doc, anchored) {
+  if (!anchored?.size || !doc.comments) return;
+  const kept = new Set(commentAnchors(doc.paragraphs).map(a => a.id)), gone = new Set([...anchored].filter(id => !kept.has(id)));
+  if (gone.size) doc.comments = doc.comments.filter(c => !gone.has(c.id) && !gone.has(c.parentId));
 }
 function removeOrphanedTables(doc) {
   for (;;) {
@@ -164,6 +174,7 @@ function applyTableContent(doc, table, state) {
   if (doc.hasBlockControls) rehomeMovedBlockControls(doc.paragraphs);
   repairStructuralBookmarks(doc.paragraphs, state.bookmarks, doc.tables, table.id);
   normalizeBlockBookmarkScopes(doc.paragraphs, doc.tables);
+  removeUnanchoredComments(doc, state.comments);
   for (const [key, point] of Object.entries(state.selection)) {
     const index = doc.paragraphs.findIndex(p => p.id === point.id);
     if (index >= 0) doc.selection[key] = doc.paragraphOffset(index) + point.offset;
@@ -277,6 +288,18 @@ function clearRevisions(paragraphs, start, end) {
   eachRevisionTarget(paragraphs, start, end, ({ run, mark }) => { if (!mark) delete run.revision; });
   for (const p of paragraphs) if (p.runs.length > 1) p.runs = normalize(p.runs);
 }
+/**
+ * The changes of the paragraphs that reach [start, end], including the mark just before it. Only their
+ * parts within [start, end] are exact; listing the whole document's on each tracked edit made Replace
+ * All with Track Changes on take minutes on a long document.
+ */
+function nearbyRevisionRanges(paragraphs, start, end) {
+  let first = 0, at = 0;
+  while (first < paragraphs.length - 1 && at + paragraphLength(paragraphs[first]) + 1 < start) at += paragraphLength(paragraphs[first++]) + 1;
+  let last = first;
+  for (let position = at + paragraphLength(paragraphs[first]) + 1; last < paragraphs.length - 1 && position <= end; position += paragraphLength(paragraphs[last]) + 1) last++;
+  return revisionRanges(paragraphs.slice(first, last + 1)).map(r => ({ ...r, start: r.start + at, end: r.end + at }));
+}
 function normalize(runs) {
   const result = [];
   for (const run of runs) {
@@ -298,7 +321,6 @@ export class TextDocument {
     // Display permission applies only to initial resolution, never mutations.
     if (styles) for (const p of this.paragraphs) resolveStyledParagraph(p, this.styles, this.numbering, { displayOnly });
     documentBlocks(this.paragraphs, this.tables);
-    this.hasColumnBookmarks = bookmarkEntries(this.paragraphs, this.tables).some(entry => entry.columnRange);
     this.pageSettings = validatePageSettings(pageSettings);
     // Section breaks inserted later copy the source section they split (see insertSectionBreakAt).
     this.sourceSectionCount = this.paragraphs.filter(p => p.sectionEnd).length + 1;
@@ -310,6 +332,16 @@ export class TextDocument {
     this.typingFormat = {}; this.typingStyle = null; this.typingDirectCleared = false;
     this.history = [];
     this.future = [];
+    this.findContentFeatures();
+    this.revision = 0;
+  }
+  /**
+   * Note which content needs its own handling in edits (controls, fields, note marks). Edits only ever add
+   * such content through commands that set these, so they are found again only when content is replaced
+   * wholesale: a restored version or undo step can bring back fields an edit would otherwise misplace.
+   */
+  findContentFeatures() {
+    this.hasColumnBookmarks = bookmarkEntries(this.paragraphs, this.tables).some(entry => entry.columnRange);
     this.hasPlainTextControls = this.paragraphs.some(p => p.blockControls?.some(c => c.plainText) || p.runs.some(r => r.contentControl?.plainText));
     this.hasContentControls = this.paragraphs.some(p => p.runs.some(r => r.contentControl));
     this.hasPersistentControls = this.paragraphs.some(p => p.runs.some(r => r.contentControl?.persistent));
@@ -322,7 +354,6 @@ export class TextDocument {
     this.hasHyperlinkFields=fields.some(r=>r.field.type==='HYPERLINK');
     this.hasMacroButtons=fields.some(r=>r.field.type==='MACROBUTTON');
     this.hasNoteMarks=this.paragraphs.some(p=>p.runs.some(r=>r.noteMark));
-    this.revision = 0;
   }
   didChange(preservedBlockControls) {
     if(this.hasBodyFields){
@@ -1150,7 +1181,6 @@ export class TextDocument {
     const widths = kind === 'column' ? table.layout === 'autofit' ? [...table.grid] : fixedColumnWidths(table, this.sectionWritingWidth) : null;
     const state = tableContent(this, table), owners = verticalMerges(table);
     if (kind === 'column') state.bookmarks.gridEdit = { tableId: table.id, position: column, removed: span, inserted: 0 };
-    const anchored = this.comments?.length ? new Set(commentAnchors(this.paragraphs).map(a => a.id)) : null;
     this.checkpoint();
     if (kind === 'table') { this.tables = this.tables.filter(t => t.id !== table.id); this.paragraphs.splice(state.start, state.count); removeOrphanedTables(this); }
     else if (kind === 'row') {
@@ -1174,13 +1204,7 @@ export class TextDocument {
     }
     if (kind !== 'table') applyTableContent(this, table, state);
     if (!this.paragraphs.length) this.paragraphs.push(paragraph());
-    if (kind === 'table') { repairStructuralBookmarks(this.paragraphs, state.bookmarks, this.tables, table.id); normalizeBlockBookmarkScopes(this.paragraphs, this.tables); }
-    if (anchored) {
-      // A comment anchored in the deleted cells goes with them (and its replies), as in Word: left without
-      // an anchor it could not be reached and was written to the file again on every save.
-      const kept = new Set(commentAnchors(this.paragraphs).map(a => a.id)), gone = new Set([...anchored].filter(id => !kept.has(id)));
-      if (gone.size) this.comments = this.comments.filter(c => !gone.has(c.id) && !gone.has(c.parentId));
-    }
+    if (kind === 'table') { repairStructuralBookmarks(this.paragraphs, state.bookmarks, this.tables, table.id); normalizeBlockBookmarkScopes(this.paragraphs, this.tables); removeUnanchoredComments(this, state.comments); }
     this.select(this.paragraphOffset(Math.max(0, Math.min(first, this.paragraphs.length - 1)))); this.didChange(); return true;
   }
   insertTableParagraph(after = true) {
@@ -1222,6 +1246,7 @@ export class TextDocument {
     this.pageSettings = validatePageSettings(state.pageSettings);
     this.selection = { ...state.selection };
     this.typingFormat = { ...state.typingFormat }; this.typingStyle = copy(state.typingStyle || null); this.typingDirectCleared = !!state.typingDirectCleared;
+    this.findContentFeatures();
     this.didChange();
   }
   checkpoint() {
@@ -1860,10 +1885,34 @@ export class TextDocument {
   }
   // With Track Changes on, each replacement is an ordinary tracked edit, so
   // the found text is marked deleted and the replacement inserted. One step.
+  /** Whether a paragraph's text can be edited apart from the others: no fields, controls or note marks reach across paragraphs. */
+  get paragraphsEditAlone() { return !this.hasContentControls && !this.hasBlockControls && !this.hasPlainTextControls && !this.hasBodyFields && !this.hasNoteMarks && !this.hasMacroButtons; }
+  paragraphStarts() { const starts = []; let at = 0; for (const p of this.paragraphs) { starts.push(at); at += paragraphLength(p) + 1; } return starts; }
+  /**
+   * Replace [start, end) within paragraph `index`, which starts at `at`, as replace() does, in a view of
+   * the model holding only that paragraph (see paragraphsEditAlone). An edit makes several passes over
+   * its document; making them over the whole document for each of a batch of replacements made Replace
+   * All take minutes on a long document. Later paragraphs keep their indices only when `text` has no
+   * paragraph break, so a batch runs from its last replacement.
+   */
+  replaceWithinParagraph(index, at, start, end, text) {
+    const view = Object.create(this);
+    view.paragraphs = [this.paragraphs[index]];
+    view.selection = { anchor: start - at, focus: end - at };
+    view.typingFormat = {}; view.typingStyle = null; view.typingDirectCleared = false;
+    const changed = view.replace(text, { checkpoint: false });
+    this.paragraphs.splice(index, 1, ...view.paragraphs);
+    this.selection = { anchor: view.selection.anchor + at, focus: view.selection.focus + at };
+    this.lastTrackedDeletion = view.lastTrackedDeletion;
+    return changed;
+  }
   trackedReplaceMatches(matches, text) {
     // Replacing text that is already marked deleted can change nothing; keep history exact then.
     const before = this.snapshot(); let count = 0;
+    const starts = this.paragraphsEditAlone ? this.paragraphStarts() : null;
     for (const m of [...matches].reverse()) {
+      // Text put back after the author deleted it is found as a move anywhere in the document.
+      if (starts && (!text || !this.lastTrackedDeletion)) { if (this.replaceWithinParagraph(m.paragraph, starts[m.paragraph], m.start, m.end, text)) count++; continue; }
       this.selection = { anchor: m.start, focus: m.end };
       this.typingFormat = {}; this.typingStyle = null; this.typingDirectCleared = false;
       if (this.replace(text, { checkpoint: false })) count++;
@@ -1914,14 +1963,20 @@ export class TextDocument {
         // The author's own pending insertions simply disappear; other text is marked
         // deleted (another reviewer's insertion keeps its insertion beneath the deletion).
         const me = this.revisionAuthor || 'Author';
-        const removals = revisionRanges(this.paragraphs).filter(r => r.type === 'ins' && r.author === me && r.start < end && r.end > start)
+        const removals = nearbyRevisionRanges(this.paragraphs, start, end).filter(r => r.type === 'ins' && r.author === me && r.start < end && r.end > start)
           .map(r => [Math.max(start, r.start), Math.min(end, r.end)]);
         const deletion = deletionRevision = this.newRevision('del');
+        // Deleting next to the author's own deletion from moments ago (Backspace or Delete held down) extends it,
+        // as typing extends an insertion, so it stays one change even when it crosses a clock second.
+        const now = Date.now();
+        const continued = nearbyRevisionRanges(this.paragraphs, start, end).find(r => r.type === 'del' && !r.move && r.author === me && (r.end === start || r.start === end) && now - Date.parse(r.date) < 60000);
+        if (continued) deletion.date = continued.date;
         // A paragraph mark that ends a table cell (or sits before or after a table) cannot be deleted.
-        const boundaries = new Set(this.paragraphs.filter((p, i) => (p.cellId || '') !== (this.paragraphs[i + 1]?.cellId || '')).map(p => p.id));
+        let boundaries;
+        const boundary = paragraph => (boundaries ||= new Set(this.paragraphs.filter((p, i) => (p.cellId || '') !== (this.paragraphs[i + 1]?.cellId || '')).map(p => p.id))).has(paragraph.id);
         const mark = revision => !revision ? { ...deletion } : revision.type === 'ins' && revision.author !== me ? { ...deletion, inserted: { author: revision.author, date: revision.date } } : revision;
         eachRevisionTarget(this.paragraphs, start, end, ({ paragraph, run, mark: isMark }) => {
-          if (isMark) { if (!boundaries.has(paragraph.id)) paragraph.markRevision = mark(paragraph.markRevision); }
+          if (isMark) { if (!boundary(paragraph)) paragraph.markRevision = mark(paragraph.markRevision); }
           else run.revision = mark(run.revision);
         });
         for (const [a, b] of removals.reverse()) {
@@ -1936,7 +1991,7 @@ export class TextDocument {
         // Typing that continues the author's own insertion from moments ago extends it, so one burst of
         // typing is one change even when it crosses a clock second.
         const me = this.revisionAuthor || 'Author', now = Date.now();
-        const continued = revisionRanges(this.paragraphs).find(r => r.type === 'ins' && !r.move && r.author === me && r.end === insertAt && now - Date.parse(r.date) < 60000);
+        const continued = nearbyRevisionRanges(this.paragraphs, insertAt, insertAt).find(r => r.type === 'ins' && !r.move && r.author === me && r.end === insertAt && now - Date.parse(r.date) < 60000);
         const length = documentLength(this.paragraphs);
         this.replaceUntracked(text, { ...rest, checkpoint: false });
         const inserted = documentLength(this.paragraphs) - length, insertion = this.newRevision('ins');
@@ -2005,6 +2060,8 @@ export class TextDocument {
     const at = this.range[1], location = locate(this.paragraphs, at), p = this.paragraphs[location.index];
     const run = footnoteReferenceRun(this.typingRun(at), id, kind);
     if (custom) run.noteMark.custom = true;
+    // With Track Changes on the reference is an insertion like typed text, so rejecting it removes the note.
+    if (this.trackChanges && !this.trackingInternal) run.revision = this.newRevision('ins');
     p.runs = normalize([...sliceRuns(p.runs, 0, location.offset), run, ...sliceRuns(p.runs, location.offset)]);
     for (const marker of [...(p.bookmarks || []), ...(p.fieldMarkers || [])]) if (marker.offset > location.offset || marker.offset === location.offset && marker.edge === 'end' && marker.comment) marker.offset++;
     this.hasNoteMarks = true;
@@ -2035,38 +2092,60 @@ export class TextDocument {
       // range still holds; then the removals, from the last, so each earlier range stays where it was.
       // Removing first left a paragraph's formatting change reaching into the next paragraph.
       const removes = r => r.type !== 'format' && (r.type === 'ins' ? !accept : accept);
+      // Paragraph starts, measured once: kept changes and formatting move no text, and removals run from
+      // the last, so the starts before each stay valid. Walking from the document's start for every change
+      // made Accept All and Reject All on a long reviewed document take minutes.
+      const starts = []; let offset = 0;
+      for (const p of this.paragraphs) { starts.push(offset); offset += paragraphLength(p) + 1; }
+      const indexAt = position => { let low = 0, high = starts.length - 1; while (low < high) { const middle = (low + high + 1) >> 1; if (starts[middle] <= position) low = middle; else high = middle - 1; } return low; };
+      const visitWithin = (from, to, visit) => { const first = indexAt(from); eachRevisionTarget(this.paragraphs.slice(first, indexAt(to) + 1), from - starts[first], to - starts[first], visit); };
+      // Text removed from within one paragraph that holds no fields, controls or note marks needs none of
+      // replace's work across the document.
+      const plain = !this.hasContentControls && !this.hasBlockControls && !this.hasPlainTextControls && !this.hasMacroButtons;
       for (const r of [...targets.filter(r => !removes(r)), ...targets.filter(removes).reverse()]) {
         if (r.type === 'format') {
           // Rejecting re-applies the recorded former formatting; a change recorded without it is kept.
           const resolve = (target, kind) => { if (accept) acceptFormatChange(target, kind); else if (!rejectFormatChange(target)) this.formatRejectSkipped = true; else if (kind === 'run') acceptFormatChange(target, 'run'); };
-          let at = 0;
-          for (const p of this.paragraphs) {
-            const size = p.runs.reduce((n, run) => n + run.text.length, 0);
-            if (at + size + 1 > r.start && at < r.end) {
-              let touched = false;
-              const change = paragraphFormatChange(p);
-              if (change && only(change) && at >= r.start && at + size + 1 <= r.end + 1) { resolve(p, 'paragraph'); touched = true; }
-              eachRevisionTarget(this.paragraphs, Math.max(r.start, at), Math.min(r.end, at + size), ({ run, mark }) => { const runChange = !mark && runFormatChange(run); if (runChange && only(runChange)) { resolve(run, 'run'); touched = true; } });
-              if (touched && !accept && this.stylesEnabled) resolveStyledParagraph(p, this.styles, this.numbering);
-            }
-            at += size + 1;
-            if (at > r.end) break;
+          for (let i = indexAt(r.start); i < this.paragraphs.length && starts[i] < r.end; i++) {
+            const p = this.paragraphs[i], at = starts[i], size = paragraphLength(p);
+            let touched = false;
+            const change = paragraphFormatChange(p);
+            if (change && only(change) && at >= r.start && at + size + 1 <= r.end + 1) { resolve(p, 'paragraph'); touched = true; }
+            eachRevisionTarget([p], Math.max(r.start, at) - at, Math.min(r.end, at + size) - at, ({ run, mark }) => { const runChange = !mark && runFormatChange(run); if (runChange && only(runChange)) { resolve(run, 'run'); touched = true; } });
+            if (touched && !accept && this.stylesEnabled) resolveStyledParagraph(p, this.styles, this.numbering);
           }
           continue;
         }
         const keep = r.type === 'ins' ? accept : !accept;
         // Rejecting a deletion of another reviewer's insertion restores that insertion.
         const kept = revision => revision?.inserted && !accept ? { type: 'ins', ...revision.inserted } : undefined;
-        if (keep) eachRevisionTarget(this.paragraphs, r.start, r.end, ({ paragraph, run, mark }) => {
+        if (keep) visitWithin(r.start, r.end, ({ paragraph, run, mark }) => {
           const target = mark ? paragraph : run, key = mark ? 'markRevision' : 'revision', next = kept(target[key]);
           if (next) target[key] = next; else delete target[key];
         });
         else {
+          const index = indexAt(r.start), p = this.paragraphs[index], from = r.start - starts[index], to = r.end - starts[index];
+          if (plain && to <= paragraphLength(p) && !p.fieldMarkers?.length && !p.runs.some(run => run.noteMark)) {
+            const next = { ...copy(p), runs: normalize([...sliceRuns(p.runs, 0, from, true), ...sliceRuns(p.runs, to)]) };
+            replaceBookmarkMarkers([p], [next], from, to, 0);
+            for (const change of hyperlinkBoundaryChanges(next.runs)) {
+              next.runs = normalize([...sliceRuns(next.runs, 0, change.start), ...sliceRuns(next.runs, change.start, change.end).map(run => { const piece = { ...run }; if (change.link) piece.link = { ...change.link }; else delete piece.link; return piece; }), ...sliceRuns(next.runs, change.end)]);
+            }
+            if (this.stylesEnabled) resolveStyledParagraph(next, this.styles, this.numbering);
+            this.paragraphs[index] = next;
+            continue;
+          }
           // A removed paragraph mark merges its paragraph with the next one.
-          const limit = documentLength(this.paragraphs);
-          this.selection = { anchor: r.start, focus: Math.min(r.end, limit) };
+          const limit = documentLength(this.paragraphs), last = Math.min(r.end, limit);
           if (r.end > limit) for (const p of this.paragraphs.slice(-1)) delete p.markRevision;
-          if (r.start < Math.min(r.end, limit)) this.replaceUntracked('', { checkpoint: false });
+          // A change can cross a field's start or end (deleting part of a field's result with Track Changes
+          // on). The text on either side goes separately, and the field keeps the rest of its result.
+          const cuts = this.hasBodyFields ? bodyFieldRanges(this.paragraphs).flatMap(f => f.start < r.start || f.end > last ? [f.start, f.end].filter(at => r.start < at && at < last) : []) : [];
+          const points = [...new Set([r.start, ...cuts.sort((a, b) => a - b), last])];
+          for (let i = points.length - 1; i > 0; i--) {
+            this.selection = { anchor: points[i - 1], focus: points[i] };
+            if (points[i - 1] < points[i]) this.replaceUntracked('', { checkpoint: false });
+          }
         }
       }
     } finally { this.trackingInternal = false; }
@@ -2394,4 +2473,4 @@ export class TextDocument {
 }
 
 // Table commands outside this file (table-editing.js) share the structural helpers above.
-export const tableModelInternals = Object.freeze({ tableContent, applyTableContent, blankCellParagraph, clearMerge, setCellWidths, refreshTableStyles, reparentCellContent, removeOrphanedTables });
+export const tableModelInternals = Object.freeze({ tableContent, applyTableContent, blankCellParagraph, clearMerge, setCellWidths, refreshTableStyles, reparentCellContent, removeOrphanedTables, removeUnanchoredComments });

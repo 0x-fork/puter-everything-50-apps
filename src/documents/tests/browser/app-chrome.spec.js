@@ -217,6 +217,19 @@ test('the status bar counts the selection, picks a language that saves into the 
   expect(strFromU8(unzipSync(readFileSync(path))['word/document.xml'])).toContain('<w:lang w:val="de-DE"/>');
 });
 
+test('the ContextMenu key on the status bar starts its Customize menu on the first item', async ({ page }) => {
+  await openEditor(page);
+  await page.locator('.ed-statusbar .ed-word-count').focus();
+  await page.keyboard.press('ContextMenu');
+  const menu = page.getByRole('menu', { name: 'Customize Status Bar' });
+  await expect(menu.getByRole('menuitemcheckbox', { name: 'Page Number' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  // A right-click still opens it with no item chosen.
+  await page.locator('.ed-statusbar').click({ button: 'right', position: { x: 300, y: 10 } });
+  await expect(menu).toBeFocused();
+});
+
 test('the Language list is one tab stop that the arrow keys move through', async ({ page }) => {
   await openEditor(page);
   await text(page).fill('Bonjour');
@@ -395,4 +408,26 @@ test('AutoSave off waits for Save; Comments opens the review pane; the page coun
   // Status bar: Page 1 of 1 opens Go To.
   await page.locator('.ed-page-count').click();
   await expect(page.getByRole('dialog', { name: /Go To/i })).toBeVisible();
+});
+
+test('on a phone, panes open together stay within reach below the page', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/mock.html#/new');
+  await expect(text(page)).toBeEditable();
+  const open = async (tab, name) => {
+    await page.locator(`#ribbon-tab-${tab}`).click();
+    const button = page.locator(`#ribbon-panel-${tab}`).getByRole('button', { name, exact: true });
+    await button.scrollIntoViewIfNeeded();
+    await button.click();
+  };
+  await open('home', 'Styles Pane');
+  await open('view', 'Navigation Pane');
+  const styles = page.getByRole('complementary', { name: 'Styles pane' });
+  await expect(styles).toBeVisible();
+  await expect(page.getByRole('complementary', { name: 'Navigation' })).toBeVisible();
+  // Together they are taller than the room under the page: a swipe over them brings the last one into view.
+  await styles.getByRole('heading', { name: 'Styles' }).hover();
+  await page.mouse.wheel(0, 2000);
+  const bottoms = () => page.evaluate(() => [document.querySelector('.styles-pane'), document.querySelector('.canvas-editor-content')].map(node => Math.round(node.getBoundingClientRect().bottom)));
+  await expect.poll(async () => { const [pane, column] = await bottoms(); return pane <= column; }).toBe(true);
 });

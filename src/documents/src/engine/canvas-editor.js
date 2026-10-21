@@ -4,8 +4,10 @@ import { decodeShape } from './canvas-shapes.js';
 import { wordPosition, optionWordPosition } from './word-navigation.js';
 import { carriesFormatting, copyFragment, fragmentHtml, htmlFragment, pasteFragment, formattedPasteFits } from './clipboard-fragment.js';
 import { showLink } from './link-appearance.js';
+import { revisionView } from './revisions.js';
 
 export const PASTED_PICTURE = /^image\/(png|jpeg|tiff)$/i;
+const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
 import { inlineControlCaret, adjacentInlineControl, moveInlineControlCaret, documentStartControlCaret, moveInlineControlHomeEnd, emptyControlPointerCaret, pointerControlSelection } from './content-control-caret.js';
 import { paintControlCarets } from './canvas-control-caret.js';
 import { paintStoryChrome, storyBoundaries } from './canvas-story-chrome.js';
@@ -150,7 +152,7 @@ export class CanvasEditor {
       this.point({clientX:e.clientX,clientY:e.clientY,altKey:true},false);
       const candidate=this.pointImage, picture=normal || (selected && candidate?.image.id===selected.id ? candidate : null);
       if (picture) this.model.select(picture.start, picture.end);
-      else if (position < this.model.range[0] || position > this.model.range[1]) this.model.select(position, position);
+      else if (position < this.model.range[0] || position > this.model.range[1]) { this.point(e); this.preferredX = null; this.model.select(position, position); }
       this.focus(); this.onSelection();
       const behind = !this.model.selectedImage && candidate;
       onContextMenu({event:e, behind, selectBehind:()=>{ if(behind){this.model.select(behind.start,behind.end);this.focus();this.onSelection();} }});
@@ -514,7 +516,8 @@ export class CanvasEditor {
     // The host can keep history beyond this editor's (changes that reopened the package).
     if (!this.session[direction === 'undo' ? 'history' : 'future'].length && this.onHistoryEnd?.(direction)) return;
     try {
-      if (this.session[direction](() => { this.validateStory(); this.relayout(); })) this.onChange();
+      // The caret moves to the restored selection: Up and Down start from its column there, not the one before.
+      if (this.session[direction](() => { this.validateStory(); this.preferredX = null; this.caretAffinity = 'forward'; this.relayout(); })) this.onChange();
       this.focus(); this.revealCaret();
     } catch (e) { this.relayout(); this.onError(e); }
   }
@@ -630,14 +633,23 @@ export class CanvasEditor {
   }
   printSheets() {
     this.finishComposition();
-    // Printing always uses the authored pages, whatever view is on screen: lay them out privately and
-    // put the screen layout back afterwards, without touching the page canvases.
-    if (this.view) {
+    // Printing always uses the authored pages, whatever view is on screen, and leaves out hidden text,
+    // which is laid out only while the formatting marks show it: lay the pages out privately and put the
+    // screen layout back afterwards, without touching the page canvases.
+    const hidden = revisionView.showHidden && [this.session.body, ...Object.values(this.pageStories?.stories || {})].some(story => story?.paragraphs?.some(p => p.runs.some(r => r.vanish)));
+    if (this.view || hidden) {
       const screen = { view: this.view, layout: this.layout, storyLayout: this.storyLayout, selectionLayout: this.selectionLayout, tablePaintCache: this.tablePaintCache, drawingPageContexts: this.drawingPageContexts };
-      const printed = this.computeLayout(null);
-      Object.assign(this, printed, { selectionLayout: printed.layout, tablePaintCache: new Map(), drawingPageContexts: drawingPageContexts(printed.layout, this.pageStories), view: null });
-      try { return this.printSheets(); } finally { Object.assign(this, screen); }
+      const shown = revisionView.showHidden;
+      if (hidden) revisionView.showHidden = false;
+      try {
+        const printed = this.computeLayout(null);
+        Object.assign(this, printed, { selectionLayout: printed.layout, tablePaintCache: new Map(), drawingPageContexts: drawingPageContexts(printed.layout, this.pageStories), view: null });
+        return this.paintSheets();
+      } finally { revisionView.showHidden = shown; Object.assign(this, screen); }
     }
+    return this.paintSheets();
+  }
+  paintSheets() {
     this.printedLayout = { layout: this.layout, storyLayout: this.storyLayout };
     const sheets = this.layout.pages.map(geometry => {
       const canvas = document.createElement('canvas');
@@ -1038,7 +1050,8 @@ export class CanvasEditor {
     return true;
   }
   pointerDown(e, tapped = false) {
-    if (e.button !== 0) return;
+    // Control+click is a Mac's secondary click: the context menu follows, and the selection it acts on stays.
+    if (e.button !== 0 || MAC && e.ctrlKey) return;
     // A press during composition commits it and goes on to place the caret, as in a native field;
     // returning would let the press take focus from the document, losing what is typed next.
     if (this.composition) this.finishComposition();
@@ -1142,8 +1155,12 @@ export class CanvasEditor {
       const { index, offset } = locate(this.model.paragraphs, position), start = position - offset;
       return { start, end: start + paragraphText(this.model.paragraphs[index]).length };
     }
+    return this.wordAt(e, position);
+  }
+  /** The word under the pointer; none on a paragraph mark or break (an empty line, past a line's end), which typing would remove. */
+  wordAt(e, position) {
     const word = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(this.model.text).containing(this.pointCharacter(e, position));
-    return word ? { start: word.index, end: word.index + word.segment.length } : null;
+    return word && !/[\n\v\f\u000e]/.test(word.segment) ? { start: word.index, end: word.index + word.segment.length } : null;
   }
   /** Extend a pointer selection to a point. */
   dragTo(e) {
@@ -1240,8 +1257,8 @@ export class CanvasEditor {
     if (this.pointImage) {
       this.model.select(this.pointImage.start, this.pointImage.end); this.focus(); this.onSelection(); return;
     }
-    const word = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(this.model.text).containing(this.pointCharacter(e, pos));
-    if (word) { this.model.select(word.index, word.index + word.segment.length); this.focus(); this.onSelection(); }
+    const word = this.wordAt(e, pos);
+    if (word) { this.model.select(word.start, word.end); this.focus(); this.onSelection(); }
   }
   /**
    * The offset of the character under the pointer. A press resolves to the nearest caret stop, which
@@ -1496,6 +1513,11 @@ export class CanvasEditor {
     if (e.key === 'Tab' && !mod && !e.altKey && !leaveWithTab && this.model.tableContext) {
       e.preventDefault(); this.execute(() => this.model.moveCell(e.shiftKey ? -1 : 1)); return;
     }
+    // At the start of list items, Tab demotes them and Shift+Tab promotes them, as in other word processors.
+    // At the top level Shift+Tab still moves focus on.
+    if (e.key === 'Tab' && !mod && !e.altKey && !leaveWithTab && this.listTab(e.shiftKey ? -1 : 1)) {
+      e.preventDefault(); this.changeListLevel(e.shiftKey ? -1 : 1); return;
+    }
     if (e.key === 'Tab' && !e.shiftKey && !mod && !e.altKey && !leaveWithTab) {
       e.preventDefault(); this.insertTab(); return;
     }
@@ -1512,6 +1534,11 @@ export class CanvasEditor {
       if (e.key === 'Delete' && e.shiftKey && this.model.range[0] !== this.model.range[1]) return;
       e.preventDefault(); this.deleteText(e.key === 'Backspace' ? -1 : 1);
     }
+  }
+  /** Whether Tab changes the level of the selected list items: the selection starts a list item and the level can move. */
+  listTab(delta) {
+    const targets = this.model.selectedParagraphs, [start] = this.model.range;
+    return locate(this.model.paragraphs, start).offset === 0 && targets.every(p => p.list && p.list.level + delta >= 0 && p.list.level + delta <= 8);
   }
   beforeInput(e) {
     if (this.readOnly || this.viewOnly) { e.preventDefault(); return; }
@@ -1544,7 +1571,8 @@ export class CanvasEditor {
     const edge = direction < 0 ? line.start : line.end;
     // At the edge already, the key deletes what is across it, as Backspace or Delete would.
     if (edge === start) return this.model.delete(direction);
-    this.model.select(Math.min(start, edge), Math.max(start, edge));
+    // Selected from the caret toward the edge, so a tracked deletion leaves the caret on the far side of it.
+    this.model.select(start, edge);
     return this.model.replace('');
   }
   // Typing continues one undo step until a new word starts.
@@ -1603,7 +1631,12 @@ export class CanvasEditor {
     }, undefined, undefined, true);
     this.typingGroup = null;
   }
-  reconcile(value, checkpoint) {
+  /**
+   * Apply the native field's new value to the model. `caret` is the native field's collapsed caret after
+   * the change, which ends where a deletion started or an insertion ended; `backward` marks a deletion
+   * toward the start (Option or Ctrl+Backspace).
+   */
+  reconcile(value, checkpoint, { caret = null, backward = false } = {}) {
     const old = this.inputText;
     if (old === value) return false;
     const selection = this.model.selection, at = selection.focus, added = value.length - old.length;
@@ -1614,33 +1647,35 @@ export class CanvasEditor {
       return this.model.replace(value.slice(at, at + added), { checkpoint });
     }
     let start = 0, end = old.length, tail = value.length;
-    while (start < end && start < tail && old[start] === value[start]) start++;
+    // Where the native caret shows the change was, take it: deleting "two " before "three" also reads
+    // as deleting "wo t", which would strike the wrong letters and keep the wrong one's formatting.
+    const from = caret === null ? -1 : added < 0 ? caret : caret - added;
+    const exact = from >= 0 && value.slice(0, from) === old.slice(0, from) && value.slice(from + Math.max(0, added)) === old.slice(from + Math.max(0, -added));
+    if (exact) { start = from; end = from + Math.max(0, -added); tail = from + Math.max(0, added); }
+    else while (start < end && start < tail && old[start] === value[start]) start++;
     // Keep diffs at complete grapheme boundaries, including composed emoji.
     const points = boundaries(old);
     start = [...points].reverse().find(p => p <= start) ?? 0;
-    while (end > start && tail > start && old[end - 1] === value[tail - 1]) { end--; tail--; }
+    if (!exact) while (end > start && tail > start && old[end - 1] === value[tail - 1]) { end--; tail--; }
     const safeEnd = points.find(p => p >= end) ?? old.length;
     tail += safeEnd - end; end = safeEnd;
     const typingFormat = this.model.typingFormat, typingStyle = this.model.typingStyle, typingDirectCleared = this.model.typingDirectCleared;
     const controlCaret = start === end && start === selection.anchor && end === selection.focus ? selection.controlCaret : undefined;
     const sameRange = start === Math.min(selection.anchor, selection.focus) && end === Math.max(selection.anchor, selection.focus);
-    this.model.select(sameRange ? selection.anchor : start, sameRange ? selection.focus : end, controlCaret, sameRange ? selection.controlSelection : undefined);
+    // A backward deletion leaves the caret before what it removed, also when Track Changes keeps that
+    // text as a deletion, so the next press goes on to the word before.
+    this.model.select(sameRange ? selection.anchor : backward ? end : start, sameRange ? selection.focus : backward ? start : end, controlCaret, sameRange ? selection.controlSelection : undefined);
     this.model.typingFormat = typingFormat; this.model.typingStyle = typingStyle; this.model.typingDirectCleared = typingDirectCleared;
     return this.model.replace(value.slice(start, tail), { checkpoint });
   }
-  nativeInput() {
+  nativeInput(e) {
     if (this.readOnly || this.viewOnly) { this.syncInput(); return; }
     try {
       const revision = this.session.revision;
       this.session.run(() => {
         const value = this.input.value, a = this.input.selectionStart, b = this.input.selectionEnd;
-        this.reconcile(value, false);
-        const typingFormat = this.model.typingFormat, typingStyle = this.model.typingStyle, typingDirectCleared = this.model.typingDirectCleared;
-        if (this.inputText === value) {
-          const selection = this.model.selection;
-          this.model.select(a, b, a === selection.anchor && b === selection.focus ? selection.controlCaret : undefined, a === selection.anchor && b === selection.focus ? selection.controlSelection : undefined);
-        }
-        this.model.typingFormat = typingFormat; this.model.typingStyle = typingStyle; this.model.typingDirectCleared = typingDirectCleared;
+        this.reconcile(value, false, { caret: a === b ? a : null, backward: /Backward$/.test(e?.inputType || '') });
+        this.followNativeSelection(value, a, b);
       }, () => { this.validateStory(); this.relayout(); this.revealCaret(); }, { record: !this.composition });
       if (!this.composition && revision !== this.session.revision) this.onChange();
     } catch (e) {
@@ -1648,11 +1683,31 @@ export class CanvasEditor {
       this.onError(e); this.relayout();
     }
   }
+  /**
+   * Take the native field's selection once its value is in the model. During a composition with Track
+   * Changes on, the text it replaced stays in the document, struck out, but not in the native field;
+   * that text lies before the composition, so the selection maps across by the text after it.
+   */
+  followNativeSelection(value, a, b) {
+    const text = this.inputText, shift = text.length - value.length;
+    if (text !== value && !(this.composition && shift > 0 && text.endsWith(value.slice(a)))) return;
+    a += shift; b += shift;
+    const selection = this.model.selection, same = a === selection.anchor && b === selection.focus;
+    const typingFormat = this.model.typingFormat, typingStyle = this.model.typingStyle, typingDirectCleared = this.model.typingDirectCleared;
+    this.model.select(a, b, same ? selection.controlCaret : undefined, same ? selection.controlSelection : undefined);
+    this.model.typingFormat = typingFormat; this.model.typingStyle = typingStyle; this.model.typingDirectCleared = typingDirectCleared;
+  }
   finishComposition() {
     if (!this.composition) return;
     const before = this.composition;
-    try { this.session.run(() => this.reconcile(this.input.value, false), () => this.validateStory(), { record: false }); }
-    catch (e) { this.session.restore(before); this.onError(e); }
+    try {
+      this.session.run(() => {
+        const value = this.input.value, a = this.input.selectionStart, b = this.input.selectionEnd;
+        this.reconcile(value, false);
+        // Committing re-reads the text the composition replaced, which leaves the caret before it.
+        if (this.inputText !== value) this.followNativeSelection(value, a, b);
+      }, () => this.validateStory(), { record: false });
+    } catch (e) { this.session.restore(before); this.onError(e); }
     this.composition = null;
     const changed = JSON.stringify(before.state.paragraphs) !== JSON.stringify(this.model.paragraphs);
     if (changed) this.session.record(before);

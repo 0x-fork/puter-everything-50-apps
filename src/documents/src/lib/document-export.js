@@ -2,14 +2,15 @@
  * Export the body of a document model as a web page, Markdown or plain text — the File > Export
  * formats besides .docx and PDF. These are readable approximations: headings, paragraphs, lists,
  * tables, links and bold/italic/underline/strike/super/subscript survive; page layout, pictures,
- * fields, headers and footers, notes and comments do not.
+ * fields, headers and footers, notes, comments and hidden text do not.
  */
 import { documentBlocks } from '../engine/tables.js';
 import { listKind, listMarkers } from '../engine/numbering.js';
 
 const OBJECT = '￼';
 const escapeHtml = text => String(text).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const runText = run => String(run.text || '').replace(new RegExp(OBJECT, 'g'), '');
+// Hidden text is neither shown nor printed, so a downloaded or published copy leaves it out too.
+const runText = run => run.vanish ? '' : String(run.text || '').replace(new RegExp(OBJECT, 'g'), '');
 
 /** A heading level 1–6 from a paragraph's style, or 0. */
 export function headingLevel(p, styles) {
@@ -107,7 +108,8 @@ function blocksHtml(blocks, model, numbers = itemNumbers(model)) {
     }
     const level = headingLevel(p, model.styles);
     const inner = p.runs.map(run => runHtml(run, !!level)).join('') || '<br>';
-    const align = ['center', 'right', 'both'].includes(p.alignment) ? ` style="text-align:${p.alignment === 'both' ? 'justify' : p.alignment}"` : '';
+    const alignment = p.format?.alignment;
+    const align = ['center', 'right', 'both'].includes(alignment) ? ` style="text-align:${alignment === 'both' ? 'justify' : alignment}"` : '';
     html += tag ? `<li${align}>${inner}` : level ? `<h${level}${align}>${inner}</h${level}>` : `<p${align}>${inner}</p>`;
   }
   closeLists();
@@ -144,25 +146,42 @@ const escapeLineStart = line => line.replace(/^(?: {4,}|\t)/, space => `&#${spac
   .replace(/^( {0,3})([-+=])/, '$1\\$2').replace(/^( {0,3}\d{1,9})([.)])/, '$1\\$2');
 // Breaks stand as NUL (which document text cannot hold) until the paragraph knows how its lines break.
 const BREAK = '\0';
-function runMarkdown(run, heading = false) {
-  let text = mdEscape(runText(run)).replace(/[\v\f\u000e]/g, BREAK);
-  if (!text.trim()) return text;
+// A run's escaped text, split around its core when the run writes markers, tags or a link around it.
+function runPieces(run, heading) {
+  const text = mdEscape(runText(run)).replace(/[\v\f\u000e]/g, BREAK);
+  const strike = run.strikethrough && run.strikethrough !== 'none', bold = run.bold && !heading, link = safeLink(run);
+  if (!/[^\s\0]/.test(text) || !(strike || run.italic || bold || ['superscript', 'subscript'].includes(run.verticalAlign) || link)) return { text };
   // Breaks at a run's edges stay outside its emphasis markers, as spaces do.
   const [, lead, core, trail] = /^([\s\0]*)([\s\S]*?)([\s\0]*)$/.exec(text);
+  return { text, lead, core, trail, run, strike, bold, link };
+}
+// The character a run writes first or last (`end`); a marker, tag or link bracket is punctuation.
+const edge = (piece, end) => !piece ? '' : !piece.core ? (end ? piece.text.at(-1) : piece.text[0]) : (end ? piece.trail.at(-1) : piece.lead[0]) || '*';
+// CommonMark punctuation (Unicode P and S). A marker between a word and punctuation is not one: it opens only
+// after whitespace or punctuation and closes only before them, so x**\_y\_**z would show its asterisks.
+const PUNCTUATION = /[\p{P}\p{S}]/u;
+const loose = c => !c || /[\s\0]/.test(c) || PUNCTUATION.test(c);
+function runMarkdown(piece, before, after) {
+  if (!piece.core) return piece.text;
+  const { lead, core, trail, run } = piece, chars = [...core];
+  // Emphasis that markers cannot give there is written as HTML, which reads back the same.
+  const tags = PUNCTUATION.test(chars[0]) && !loose(lead.at(-1) || before) || PUNCTUATION.test(chars.at(-1)) && !loose(trail[0] || after);
   let out = core;
-  if (run.strikethrough && run.strikethrough !== 'none') out = `~~${out}~~`;
-  if (run.italic) out = `*${out}*`;
-  if (run.bold && !heading) out = `**${out}**`;
+  if (piece.strike) out = tags ? `<del>${out}</del>` : `~~${out}~~`;
+  if (run.italic) out = tags ? `<em>${out}</em>` : `*${out}*`;
+  if (piece.bold) out = tags ? `<strong>${out}</strong>` : `**${out}**`;
   if (run.verticalAlign === 'superscript') out = `<sup>${out}</sup>`;
   if (run.verticalAlign === 'subscript') out = `<sub>${out}</sub>`;
-  const link = safeLink(run);
-  if (link) out = `[${out}](${link.replace(/[()\s|]/g, encodeURIComponent)})`;
+  if (piece.link) out = `[${out}](${piece.link.replace(/[()\s|]/g, encodeURIComponent)})`;
   return lead + out + trail;
 }
 /** A paragraph's Markdown, its line, page and column breaks written as `lineBreak`. */
 // A break at either end of a paragraph has no line to start: Markdown would show a backslash there.
-const paragraphMarkdown = (p, heading = false, lineBreak = '\\\n') => p.runs.map(run => runMarkdown(run, heading)).join('').replace(/^\0+|\0+$/g, '')
-  .split(BREAK).map(escapeLineStart).join(heading ? ' ' : lineBreak);
+const paragraphMarkdown = (p, heading = false, lineBreak = '\\\n') => {
+  const pieces = p.runs.map(run => runPieces(run, heading)).filter(piece => piece.text);
+  return pieces.map((piece, i) => runMarkdown(piece, edge(pieces[i - 1], true), edge(pieces[i + 1], false))).join('').replace(/^\0+|\0+$/g, '')
+    .split(BREAK).map(escapeLineStart).join(heading ? ' ' : lineBreak);
+};
 function blocksMarkdown(blocks, model) {
   const out = [], numbers = itemNumbers(model);
   // The open list levels, outermost first: where each level's markers start and its items' text begins.
@@ -209,12 +228,24 @@ export function documentMarkdown(model) {
 }
 
 /* ---- Plain text ---- */
+/** Each list item's marker as the document shows it ("1.", "a)", "•") and what separates it from the text. */
+function itemMarkers(model) {
+  const markers = new Map();
+  try {
+    listMarkers(model.paragraphs, model.numbering).forEach((marker, i) => {
+      if (marker?.text) markers.set(model.paragraphs[i], marker.text + ({ space: ' ', nothing: '' }[marker.level.suffix] ?? '\t'));
+    });
+  } catch { /* Items are written without their markers instead. */ }
+  return markers;
+}
 export function documentPlainText(model) {
-  const lines = [];
+  const lines = [], markers = itemMarkers(model);
+  // A list item keeps its number or bullet, indented two spaces a level, as text has no other way to show them.
+  const marker = (p, indent = true) => markers.has(p) ? (indent ? '  '.repeat(listLevel(p)) : '') + markers.get(p) : '';
   const walk = blocks => {
     for (const block of blocks) {
-      if (block.type === 'table') { for (const row of tableRows(block, cell => cellText(cell, p => p.runs.map(runText).join('').replace(/[\v\f\u000e]/g, ' '), ' ', ' '))) lines.push(row.join('\t')); continue; }
-      lines.push(block.paragraph.runs.map(runText).join('').replace(/[\v\f\u000e]/g, '\n'));
+      if (block.type === 'table') { for (const row of tableRows(block, cell => cellText(cell, p => marker(p, false) + p.runs.map(runText).join('').replace(/[\v\f\u000e]/g, ' '), ' ', ' '))) lines.push(row.join('\t')); continue; }
+      lines.push(marker(block.paragraph) + block.paragraph.runs.map(runText).join('').replace(/[\v\f\u000e]/g, '\n'));
     }
   };
   walk(blocksOf(model));

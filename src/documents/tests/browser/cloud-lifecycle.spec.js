@@ -210,3 +210,56 @@ test('a starred document renamed in the editor stays starred', async ({ page }) 
   await page.evaluate(() => { location.hash = '#/home'; });
   await expect(page.locator('.file-row', { hasText: 'Renamed plan' })).toHaveClass(/is-starred/);
 });
+
+test('a name typed just before going back to the documents is kept', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('Plan text');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Saved to Puter');
+  // Checking that the new name is free takes a moment.
+  await page.evaluate(() => window.__puterFaults.push({ op: 'stat', path: '^Documents/Final plan\\.docx$', delay: 800, times: 1 }));
+  const title = page.getByRole('textbox', { name: 'Document name' });
+  await title.fill('Final plan');
+  await title.press('Enter');
+  await page.evaluate(() => { location.hash = '#/home'; });
+  await expect(page.locator('.file-row', { hasText: 'Final plan' })).toBeVisible();
+  await expect(page.locator('.file-row', { hasText: 'Untitled document' })).toHaveCount(0);
+  await expect(page.locator('.toast-root')).not.toContainText('cancelled');
+});
+
+test('Open Recent says when the documents could not be listed', async ({ page }) => {
+  await openEditor(page);
+  await page.evaluate(() => window.__puterFaults.push({ op: 'readdir', path: '^Documents$', message: 'Network error', times: 1 }));
+  await page.locator('.ed-menubar').getByRole('menuitem', { name: 'File', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Open Recent', exact: true }).click();
+  await expect(page.locator('.menu-note')).toHaveText('Could not load recent documents. Check your connection and try again.');
+});
+
+test('hiding the page writes edits typed during a save as soon as that save ends', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('Draft');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Saved to Puter');
+  // A slow write: the pause before the next autosave grows with it, to several seconds.
+  await page.evaluate(() => window.__puterFaults.push({ op: 'write', path: '^Documents/[^/]+\\.docx$', delay: 1500, times: 1 }));
+  await text(page).press('End'); await page.keyboard.type(' one');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Saving…');
+  await page.keyboard.type(' two');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    delete document.visibilityState;
+  });
+  await expect.poll(() => page.evaluate(() => window.__docs.current.view.doc.dirty), { timeout: 3000 }).toBe(false);
+});
+
+test('a new document saved under a free name shows that name', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('First');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Saved to Puter');
+  await page.evaluate(() => { location.hash = '#/home'; });
+  await page.getByRole('button', { name: 'New document' }).first().click();
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await text(page).fill('Second');
+  await expect.poll(() => page.evaluate(() => window.__docs.current.view.doc.path)).toBe('Documents/Untitled document 2.docx');
+  await expect(page.getByRole('textbox', { name: 'Document name' })).toHaveValue('Untitled document 2');
+  await expect(page).toHaveTitle('Untitled document 2 — Documents');
+});

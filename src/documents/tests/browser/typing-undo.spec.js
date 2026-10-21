@@ -83,3 +83,67 @@ test('Cmd+Backspace and Cmd+Delete stop at the edge of the line as laid out, not
   expect(await softLine('deleteSoftLineBackward', first[0])).toBe(true);
   await expect(input(page)).toHaveValue(`Intro${long}`);
 });
+
+test('deleting a word with the platform chord removes that word, not letters shifted onto the next', async ({ page }) => {
+  await blank(page);
+  await input(page).fill('one two three');
+  await page.evaluate(() => { const e = window.__docs.current.view.engine; e.model.select(8, 13); e.toggleBold(); e.model.select(8); e.syncInput(); });
+  // The platform's delete-word chord, handled by the native field. "two " and "three" share the t, so
+  // the change also reads as deleting "wo t".
+  await input(page).press(process.platform === 'darwin' ? 'Alt+Backspace' : 'Control+Backspace');
+  await expect(input(page)).toHaveValue('one three');
+  expect(await page.evaluate(() => window.__docs.current.view.engine.model.paragraphs[0].runs.map(r => [r.text, !!r.bold]))).toEqual([['one ', false], ['three', true]]);
+  expect(await input(page).evaluate(el => [el.selectionStart, el.selectionEnd])).toEqual([4, 4]);
+});
+
+test('with Track Changes on, word and line deletions leave the caret before what they struck out', async ({ page }) => {
+  await blank(page);
+  await input(page).fill('one two three\nfour five six');
+  await input(page).press('ControlOrMeta+Shift+e');
+  await expect.poll(() => page.evaluate(() => !!window.__docs.current.view.engine.model.trackChanges)).toBe(true);
+  const state = () => page.evaluate(() => {
+    const e = window.__docs.current.view.engine;
+    return { range: [...e.model.range], deleted: e.model.paragraphs.map(p => p.runs.filter(r => r.revision?.type === 'del').map(r => r.text).join('')) };
+  });
+  await input(page).evaluate(el => { el.setSelectionRange(13, 13); el.dispatchEvent(new Event('select')); });
+  // The platform's delete-word chord, handled by the native field.
+  const deleteWord = process.platform === 'darwin' ? 'Alt+Backspace' : 'Control+Backspace';
+  await input(page).press(deleteWord);
+  expect(await state()).toEqual({ range: [8, 8], deleted: ['three', ''] });
+  // A second press goes on to the word before, rather than striking the same one again.
+  await input(page).press(deleteWord);
+  expect(await state()).toEqual({ range: [4, 4], deleted: ['two three', ''] });
+  // Cmd+Backspace (the Mac's soft-line deletion) likewise.
+  await input(page).evaluate(el => {
+    el.setSelectionRange(27, 27); el.dispatchEvent(new Event('select'));
+    el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteSoftLineBackward', bubbles: true, cancelable: true }));
+  });
+  expect(await state()).toEqual({ range: [14, 14], deleted: ['two three', 'four five six'] });
+});
+
+test('after Undo or a right-click moves the caret, Up and Down keep to its new column', async ({ page }) => {
+  await blank(page);
+  await input(page).fill('First line of text here\nSecond line of text here\nThird line of text here');
+  const place = at => input(page).evaluate((el, at) => { el.setSelectionRange(at, at); el.dispatchEvent(new Event('select')); }, at);
+  const caret = () => input(page).evaluate(el => el.selectionStart);
+  await place(54); // Third line, after "Third"
+  await page.keyboard.type('Z');
+  await place(20);
+  await page.keyboard.press('ArrowDown');
+  expect(await caret()).toBeGreaterThan(40);
+  // Undo puts the caret back after "Third"; Up goes to the same column of the line above, not the old one.
+  await input(page).press('ControlOrMeta+z');
+  expect(await caret()).toBe(54);
+  await page.keyboard.press('ArrowUp');
+  expect(Math.abs(await caret() - 29)).toBeLessThanOrEqual(1);
+  // A right-click elsewhere moves the caret too.
+  await page.keyboard.press('End');
+  await page.keyboard.press('ArrowDown');
+  const box = await page.locator('canvas.canvas-page').first().boundingBox();
+  const at = await page.evaluate(() => { const e = window.__docs.current.view.engine, line = e.selectionLayout.lines[0]; return { x: line.stops.find(s => s.offset === 5).x * e.zoom, y: (line.y + line.height / 2) * e.zoom }; });
+  await page.mouse.click(box.x + at.x, box.y + at.y, { button: 'right' });
+  await page.keyboard.press('Escape');
+  expect(await caret()).toBe(5);
+  await page.keyboard.press('ArrowDown');
+  expect(Math.abs(await caret() - 29)).toBeLessThanOrEqual(1);
+});

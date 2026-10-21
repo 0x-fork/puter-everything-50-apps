@@ -33,7 +33,7 @@ import { createParagraphPaginator } from './pagination.js';
 import { paragraphText, paragraphFormat, runFormat } from './model.js';
 import { revisionView, runRevisionDisplay } from './revisions.js';
 import { inlineSegments, EMU_PER_PX, drawingOffsetPixels, imageExtents, inlineImageExtents, inlineImagePaintFrame, normalizedRotation, isPositionedImage, isSideWrappedImage } from './images.js';
-import { squareFlowHints, squareFlowSignature, squareRow, joinSquareLine, clearingBreakTarget } from './square-wrap.js';
+import { squareFlowHints, squareFlowSignature, squareRow, squareHintsReach, joinSquareLine, clearingBreakTarget } from './square-wrap.js';
 import { positionedImageFrame, positionedImageContains, positionedImageBounds, isCellRelativePosition, isPageBasedCellPosition } from './positioned-images.js';
 import { resolveDrawingCollisions } from './drawing-collisions.js';
 import { floatingParagraph } from './floating-images.js';
@@ -128,9 +128,11 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
   const numberNotes = () => numberedParagraphs(source, { footnote: notes?.numbers || new Map(), endnote: endnotes?.numbers || new Map() });
   if (notes || endnotes) paragraphs = numberNotes();
   for (let attempt = 0; attempt < MAX_PAGES; attempt++) {
+    // Page counts reach the body only through the header and footer heights they produce.
+    const storyHeights = totals ? new Map() : undefined;
     const flow = () => notes
-      ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, noteReserve }), measureBase, numbering, storyOptions)
-      : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts });
+      ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights, noteReserve }), measureBase, numbering, storyOptions)
+      : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights });
     placed = flow();
     // Footnotes numbered per page (§17.11.19 eachPage) need their pages first; renumber once and lay out again.
     if (notes?.restart === 'eachPage') {
@@ -147,6 +149,9 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
     for (const regions of placed.pageRegions) for (const section of new Set((regions || []).map(r => r.section))) sectionCounts[section] = (sectionCounts[section] || 0) + 1;
     const next = { pageCount: placed.pageCount, sectionCounts };
     if (JSON.stringify(next) === JSON.stringify(counts)) return aligned();
+    // When the new counts leave every header and footer this layout measured at the same height,
+    // laying out again with them would place everything exactly as it is now.
+    if ([...storyHeights.values()].every(story => story.measure(next) === story.height)) return aligned();
     counts = next;
   }
   throw new Error('Header/footer page-count fields did not converge during pagination.');
@@ -258,11 +263,12 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
         const textMeasure = page.rotatedCellText ? (text, style) => rotatedCellTextMetrics(measure(text, style), style) : measure;
         const hints = page.paragraphFrameFlow ? undefined : wrapHints && { ...wrapHints, exclusions: wrapHints.exclusions.filter(e => cellEdges ? e.cellId === block.paragraph.cellId : !e.cellId) };
         const run = () => measureParagraph(block.paragraph, block.offset, textMeasure, page, markers[block.index], numbering, edges, hints, !cellEdges && keepBoundaryLine);
-        // Cells, wrapping around drawings, unequal columns and drawings themselves (whose objects
-        // keep their identity) are always measured again.
+        // A cell paragraph's key adds its cell edges and neighbours. Rows wrapping around drawings,
+        // unequal columns and drawings themselves (whose objects keep their identity) are always
+        // measured again.
         let key = null;
-        if (paragraphCache && !cellEdges && !hints && !page.rotatedCellText && !page.columnWidthAt && !block.paragraph.runs.some(r => r.image)) {
-          try { key = JSON.stringify([block.paragraph, pageKey(page), markers[block.index] ?? null, keepBoundaryLine, sharedKey]); } catch { key = null; }
+        if (paragraphCache && !squareHintsReach(hints, block.paragraph.id) && !page.rotatedCellText && !page.columnWidthAt && !block.paragraph.runs.some(r => r.image)) {
+          try { key = JSON.stringify([block.paragraph, pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey]); } catch { key = null; }
         }
         const measured = key === null ? run() : paragraphCache.measure(key, block.offset, run);
         // Removing a floating frame from body flow must not join paragraph

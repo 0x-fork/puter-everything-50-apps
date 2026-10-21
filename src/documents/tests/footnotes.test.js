@@ -111,6 +111,13 @@ describe('footnotes', () => {
     expect(lastOnFirst(withNotes)).toBeLessThan(lastOnFirst(without));
   });
 
+  it('names the note, not a header or footer, when a note grows taller than a page', async () => {
+    const { pkg, model } = await open(notedDocx());
+    const note = Object.values(pkg.pageStories.stories).find(story => story.kind === 'footnote');
+    note.paragraphs[0].runs.at(-1).text += ' Long source text.'.repeat(1500);
+    expect(() => layout(pkg, model)).toThrow('This footnote or endnote is taller than a page.');
+  });
+
   it('saves untouched notes byte for byte, edits a note and prunes deleted references', async () => {
     const source = notedDocx(), { pkg, model } = await open(source);
     const save = async (edits) => new Uint8Array(await pkg.export(model.paragraphs, model.pageSettings, model.numbering, model.styles, model.tables, model.assets, edits).arrayBuffer());
@@ -163,6 +170,21 @@ describe('footnotes', () => {
       }
     }
   }, 120000);
+
+  it('tracks a footnote inserted with Track Changes on, so rejecting it removes the note', async () => {
+    const { pkg, model } = await open(notedDocx());
+    model.trackChanges = true; model.revisionAuthor = 'Reviewer';
+    const { id, path } = pkg.addFootnote();
+    model.select(5); model.insertFootnoteReference(id);
+    expect(model.revisions.map(r => [r.type, r.author, model.text.slice(r.start, r.end)])).toEqual([['ins', 'Reviewer', '\ufffc']]);
+    const note = new TextDocument([paragraph()], model.pageSettings, model.numbering, model.styles, [], model.assets);
+    note.paragraphs[0].runs = footnoteOpeningRuns(note.typingRun(0));
+    const save = async () => strFromU8(unzipSync(new Uint8Array(await pkg.export(model.paragraphs, model.pageSettings, model.numbering, model.styles, model.tables, model.assets, { [path]: { paragraphs: note.paragraphs, tables: [] } }, undefined, true).arrayBuffer()))['word/document.xml']);
+    expect(await save()).toMatch(new RegExp(`<w:ins [^>]*w:author="Reviewer"[^>]*><w:r><w:rPr>.*?</w:rPr><w:footnoteReference w:id="${id}"/></w:r></w:ins>`));
+    const text = model.text;
+    expect(model.resolveRevisions(false)).toBe(true);
+    expect(model.text).toBe(text.slice(0, 5) + text.slice(6));
+  });
 
   it('drops a new note whose reference was undone', async () => {
     const { pkg, model } = await open(notedDocx());

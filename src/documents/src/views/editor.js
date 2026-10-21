@@ -61,6 +61,7 @@ import { createReferences } from './references.js';
 import { createMailings } from './mailings.js';
 import { createDocumentViews } from './document-views.js';
 import { createInsert } from './insert-tab.js';
+import { imageFilesFrom } from '../lib/images.js';
 import { createDraw } from './draw-tab.js';
 import { createPictures } from './pictures.js';
 import { createEditingCommands } from './home-editing-commands.js';
@@ -109,7 +110,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const printAbort = new AbortController();
   let printing = false;
   window.addEventListener('keydown', e => {
-    if (!e.defaultPrevented && !isComposing(e) && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'p' && engine) {
+    if (!e.defaultPrevented && !isComposing(e) && (e.ctrlKey || e.metaKey) && !e.altKey && shortcutCode(e) === 'KeyP' && engine) {
       e.preventDefault(); printDocument();
     }
   }, {signal:printAbort.signal});
@@ -668,6 +669,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       else { customZoom.value = String(scale); customZoom.textContent = `${Math.round(scale * 100)}%`; customZoom.hidden = false; zoom.value = customZoom.value; }
       engine?.setZoom(scale); syncZoom();
     },
+    /** The zoom as chosen: 'fit' while the page follows the window's width, otherwise the scale. */
+    get value() { return zoom.value === 'fit' ? 'fit' : engine?.zoom ?? 1; },
   };
   // A drag hands the keyboard back to the text when it ends; the arrow keys, which end a change at every press, keep it on the slider.
   let zoomDragged = false;
@@ -775,6 +778,19 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const baseExtendTab = editorCommands.extendTab;
   editorCommands.extendTab = (id, kit) => [...(baseExtendTab?.(id, kit) || []), ...review.extendTab(id, kit), ...references.extendTab(id, kit)];
   editorCommands.readAloudActive = () => review.commands.readAloudActive();
+  // A picture dropped on the pages goes in where it lands, as Insert > Pictures puts it in. Other files
+  // (a document to open) go on to the window's own drop handling.
+  const pictureDrop = e => !!engine && !failed && !pkg.readOnly && !engine.viewOnly && [...(e.dataTransfer?.items || [])].some(item => item.kind === 'file' && /^image\//i.test(item.type));
+  host.addEventListener('dragover', e => { if (pictureDrop(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  host.addEventListener('drop', async e => {
+    const files = pictureDrop(e) ? imageFilesFrom(e.dataTransfer) : [];
+    if (!files.length) return;
+    e.preventDefault();
+    const editor = engine;
+    editor.finishComposition();
+    editor.model.select(editor.point(e)); editor.syncInput();
+    for (const file of files) if (engine === editor && !destroyed) await editorCommands.insertPictureFile(file);
+  });
 
   /* ---- Application chrome: menu bar, File view, title bar, status bar, keyboard ---- */
   // Feature modules add menu-bar entries and document context-menu entries the way they add ribbon groups.
@@ -1215,8 +1231,10 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     focusFont: () => fontFamily.click(), focusSize: () => { fontSize.focus(); fontSize.select(); } }), true);
   root.addEventListener('keydown', e => {
     if (e.defaultPrevented || isComposing(e)) return;
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f' && engine) { e.preventDefault(); openSearch(); return; }
+    // By the letter the layout types, or the physical key where it types another script (Cyrillic ы, а), so the
+    // browser's own Save page and Find bar do not take these chords.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && shortcutCode(e) === 'KeyS') { e.preventDefault(); save(); return; }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && shortcutCode(e) === 'KeyF' && engine) { e.preventDefault(); openSearch(); return; }
     // Find and replace: the conventional Ctrl+H; Cmd+H hides the app on a Mac, so there it is Cmd+Shift+H.
     if (shortcutCode(e) === 'KeyH' && !e.altKey && engine && (MOD_KEY === 'Cmd' ? e.metaKey && e.shiftKey : e.ctrlKey && !e.shiftKey)) { e.preventDefault(); openFind(); return; }
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === '/') { e.preventDefault(); editorCommands.openShortcuts(); return; }
@@ -1377,10 +1395,17 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     updateWordCount();
     statusBar?.refresh();
   }
+  // The counts last shown, with the text and selection they were taken from: every caret move and each keystroke
+  // (twice) refresh the status bar, and splitting a long document into words takes milliseconds each time.
+  let counted = { text: null, a: 0, b: 0, total: 0, chosen: null };
   function updateWordCount() {
-    const total = engine.model.text.trim().split(/\s+/u).filter(Boolean).length;
-    const [a, b] = engine.model.range;
-    const chosen = a !== b ? engine.model.text.slice(a, b).trim().split(/\s+/u).filter(Boolean).length : null;
+    const text = engine.model.text, [a, b] = engine.model.range;
+    if (text !== counted.text || a !== counted.a || b !== counted.b) {
+      const total = text === counted.text ? counted.total : text.trim().split(/\s+/u).filter(Boolean).length;
+      const chosen = a !== b ? text.slice(a, b).trim().split(/\s+/u).filter(Boolean).length : null;
+      counted = { text, a, b, total, chosen };
+    }
+    const { total, chosen } = counted;
     words.textContent = chosen !== null ? `${chosen} of ${total} ${total === 1 ? 'word' : 'words'}` : `${total} ${total === 1 ? 'word' : 'words'}`;
   }
   function renderStatus(label, name, state = '') {
@@ -1433,6 +1458,15 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (e.key === 'Escape') { e.preventDefault(); title.value = doc.name; refreshTitle(); title.blur(); engine?.focus(); }
   });
   doc.addEventListener('status', updateStatus);
+  // A first save can name the file otherwise than the name shown ("Untitled document 2" when the first is taken):
+  // the title shows the document's name, unless the user is typing a new one there.
+  const onPath = () => {
+    if (destroyed) return;
+    if (document.activeElement !== title) title.value = doc.name;
+    refreshTitle();
+    document.title = `${doc.name} — Documents`;
+  };
+  doc.addEventListener('path', onPath);
   const onSession = () => { renderAccountButton(account); updateStatus(); if (session.signedIn && doc.dirty && doc.exporter) doc.save({ auto: true }).catch(error); };
   if (!local) session.addEventListener('change', onSession);
   updateStatus();
@@ -1624,15 +1658,20 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     throw e;
   });
   ready.catch(() => {});
+  // Once the document is open (or could not be), an editor without a save handler can never save it.
+  let settled = false;
+  ready.then(() => { settled = true; }, () => { settled = true; });
   return {
     el: root, doc, ready,
     get engine() { return engine; },
+    /** Whether the document opened as a read-only preview or not at all, so that nothing here can save it. */
+    get unsaveable() { return settled && !doc.exporter; },
     get commands() { return editorCommands; },
     async flush() {
       if (destroyed) return true;
       engine?.finishComposition();
-      if (!doc.dirty && doc.status !== 'saving') return true;
-      if (!doc.exporter) return false;
+      // A clean document still waits for a rename or copy under way (doc.flush), or leaving would cancel it.
+      if (doc.dirty && !doc.exporter) return false;
       // A save that never answers (a stalled connection) must not keep the user in the editor: after a while
       // leaving asks, as it does after a failed save, and the save itself goes on.
       const flushing = doc.flush();
@@ -1656,6 +1695,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       fitObserver?.disconnect(); rulers?.destroy(); views.destroy(); chrome.destroy(); formatArea.destroy(); review.destroy(); reviewTools.destroy(); collab.destroy(); versionHistory.destroy(); assistant.destroy(); references.destroy(); insert.destroy(); draw.destroy(); pictures.destroy(); editingCommands.destroy(); proofing.destroy(); for (const module of pageModules) module.destroy();
       releasePictures();
       doc.removeEventListener('status', updateStatus);
+      doc.removeEventListener('path', onPath);
       session.removeEventListener('change', onSession);
       doc.destroy(); engine?.destroy();
     },

@@ -128,6 +128,28 @@ describe('tracked changes', () => {
     expect(xml.match(/<w:ins [^>]*w:author="Me"[^>]*>/g)).toHaveLength(1);
     expect(xml.replace(/<\/w:t><\/w:r><w:r><w:t xml:space="preserve">/g, '')).toMatch(/<w:ins [^>]*w:author="Me"[^>]*><w:r><w:t xml:space="preserve"> More<\/w:t><\/w:r><\/w:ins>/);
   });
+  it('keeps Backspace or Delete held down as one deletion across a clock second, but not an old deletion', async () => {
+    const { pkg, model } = await open(trackedDocx());
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-05-01T10:00:00.900Z'));
+      model.select(model.text.indexOf('Second') + 6); model.delete(-1);
+      vi.setSystemTime(new Date('2026-05-01T10:00:01.100Z'));
+      model.delete(-1);
+      expect(summary(model).filter(r => r[1] === 'Me')).toEqual([['del', 'Me', 'nd']]);
+      vi.setSystemTime(new Date('2026-05-01T10:00:01.900Z'));
+      model.select(model.text.indexOf('Second')); model.delete(1);
+      vi.setSystemTime(new Date('2026-05-01T10:00:02.100Z'));
+      model.delete(1);
+      expect(summary(model).filter(r => r[1] === 'Me')).toEqual([['del', 'Me', 'Se'], ['del', 'Me', 'nd']]);
+      // A deletion made minutes later is a change of its own.
+      vi.setSystemTime(new Date('2026-05-01T10:05:00.000Z'));
+      model.delete(1);
+      expect(summary(model).filter(r => r[1] === 'Me')).toEqual([['del', 'Me', 'Se'], ['del', 'Me', 'c'], ['del', 'Me', 'nd']]);
+    } finally { vi.useRealTimers(); }
+    const xml = strFromU8(unzipSync(await save(pkg, model))['word/document.xml']);
+    expect(xml.match(/<w:del [^>]*w:author="Me"[^>]*>/g)).toHaveLength(3);
+  });
   it('accepts and rejects changes, singly and all at once', async () => {
     let { model } = await open(trackedDocx());
     model.select(model.text.indexOf('added') + 1);
@@ -260,6 +282,33 @@ describe('a tracked edit that joins two characters into one', () => {
   });
 });
 
+describe('a tracked deletion across a field\'s start or end', () => {
+  const setup = () => {
+    const pkg = createDocx([paragraph('Date: ')]);
+    const doc = new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables);
+    doc.select(6); insertBodyField(doc, 'DATE', '2026-10-21'); doc.select(doc.text.length); doc.replace(' end');
+    doc.trackChanges = true; doc.revisionAuthor = 'Me';
+    return doc;
+  };
+  const results = doc => bodyFieldRanges(doc.paragraphs).map(r => doc.text.slice(r.start, r.end));
+  it.each([['start', 3, 10, 'Dat-10-21 end', '-10-21'], ['end', 12, 19, 'Date: 2026-1d', '2026-1']])('is accepted, leaving the rest of the result (across its %s)', (side, start, end, text, result) => {
+    const doc = setup();
+    doc.select(start, end); expect(doc.replace('')).toBe(true);
+    // Accepting it threw, and so did Accept All for every other change in the document.
+    expect(doc.resolveRevisions(true)).toBe(true);
+    expect(doc.text).toBe(text);
+    expect(results(doc)).toEqual([result]);
+    expect(doc.revisions).toEqual([]);
+  });
+  it('is rejected, leaving the field as it was', () => {
+    const doc = setup();
+    doc.select(3, 10); doc.replace('');
+    expect(doc.resolveRevisions(false)).toBe(true);
+    expect(doc.text).toBe('Date: 2026-10-21 end');
+    expect(results(doc)).toEqual(['2026-10-21']);
+  });
+});
+
 describe('fields inserted over a selection with Track Changes on', () => {
   it('Insert Field wraps exactly the new result, after the struck-out selection', () => {
     const pkg = createDocx([paragraph('Due OLD today')]);
@@ -340,3 +389,44 @@ it.each([true, false])('resolves only the changes Show Markup shows (accept=%s),
   session.run(m => m.resolveRevisions(accept, undefined, undefined, { only: change => change.author !== 'Bea' }));
   expect(body.revisions.map(r => [r.type, r.author, body.text.slice(r.start, r.end)])).toEqual([['ins', 'Bea', ' big']]);
 });
+
+describe('Accept All and Reject All on a long reviewed document', () => {
+  const reviewed = count => {
+    const revision = type => ({ type, author: 'Ada', date: '2026-01-01T00:00:00Z' });
+    const paragraphs = Array.from({ length: count }, (_, i) => {
+      const p = paragraph(`Item ${i} reads`);
+      p.runs.push({ ...p.runs[0], text: ' old', revision: revision('del') }, { ...p.runs[0], text: ' new', revision: revision('ins') }, { ...p.runs[0], text: ' text.' });
+      // A bookmark around the final word moves with the text before it.
+      const length = p.runs.reduce((n, r) => n + r.text.length, 0);
+      p.bookmarks = [{ id: `b${i}`, name: `Item${i}`, edge: 'start', offset: length - 5 }, { id: `b${i}`, edge: 'end', offset: length - 1 }];
+      return p;
+    });
+    const pkg = createDocx(paragraphs);
+    return new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets);
+  };
+  it.each([true, false])('resolves thousands of changes in linear time (accept=%s)', accept => {
+    const doc = reviewed(2000);
+    const started = performance.now();
+    expect(doc.resolveRevisions(accept)).toBe(true);
+    // It took over a minute when every change walked or rewrote the document from its start.
+    expect(performance.now() - started).toBeLessThan(15000);
+    expect(doc.revisions).toEqual([]);
+    const kept = accept ? 'new' : 'old';
+    expect(doc.paragraphs.map(p => p.runs.map(r => r.text).join(''))).toEqual(Array.from({ length: 2000 }, (_, i) => `Item ${i} reads ${kept} text.`));
+    expect(doc.bookmarks.map(b => doc.text.slice(b.start, b.end))).toEqual(Array(2000).fill('text'));
+  }, 90000);
+});
+
+it('replaces thousands of matches with Track Changes on in linear time', () => {
+  const pkg = createDocx(Array.from({ length: 2000 }, (_, i) => paragraph(`Clause ${i}: the Company shall notify the Company's agent.`)));
+  const doc = new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets, { trackChanges: true });
+  doc.revisionAuthor = 'Me';
+  const started = performance.now();
+  expect(doc.replaceMatches('Company', 'Contractor', { matchCase: true }, true)).toBe(4000);
+  // Every match listed and walked the whole document's changes, so this took over a minute.
+  expect(performance.now() - started).toBeLessThan(15000);
+  expect(doc.revisions).toHaveLength(8000);
+  expect(doc.revisions.slice(0, 2).map(r => [r.type, doc.text.slice(r.start, r.end)])).toEqual([['del', 'Company'], ['ins', 'Contractor']]);
+  doc.resolveRevisions(true);
+  expect(doc.paragraphs[1999].runs.map(r => r.text).join('')).toBe("Clause 1999: the Contractor shall notify the Contractor's agent.");
+}, 120000);

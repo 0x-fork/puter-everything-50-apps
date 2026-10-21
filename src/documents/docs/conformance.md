@@ -55,6 +55,24 @@ cases. The valid independent fixture and its browser download are checked with
 `npm run check:conformance`; malformed regression inputs are intentionally not
 claimed to pass the schema.
 
+## Templates and macro-enabled documents
+
+ECMA-376 Part 1 §11.3.10 gives the Main Document part one of two content types:
+`…wordprocessingml.document.main+xml` for a document and
+`…wordprocessingml.template.main+xml` for a template (.dotx). Macro-enabled files
+(.docm, .dotm) use Microsoft's `application/vnd.ms-word.document.macroEnabled.main+xml`
+and `…template.macroEnabledTemplate.main+xml` for the same markup. The codec
+accepts all four at `/word/document.xml`. A template opens editable like a
+document; a package with a VBA project or digital signature opens only as the
+read-only preview above, and its macros are neither run nor removed.
+
+What the editor saves is always a .docx (a template's first save writes a new .docx
+file and leaves the template as it was), so an export rewrites the Main Document override to the
+document content type, the one Word requires of a .docx. No other part changes
+for that reason; a template's attached-template setting and glossary (building
+block) parts are kept as they are but not used. Unit tests in
+`tests/canvas-docx.test.js` cover a template and a macro-enabled document.
+
 ## DOCX font families and theme inheritance
 
 | Area | Specification | Supported subset |
@@ -21931,13 +21949,18 @@ Supported subset:
   Enter record insertions; Delete/Backspace/selection replacement record deletions; deleting your
   own pending insertion removes it outright.
 - Accept/Reject this change, and move to next, all changes, and all changes and stop tracking.
+  Accepting a deletion that crosses a field's begin or end (§17.16.18) removes the text on either
+  side of the boundary separately; the field keeps the rest of its result.
+- Inserting a footnote or endnote reference (§17.11.14 `footnoteReference`, §17.11.7
+  `endnoteReference`) records the reference run as an insertion, written inside `w:ins`.
+- Replace All records each replacement as a deletion of the found text and an insertion.
 - All Markup (inline colour, underline and strikethrough with left-margin change bars), Simple
   Markup and No Markup (deleted text hidden), and Original (inserted text hidden).
 - Unchanged documents save byte for byte; revisions survive untracked edits and round trips.
 
 Formatting revisions (`rPrChange`, `pPrChange`, including in the paragraph mark) are retained, listed with change bars and can be accepted; rejecting them is reported as not supported and keeps them. Gaps: table row/cell revisions, and revisions in
 headers, footers and drawing text still open read-only. Moves are not distinguished from
-insertions/deletions after an edit. Replace All in Find and Replace is not tracked. Balloons for
+insertions/deletions after an edit. An equation inserted with tracking on is not tracked. Balloons for
 deletions are not drawn. Tests: `tests/tracked-changes.test.js`.
 
 ## Generated table of contents (2026-10-09)
