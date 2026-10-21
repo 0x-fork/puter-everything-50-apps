@@ -41,6 +41,10 @@ export class Store extends Emitter {
     this.library = { v: 1, notebooks: [] };
     this.notebooks = [];
     this.trash = [];
+    // Ids in trash.json as last read or written, to merge other devices' changes.
+    this.trashBase = new Set();
+    // trash.json writes made by this session, so a read that a write overtook is ignored.
+    this.trashWrites = 0;
     this.pages = new Map();
     this.pageLoads = new Map();
     this.textCache = new Map();
@@ -49,7 +53,13 @@ export class Store extends Emitter {
     this.writers = new Map();
     this.pendingWrites = new Map();
     this.failed = new Set();
+    // Pictures, attachments and recordings being uploaded right now.
+    this.assetWrites = 0;
     this.versionState = new Map();
+    this.versionJobs = new Map();
+    // Re-encrypted assets' old copies, by page id: removed once the page
+    // pointing at the new copies is saved.
+    this.staleAssets = new Map();
     this.loadedSnapshots = new Map();
     this.status = 'saved';
     // Keys of unlocked password-protected sections, by section id. Never stored.
@@ -61,12 +71,13 @@ export class Store extends Emitter {
 
   async load({ defaultName = 'My Notebook' } = {}) {
     const [library, trash, listed] = await Promise.all([
-      this.backend.readJSON('library.json'),
-      this.backend.readJSON('trash.json'),
+      this.readDamaged('library.json'),
+      this.readDamaged('trash.json'),
       this.backend.list('notebooks'),
     ]);
     this.library = library && Array.isArray(library.notebooks) ? library : { v: 1, notebooks: [] };
     this.trash = Array.isArray(trash) ? trash : [];
+    this.trashBase = new Set(this.trash.map((t) => t.id));
     const trashedNotebooks = new Set(this.trash.filter((t) => t.kind === 'notebook').map((t) => t.notebook.id));
     // Notebooks created on another device before this library.json was
     // written still show up: the folder listing is the source of truth.
@@ -89,6 +100,19 @@ export class Store extends Emitter {
     this.emit('change', { type: 'load' });
   }
 
+  /**
+   * Reads a file that the app can do without: a damaged (truncated)
+   * library.json or trash.json must not keep every notebook from opening.
+   * The notebooks folder still lists the notebooks; network errors still throw.
+   */
+  readDamaged(path) {
+    return this.backend.readJSON(path).catch((err) => {
+      if (!(err instanceof SyntaxError)) throw err;
+      console.warn(`Ignoring unreadable ${path}`, err);
+      return null;
+    });
+  }
+
   async createStarterNotebook(name) {
     const nb = this.createNotebook(name, { silent: true });
     const quick = this.createSection(nb.id, { name: 'Quick Notes', color: 'yellow', silent: true });
@@ -100,13 +124,43 @@ export class Store extends Emitter {
 
   /** Re-reads manifests changed on another device. Open dirty notebooks win. */
   async refresh() {
-    const library = await this.backend.readJSON('library.json').catch(() => null);
+    const trashWrites = this.trashWrites;
+    const [library, remoteTrash] = await Promise.all([
+      this.backend.readJSON('library.json').catch(() => null),
+      this.backend.readJSON('trash.json').catch(() => null),
+    ]);
     if (!library) return false;
     let changed = false;
-    for (const id of library.notebooks || []) {
-      if (this.timers.has(`notebooks/${id}.json`)) continue;
-      const remote = await this.backend.readJSON(`notebooks/${id}.json`).catch(() => null);
-      if (!remote) continue;
+    // A trash.json saved here while it was read is newer than what was
+    // read: merging that would drop what was just deleted here.
+    if (await this.mergeTrash(this.trashWrites === trashWrites ? remoteTrash : null)) changed = true;
+    // A notebook deleted on another device leaves this one too, unless it
+    // has changes here: unsaved, or made after the copy that was deleted
+    // (restoring that copy would undo them). Its Deleted Notes entry may
+    // have arrived with an earlier merge (when this device saved trash.json),
+    // and library.json saved here since may list it again: save it without.
+    let dropped = false;
+    for (const entry of this.trash) {
+      const i = entry.kind === 'notebook' ? this.notebooks.findIndex((n) => n.id === entry.notebook.id) : -1;
+      if (i >= 0 && !this.timers.has(`notebooks/${entry.notebook.id}.json`) && String(this.notebooks[i].modified || '') <= String(entry.notebook.modified || '')) {
+        this.notebooks.splice(i, 1);
+        dropped = true;
+      }
+    }
+    if (dropped) {
+      changed = true;
+      this.syncLibraryOrder();
+      this.scheduleLibrary();
+    }
+    // Read the manifests in parallel (one round trip, not one per notebook),
+    // then apply them in library order. Notebooks with unsaved changes here
+    // are skipped, also if they became dirty while the reads ran.
+    const ids = [...(library.notebooks || [])];
+    const dirty = (id) => this.timers.has(`notebooks/${id}.json`);
+    const remotes = await Promise.all(ids.map((id) => (dirty(id) ? null : this.backend.readJSON(`notebooks/${id}.json`).catch(() => null))));
+    for (const [n, id] of ids.entries()) {
+      const remote = remotes[n];
+      if (!remote || dirty(id)) continue;
       const i = this.notebooks.findIndex((n) => n.id === id);
       if (i < 0) {
         if (this.trash.some((t) => t.kind === 'notebook' && t.notebook.id === id)) continue;
@@ -114,8 +168,17 @@ export class Store extends Emitter {
         changed = true;
       } else if (remote.modified > this.notebooks[i].modified) {
         for (const s of this.sectionsOf(remote)) {
-          const key = s.locked && this.keys.get(s.id);
-          if (key && s.sealed) s.pages = await openJSON(key, s.sealed).catch(() => []);
+          const key = this.keys.get(s.id);
+          if (!key) continue;
+          const pages = s.locked && s.sealed ? await openJSON(key, s.sealed).catch(() => null) : null;
+          if (pages) s.pages = pages;
+          else {
+            // Password changed or removed on another device: this key no
+            // longer fits, so the section locks rather than look empty (and
+            // save an empty page list over the real one).
+            this.keys.delete(s.id);
+            if (s.locked) for (const m of this.section(s.id)?.pages || []) this.pages.delete(m.id);
+          }
         }
         this.notebooks[i] = remote;
         changed = true;
@@ -129,17 +192,54 @@ export class Store extends Emitter {
   }
 
   /**
-   * Reloads an open page if another device saved a newer copy and nothing
-   * is waiting to be saved here. Returns true when the page changed.
+   * Folds in Deleted Notes changes another device saved since this session
+   * last read or wrote trash.json: what was deleted there is added here,
+   * what was restored or purged there is dropped. True when trash changed.
    */
-  async refreshPage(id) {
+  async mergeTrash(remote) {
+    if (!Array.isArray(remote)) return false;
+    const base = this.trashBase;
+    const remoteIds = new Set(remote.map((t) => t?.id));
+    const localIds = new Set(this.trash.map((t) => t.id));
+    const kept = this.trash.filter((t) => !base.has(t.id) || remoteIds.has(t.id));
+    const added = remote.filter((t) => t?.id && !base.has(t.id) && !localIds.has(t.id));
+    this.trashBase = remoteIds;
+    if (!added.length && kept.length === this.trash.length) return false;
+    for (const entry of added) {
+      // A protected section unlocked here holds its pages decrypted, or the
+      // next save would seal an empty list over them.
+      const root = entry.node || entry.notebook;
+      if (!root) continue;
+      for (const s of this.sectionsOf({ sections: root.sections || [root] })) {
+        const key = s.locked && this.keys.get(s.id);
+        if (!key) continue;
+        const pages = s.sealed ? await openJSON(key, s.sealed).catch(() => null) : null;
+        if (pages) s.pages = pages;
+        else this.keys.delete(s.id);
+      }
+    }
+    this.trash = [...kept, ...added].sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+    return true;
+  }
+
+  /**
+   * Reloads an open page if another device saved a newer copy and nothing
+   * is waiting to be saved here, before the read or after it. busy() tells
+   * of edits not yet handed to the store. Returns true when the page changed.
+   */
+  async refreshPage(id, { busy = () => false } = {}) {
+    const path = `pages/${id}.json`;
     const local = this.pages.get(id);
-    if (!local || this.timers.has(`pages/${id}.json`) || this.pendingWrites.has(`pages/${id}.json`)) return false;
-    let remote = await this.backend.readJSON(`pages/${id}.json`).catch(() => null);
+    const unsaved = () => this.pages.get(id) !== local || this.timers.has(path) || this.pendingWrites.has(path) || busy();
+    if (!local || unsaved()) return false;
+    const modified = local.modified;
+    let remote = await this.backend.readJSON(path).catch(() => null);
     if (remote?.sealed) {
       const key = this.keys.get(this.findPage(id)?.section.id);
       remote = key ? await openJSON(key, remote.sealed).catch(() => null) : null;
     }
+    // Edits made while the copy was read win: never replace them.
+    if (unsaved() || local.modified !== modified) return false;
     if (!remote?.modified || remote.modified <= local.modified) return false;
     for (const k of Object.keys(local)) delete local[k];
     Object.assign(local, remote, { id });
@@ -355,8 +455,11 @@ export class Store extends Emitter {
     delete copy.sealed;
     const copiedPages = [];
     if (target === f.notebook) copy.name = `${f.node.name} (copy)`;
-    for (const meta of f.node.pages) {
-      const page = await this.loadPage(meta.id);
+    // Load every page first: a failed load then leaves no half-made copy behind.
+    const sources = [];
+    for (const meta of f.node.pages) sources.push(await this.loadPage(meta.id));
+    for (const [i, meta] of f.node.pages.entries()) {
+      const page = sources[i];
       const newId = uid('p');
       const dup = { ...structuredClone(page), id: newId };
       this.pages.set(newId, dup);
@@ -414,7 +517,9 @@ export class Store extends Emitter {
     if (this.pages.has(id)) return this.pages.get(id);
     if (this.pageLoads.has(id)) return this.pageLoads.get(id);
     const job = (async () => {
-      let raw = await this.backend.readJSON(`pages/${id}.json`);
+      // A sealed save still waiting to be retried is newer than the file.
+      const queued = this.timers.get(`pages/${id}.json`)?.getter();
+      let raw = typeof queued?.sealed === 'string' ? queued : await this.backend.readJSON(`pages/${id}.json`);
       const found = this.findPage(id);
       if (raw?.sealed) {
         // The page may have just moved, so its current section's key is
@@ -520,6 +625,7 @@ export class Store extends Emitter {
     if (target.notebook !== f.notebook) this.touchNotebook(target.notebook);
     if ((f.section.locked || target.node.locked) && f.section !== target.node) {
       for (const m of group) {
+        if (target.node.locked) this.dropVersions(m.id).catch(() => {});
         this.loadPage(m.id).then((page) => {
           this.rekeyAssets(page);
           this.schedule(`pages/${m.id}.json`, () => this.pages.get(m.id), 0);
@@ -596,12 +702,20 @@ export class Store extends Emitter {
     if (i < 0) return null;
     const entry = this.trash[i];
     let result = null;
+    // Anything already back (restored on another device) is not added
+    // twice, but it is saved again so the restore sticks.
     if (entry.kind === 'notebook') {
-      this.notebooks.splice(Math.min(entry.index, this.notebooks.length), 0, entry.notebook);
-      this.library.notebooks = this.notebooks.map((n) => n.id);
-      this.touchNotebook(entry.notebook);
+      if (!this.notebook(entry.notebook.id)) {
+        this.notebooks.splice(Math.min(entry.index, this.notebooks.length), 0, entry.notebook);
+        this.library.notebooks = this.notebooks.map((n) => n.id);
+      }
+      this.touchNotebook(this.notebook(entry.notebook.id));
       this.scheduleLibrary();
       result = { notebookId: entry.notebook.id };
+    } else if ((entry.kind === 'section' || entry.kind === 'group') && this.findNode(entry.node.id)) {
+      const live = this.findNode(entry.node.id);
+      this.touchNotebook(live.notebook);
+      result = { notebookId: live.notebook.id, sectionId: entry.node.id };
     } else if (entry.kind === 'section' || entry.kind === 'group') {
       const nb = this.notebook(entry.notebookId) || this.notebooks[0];
       if (!nb) return null;
@@ -610,6 +724,10 @@ export class Store extends Emitter {
       list.splice(Math.min(entry.index, list.length), 0, entry.node);
       this.touchNotebook(nb);
       result = { notebookId: nb.id, sectionId: entry.node.id };
+    } else if (entry.kind === 'page' && entry.pages.length && entry.pages.every((p) => this.findPage(p.id))) {
+      const live = this.findPage(entry.pages[0].id);
+      this.touchNotebook(live.notebook);
+      result = { sectionId: live.section.id, pageId: live.meta.id };
     } else if (entry.kind === 'page') {
       let section = this.section(entry.sectionId);
       if (!section) {
@@ -618,8 +736,19 @@ export class Store extends Emitter {
         section = [...this.sectionsOf(nb)][0] || this.createSection(nb.id, { name: entry.sectionName || 'Restored Pages', silent: true });
       }
       if (this.isLocked(section.id)) return null;
-      section.pages.splice(Math.min(entry.index, section.pages.length), 0, ...entry.pages);
+      const restored = entry.pages.filter((p) => !this.findPage(p.id));
+      section.pages.splice(Math.min(entry.index, section.pages.length), 0, ...restored);
       normalizeLevels(section.pages);
+      // Saved for the section they left; re-save them encrypted (or not) for this one.
+      if ((entry.lockedSection || null) !== (section.locked ? section.id : null)) {
+        for (const m of restored) {
+          if (section.locked) this.dropVersions(m.id).catch(() => {});
+          this.loadPage(m.id).then(async (page) => {
+            await this.rekeyAssets(page);
+            this.schedule(`pages/${m.id}.json`, () => this.pages.get(m.id), 0);
+          }).catch(() => {});
+        }
+      }
       this.touchNotebook(this.findNode(section.id).notebook);
       result = { sectionId: section.id, pageId: entry.pages[0]?.id };
     }
@@ -634,13 +763,22 @@ export class Store extends Emitter {
     const i = this.trash.findIndex((t) => t.id === trashId);
     if (i < 0) return;
     const [entry] = this.trash.splice(i, 1);
-    const pageIds = trashPageIds(entry);
+    // Never delete the files of anything that is live again (restored on another device).
+    const pageIds = trashPageIds(entry).filter((id) => !this.findPage(id));
     this.scheduleTrash();
     this.emit('change', { type: 'purge' });
-    await Promise.all(pageIds.map((id) => this.dropPageFiles(id)));
-    if (entry.kind === 'notebook') {
-      this.cancel(`notebooks/${entry.notebook.id}.json`);
-      await this.backend.remove(`notebooks/${entry.notebook.id}.json`);
+    try {
+      await Promise.all(pageIds.map((id) => this.dropPageFiles(id)));
+      if (entry.kind === 'notebook' && !this.notebook(entry.notebook.id)) {
+        this.cancel(`notebooks/${entry.notebook.id}.json`);
+        await this.backend.remove(`notebooks/${entry.notebook.id}.json`);
+      }
+    } catch (err) {
+      // Files are left behind: keep the entry so deleting can be tried again.
+      if (!this.trash.some((t) => t.id === entry.id)) this.trash.splice(Math.min(i, this.trash.length), 0, entry);
+      this.scheduleTrash();
+      this.emit('change', { type: 'purge' });
+      throw err;
     }
   }
 
@@ -657,7 +795,9 @@ export class Store extends Emitter {
     this.cancel(`pages/${id}.json`);
     this.pages.delete(id);
     this.textCache.delete(id);
-    await Promise.all([this.backend.remove(`pages/${id}.json`), this.backend.remove(`versions/${id}.json`)]);
+    this.staleAssets.delete(id);
+    // A shared link must not outlive a page deleted for good.
+    await Promise.all([this.backend.remove(`pages/${id}.json`), this.backend.remove(`versions/${id}.json`), this.backend.remove(`published/${id}.json`)]);
   }
 
   // ---------------------------------------------------------------- versions
@@ -675,8 +815,11 @@ export class Store extends Emitter {
     const before = this.loadedSnapshots.get(page.id);
     if (!before) return;
     this.versionState.set(page.id, { busy: true, last: Date.now() });
-    (async () => {
-      const list = (await this.backend.readJSON(`versions/${page.id}.json`).catch(() => null)) || [];
+    const job = (async () => {
+      // A failed read must not save a list holding only this version.
+      const list = (await this.readDamaged(`versions/${page.id}.json`)) || [];
+      // The section may have been protected while the list was read.
+      if (this.protectionOf(page.id)) return;
       const newest = list[0] ? Date.parse(list[0].at) : 0;
       if (Date.now() - newest >= VERSION_INTERVAL && before.modified !== list[0]?.page.modified) {
         list.unshift({ at: this.now(), page: before });
@@ -684,12 +827,23 @@ export class Store extends Emitter {
         await this.backend.writeJSON(`versions/${page.id}.json`, list);
       }
       this.loadedSnapshots.set(page.id, structuredClone(this.pages.get(page.id) || page));
+    })().catch(() => {}).finally(() => {
       this.versionState.set(page.id, { busy: false, last: Date.now() });
-    })().catch(() => this.versionState.set(page.id, { busy: false, last: Date.now() }));
+      if (this.versionJobs.get(page.id) === job) this.versionJobs.delete(page.id);
+    });
+    this.versionJobs.set(page.id, job);
+  }
+
+  /** Deletes a page's versions: a page in a protected section keeps none (they would be plaintext). */
+  async dropVersions(pageId) {
+    // A version being written right now would land after the removal.
+    await this.versionJobs.get(pageId);
+    this.loadedSnapshots.delete(pageId);
+    await this.backend.remove(`versions/${pageId}.json`);
   }
 
   async addVersion(pageId, snapshot) {
-    const list = (await this.backend.readJSON(`versions/${pageId}.json`).catch(() => null)) || [];
+    const list = (await this.readDamaged(`versions/${pageId}.json`)) || [];
     list.unshift({ at: this.now(), page: snapshot });
     list.length = Math.min(list.length, MAX_VERSIONS);
     await this.backend.writeJSON(`versions/${pageId}.json`, list);
@@ -699,11 +853,12 @@ export class Store extends Emitter {
     return (await this.backend.readJSON(`versions/${pageId}.json`).catch(() => null)) || [];
   }
 
+  /** Puts a page back to a stored version. Null when that version is gone; throws when storage fails. */
   async restoreVersion(pageId, at) {
-    const list = await this.versions(pageId);
+    const list = (await this.readDamaged(`versions/${pageId}.json`)) || [];
     const v = list.find((x) => x.at === at);
-    const page = await this.loadPage(pageId);
     if (!v) return null;
+    const page = await this.loadPage(pageId);
     await this.addVersion(pageId, structuredClone(page));
     Object.assign(page, structuredClone(v.page), { id: pageId });
     this.pageChanged(page, { title: page.title });
@@ -739,6 +894,7 @@ export class Store extends Emitter {
 
   async seal(path, value) {
     if (path.startsWith('pages/')) {
+      if (typeof value?.sealed === 'string') return value;
       const sectionId = this.protectionOf(value?.id);
       if (!sectionId) return value;
       const key = this.keys.get(sectionId);
@@ -785,21 +941,37 @@ export class Store extends Emitter {
     if (!f?.node.locked) return true;
     const key = await unlockKey(f.node.locked, password);
     if (!key) return false;
-    this.keys.set(id, key);
+    // Open the page list before keeping the key: a section that holds a key
+    // but no pages would save an empty list over the real one.
+    let pages = f.node.pages;
     if (f.node.sealed) {
-      f.node.pages = await openJSON(key, f.node.sealed);
+      pages = await openJSON(key, f.node.sealed).catch(() => null);
+      if (!Array.isArray(pages)) throw Object.assign(new Error("This section's page list is damaged and can't be opened."), { damaged: true });
     }
+    this.keys.set(id, key);
+    f.node.pages = pages;
     this.emit('change', { type: 'unlock', id });
     return true;
   }
 
   /** Locks a section again: writes pending changes sealed, then forgets the key and the pages. */
   async lockSection(id) {
-    const f = this.findNode(id);
-    if (!f?.node.locked || !this.keys.has(id)) return;
-    const pageIds = f.node.pages.map((p) => p.id);
+    // A section deleted while unlocked sits in Deleted Notes and locks too.
+    const node = this.findNode(id)?.node || this.trashedSection(id);
+    if (!node?.locked || !this.keys.has(id)) return;
+    const pageIds = node.pages.map((p) => p.id);
     await this.flush();
     const key = this.keys.get(id);
+    // A save that failed (offline) is retried after the key is gone, when it
+    // could no longer be encrypted: seal what it will write now instead.
+    const trashed = this.trash.filter((e) => e.kind === 'page' && e.lockedSection === id).flatMap((e) => e.pages.map((p) => p.id));
+    for (const pid of [...pageIds, ...trashed]) {
+      const pending = this.timers.get(`pages/${pid}.json`);
+      const page = this.pages.get(pid);
+      if (!pending || !page) continue;
+      const sealed = { id: pid, sealed: await sealJSON(key, page) };
+      pending.getter = () => sealed;
+    }
     for (const entry of this.trash) {
       if (entry.kind === 'page' && entry.lockedSection === id && entry.pages.length) {
         entry.sealedPages = await sealJSON(key, entry.pages);
@@ -807,19 +979,29 @@ export class Store extends Emitter {
         entry.sectionName = '';
       }
     }
-    f.node.sealed = await sealJSON(key, f.node.pages);
+    node.sealed = await sealJSON(key, node.pages);
     this.keys.delete(id);
-    f.node.pages = [];
-    for (const pid of pageIds) {
+    node.pages = [];
+    for (const pid of [...pageIds, ...trashed]) {
       this.pages.delete(pid);
       this.textCache.delete(pid);
-      const url = [...this.assetUrls.keys()].filter((a) => a.startsWith(`${id}.`));
-      for (const a of url) {
-        URL.revokeObjectURL(this.assetUrls.get(a));
-        this.assetUrls.delete(a);
-      }
+    }
+    for (const a of [...this.assetUrls.keys()].filter((a) => a.startsWith(`${id}.`))) {
+      URL.revokeObjectURL(this.assetUrls.get(a));
+      this.assetUrls.delete(a);
     }
     this.emit('change', { type: 'lock', id });
+  }
+
+  /** A section inside a Deleted Notes entry (deleted itself or with its group or notebook). */
+  trashedSection(id) {
+    for (const entry of this.trash) {
+      const root = entry.node || entry.notebook;
+      if (!root) continue;
+      const found = findIn(root.sections || [root], id, null);
+      if (found?.node.type === 'section') return found.node;
+    }
+    return null;
   }
 
   async lockAll() {
@@ -859,6 +1041,8 @@ export class Store extends Emitter {
     for (const page of pages) {
       await this.rekeyAssets(page, { from: oldKey, sectionId: id, force: Boolean(oldKey) });
       this.schedule(`pages/${page.id}.json`, () => this.pages.get(page.id), 0);
+      // A version being written right now would land after the removal.
+      await this.versionJobs.get(page.id);
       this.loadedSnapshots.delete(page.id);
       await this.backend.remove(`versions/${page.id}.json`).catch(() => {});
     }
@@ -874,12 +1058,39 @@ export class Store extends Emitter {
     if (!f?.node.locked || !this.keys.has(id)) return false;
     const pages = await Promise.all(f.node.pages.map((m) => this.loadPage(m.id)));
     const key = this.keys.get(id);
+    // Pages deleted from the section are decrypted too, or nothing could
+    // open them once the key is gone.
+    const entries = this.trash.filter((e) => e.kind === 'page' && e.lockedSection === id);
+    const trashed = [];
+    for (const entry of entries) {
+      const metas = entry.sealedPages ? await openJSON(key, entry.sealedPages) : entry.pages;
+      for (const m of metas) {
+        let page = this.pages.get(m.id);
+        if (!page) {
+          const raw = await this.backend.readJSON(`pages/${m.id}.json`);
+          page = raw?.sealed ? await openJSON(key, raw.sealed).catch(() => null) : raw;
+        }
+        if (page) trashed.push(page);
+      }
+      entry.pages = metas;
+    }
     delete f.node.locked;
     delete f.node.sealed;
-    for (const page of pages) {
+    for (const entry of entries) {
+      delete entry.sealedPages;
+      delete entry.lockedSection;
+      delete entry.pageIds;
+      entry.sectionName ||= f.node.name;
+    }
+    for (const page of trashed) {
+      page.outlines ||= [];
+      this.pages.set(page.id, page);
+    }
+    for (const page of [...pages, ...trashed]) {
       await this.rekeyAssets(page, { from: key, sectionId: null });
       this.schedule(`pages/${page.id}.json`, () => this.pages.get(page.id), 0);
     }
+    if (entries.length) this.scheduleTrash();
     this.keys.delete(id);
     this.touchNotebook(f.notebook);
     await this.flush();
@@ -889,7 +1100,9 @@ export class Store extends Emitter {
 
   /**
    * Re-saves a page's assets so they match its section: sealed with the
-   * section key when protected, plain otherwise. Old copies are removed.
+   * section key when protected, plain otherwise. Old copies are removed
+   * after the page that points at the new ones is saved, so a failure in
+   * between never leaves the stored page pointing at a deleted file.
    */
   async rekeyAssets(page, { from = null, sectionId, force = false } = {}) {
     const target = sectionId === undefined ? this.findPage(page.id)?.section : this.section(sectionId);
@@ -917,7 +1130,9 @@ export class Store extends Emitter {
         const ext = sealedFor ? assetId.split('.').at(-2) : assetId.split('.').pop();
         const newId = await this.saveAsset(blob, `x.${ext}`, { sectionId: wantSection });
         o.html = o.html.split(`data-asset="${assetId}"`).join(`data-asset="${newId}"`);
-        await this.backend.remove(`assets/${assetId}`).catch(() => {});
+        // An open editor still shows (and would save back) the old id.
+        this.emit('assets-renamed', { id: page.id, map: { [assetId]: newId } });
+        this.staleAssets.set(page.id, [...(this.staleAssets.get(page.id) || []), assetId]);
         changed = true;
       }
     }
@@ -925,19 +1140,35 @@ export class Store extends Emitter {
     return changed;
   }
 
-  /** A copied page gets its own copies of sealed assets, keyed for where it now lives. */
+  /**
+   * A copied page gets its own copies of its assets, keyed for where it now
+   * lives. Shared files would break the other page's pictures as soon as
+   * one of them is re-encrypted (moved into or out of a protected section).
+   */
   async copyAssets(page) {
     const target = this.findPage(page.id)?.section;
-    const needs = page.outlines.some((o) => /data-asset="[^"]+\.sealed"/.test(o.html)) || target?.locked;
-    if (!needs) return;
-    for (const o of page.outlines) {
-      for (const m of [...o.html.matchAll(/data-asset="([^"]+)"/g)]) {
-        const blob = await this.assetBlob(m[1]).catch(() => null);
-        if (!blob) continue;
-        const ext = m[1].endsWith('.sealed') ? m[1].split('.').at(-2) : m[1].split('.').pop();
-        const id = await this.saveAsset(blob, `x.${ext}`, { sectionId: target?.locked ? target.id : null });
-        o.html = o.html.split(`data-asset="${m[1]}"`).join(`data-asset="${id}"`);
+    const assetIds = new Set(page.outlines.flatMap((o) => [...o.html.matchAll(/data-asset="([^"]+)"/g)].map((m) => m[1])));
+    if (!assetIds.size) return;
+    const sectionId = target?.locked ? target.id : null;
+    const copies = new Map();
+    // A few at a time: a page full of pictures copies in a few round
+    // trips rather than two per picture.
+    await mapLimit([...assetIds], 4, async (assetId) => {
+      const blob = await this.assetBlob(assetId).catch(() => null);
+      if (!blob) return;
+      const sealed = assetId.endsWith('.sealed');
+      const ext = sealed ? assetId.split('.').at(-2) : assetId.split('.').pop();
+      try {
+        copies.set(assetId, await this.saveAsset(blob, `x.${ext}`, { sectionId }));
+      } catch (err) {
+        // A plain file the copy can't get its own of stays shared (as copies
+        // always were); one that must be encrypted differently can't.
+        if (sealed || sectionId) throw err;
+        console.warn('Copied page shares a file it could not copy', assetId, err);
       }
+    });
+    for (const o of page.outlines) {
+      for (const [from, to] of copies) o.html = o.html.split(`data-asset="${from}"`).join(`data-asset="${to}"`);
     }
     this.schedule(`pages/${page.id}.json`, () => this.pages.get(page.id), 0);
   }
@@ -974,9 +1205,9 @@ export class Store extends Emitter {
    * Searches page titles and text. Every whitespace-separated term must
    * appear (case- and accent-insensitive). Title hits rank first.
    */
-  async search(query, { scope = 'all', limit = 200 } = {}) {
+  async search(query, { scope = 'all', limit = 200, count = false } = {}) {
     const terms = normalize(query).split(/\s+/).filter(Boolean);
-    if (!terms.length) return [];
+    if (!terms.length) return count ? { results: [], total: 0 } : [];
     const candidates = this.scopePages(scope);
     const results = [];
     await mapLimit(candidates, 6, async (c) => {
@@ -984,11 +1215,15 @@ export class Store extends Emitter {
       const hay = normalize(text);
       if (!terms.every((t) => hay.includes(t))) return;
       const title = normalize(c.meta.title || '');
+      const titleHits = terms.filter((t) => title.includes(t)).length;
       const score = terms.reduce((s, t) => s + (title.includes(t) ? 10 : 0) + countOf(hay, t), 0);
-      results.push({ ...c, score, snippet: snippet(text, terms) });
+      results.push({ ...c, score, titleHits, snippet: snippet(text, terms) });
     });
-    results.sort((a, b) => b.score - a.score || (b.meta.modified || '').localeCompare(a.meta.modified || ''));
-    return results.slice(0, limit);
+    // Pages whose title has more of the terms come first, however often
+    // another page's text repeats them.
+    results.sort((a, b) => b.titleHits - a.titleHits || b.score - a.score || (b.meta.modified || '').localeCompare(a.meta.modified || ''));
+    // With `count`, also say how many matched in all, for a capped list.
+    return count ? { results: results.slice(0, limit), total: results.length } : results.slice(0, limit);
   }
 
   /** Every tagged paragraph in a scope, for the Tags Summary pane. */
@@ -1013,11 +1248,13 @@ export class Store extends Emitter {
     const ext = (name.match(/\.([a-z0-9]{1,8})$/i)?.[1] || mimeExt(blob.type) || 'bin').toLowerCase();
     const key = sectionId && this.keys.get(sectionId);
     const id = key ? `${sectionId}.${uid('a')}.${ext}.sealed` : `${uid('a')}.${ext}`;
+    this.assetWrites++;
     this.setStatus('saving');
     try {
       const data = key ? new Blob([await sealBytes(key, new Uint8Array(await blob.arrayBuffer()))]) : blob;
       await this.backend.writeBlob(`assets/${id}`, data);
     } finally {
+      this.assetWrites--;
       this.updateStatus();
     }
     this.assetUrls.set(id, URL.createObjectURL(blob));
@@ -1072,6 +1309,7 @@ export class Store extends Emitter {
     const entry = this.timers.get(path);
     if (entry) clearTimeout(entry.t);
     this.timers.delete(path);
+    this.failed.delete(path);
     this.updateStatus();
   }
 
@@ -1081,7 +1319,11 @@ export class Store extends Emitter {
     this.timers.delete(path);
     clearTimeout(entry.t);
     const value = entry.getter();
-    if (value === null || value === undefined) return this.updateStatus();
+    if (value === null || value === undefined) {
+      // Nothing left to save (deleted meanwhile): a failure of it is moot.
+      this.failed.delete(path);
+      return this.updateStatus();
+    }
     let snapshot = JSON.parse(JSON.stringify(value));
     // Writes to one path run one at a time, in order.
     const prev = this.writers.get(path) || Promise.resolve();
@@ -1089,8 +1331,22 @@ export class Store extends Emitter {
       this.pendingWrites.set(path, (this.pendingWrites.get(path) || 0) + 1);
       this.setStatus('saving');
       try {
+        // Another device may have changed Deleted Notes since this session
+        // read it: merge rather than write over its entries.
+        if (path === 'trash.json' && (await this.mergeTrash(await this.readDamaged(path)))) {
+          snapshot = JSON.parse(JSON.stringify(this.trash));
+          this.emit('change', { type: 'trash' });
+        }
+        const plain = snapshot;
         snapshot = await this.seal(path, snapshot);
-        if (snapshot !== null) await this.backend.writeJSON(path, snapshot);
+        if (snapshot !== null) {
+          await this.backend.writeJSON(path, snapshot);
+          if (path.startsWith('pages/')) await this.dropStaleAssets(plain);
+        }
+        if (path === 'trash.json' && snapshot) {
+          this.trashBase = new Set(snapshot.map((t) => t.id));
+          this.trashWrites++;
+        }
         this.failed.delete(path);
       } catch (err) {
         console.warn('Save failed', path, err);
@@ -1111,6 +1367,19 @@ export class Store extends Emitter {
     return job;
   }
 
+  /** Removes old asset copies the just-saved page no longer points at (unless a loaded page still does). */
+  async dropStaleAssets(saved) {
+    const stale = this.staleAssets.get(saved?.id);
+    if (!stale || !Array.isArray(saved.outlines)) return;
+    const uses = (page, a) => page.outlines?.some((o) => o.html?.includes(`data-asset="${a}"`));
+    const gone = stale.filter((a) => !uses(saved, a));
+    const left = stale.filter((a) => !gone.includes(a));
+    if (left.length) this.staleAssets.set(saved.id, left);
+    else this.staleAssets.delete(saved.id);
+    const unused = gone.filter((a) => ![...this.pages.values()].some((p) => p.id !== saved.id && uses(p, a)));
+    await Promise.all(unused.map((a) => this.backend.remove(`assets/${a}`).catch(() => {})));
+  }
+
   /** Writes everything pending now. */
   async flush() {
     const paths = [...this.timers.keys()];
@@ -1119,7 +1388,7 @@ export class Store extends Emitter {
   }
 
   hasUnsaved() {
-    return this.timers.size > 0 || this.pendingWrites.size > 0;
+    return this.timers.size > 0 || this.pendingWrites.size > 0 || this.assetWrites > 0;
   }
 
   setStatus(status) {
@@ -1129,7 +1398,7 @@ export class Store extends Emitter {
   }
 
   updateStatus() {
-    if (this.pendingWrites.size) this.setStatus('saving');
+    if (this.pendingWrites.size || this.assetWrites) this.setStatus('saving');
     else if (this.failed.size) this.setStatus('error');
     else if (this.timers.size) this.setStatus('pending');
     else this.setStatus('saved');
@@ -1175,6 +1444,32 @@ export function normalize(s) {
   return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 }
 
+/**
+ * normalize() with a way back to the original text: a match at [s, e) in
+ * `flat` covers text.slice(from(s), to(e)). Folding can change the length
+ * (Hangul syllables split into letters), so offsets are mapped per
+ * character then.
+ */
+export function foldWithOffsets(s) {
+  const text = String(s || '');
+  const flat = normalize(text);
+  if (flat.length === text.length) return { flat, from: (i) => i, to: (i) => i };
+  let out = '';
+  const starts = [];
+  const ends = [];
+  let at = 0;
+  for (const ch of text) {
+    const f = normalize(ch);
+    for (let k = 0; k < f.length; k++) {
+      starts.push(at);
+      ends.push(at + ch.length);
+    }
+    out += f;
+    at += ch.length;
+  }
+  return { flat: out, from: (i) => (i < starts.length ? starts[i] : text.length), to: (i) => (i > 0 ? ends[i - 1] : 0) };
+}
+
 function countOf(hay, term) {
   let n = 0;
   let i = hay.indexOf(term);
@@ -1188,13 +1483,14 @@ function countOf(hay, term) {
 /** A short excerpt around the first match. */
 export function snippet(text, terms, radius = 60) {
   const flat = text.replace(/\s+/g, ' ');
-  const hay = normalize(flat);
+  const { flat: hay, from } = foldWithOffsets(flat);
   let at = -1;
   for (const t of terms) {
     const i = hay.indexOf(t);
     if (i >= 0 && (at < 0 || i < at)) at = i;
   }
   if (at < 0) return flat.slice(0, radius * 2);
+  at = from(at);
   const start = Math.max(0, at - radius);
   const end = Math.min(flat.length, at + radius);
   return (start > 0 ? '…' : '') + flat.slice(start, end).trim() + (end < flat.length ? '…' : '');

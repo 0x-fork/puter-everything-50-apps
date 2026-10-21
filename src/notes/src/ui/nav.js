@@ -1,4 +1,4 @@
-import { h, clamp } from '../lib/dom.js';
+import { h, clamp, announce } from '../lib/dom.js';
 import { icon } from '../lib/icons.js';
 import { modKey } from '../lib/platform.js';
 import { COLOR_BY_ID } from '../data/colors.js';
@@ -52,9 +52,11 @@ export class Nav {
         r.classList.remove('dragging');
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
     });
     r.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowLeft') set(prefs()[key] - 16);
@@ -138,7 +140,7 @@ export class Nav {
     if (nb) walk(nb.sections, 0);
     this.sectionsList.setAttribute('role', 'tree');
     this.sectionsList.replaceChildren(...rows);
-    if (!rows.length) this.setEmpty(this.sectionsList, 'This notebook has no sections yet. Add one to start writing.');
+    if (!rows.length) this.setEmpty(this.sectionsList, nb ? 'This notebook has no sections yet. Add one to start writing.' : 'You have no notebooks. Add one to start writing.');
     this.fixRoving(this.sectionsList, state.sectionId);
   }
 
@@ -168,13 +170,16 @@ export class Nav {
       row.append(h('span.section-tab', { style: { '--sec-color': this.colorOf(node.color) } }), h('span.row-label', node.name));
       if (node.locked) row.append(h('span.lock', { title: 'Password protected' }, icon(this.app.isUnlocked(node.id) ? 'unlock' : 'lock', 14, undefined, { plain: true })));
     }
-    row.addEventListener('click', () => {
+    const rename = () => this.renameNow(node.id, node.name, (v) => this.app.store.renameNode(node.id, v));
+    row.addEventListener('click', (e) => {
+      const locked = node.locked && !this.app.isUnlocked(node.id);
       if (node.type === 'group') this.app.store.toggleGroup(node.id);
       else this.app.selectSection(node.id);
+      if (e.detail === 2 && !locked) rename();
     });
     row.addEventListener('dblclick', (e) => {
       e.preventDefault();
-      this.rename(row, node.name, (v) => this.app.store.renameNode(node.id, v));
+      rename();
     });
     row.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -280,10 +285,14 @@ export class Nav {
       row.append(twisty);
     }
     row.append(h(`span.row-label${title ? '' : '.untitled'}`, title || 'Untitled Page'));
-    row.addEventListener('click', () => this.app.openPage(meta.id));
+    const rename = () => this.renameNow(meta.id, meta.title || '', (v) => this.app.renamePage(meta.id, v), true);
+    row.addEventListener('click', (e) => {
+      this.app.openPage(meta.id);
+      if (e.detail === 2) rename();
+    });
     row.addEventListener('dblclick', (e) => {
       e.preventDefault();
-      this.rename(row, meta.title || '', (v) => this.app.renamePage(meta.id, v), true);
+      rename();
     });
     row.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -332,14 +341,19 @@ export class Nav {
         target.focus();
         const id = target.dataset.id;
         // Opening re-renders the list; put focus back on the row it was on.
-        const done = target.dataset.kind === 'page' ? this.app.openPage(id, { focus: false }) : target.dataset.kind === 'section' ? this.app.selectSection(id, { focus: false }) : null;
+        // Arrowing past a locked section doesn't stop to ask for its
+        // password; Enter or Unlock does.
+        const done = target.dataset.kind === 'page' ? this.app.openPage(id, { focus: false }) : target.dataset.kind === 'section' ? this.app.selectSection(id, { focus: false, unlock: false }) : null;
         this.focusRow(id);
         Promise.resolve(done).then(() => this.list(kind).contains(document.activeElement) || document.activeElement === document.body ? this.focusRow(id) : null);
       };
       const mod = modKey(e);
       if (e.altKey && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
         e.preventDefault();
-        this.app.moveByKeyboard(kind, row.dataset.id, e.key === 'ArrowUp' ? -1 : 1);
+        // A sorted list doesn't show your order, so moving would change it
+        // unseen (dragging is off then too).
+        if (kind === 'page' && prefs().pageSort !== 'manual') announce('Pages are sorted. Sort by None to move them.');
+        else this.app.moveByKeyboard(kind, row.dataset.id, e.key === 'ArrowUp' ? -1 : 1);
         return;
       }
       if (kind === 'page' && mod && e.altKey && (e.code === 'BracketRight' || e.code === 'BracketLeft')) {
@@ -412,8 +426,7 @@ export class Nav {
           break;
         case 'Delete':
           e.preventDefault();
-          if (kind === 'page') this.app.deletePage(row.dataset.id);
-          else this.app.deleteSection(row.dataset.id);
+          this.refocusAfter(kind, kind === 'page' ? this.app.deletePage(row.dataset.id) : this.app.deleteSection(row.dataset.id));
           break;
         case 'ContextMenu':
           e.preventDefault();
@@ -428,6 +441,17 @@ export class Nav {
     });
   }
 
+  /**
+   * Deleting the focused row drops focus on the page body; once `done`
+   * settles, put it on the row that is now selected instead.
+   */
+  refocusAfter(kind, done) {
+    Promise.resolve(done).then(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body) this.list(kind).querySelector('.row[tabindex="0"]')?.focus();
+    });
+  }
+
   openRowMenu(row) {
     const r = row.getBoundingClientRect();
     const point = { x: r.left + 24, y: r.bottom };
@@ -438,6 +462,18 @@ export class Nav {
       const f = this.app.store.findNode(row.dataset.id);
       if (f) this.app.sectionMenu(f.node, point);
     }
+  }
+
+  /**
+   * Starts renaming the row for `id` as it is now. A click redraws the
+   * list, so the browser sends no dblclick for a double-click; the row's
+   * second click (detail 2) starts the rename instead. Phones show one
+   * list at a time and move on to the next, so they rename from the menu.
+   */
+  renameNow(id, value, commit, allowEmpty) {
+    if (this.app.isPhone()) return;
+    const row = this.el.querySelector(`.row[data-id="${CSS.escape(id)}"]`);
+    if (row) this.rename(row, value, commit, allowEmpty);
   }
 
   /** Inline rename. commit(value) runs on Enter or blur. */
@@ -455,7 +491,9 @@ export class Nav {
       done = true;
       const v = input.value.trim();
       if (save && (v || allowEmpty) && v !== value) commit(v);
-      else this.app.renderNav();
+      // Renaming the open page changes its title without redrawing the
+      // list, so put the label back whenever the box is still there.
+      if (input.isConnected) this.app.renderNav();
       setTimeout(() => this.focusRow(row.dataset.id));
     };
     input.addEventListener('keydown', (e) => {

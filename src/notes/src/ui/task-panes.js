@@ -1,9 +1,10 @@
 import { h } from '../lib/dom.js';
 import { icon } from '../lib/icons.js';
 import { formatRelative } from '../lib/dates.js';
-import { TAG_BY_ID, tagLabel, setTagDoneInHtml } from '../data/tags.js';
+import { TAG_BY_ID, tagLabel, setTagDoneInHtml, extractTags } from '../data/tags.js';
 import { pageText } from '../data/store.js';
 import { insertHtml } from '../editor/format.js';
+import { blockOf, blocksInRange, editableRoot, textOffset } from '../editor/selection.js';
 import { textToHtml } from '../editor/page-editor.js';
 import { openDialog, confirmDialog } from './dialog.js';
 import { toast } from './toast.js';
@@ -94,7 +95,10 @@ export class TaskPanes {
       list,
     );
     this.app.editor.flush();
+    // A slower earlier search (another scope or filter) must not win.
+    const token = (this.tagsToken = {});
     let items = await this.app.store.collectTags(this.scopeValue());
+    if (token !== this.tagsToken) return;
     if (o.openOnly) items = items.filter((t) => TAG_BY_ID.get(t.tag)?.kind === 'check' && !t.done);
     this.lastTags = items;
     list.removeAttribute('aria-busy');
@@ -131,7 +135,9 @@ export class TaskPanes {
     const row = h('div.result', { role: 'listitem', style: { display: 'flex', gap: '8px', alignItems: 'flex-start' } });
     if (def?.kind === 'check') {
       const box = h('input', { type: 'checkbox', checked: t.done, 'aria-label': `Mark "${t.text}" as ${t.done ? 'not done' : 'done'}`, style: { marginTop: '2px', accentColor: 'var(--accent)' } });
-      box.addEventListener('change', () => this.setDone(t, box.checked));
+      box.addEventListener('change', async () => {
+        if ((await this.setDone(t, box.checked)) === false) box.checked = !box.checked;
+      });
       row.append(box);
     } else row.append(glyph);
     const open = h('button.link-btn', { type: 'button', style: { fontWeight: '400', color: 'var(--text)', textAlign: 'left', flex: '1', textDecoration: t.done ? 'line-through' : 'none' } },
@@ -145,10 +151,18 @@ export class TaskPanes {
 
   async setDone(t, done) {
     const page = await this.app.store.loadPage(t.meta.id);
-    const outline = page.outlines.find((o) => o.id === t.outlineId);
-    if (!outline) return;
     if (this.app.state.pageId === page.id) this.app.editor.flush();
-    outline.html = setTagDoneInHtml(outline.html, t.index, done);
+    const outline = page.outlines.find((o) => o.id === t.outlineId);
+    // The note may have changed since the list was made: find the listed
+    // tag again rather than trusting its old position.
+    const now = outline ? extractTags([outline]) : [];
+    const same = (c) => c.tag === t.tag && c.text === t.text;
+    const index = now[t.index] && same(now[t.index]) ? t.index : now.findIndex(same);
+    if (index < 0) {
+      toast('That note has changed. Refresh Results and try again.');
+      return false;
+    }
+    outline.html = setTagDoneInHtml(outline.html, index, done);
     this.app.store.pageChanged(page);
     if (this.app.state.pageId === page.id) await this.app.editor.render();
     t.done = done;
@@ -200,8 +214,15 @@ export class TaskPanes {
         const preview = h('button.btn.small', { type: 'button', onclick: () => this.previewVersion(v) }, 'Preview');
         const restore = h('button.btn.small', { type: 'button', onclick: async () => {
           if (!(await confirmDialog({ title: 'Restore this version?', message: `The page will go back to how it was on ${when.toLocaleString()}.`, okLabel: 'Restore' }))) return;
-          await this.app.store.restoreVersion(pageId, v.at);
-          toast('Version restored');
+          let restored;
+          try {
+            restored = await this.app.store.restoreVersion(pageId, v.at);
+          } catch (err) {
+            console.error(err);
+            toast("Couldn't restore this version. Check your connection and try again.", { kind: 'error' });
+            return;
+          }
+          toast(restored ? 'Version restored' : 'That version is no longer available.', { kind: restored ? 'info' : 'error' });
           this.renderVersions();
         } }, 'Restore');
         return h('div.result', { style: { display: 'grid', gap: '6px' } },
@@ -237,6 +258,8 @@ export class TaskPanes {
       try {
         result = (await app.ai.ask(prompt)).trim();
         output.textContent = result || 'No answer.';
+        // Rewrite and proofread replace the text they were given.
+        insert.replaceChildren(icon('plus', 14), lastSelection ? 'Replace Selection' : 'Insert on Page');
         outputActions.hidden = !result;
       } catch (err) {
         output.textContent = `Assist could not answer: ${err?.message || err?.error?.message || 'request failed'}`;
@@ -276,7 +299,7 @@ export class TaskPanes {
     const insert = h('button.btn.small', { type: 'button', onclick: () => {
       if (!result) return;
       if (lastSelection && lastSelection.commonAncestorContainer.isConnected) {
-        app.editor.lastRange = lastSelection;
+        app.editor.lastRange = withoutNextParagraph(lastSelection);
         app.editor.restoreRange();
         insertHtml(textToHtml(result));
       } else {
@@ -286,7 +309,7 @@ export class TaskPanes {
       }
       app.editor.markActiveDirty();
       toast('Added to the page');
-    } }, icon('plus', 14), lastSelection ? 'Replace Selection' : 'Insert on Page');
+    } }, icon('plus', 14), 'Insert on Page');
     const copy = h('button.btn.small', { type: 'button', onclick: () => navigator.clipboard?.writeText(result).then(() => toast('Copied')) }, icon('copy', 14), 'Copy');
     outputActions.append(insert, copy);
     this.body.replaceChildren(h('div', { style: { padding: '0 14px 16px', display: 'grid', gap: '8px' } },
@@ -297,6 +320,21 @@ export class TaskPanes {
       outputActions,
     ));
   }
+}
+
+/**
+ * A triple-clicked paragraph is selected up to the start of the next one;
+ * replacing that range would merge the next paragraph into the new text.
+ * Ends the range at the end of the last paragraph it really covers.
+ */
+function withoutNextParagraph(selection) {
+  const range = selection.cloneRange();
+  const root = editableRoot(range.commonAncestorContainer);
+  const end = root && blockOf(range.endContainer, root);
+  if (!end || end === blockOf(range.startContainer, root) || textOffset(end, range.endContainer, range.endOffset) > 0) return range;
+  const last = blocksInRange(range, root).filter((b) => b !== end && !b.contains(end)).at(-1);
+  if (last) range.setEnd(last, last.childNodes.length);
+  return range;
 }
 
 function escape(s) {

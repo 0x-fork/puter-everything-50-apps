@@ -30,7 +30,19 @@ export class InkTools {
     this.selBox.className = 'selection-box';
     this.selBox.hidden = true;
     editor.pageEl.append(this.layer, this.overlay, this.selBox);
+    // The stroke, erase or drag in progress: { pointerType, cancel }.
+    this.active = null;
+    // Fingers on the overlay, for two-finger scrolling and zooming.
+    this.touches = new Map();
+    this.gesture = null;
     this.overlay.addEventListener('pointerdown', (e) => this.onDown(e));
+    this.overlay.addEventListener('pointermove', (e) => this.onTouchMove(e));
+    for (const type of ['pointerup', 'pointercancel']) {
+      this.overlay.addEventListener(type, (e) => {
+        if (!this.touches.delete(e.pointerId)) return;
+        if (this.touches.size < 2) this.gesture = null;
+      });
+    }
     this.selBox.addEventListener('pointerdown', (e) => this.dragSelection(e));
   }
 
@@ -100,28 +112,85 @@ export class InkTools {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (this.editor.readOnly) return;
     e.preventDefault();
+    if (e.pointerType === 'touch') {
+      // Palm rejection: a hand resting on the screen while a pen writes doesn't draw.
+      if (this.active?.pointerType === 'pen') return;
+      this.touches.set(e.pointerId, [e.clientX, e.clientY]);
+      this.overlay.setPointerCapture(e.pointerId);
+      if (this.gesture) return;
+      if (this.touches.size >= 2) {
+        // A second finger makes it a scroll or pinch: undo what the first one started.
+        this.active?.cancel();
+        this.startGesture();
+        return;
+      }
+    } else if (this.active?.pointerType === 'touch' && e.pointerType === 'pen') {
+      this.active.cancel(); // the palm landed before the pen
+    }
+    if (this.active) return;
     this.overlay.setPointerCapture(e.pointerId);
+    // A pen's eraser end (or eraser button) erases whatever the tool.
+    const tool = e.pointerType === 'pen' && (e.button === 5 || e.buttons & 32) ? 'eraser' : this.tool;
     const handlers = { pen: () => this.drawStroke(e), eraser: () => this.erase(e), lasso: () => this.lasso(e), shape: () => this.drawShape(e), space: () => this.insertSpace(e) };
-    handlers[this.tool]?.();
+    handlers[tool]?.();
   }
 
-  track(e, onMove, onUp) {
+  startGesture() {
+    const [a, b] = [...this.touches.values()];
+    this.gesture = { mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], dist: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, zoom: this.editor.zoom };
+  }
+
+  /** Two fingers scroll the page and pinch to zoom, whatever the tool. */
+  onTouchMove(e) {
+    if (!this.touches.has(e.pointerId)) return;
+    this.touches.set(e.pointerId, [e.clientX, e.clientY]);
+    const g = this.gesture;
+    if (!g) return;
+    const [a, b] = [...this.touches.values()];
+    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const scale = Math.hypot(a[0] - b[0], a[1] - b[1]) / g.dist;
+    if (Math.abs(scale - 1) > 0.04 || this.editor.zoom !== g.zoom) this.editor.setZoom(g.zoom * scale, { clientX: mid[0], clientY: mid[1] });
+    this.editor.scroller.scrollBy(g.mid[0] - mid[0], g.mid[1] - mid[1]);
+    g.mid = mid;
+  }
+
+  /**
+   * Follows one pointer until it lifts. onCancel undoes the action when it
+   * is abandoned (a second finger turns it into a scroll, or a pen lands
+   * after the palm).
+   */
+  track(e, onMove, onUp, onCancel) {
     const id = e.pointerId;
     const move = (ev) => {
       if (ev.pointerId !== id) return;
       const events = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev];
       for (const ce of events.length ? events : [ev]) onMove(ce);
     };
-    const up = (ev) => {
-      if (ev.pointerId !== id) return;
+    const stop = () => {
       this.overlay.removeEventListener('pointermove', move);
       this.overlay.removeEventListener('pointerup', up);
       this.overlay.removeEventListener('pointercancel', up);
+      this.overlay.removeEventListener('lostpointercapture', up);
+      this.active = null;
+    };
+    const up = (ev) => {
+      if (ev.pointerId !== id) return;
+      stop();
       onUp(ev);
     };
     this.overlay.addEventListener('pointermove', move);
     this.overlay.addEventListener('pointerup', up);
     this.overlay.addEventListener('pointercancel', up);
+    // If the overlay loses the pointer, its pointerup may land elsewhere:
+    // finish now rather than glue the next stroke onto this one.
+    this.overlay.addEventListener('lostpointercapture', up);
+    this.active = {
+      pointerType: e.pointerType,
+      cancel: () => {
+        stop();
+        onCancel?.();
+      },
+    };
   }
 
   drawStroke(e) {
@@ -154,6 +223,9 @@ export class InkTools {
       }
       this.editor.layout();
       this.editor.changed();
+    }, () => {
+      cancelAnimationFrame(frame);
+      el.remove();
     });
   }
 
@@ -177,17 +249,21 @@ export class InkTools {
       this.page.ink.push(item);
       this.editor.layout();
       this.editor.changed();
-    });
+    }, () => el.remove());
   }
 
   erase(e) {
     const r = 6 / this.editor.zoom;
+    const start = this.page.ink;
     let removed = false;
+    let last = null;
     const at = (ev) => {
       const [x, y] = this.point(ev);
+      const from = last;
+      last = [x, y];
       const before = this.page.ink.length;
       this.page.ink = this.page.ink.filter((item) => {
-        if (!hitTest(item, x, y, r)) return true;
+        if (!hitTest(item, x, y, r, from)) return true;
         this.layer.querySelector(`[data-id="${item.id}"]`)?.remove();
         return false;
       });
@@ -195,7 +271,14 @@ export class InkTools {
     };
     at(e);
     this.track(e, at, () => {
-      if (removed) this.editor.changed();
+      if (!removed) return;
+      // The page shrinks back once the ink that grew it is gone, as drawing grows it.
+      this.editor.layout();
+      this.editor.changed();
+    }, () => {
+      if (!removed) return;
+      this.page.ink = start;
+      this.render();
     });
   }
 
@@ -220,7 +303,7 @@ export class InkTools {
       this.select(ids);
       this.editor.selectOutlines(outlines);
       this.editor.scroller.focus({ preventScroll: true });
-    });
+    }, () => path.remove());
   }
 
   insertSpace(e) {
@@ -257,6 +340,11 @@ export class InkTools {
       this.render();
       this.editor.layout();
       if (Math.abs(dy) > 1) this.editor.changed();
+    }, () => {
+      line.remove();
+      band.remove();
+      for (const el of outlines) el.style.transform = '';
+      inkEls.forEach((el) => el?.removeAttribute('transform'));
     });
   }
 
@@ -308,6 +396,21 @@ export class InkTools {
     const b = unionBounds(items.map(bounds));
     Object.assign(this.selBox.style, { left: `${b.x - 4}px`, top: `${b.y - 4}px`, width: `${b.w + 8}px`, height: `${b.h + 8}px` });
     this.selBox.hidden = false;
+  }
+
+  /** Moves the selected ink by arrow-key steps, stopping at the page's top and left edges. */
+  nudge(dx, dy) {
+    const items = this.selectedItems();
+    if (!items.length) return false;
+    const b = unionBounds(items.map(bounds));
+    dx = Math.max(dx, -Math.max(0, b.x));
+    dy = Math.max(dy, -Math.max(0, b.y));
+    for (const item of items) {
+      translate(item, dx, dy);
+      this.replaceEl(item);
+    }
+    this.updateSelectionBox();
+    return true;
   }
 
   beginMove() {
@@ -369,15 +472,22 @@ export class InkTools {
     return true;
   }
 
-  /** Recolors the selected ink (Draw > color picker with a selection). */
-  recolor(color, width) {
+  /**
+   * Restyles the selected ink (a pen, color or thickness picked while ink
+   * is selected), as one undo step.
+   */
+  recolor({ color, width, highlighter } = {}) {
     const items = this.selectedItems();
     if (!items.length) return false;
     for (const item of items) {
       if (color) item.color = color;
-      if (width) item.width = width;
+      // Shapes keep the same width limits as when they're drawn.
+      if (width) item.width = item.type === 'shape' ? Math.max(1.5, Math.min(width, 8)) : width;
+      if (highlighter !== undefined && item.type === 'stroke') item.highlighter = Boolean(highlighter);
       this.replaceEl(item);
     }
+    this.updateSelectionBox();
+    this.editor.layout();
     this.editor.changed();
     return true;
   }

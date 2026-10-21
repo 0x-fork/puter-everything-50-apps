@@ -1,4 +1,4 @@
-import { blocksInRange, blockOf, currentRange, editableRoot, selectRange } from './selection.js';
+import { blocksInRange, blockOf, currentRange, editableRoot, isBlock, selectRange } from './selection.js';
 
 /*
  * Text formatting on the current selection. Inline formatting goes through
@@ -41,12 +41,58 @@ export const STYLES = [
 
 const STYLE_CLASSES = STYLES.filter((s) => s.cls).map((s) => s.cls);
 
+const INLINE_COMMANDS = new Set(['bold', 'italic', 'underline', 'strikeThrough', 'subscript', 'superscript', 'fontName', 'foreColor', 'hiliteColor', 'removeFormat', 'unlink']);
+
+// Set while a color the user picked goes on: the editor's cleanup of
+// Chrome's frozen styles (dropRedundantStyles) must leave those spans be,
+// and Chrome reports every editing command's input event with no type.
+let picking = 0;
+
+/** Whether a font or highlight color the user chose is being applied. */
+export function applyingColor() {
+  return picking > 0;
+}
+
 function exec(cmd, value = null) {
+  if (INLINE_COMMANDS.has(cmd)) startAfterEmbeds();
+  const color = cmd === 'foreColor' || cmd === 'hiliteColor';
+  if (color) picking++;
   try {
     return document.execCommand(cmd, false, value);
   } catch {
     return false;
+  } finally {
+    if (color) picking--;
   }
+}
+
+/*
+ * Chrome ignores bold, color, Clear Formatting and the other inline
+ * commands when the selection starts right before a non-editable box,
+ * which is where a to-do or other tag sits at the start of a line. Start
+ * the selection after such boxes instead; they carry no text formatting.
+ */
+function startAfterEmbeds() {
+  const sel = document.getSelection();
+  const range = currentRange();
+  if (!range || range.collapsed || range.startContainer.nodeType !== 1) return;
+  let node = range.startContainer;
+  let offset = range.startOffset;
+  let moved = false;
+  for (let guard = 0; guard < 100; guard++) {
+    const child = node.childNodes[offset];
+    if (child?.nodeType === 1 && child.getAttribute('contenteditable') === 'false') {
+      offset++;
+      moved = true;
+    } else if (child?.nodeType === 1 && isBlock(child) && child.firstChild) {
+      node = child;
+      offset = 0;
+    } else break;
+  }
+  if (!moved || range.comparePoint(node, offset) > 0) return;
+  // Keep the direction of a selection made backwards (focus at the start).
+  if (sel.focusNode === range.startContainer && sel.focusOffset === range.startOffset) sel.setBaseAndExtent(range.endContainer, range.endOffset, node, offset);
+  else sel.setBaseAndExtent(node, offset, range.endContainer, range.endOffset);
 }
 
 function withCss(on, fn) {
@@ -154,7 +200,11 @@ export function setBlockStyle(id) {
   const root = range && editableRoot(range.commonAncestorContainer);
   if (!style || !root || !root.classList.contains('outline-body')) return;
   const blocks = blocksInRange(range, root);
-  const saved = range.cloneRange();
+  // Plain boundary points, not a live Range: moving a block's children into
+  // its replacement would collapse a live range to the start of the outline.
+  const points = [[range.startContainer, range.startOffset], [range.endContainer, range.endOffset]];
+  // Maps a point inside an element this command replaced to where it is now.
+  const moved = new Map();
   for (const block of blocks) {
     if (block.tagName === 'TD' || block.tagName === 'TH') continue;
     let target = block;
@@ -164,18 +214,40 @@ export function setBlockStyle(id) {
         block.classList.remove(...STYLE_CLASSES);
         continue;
       }
+      const existing = block.firstElementChild;
+      const before = block.childNodes.length;
       target = wrapLiContent(block);
+      if (target !== existing) {
+        // The item's leading content moved into a new paragraph.
+        const taken = before - block.childNodes.length + 1;
+        const p = target;
+        moved.set(block, (offset) => (offset <= taken ? [p, offset] : [block, offset - taken + 1]));
+      }
     }
     const replaced = retag(target, style.tag);
+    if (replaced !== target) moved.set(target, (offset) => [replaced, offset]);
     replaced.classList.remove(...STYLE_CLASSES);
     if (style.cls) replaced.classList.add(style.cls);
     if (!replaced.getAttribute('class')) replaced.removeAttribute('class');
-    if (replaced.parentElement?.tagName === 'LI' && style.tag === 'P' && !style.cls) unwrap(replaced);
+    if (replaced.parentElement?.tagName === 'LI' && style.tag === 'P' && !style.cls) {
+      const li = replaced.parentElement;
+      const index = [...li.childNodes].indexOf(replaced);
+      moved.set(replaced, (offset) => [li, index + offset]);
+      unwrap(replaced);
+    }
   }
+  const place = ([node, offset]) => {
+    for (let hops = 0; moved.has(node) && hops < 4; hops++) [node, offset] = moved.get(node)(offset);
+    return [node, Math.min(offset, node.nodeType === 3 ? node.length : node.childNodes.length)];
+  };
   try {
-    selectRange(saved);
+    const [start, end] = points.map(place);
+    const r = document.createRange();
+    r.setStart(...start);
+    r.setEnd(...end);
+    selectRange(r);
   } catch {
-    /* range nodes may have moved */
+    /* the caret's nodes left the outline */
   }
   root.dispatchEvent(new Event('input', { bubbles: true }));
 }
@@ -261,6 +333,18 @@ export function insertNode(node, { spaceAfter = true } = {}) {
   const root = range && editableRoot(range.commonAncestorContainer);
   if (!root) return false;
   range.deleteContents();
+  // A caret between the body's blocks (a new container's caret sits after
+  // its empty paragraph) goes into the neighboring paragraph, so the embed
+  // doesn't end up outside any block.
+  if (range.collapsed && range.startContainer === root) {
+    const before = root.childNodes[range.startOffset - 1];
+    const block = before || root.childNodes[range.startOffset];
+    if (block?.nodeType === 1 && /^(P|H[1-6]|BLOCKQUOTE|PRE)$/.test(block.nodeName)) {
+      if (block.childNodes.length === 1 && block.firstChild.nodeName === 'BR') block.replaceChildren();
+      range.selectNodeContents(block);
+      range.collapse(!before);
+    }
+  }
   range.insertNode(node);
   const after = document.createTextNode(spaceAfter ? '\u00a0' : '');
   node.after(after);
@@ -270,6 +354,92 @@ export function insertNode(node, { spaceAfter = true } = {}) {
   selectRange(r);
   root.dispatchEvent(new Event('input', { bubbles: true }));
   return true;
+}
+
+/*
+ * Chrome's own editing (pasting, inserting links, joining two paragraphs
+ * with Backspace, outdenting a list item) wraps the text it moves in spans
+ * that freeze how the text looked before, for instance
+ * <span style="font-size: 11pt; background-color: transparent">. In a
+ * normal paragraph they change nothing, but they keep that text at 11pt
+ * when the paragraph later becomes a heading, and text pasted or linked
+ * into a heading comes out in the small body font. For elements an edit
+ * just added, this drops a transparent background and any font size,
+ * color or font that only repeats the surrounding text or the note's base
+ * text, then unwraps spans left with no attributes.
+ */
+const CLEAR_BACKGROUNDS = new Set(['transparent', 'initial', 'rgba(0, 0, 0, 0)']);
+const BASE_PROPS = ['font-size', 'color', 'font-family'];
+
+/*
+ * Chrome's frozen spans are new elements on new text, so they can't be told
+ * from the user's own spans by node; but a join or drag-move that freezes
+ * the user's own formatting (11pt text in a heading) carries the same value
+ * over the same text. ownStyleRuns notes, before such an edit, the font
+ * sizes, colors and fonts set on the text of the blocks it touches;
+ * dropRedundantStyles keeps a value one of those runs held over that text.
+ */
+export function ownStyleRuns(blocks) {
+  const runs = [];
+  for (const block of blocks) {
+    for (const el of block.querySelectorAll('[style]')) {
+      if (isBlock(el) || el.closest('.nt-tag, .nt-file, .nt-math')) continue;
+      const text = el.textContent;
+      if (!text) continue;
+      for (const prop of BASE_PROPS) {
+        if (el.style.getPropertyValue(prop)) runs.push({ prop, value: getComputedStyle(el).getPropertyValue(prop), text });
+      }
+    }
+  }
+  return runs;
+}
+
+/** own: runs from ownStyleRuns, taken before the edit that added the elements. */
+export function dropRedundantStyles(elements, { own = null } = {}) {
+  const sel = document.getSelection();
+  const bases = new Map();
+  let points = null;
+  for (const el of elements) {
+    if (!el.isConnected || !el.parentElement || isBlock(el) || el.tagName === 'MARK' || el.tagName === 'IMG') continue;
+    const root = editableRoot(el);
+    if (!root?.classList.contains('outline-body') || el.closest('.nt-tag, .nt-file, .nt-math')) continue;
+    const style = el.style;
+    if (CLEAR_BACKGROUNDS.has(style.backgroundColor)) {
+      style.removeProperty('background-color');
+      // Keep it if a stylesheet would otherwise paint a background here.
+      if (!CLEAR_BACKGROUNDS.has(getComputedStyle(el).backgroundColor)) style.backgroundColor = 'transparent';
+    }
+    if (!bases.has(root)) bases.set(root, getComputedStyle(root));
+    const base = bases.get(root);
+    for (const prop of BASE_PROPS) {
+      if (!style.getPropertyValue(prop)) continue;
+      const value = getComputedStyle(el).getPropertyValue(prop);
+      if (value === getComputedStyle(el.parentElement).getPropertyValue(prop)) style.removeProperty(prop);
+      else if (value === base.getPropertyValue(prop) && !own?.some((r) => r.prop === prop && r.value === value && r.text.includes(el.textContent))) style.removeProperty(prop);
+    }
+    if (el.getAttribute('style') !== '') continue;
+    el.removeAttribute('style');
+    if (el.tagName !== 'SPAN' || el.attributes.length) continue;
+    // Unwrapping moves the text nodes, which would collapse a live
+    // selection inside them; keep the boundary points and put them back.
+    points ||= sel?.rangeCount ? [[sel.anchorNode, sel.anchorOffset], [sel.focusNode, sel.focusOffset]] : [];
+    const parent = el.parentNode;
+    const index = [...parent.childNodes].indexOf(el);
+    const grow = el.childNodes.length - 1;
+    points = points.map(([node, offset]) => {
+      if (node === el) return [parent, index + offset];
+      if (node === parent && offset > index) return [parent, offset + grow];
+      return [node, offset];
+    });
+    unwrap(el);
+  }
+  if (points?.length === 2 && points.every(([node]) => node?.isConnected)) {
+    try {
+      sel.setBaseAndExtent(points[0][0], points[0][1], points[1][0], points[1][1]);
+    } catch {
+      /* the boundary moved out of reach */
+    }
+  }
 }
 
 /** Moves the blocks around the caret up or down one block. */

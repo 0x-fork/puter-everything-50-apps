@@ -3,7 +3,7 @@ import { icon } from '../lib/icons.js';
 import { matchShortcut, modKey, shortcutLabel } from '../lib/platform.js';
 import { SECTION_COLORS } from '../data/colors.js';
 import { PageEditor } from '../editor/page-editor.js';
-import { queryFormat, FONTS, SIZES, setFontName, setFontSize, DEFAULT_SIZE } from '../editor/format.js';
+import { queryFormat, FONTS, SIZES, setFontName, setFontSize, setColor, setHighlight, DEFAULT_SIZE } from '../editor/format.js';
 import { activeTags, tagStylesheet } from '../editor/tag-edit.js';
 import { tableHtml } from '../editor/table.js';
 import { insertHtml } from '../editor/format.js';
@@ -269,6 +269,7 @@ export class App {
   }
 
   setRailView(view, { focus = false } = {}) {
+    if (view !== 'notebooks' && view !== this.state.railView) this.sideOpener = document.activeElement;
     this.state.railView = view;
     if (view === 'notebooks') this.state.navVisible = true;
     this.applyLayout();
@@ -278,6 +279,17 @@ export class App {
     } else if (view === 'recent') this.recent.render();
     if (this.isPhone()) this.root.dataset.mobileView = view === 'notebooks' ? 'sections' : 'sections';
     this.ribbon.refresh();
+  }
+
+  /** Closes Search or Recent Notes and puts focus back where it was before. */
+  closeSidePanel() {
+    const view = this.state.railView;
+    const opener = this.sideOpener;
+    this.sideOpener = null;
+    this.setRailView('notebooks');
+    if (opener && this.editor.scroller.contains(opener) && this.editor.restoreRange()) return;
+    if (opener?.isConnected && opener !== document.body && opener.offsetParent !== null) opener.focus();
+    else this.railButtons[view]?.focus();
   }
 
   toggleNav() {
@@ -317,6 +329,9 @@ export class App {
       this.renderNav();
     });
     this.store.on('status', (s) => this.updateSync(s));
+    this.store.on('assets-renamed', ({ id, map }) => {
+      if (this.editor.page?.id === id) this.editor.renameAssets(map);
+    });
     this.store.on('page-replaced', async ({ id }) => {
       if (id === this.state.pageId) await this.editor.open(await this.store.loadPage(id));
     });
@@ -328,17 +343,26 @@ export class App {
         e.returnValue = '';
       }
     });
+    // A link pasted into this tab's address bar (or Back/Forward between
+    // such links) only changes the hash, so follow it here too.
+    this.listen(window, 'hashchange', () => this.followHash());
     this.listen(document, 'visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         this.editor.flush();
         this.store.flush();
       } else this.refreshFromCloud();
     });
+    // Switching between visible windows (or Puter app windows) changes
+    // focus, not visibility.
+    this.listen(window, 'focus', () => this.refreshFromCloud());
     this.refreshFromCloud = debounce(async () => {
       try {
         if (await this.store.refresh()) this.ensureSelection();
         const id = this.state.pageId;
-        if (id && !this.editor.dirty.size && !this.editor.commitSoon.pending() && (await this.store.refreshPage(id))) toast('This page was updated on another device.');
+        // Edits still only in the editor (typed, or a stroke being drawn)
+        // count as unsaved, also when they start while the copy is read.
+        const busy = () => this.editor.page?.id === id && Boolean(this.editor.dirty.size || this.editor.commitSoon.pending() || this.editor.ink.active);
+        if (id && !busy() && (await this.store.refreshPage(id, { busy }))) toast('This page was updated on another device.');
       } catch {
         /* offline */
       }
@@ -387,6 +411,21 @@ export class App {
     this.ensureSelection();
   }
 
+  /** Opens the page or section a #page= or #section= link names. */
+  followHash() {
+    const hash = location.hash;
+    if (hash.startsWith('#page=')) {
+      const id = hash.slice(6);
+      if (id === this.state.pageId) return;
+      if (this.store.findPage(id)) this.openPage(id);
+      else toast("That page isn't available. It may have been deleted.", { kind: 'error' });
+    } else if (hash.startsWith('#section=')) {
+      const id = hash.slice(9);
+      if (this.store.section(id)) this.selectSection(id, { focus: false });
+      else toast("That section isn't available. It may have been deleted.", { kind: 'error' });
+    }
+  }
+
   /** Makes sure a notebook, section and (if possible) page are selected. */
   ensureSelection() {
     const s = this.store;
@@ -421,6 +460,7 @@ export class App {
     this.nav.renderSections();
     this.nav.renderPages();
     if (this.state.railView === 'recent') this.recent.render();
+    else if (this.state.railView === 'search') this.search.syncScope();
     this.updateTitle();
   }
 
@@ -448,10 +488,11 @@ export class App {
     if (this.isPhone()) this.setMobileView('sections');
   }
 
-  async selectSection(id, { focus = true } = {}) {
+  /** unlock: false selects a locked section without asking for its password; the page offers Unlock. */
+  async selectSection(id, { focus = true, unlock = true } = {}) {
     const f = this.store.findNode(id);
     if (!f || f.node.type !== 'section') return;
-    if (f.node.locked && !this.isUnlocked(id)) {
+    if (unlock && f.node.locked && !this.isUnlocked(id)) {
       const ok = await features.unlockSection(this, f.node);
       if (!ok) return;
     }
@@ -482,13 +523,30 @@ export class App {
     setPref('sectionPages', sp);
     if (location.hash !== `#page=${id}`) history.replaceState(null, '', `#page=${id}`);
     this.renderNav();
-    this.showCanvas();
+    // With no page on screen (an empty or error state), that state stays
+    // until the page arrives rather than showing a stale page.
+    if (this.editor.page) this.showCanvas();
+    // Until the page arrives, the page still on screen takes no input: it is
+    // no longer the selected page.
+    this.editor.scroller.toggleAttribute('inert', true);
+    let failure = null;
     const page = await this.store.loadPage(id).catch((err) => {
       console.error(err);
-      toast("Couldn't open this page. Check your connection and try again.", { kind: 'error' });
+      failure = err;
       return null;
     });
-    if (!page || this.state.pageId !== id) return;
+    // A newer selection owns the canvas now.
+    if (this.state.pageId !== id) return;
+    this.editor.scroller.toggleAttribute('inert', false);
+    if (!page) {
+      // A file that is there but can't be parsed won't load on a retry.
+      const damaged = failure instanceof SyntaxError;
+      toast(damaged ? "Couldn't open this page: its file is damaged." : "Couldn't open this page. Check your connection and try again.", { kind: 'error' });
+      this.showEmpty(damaged ? 'damaged' : 'load-error');
+      if (this.isPhone()) this.setMobileView('page');
+      return;
+    }
+    this.showCanvas();
     this.editor.setSurface(prefs().surface === 'light' ? 'light' : 'auto');
     await this.editor.open(page);
     this.editor.setZoom(prefs().zoom || 1);
@@ -522,11 +580,22 @@ export class App {
     this.editor.flush();
     this.editor.page = null;
     this.editor.scroller.hidden = true;
+    this.editor.scroller.toggleAttribute('inert', false);
     this.canvasCol.querySelector('.canvas-empty')?.remove();
     const section = this.store.section(this.state.sectionId);
     let body;
-    if (kind === 'locked') {
+    if (kind === 'load-error' || kind === 'damaged') {
+      // The selected page couldn't be loaded; the list keeps it selected.
+      const id = this.state.pageId;
+      // A damaged file can also be a read that went wrong once: offer a retry too.
+      const retry = h('button.btn.primary', { type: 'button', onclick: () => id && this.openPage(id, { focus: true }) }, 'Try again');
+      body = kind === 'damaged'
+        ? h('div', icon('cloudOff', 32), h('h2', "This page can't be opened"), h('p', 'Its file is damaged.'), retry)
+        : h('div', icon('cloudOff', 32), h('h2', "Couldn't open this page"), h('p', 'Check your connection and try again.'), retry);
+    } else if (kind === 'locked') {
       body = h('div', icon('lock', 32), h('h2', 'This section is password protected'), h('p', 'Enter its password to see its pages.'), h('button.btn.primary', { type: 'button', onclick: () => section && this.selectSection(section.id) }, 'Unlock'));
+    } else if (!this.store.notebook(this.state.notebookId)) {
+      body = h('div', icon('notebook', 32), h('h2', 'No notebooks yet'), h('p', 'Add a notebook to start writing.'), h('button.btn.primary', { type: 'button', onclick: () => this.newNotebook() }, 'Add notebook'));
     } else if (!section) {
       body = h('div', icon('notebook', 32), h('h2', 'No sections yet'), h('p', 'Add a section to start writing.'), h('button.btn.primary', { type: 'button', onclick: () => this.newSection() }, 'Add section'));
     } else {
@@ -540,9 +609,27 @@ export class App {
   stepPage(dir) {
     const section = this.store.section(this.state.sectionId);
     if (!section) return;
-    const i = section.pages.findIndex((p) => p.id === this.state.pageId);
-    const next = section.pages[i + dir];
-    if (next) this.openPage(next.id);
+    // Follow the page list as shown: its sort order, without the subpages
+    // of collapsed pages. The open page may itself be such a hidden
+    // subpage: step from its place in the full order then.
+    const shown = new Set([...this.nav.pagesList.querySelectorAll('.row')].map((r) => r.dataset.id));
+    const ids = this.nav.sortedPages(section).map((p) => p.meta.id);
+    let i = ids.indexOf(this.state.pageId);
+    if (i < 0) return;
+    do i += dir;
+    while (i >= 0 && i < ids.length && !shown.has(ids[i]));
+    const next = ids[i];
+    // Opening the page replaces the one being typed in; carry on writing in
+    // the new page (as opening it from the page list with Enter does)
+    // rather than leave focus on nothing.
+    // With a pen or other tool, the canvas itself has focus: keep it there.
+    const active = document.activeElement;
+    const canvas = active === this.editor.scroller;
+    const typing = !canvas && (!active || active === document.body || this.editor.scroller.contains(active));
+    if (!next) return;
+    Promise.resolve(this.openPage(next, { focus: typing })).then(() => {
+      if (canvas && this.state.pageId === next && this.editor.page) this.editor.scroller.focus({ preventScroll: true });
+    });
   }
 
   isUnlocked(id) {
@@ -551,8 +638,6 @@ export class App {
 
   /** Locks a protected section and closes its page if it is open. */
   async lockSection(id) {
-    const f = this.store.findNode(id);
-    if (!f) return;
     if (this.state.sectionId === id) {
       this.editor.flush();
       this.showEmpty('locked');
@@ -654,6 +739,10 @@ export class App {
         page.title = title;
         this.store.pageChanged(page, { title });
         this.renderNav();
+      }, (err) => {
+        console.error(err);
+        toast("Couldn't rename the page. Check your connection and try again.", { kind: 'error' });
+        this.renderNav();
       });
     }
   }
@@ -711,8 +800,15 @@ export class App {
       toast('Unlock the protected section first to restore this page.', { kind: 'error' });
       return false;
     }
+    const kind = this.store.trash.find((t) => t.id === trashId)?.kind;
     const r = this.store.restore(trashId);
-    if (r?.pageId) this.openPage(r.pageId);
+    if (!r) {
+      // Nothing was restored: the section it goes back to is locked, or
+      // there is no notebook left to put it in.
+      toast(kind === 'page' && this.store.notebooks.length ? 'Unlock the protected section first to restore this page.' : "Couldn't restore this. Create a notebook first, then try again.", { kind: 'error' });
+      return false;
+    }
+    if (r.pageId) this.openPage(r.pageId);
     else if (r?.sectionId) this.selectSection(r.sectionId, { focus: false });
     else if (r?.notebookId) this.selectNotebook(r.notebookId);
     else this.ensureSelection();
@@ -762,7 +858,13 @@ export class App {
           toast('Unlock that section before moving pages into it.', { kind: 'error' });
           return;
         }
-        if (this.store.movePage(drag.id, { sectionId: target.into, level: 0 })) toast('Page moved');
+        if (this.store.movePage(drag.id, { sectionId: target.into, level: 0 })) {
+          toast('Page moved');
+          // When the open page moved (or went along as a subpage), follow
+          // it to its new section, as Move or Copy does.
+          const f = this.state.pageId && this.store.findPage(this.state.pageId);
+          if (f && f.section.id !== this.state.sectionId) this.openPage(f.meta.id);
+        }
         return;
       }
       const section = this.store.section(this.state.sectionId);
@@ -837,7 +939,7 @@ export class App {
         { label: 'New Section Group', icon: 'sectionGroup', run: () => this.store.createGroup(this.state.notebookId, { parentId: node.id }) },
         { label: 'Move or Copy...', icon: 'folderOpen', run: () => this.moveDialog('group', node.id) },
         { type: 'sep' },
-        { label: 'Delete', icon: 'trash', danger: true, run: () => this.deleteSection(node.id) },
+        { label: 'Delete', icon: 'trash', danger: true, run: () => this.nav.refocusAfter('section', this.deleteSection(node.id)) },
       ], { label: node.name });
       return;
     }
@@ -853,7 +955,7 @@ export class App {
       { label: 'New Section', icon: 'newSection', run: () => this.newSection() },
       { label: 'New Section Group', icon: 'sectionGroup', run: () => this.newSectionGroup() },
       { type: 'sep' },
-      { label: 'Delete', icon: 'trash', danger: true, shortcut: 'Delete', run: () => this.deleteSection(node.id) },
+      { label: 'Delete', icon: 'trash', danger: true, shortcut: 'Delete', run: () => this.nav.refocusAfter('section', this.deleteSection(node.id)) },
     ], { label: node.name });
   }
 
@@ -879,10 +981,16 @@ export class App {
       { label: meta.collapsed ? 'Expand Subpages' : 'Collapse Subpages', icon: meta.collapsed ? 'expand' : 'collapse', disabled: !(f.section.pages[f.index + 1] && (f.section.pages[f.index + 1].level || 0) > level), run: () => this.store.togglePageCollapsed(meta.id) },
       { type: 'sep' },
       { label: 'Move or Copy...', icon: 'folderOpen', run: () => this.moveDialog('page', meta.id) },
-      { label: 'Duplicate Page', icon: 'copy', run: async () => { const m = await this.store.copyPage(meta.id); if (m) this.openPage(m.id); } },
+      { label: 'Duplicate Page', icon: 'copy', run: async () => {
+        const m = await this.store.copyPage(meta.id).catch((err) => {
+          console.error(err);
+          toast(`Couldn't duplicate "${meta.title || 'Untitled Page'}". Check your connection and try again.`, { kind: 'error' });
+        });
+        if (m) this.openPage(m.id);
+      } },
       { label: 'Copy Link to Page', icon: 'link', run: () => this.copyLink('page', meta.id) },
       { type: 'sep' },
-      { label: 'Delete Page', icon: 'trash', danger: true, shortcut: 'Delete', run: () => this.deletePage(meta.id) },
+      { label: 'Delete Page', icon: 'trash', danger: true, shortcut: 'Delete', run: () => this.nav.refocusAfter('page', this.deletePage(meta.id)) },
     ], { label: meta.title || 'Untitled Page' });
   }
 
@@ -895,8 +1003,17 @@ export class App {
       this.updateTitle();
       this.updateFormatSoon();
     });
+    ed.on('insert-failed', ({ file, err }) => toast(`Couldn't insert ${file.name || 'the file'}: ${err?.message || 'upload failed'}`, { kind: 'error' }));
     ed.on('title-input', (title) => {
       if (this.state.pageId) this.nav.updatePageTitle(this.state.pageId, title);
+    });
+    // A sorted page list takes a new title into account once the title
+    // loses focus, not on every key, so it doesn't move while you type.
+    // Focus going into the panes is a click there, which redraws them.
+    ed.titleEl.addEventListener('blur', (e) => {
+      if (prefs().pageSort === 'manual' || !this.state.pageId || this.nav.el.contains(e.relatedTarget)) return;
+      ed.flush();
+      this.nav.renderPages();
     });
     ed.on('navigate', ({ kind, id }) => {
       if (kind === 'page') {
@@ -942,7 +1059,20 @@ export class App {
     announce(`${{ type: 'Type', lasso: 'Lasso Select', eraser: 'Eraser', pen: 'Pen', shape: 'Shape', space: 'Insert Space' }[tool] || tool} tool`);
   }
 
-  setPen(pen) {
+  /**
+   * Picks a pen. With ink selected, the pick restyles that ink instead
+   * (only what `changes` names; a whole pen by default) and becomes the
+   * pen for what's drawn next, keeping the selection.
+   */
+  setPen(pen, changes = { color: pen.color, width: pen.width, highlighter: Boolean(pen.highlighter) }) {
+    const ink = this.editor.ink;
+    if (ink.selected.size && !this.editor.readOnly) {
+      ink.pen = { ...pen };
+      ink.recolor(changes);
+      this.ribbon.refresh();
+      announce('Selected ink changed');
+      return;
+    }
     this.setTool('pen', { pen });
   }
 
@@ -988,6 +1118,7 @@ export class App {
         const n = parseFloat(value);
         if (n >= 1 && n <= 400) setFontSize(n);
       }
+      this.editor.rememberRange();
       this.editor.markActiveDirty();
       this.updateFormatState();
     };
@@ -1055,19 +1186,27 @@ export class App {
       input.setAttribute('aria-expanded', 'true');
       input.focus();
     };
-    input.addEventListener('input', debounce(show, 120));
+    const showSoon = debounce(show, 120);
+    input.addEventListener('input', showSoon);
+    // The results may still be for what was typed before the last keys.
+    const showNow = () => {
+      if (!showSoon.pending() && menu?.el.isConnected) return;
+      showSoon.cancel();
+      show();
+    };
     input.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        if (!menu || !menu.el.isConnected) show();
+        showNow();
         menu?.el.querySelector('[role^="menuitem"]')?.focus();
       } else if (e.key === 'Escape') {
+        showSoon.cancel();
         input.value = '';
         closeAllMenus();
         this.editor.restoreRange();
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (!menu || !menu.el.isConnected) show();
+        showNow();
         menu?.el.querySelector('[role^="menuitem"]:not([aria-disabled="true"])')?.click();
       }
     });
@@ -1131,9 +1270,11 @@ export class App {
         this.runCommand(c.id);
         return;
       }
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape') this.ribbon.closePeek();
+      // Escape in a box or list (Search, Tell Me, a pane's options) belongs
+      // to that control; it doesn't also reset the pen or the view.
+      if (e.key === 'Escape' && !inField) {
         if (this.state.fullPage && !e.target.closest?.('.outline-body')) this.toggleFullPage();
-        this.ribbon.closePeek();
         if (this.painter) this.toggleFormatPainter(false);
         if (this.editor.ink.tool !== 'type' && !e.target.closest?.('.outline-body')) this.setTool('type');
       }
@@ -1152,7 +1293,7 @@ export class App {
       () => (this.taskPanes.el.hidden ? null : this.taskPanes.el.querySelector('button, input, select')),
     ];
     const targets = regions.map((f) => f()).filter((el) => el && el.offsetParent !== null);
-    const i = targets.findIndex((el) => el.contains(document.activeElement) || el === document.activeElement || el.closest('.nav, .ribbon, .side-panel, .task-pane, .canvas-scroll')?.contains(document.activeElement));
+    const i = targets.findIndex((el) => el.contains(document.activeElement) || el === document.activeElement || el.closest('.sections-pane, .pages-pane, .ribbon, .side-panel, .task-pane, .canvas-scroll')?.contains(document.activeElement));
     const next = targets[(i + dir + targets.length) % targets.length];
     next?.focus();
   }
@@ -1230,8 +1371,8 @@ export class App {
     toggle('underline', p.underline, cur.underline);
     toggle('strikeThrough', p.strike, cur.strike);
     document.execCommand('styleWithCSS', false, true);
-    if (p.color) document.execCommand('foreColor', false, p.color);
-    if (p.background) document.execCommand('hiliteColor', false, p.background);
+    if (p.color) setColor(p.color);
+    if (p.background) setHighlight(p.background);
     setFontSize(p.fontSize);
     if (p.fontFamily) setFontName(p.fontFamily);
     this.editor.markActiveDirty();

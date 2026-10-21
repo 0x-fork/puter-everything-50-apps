@@ -65,6 +65,7 @@ export async function hydrate(root, store) {
     );
     if (kind === 'audio' || kind === 'video') {
       const media = h(kind, { controls: true, preload: 'metadata' });
+      fixUnknownDuration(media);
       span.append(head, media);
       jobs.push(store.assetUrl(span.dataset.asset).then((url) => url && (media.src = url)).catch(() => {}));
     } else {
@@ -84,11 +85,32 @@ export async function hydrate(root, store) {
   await Promise.all(jobs);
 }
 
-/** Stored HTML for an outline body element. */
-export function serialize(body) {
+/**
+ * Browsers record WebM without a duration, so a recording's player shows
+ * no length and can't be scrubbed. Seeking past the end once makes the
+ * browser scan the file and learn its real duration.
+ */
+function fixUnknownDuration(media) {
+  media.addEventListener('loadedmetadata', () => {
+    if (media.duration !== Infinity) return;
+    const known = () => {
+      if (!Number.isFinite(media.duration)) return;
+      media.removeEventListener('durationchange', known);
+      media.currentTime = 0;
+    };
+    media.addEventListener('durationchange', known);
+    media.currentTime = Number.MAX_SAFE_INTEGER;
+  }, { once: true });
+}
+
+/**
+ * Stored HTML for an outline body element. keepSrc keeps pictures' current
+ * URLs (for the clipboard, where other apps need them).
+ */
+export function serialize(body, { keepSrc = false } = {}) {
   const clone = body.cloneNode(true);
   for (const img of clone.querySelectorAll('img')) {
-    if (img.dataset.asset) img.removeAttribute('src');
+    if (img.dataset.asset && !keepSrc) img.removeAttribute('src');
     img.classList.remove('nt-selected');
     if (!img.getAttribute('class')) img.removeAttribute('class');
   }

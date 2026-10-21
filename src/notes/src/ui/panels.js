@@ -1,21 +1,21 @@
 import { h, debounce, escapeHtml } from '../lib/dom.js';
 import { icon } from '../lib/icons.js';
 import { formatRelative } from '../lib/dates.js';
-import { normalize } from '../data/store.js';
+import { normalize, foldWithOffsets } from '../data/store.js';
 
 function highlightSnippet(text, terms) {
-  let html = escapeHtml(text);
-  const flat = normalize(text);
+  const html = escapeHtml(text);
+  const { flat, from, to } = foldWithOffsets(text);
   // Mark matches by position on the accent-folded copy.
   const marks = [];
   for (const t of terms) {
     let i = flat.indexOf(t);
     while (i >= 0 && marks.length < 20) {
-      marks.push([i, i + t.length]);
+      marks.push([from(i), to(i + t.length)]);
       i = flat.indexOf(t, i + t.length);
     }
   }
-  if (!marks.length || flat.length !== text.length) return html;
+  if (!marks.length) return html;
   marks.sort((a, b) => a[0] - b[0]);
   let out = '';
   let pos = 0;
@@ -29,7 +29,7 @@ function highlightSnippet(text, terms) {
 
 function resultRow(app, { notebook, section, meta, snippet }, terms, find) {
   const color = app.nav.colorOf(section.color);
-  const btn = h('button.result', { type: 'button', 'aria-current': String(meta.id === app.state.pageId) },
+  const btn = h('button.result', { type: 'button', 'aria-current': String(meta.id === app.state.pageId), dataset: { id: meta.id } },
     h('div.result-title', meta.title?.trim() || 'Untitled Page'),
     h('div.result-path', h('span.dot', { style: { '--sec-color': color } }), `${notebook.name} › ${section.name}`, h('span', { style: { marginLeft: 'auto' } }, formatRelative(meta.modified || meta.created))),
   );
@@ -47,7 +47,7 @@ export class SearchPanel {
     this.status = h('div.sr-only', { role: 'status', 'aria-live': 'polite' });
     this.results = h('div.side-body', { role: 'region', 'aria-label': 'Search results' });
     this.el = h('section.side-panel', { 'aria-label': 'Search', hidden: true },
-      h('div.side-head', h('h2.side-title', 'Search'), h('button.icon-btn', { type: 'button', 'aria-label': 'Close search', onclick: () => app.setRailView('notebooks') }, icon('x', 16))),
+      h('div.side-head', h('h2.side-title', 'Search'), h('button.icon-btn', { type: 'button', 'aria-label': 'Close search', onclick: () => app.closeSidePanel() }, icon('x', 16))),
       h('div.search-box', icon('search', 16), this.input),
       h('label.search-scope', 'In', this.scope),
       this.status,
@@ -55,17 +55,27 @@ export class SearchPanel {
     );
     const run = debounce(() => this.run(), 220);
     this.input.addEventListener('input', run);
+    // Pages renamed, moved, deleted or locked elsewhere update the results.
+    app.store.on('change', debounce(() => {
+      if (!this.el.hidden && this.input.value.trim()) this.run({ refresh: true });
+    }, 300));
     this.scope.addEventListener('change', () => this.run());
     this.input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        this.results.querySelector('.result')?.click();
+        // Results still showing an earlier query would open the wrong
+        // page, so search for what is typed now first.
+        const want = this.queryKey();
+        const ready = this.shown === want && !run.pending() ? null : (run.cancel(), this.run());
+        Promise.resolve(ready).then(() => {
+          if (this.shown === want) this.results.querySelector('.result')?.click();
+        });
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         this.results.querySelector('.result')?.focus();
       } else if (e.key === 'Escape') {
         if (this.input.value) this.input.value = '';
-        else app.setRailView('notebooks');
+        else app.closeSidePanel();
         this.run();
       }
     });
@@ -80,18 +90,38 @@ export class SearchPanel {
   }
 
   show() {
+    this.fillScope();
+    this.run();
+  }
+
+  /**
+   * Points the scope list at the notebook, section and page open now,
+   * keeping the chosen kind ("This Section" stays "This Section").
+   * Returns false when nothing changed.
+   */
+  fillScope() {
     const { state, store } = this.app;
     const nb = store.notebook(state.notebookId);
     const section = store.section(state.sectionId);
-    const current = this.scope.value;
-    this.scope.replaceChildren(
-      h('option', { value: 'all' }, 'All Notebooks'),
-      nb ? h('option', { value: `notebook:${nb.id}` }, `This Notebook (${nb.name})`) : null,
-      section ? h('option', { value: `section:${section.id}` }, `This Section (${section.name})`) : null,
-      state.pageId ? h('option', { value: `page:${state.pageId}` }, 'This Page') : null,
-    );
-    if ([...this.scope.options].some((o) => o.value === current)) this.scope.value = current;
-    this.run();
+    const options = [
+      ['all', 'All Notebooks'],
+      nb && [`notebook:${nb.id}`, `This Notebook (${nb.name})`],
+      section && [`section:${section.id}`, `This Section (${section.name})`],
+      state.pageId && [`page:${state.pageId}`, 'This Page'],
+    ].filter(Boolean);
+    const sig = options.join('\n');
+    if (sig === this.scopeSig) return false;
+    this.scopeSig = sig;
+    const kind = (this.scope.value || 'all').split(':')[0];
+    this.scope.replaceChildren(...options.map(([value, label]) => h('option', { value }, label)));
+    this.scope.value = options.find(([value]) => value.split(':')[0] === kind)?.[0] || 'all';
+    return true;
+  }
+
+  /** Opening another page or section while Search shows keeps its scope current. */
+  syncScope() {
+    const before = this.scope.value;
+    if (this.fillScope() && this.scope.value !== before && this.input.value.trim()) this.run({ refresh: true });
   }
 
   focus() {
@@ -99,24 +129,38 @@ export class SearchPanel {
     this.input.select();
   }
 
-  async run() {
+  queryKey() {
+    return `${this.scope.value || 'all'}\n${this.input.value.trim()}`;
+  }
+
+  /** Searches for the box's text. A refresh redraws the results in place, keeping focus. */
+  async run({ refresh = false } = {}) {
     const q = this.input.value.trim();
+    const key = this.queryKey();
     const token = (this.token = Symbol('search'));
+    this.shown = null;
     if (!q) {
       this.results.replaceChildren(h('div.empty-state', icon('search', 28), h('p', 'Search titles and text in your notebooks.')));
       this.status.textContent = '';
       return;
     }
-    this.results.replaceChildren(h('div.empty-state', h('div.spinner'), h('p', 'Searching...')));
-    const results = await this.app.store.search(q, { scope: this.scope.value || 'all' });
+    if (!refresh) this.results.replaceChildren(h('div.empty-state', h('div.spinner'), h('p', 'Searching...')));
+    const { results, total } = await this.app.store.search(q, { scope: this.scope.value || 'all', count: true });
     if (token !== this.token) return;
     const terms = normalize(q).split(/\s+/).filter(Boolean);
+    const focused = this.results.contains(document.activeElement) ? document.activeElement.closest('.result')?.dataset.id : null;
+    const count = total > results.length
+      ? `Showing the first ${results.length} of ${total.toLocaleString()} results`
+      : `${results.length} ${results.length === 1 ? 'result' : 'results'}`;
     if (!results.length) {
       this.results.replaceChildren(h('div.empty-state', h('p', `No results for "${q}".`)));
     } else {
-      this.results.replaceChildren(h('div.group-label', `${results.length} ${results.length === 1 ? 'result' : 'results'}`), ...results.map((r) => resultRow(this.app, r, terms, q)));
+      this.results.replaceChildren(h('div.group-label', count), ...results.map((r) => resultRow(this.app, r, terms, q)));
     }
-    this.status.textContent = results.length ? `${results.length} results` : 'No results';
+    if (focused) this.results.querySelector(`.result[data-id="${CSS.escape(focused)}"]`)?.focus();
+    const status = results.length ? count : 'No results';
+    if (!refresh || this.status.textContent !== status) this.status.textContent = status;
+    this.shown = key;
   }
 }
 
@@ -126,7 +170,7 @@ export class RecentPanel {
     this.app = app;
     this.list = h('div.side-body');
     this.el = h('section.side-panel', { 'aria-label': 'Recent notes', hidden: true },
-      h('div.side-head', h('h2.side-title', 'Recent Notes'), h('button.icon-btn', { type: 'button', 'aria-label': 'Close recent notes', onclick: () => app.setRailView('notebooks') }, icon('x', 16))),
+      h('div.side-head', h('h2.side-title', 'Recent Notes'), h('button.icon-btn', { type: 'button', 'aria-label': 'Close recent notes', onclick: () => app.closeSidePanel() }, icon('x', 16))),
       this.list,
     );
     this.list.addEventListener('keydown', (e) => {
@@ -158,6 +202,9 @@ export class RecentPanel {
       nodes.push(h('div.group-label', label));
       nodes.push(...list.map((r) => resultRow(this.app, r, [])));
     }
+    // Opening a page redraws this list; keep focus on the same item.
+    const focused = this.list.contains(document.activeElement) ? document.activeElement.closest('.result')?.dataset.id : null;
     this.list.replaceChildren(...nodes);
+    if (focused) this.list.querySelector(`.result[data-id="${CSS.escape(focused)}"]`)?.focus();
   }
 }

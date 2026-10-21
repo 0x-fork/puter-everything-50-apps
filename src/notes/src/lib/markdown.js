@@ -53,6 +53,12 @@ function list(el, depth) {
   const lines = [];
   let n = Number(el.getAttribute('start')) || 1;
   for (const li of el.children) {
+    // Chrome's indent nests the new list directly in the old one
+    // (<ul><li>a</li><ul><li>b</li></ul></ul>); it belongs to the item above.
+    if (li.tagName === 'UL' || li.tagName === 'OL') {
+      lines.push(...list(li, depth + 1));
+      continue;
+    }
     if (li.tagName !== 'LI') continue;
     const marker = el.tagName === 'OL' ? `${n++}.` : '-';
     const textParts = [];
@@ -79,13 +85,23 @@ function table(el) {
   return out.join('\n');
 }
 
+const BLOCK_TAGS = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'BLOCKQUOTE', 'PRE', 'TABLE', 'HR', 'FIGURE']);
+
 function blocks(root) {
   const out = [];
+  // Consecutive inline nodes (text beside a list in a <div>) form one paragraph.
+  let run = [];
+  const flush = () => {
+    const text = inline({ childNodes: run }).trim();
+    if (text) out.push(text);
+    run = [];
+  };
   for (const c of root.childNodes) {
-    if (c.nodeType === 3) {
-      if (c.nodeValue.trim()) out.push(c.nodeValue.trim());
+    if (c.nodeType === 3 || (c.nodeType === 1 && !BLOCK_TAGS.has(c.tagName))) {
+      run.push(c);
       continue;
     }
+    flush();
     if (c.nodeType !== 1) continue;
     const tag = c.tagName;
     if (/^H[1-6]$/.test(tag)) out.push(`${'#'.repeat(Number(tag[1]))} ${tagPrefix(c)}${inline(c).trim()}`);
@@ -94,13 +110,15 @@ function blocks(root) {
     else if (tag === 'PRE') out.push('```\n' + c.textContent.replace(/\n$/, '') + '\n```');
     else if (tag === 'TABLE') out.push(table(c));
     else if (tag === 'HR') out.push('---');
+    else if ((tag === 'DIV' || tag === 'FIGURE') && [...c.children].some((k) => BLOCK_TAGS.has(k.tagName))) out.push(blocks(c));
     else if (tag === 'P' || tag === 'DIV' || tag === 'FIGURE') {
       const prefix = tagPrefix(c);
       const text = inline(c).trim();
       if (prefix.startsWith('[')) out.push(`- ${prefix}${text}`);
       else out.push(prefix + text);
-    } else out.push(inline({ childNodes: [c] }).trim());
+    }
   }
+  flush();
   return out.filter((b) => b !== '').join('\n\n');
 }
 

@@ -8,7 +8,7 @@ import { htmlToMarkdown, markdownToHtml } from '../lib/markdown.js';
 import { pageText, normalize } from '../data/store.js';
 import { insertHtml, insertNode, setFontName } from '../editor/format.js';
 import { mathSpan, renderMath, hydrate } from '../editor/embeds.js';
-import { currentRange, selectRange } from '../editor/selection.js';
+import { currentRange, selectRange, placeCaret } from '../editor/selection.js';
 import { textToHtml } from '../editor/page-editor.js';
 import { openDialog, confirmDialog } from './dialog.js';
 import { openMenu } from './menu.js';
@@ -132,10 +132,12 @@ export function insertPrintout(app, file) {
 
 async function printout(app, file, range) {
   const dismiss = toast(`Inserting printout of ${file.name}...`, { duration: 60000 });
+  let task = null;
   try {
     const [pdfjs, worker] = await Promise.all([import('pdfjs-dist'), import('pdfjs-dist/build/pdf.worker.min.mjs?url')]);
     pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
-    const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    task = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+    const doc = await task.promise;
     const count = Math.min(doc.numPages, 60);
     if (range) app.editor.lastRange = range;
     app.editor.restoreRange();
@@ -159,6 +161,8 @@ async function printout(app, file, range) {
     const el = app.editor.createOutlineAt(48, app.editor.nextFreeY(), '');
     const body = el.querySelector('.outline-body');
     body.innerHTML = sanitizeHtml(images.join(''));
+    // Replacing the content dropped the caret to the top: put it after the last page.
+    placeCaret(body);
     await hydrate(body, app.store);
     app.editor.dirty.add(el);
     app.editor.commit();
@@ -168,6 +172,9 @@ async function printout(app, file, range) {
   } catch (err) {
     dismiss();
     toast(`Couldn't insert the printout: ${err?.message || 'the file could not be read'}`, { kind: 'error' });
+  } finally {
+    // Frees the parsed document and ends its pdf.js worker.
+    task?.destroy().catch(() => {});
   }
 }
 
@@ -399,7 +406,7 @@ export function linkDialog(app) {
       }
       return () => {
         if (range) app.editor.lastRange = range;
-        app.editor.restoreRange();
+        if (!app.editor.restoreRange()) app.editor.ensureCaret();
         const external = !href.startsWith('#');
         insertHtml(`<a href="${escapeHtml(href)}"${external ? ' target="_blank" rel="noopener noreferrer"' : ''}>${escapeHtml(label)}</a>&nbsp;`);
         app.editor.markActiveDirty();
@@ -432,11 +439,16 @@ export function equationDialog(app, span) {
   const range = currentRange()?.cloneRange();
   const input = h('textarea.input.mono', { id: 'eq-input', rows: 3, spellcheck: 'false', 'aria-describedby': 'eq-hint' });
   input.value = span?.dataset.tex || '';
+  const error = h('p.field-error', { role: 'alert' });
   const preview = h('div.eq-preview', { 'aria-live': 'polite', 'aria-label': 'Preview' });
   const update = debounce(async () => {
     preview.innerHTML = input.value.trim() ? await renderMath(input.value, true) : '<span class="field-hint">The preview appears here.</span>';
   }, 120);
   input.addEventListener('input', update);
+  input.addEventListener('input', () => {
+    error.textContent = '';
+    input.removeAttribute('aria-invalid');
+  });
   update();
   const snippets = h('div.eq-snippets', { role: 'group', 'aria-label': 'Insert structure or symbol' }, SNIPPETS.map(([tex, label]) => {
     const b = h('button.btn.small', { type: 'button', title: label, 'aria-label': label });
@@ -453,7 +465,7 @@ export function equationDialog(app, span) {
     title: span ? 'Edit Equation' : 'Insert Equation',
     width: 560,
     body: h('div',
-      h('div.field', h('label.field-label', { for: 'eq-input' }, 'Equation (LaTeX)'), input, h('p.field-hint', { id: 'eq-hint' }, 'For example: E = mc^2 or \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}')),
+      h('div.field', h('label.field-label', { for: 'eq-input' }, 'Equation (LaTeX)'), input, error, h('p.field-hint', { id: 'eq-hint' }, 'For example: E = mc^2 or \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}')),
       snippets,
       h('div.field', h('span.field-label', 'Preview'), preview),
     ),
@@ -461,7 +473,13 @@ export function equationDialog(app, span) {
       { label: 'Cancel' },
       { label: span ? 'Update' : 'Insert', primary: true, run: async () => {
         const tex = input.value.trim();
-        if (!tex) return;
+        if (!tex) {
+          // Like the Link dialog: say what's missing and keep the dialog open.
+          error.textContent = 'Enter an equation.';
+          input.setAttribute('aria-invalid', 'true');
+          input.focus();
+          return false;
+        }
         if (span) {
           span.dataset.tex = tex;
           span.setAttribute('aria-label', `Equation: ${tex}`);
@@ -473,7 +491,7 @@ export function equationDialog(app, span) {
         }
         return async () => {
           if (range) app.editor.lastRange = range;
-          app.editor.restoreRange();
+          if (!app.editor.restoreRange()) app.editor.ensureCaret();
           insertNode(mathSpan(tex));
           const body = app.editor.activeOutline?.querySelector('.outline-body');
           if (body) await hydrate(body, app.store);
@@ -555,6 +573,11 @@ export function moveDialog(app, kind, id) {
   filter.addEventListener('input', debounce(render, 100));
   render();
   const name = kind === 'page' ? store.findPage(id)?.meta.title || 'Untitled Page' : store.findNode(id)?.node.name;
+  const copyFailed = (err) => {
+    console.error(err);
+    toast(`Couldn't copy "${name}". Check your connection and try again.`, { kind: 'error' });
+    return 'failed';
+  };
   const act = async (copy) => {
     if (!target) {
       toast(kind === 'page' ? 'Pick a section.' : 'Pick a notebook or section group.');
@@ -562,16 +585,17 @@ export function moveDialog(app, kind, id) {
     }
     if (kind === 'page') {
       if (copy) {
-        const meta = await store.copyPage(id, { sectionId: target.sectionId });
+        if ((await store.copyPage(id, { sectionId: target.sectionId }).catch(copyFailed)) === 'failed') return false;
         toast(`Copied "${name}"`);
-        void meta;
       } else {
         store.movePage(id, { sectionId: target.sectionId, level: 0 });
         app.openPage(id);
         toast(`Moved "${name}"`);
       }
     } else if (copy) {
-      if (!(await store.copySection(id, target))) {
+      const done = await store.copySection(id, target).catch(copyFailed);
+      if (done === 'failed') return false;
+      if (!done) {
         toast("Couldn't copy that section.", { kind: 'error' });
         return false;
       }
@@ -625,6 +649,10 @@ export function pageDateDialog(app) {
 export function deletedNotesDialog(app) {
   const store = app.store;
   const list = h('div.trash-list');
+  const purgeFailed = (what) => (err) => {
+    console.error(err);
+    toast(`Couldn't ${what}. Check your connection and try again.`, { kind: 'error' });
+  };
   let dlg = null;
   const render = () => {
     list.setAttribute('role', store.trash.length ? 'list' : 'presentation');
@@ -642,7 +670,7 @@ export function deletedNotesDialog(app) {
         h('button.btn.small', { type: 'button', onclick: async () => { if (await app.restoreTrash(t.id)) { render(); toast(`Restored "${name}"`); } } }, 'Restore'),
         h('button.btn.small.danger', { type: 'button', 'aria-label': `Delete "${name}" permanently`, onclick: async () => {
           if (!(await confirmDialog({ title: 'Delete permanently?', message: `"${name}" will be deleted for good. This can't be undone.`, okLabel: 'Delete', danger: true }))) return;
-          await store.purge(t.id);
+          await store.purge(t.id).catch(purgeFailed(`delete "${name}" permanently`));
           render();
         } }, 'Delete'),
       );
@@ -657,7 +685,7 @@ export function deletedNotesDialog(app) {
       { label: 'Empty Deleted Notes', danger: true, run: async () => {
         if (!store.trash.length) return false;
         if (!(await confirmDialog({ title: 'Empty Deleted Notes?', message: 'Everything in Deleted Notes will be deleted for good.', okLabel: 'Empty', danger: true }))) return false;
-        await store.emptyTrash();
+        await store.emptyTrash().catch(purgeFailed('empty Deleted Notes'));
         render();
         return false;
       } },
@@ -829,9 +857,33 @@ export function emailPage(app) {
   const page = app.editor.page;
   if (!page) return;
   app.editor.flush();
-  const body = pageText(page).replace(page.title || '', '').trim();
-  const url = `mailto:?subject=${encodeURIComponent(page.title || 'Notes page')}&body=${encodeURIComponent(body.slice(0, 1800))}`;
+  const { url, truncated } = mailtoForPage(page);
+  if (truncated) toast('This page is too long for an email link, so only its beginning is in the message. Export the page to send all of it.', { duration: 8000 });
   window.location.href = url;
+}
+
+// Mail apps and browsers drop or refuse mailto: links much longer than
+// about 2,000 characters (counted after URL encoding).
+const MAILTO_MAX = 2000;
+
+/** A mailto: link for a page, its text cut to fit; truncated says whether it was. */
+export function mailtoForPage(page) {
+  const title = page.title || '';
+  const subject = encodeURIComponent(Array.from(title || 'Notes page').slice(0, 200).join(''));
+  const head = `mailto:?subject=${subject}&body=`;
+  const body = pageText(page).replace(title, '').trim();
+  const fits = (text) => head.length + encodeURIComponent(text).length <= MAILTO_MAX;
+  if (fits(body)) return { url: head + encodeURIComponent(body), truncated: false };
+  // Cut by code points so an emoji is never split into a lone surrogate.
+  const chars = Array.from(body);
+  let lo = 0;
+  let hi = chars.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (fits(`${chars.slice(0, mid).join('')}\u2026`)) lo = mid;
+    else hi = mid - 1;
+  }
+  return { url: head + encodeURIComponent(`${chars.slice(0, lo).join('').trimEnd()}\u2026`), truncated: true };
 }
 
 function download(name, blob) {
@@ -844,7 +896,7 @@ function download(name, blob) {
 }
 
 function safeName(s) {
-  return (s || 'Untitled Page').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80) || 'Untitled Page';
+  return (s || 'Untitled Page').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80).trim() || 'Untitled Page';
 }
 
 async function blobToDataUrl(blob) {
@@ -908,7 +960,7 @@ export async function exportPage(app, format) {
   const name = safeName(page.title);
   if (format === 'txt') return download(`${name}.txt`, new Blob([pageText(page)], { type: 'text/plain' }));
   if (format === 'md') {
-    const md = [`# ${page.title || 'Untitled Page'}`, '', ...[...page.outlines].sort((a, b) => a.y - b.y || a.x - b.x).map((o) => htmlToMarkdown(o.html))].join('\n\n');
+    const md = [`# ${page.title || 'Untitled Page'}`, ...[...page.outlines].sort((a, b) => a.y - b.y || a.x - b.x).map((o) => htmlToMarkdown(o.html)).filter((md) => md.trim())].join('\n\n');
     return download(`${name}.md`, new Blob([md + '\n'], { type: 'text/markdown' }));
   }
   const html = await pageHtmlDocument(app, [page]);
@@ -918,6 +970,9 @@ export async function exportPage(app, format) {
 export async function exportSection(app, sectionId) {
   const section = app.store.section(sectionId);
   if (!section) return;
+  // A locked section's page list is sealed: unlock it rather than export
+  // an empty file.
+  if (section.locked && !app.store.keys.has(section.id) && !(await unlockSection(app, section))) return;
   app.editor.flush();
   const pages = [];
   for (const m of section.pages) pages.push(await app.store.loadPage(m.id));
@@ -976,15 +1031,23 @@ export async function importBackup(app, backup) {
     return idMap.get(old);
   };
   const assetMap = new Map();
+  let failed = 0;
   for (const [oldId, dataUrl] of Object.entries(backup.assets || {})) {
+    let blob;
     try {
-      const blob = await (await fetch(dataUrl)).blob();
+      blob = await (await fetch(dataUrl)).blob();
+    } catch {
+      continue; // a broken entry in the file
+    }
+    try {
       const ext = oldId.replace(/\.sealed$/, '').split('.').pop();
       assetMap.set(oldId, await store.saveAsset(blob, `asset.${ext}`));
-    } catch {
-      /* skip broken asset */
+    } catch (err) {
+      console.error(err);
+      failed++;
     }
   }
+  if (failed) toast(`${failed} ${failed === 1 ? 'picture or file' : 'pictures or files'} couldn't be imported. Check your connection and import the backup again.`, { kind: 'error' });
   const nb = store.createNotebook(store.notebooks.some((n) => n.name === backup.notebook.name) ? `${backup.notebook.name} (imported)` : backup.notebook.name, { color: backup.notebook.color, silent: true });
   const cloneNodes = (nodes) => nodes.map((n) => (n.type === 'group'
     ? { ...n, id: fresh(n.id, 'g'), children: cloneNodes(n.children || []) }
@@ -1082,7 +1145,16 @@ export function shareDialog(app) {
     }
   });
   stopBtn.addEventListener('click', async () => {
-    await app.store.backend.remove(`published/${page.id}.json`).catch(() => {});
+    stopBtn.disabled = true;
+    try {
+      await app.store.backend.remove(`published/${page.id}.json`);
+    } catch (err) {
+      // The snapshot is still there, so the link still opens it.
+      status.textContent = `Couldn't stop sharing: ${err?.message || 'request failed'}. The link still works. Try again.`;
+      return;
+    } finally {
+      stopBtn.disabled = false;
+    }
     delete page.published;
     app.store.pageChanged(page);
     linkInput.value = '';
@@ -1211,8 +1283,16 @@ export function unlockSection(app, section) {
             return false;
           }
           btn.disabled = true;
-          const unlocked = await app.store.unlockSection(section.id, pw.input.value).catch(() => false);
+          let damaged = null;
+          const unlocked = await app.store.unlockSection(section.id, pw.input.value).catch((err) => {
+            if (err?.damaged) damaged = err.message;
+            return false;
+          });
           btn.disabled = false;
+          if (damaged) {
+            error.textContent = damaged;
+            return false;
+          }
           if (!unlocked) {
             error.textContent = 'That password is not correct. Passwords are case-sensitive.';
             pw.input.select();
@@ -1243,7 +1323,12 @@ export function passwordDialog(app, section) {
   if (!isNew) {
     actions.push({ label: 'Remove Password', run: async () => {
       if (!(await confirmDialog({ title: 'Remove password?', message: `"${section.name}" will no longer be encrypted. Anyone signed in to your account will be able to read it.`, okLabel: 'Remove' }))) return false;
-      await store.unprotectSection(section.id);
+      try {
+        await store.unprotectSection(section.id);
+      } catch (err) {
+        error.textContent = `Couldn't remove the password: ${err.message}`;
+        return false;
+      }
       app.unlocked.delete(section.id);
       toast('Password removed');
       app.renderNav();

@@ -721,6 +721,8 @@
   width: 8px;
   z-index: 5;
   cursor: col-resize;
+  /* A finger drag resizes the pane instead of panning the page. */
+  touch-action: none;
 }
 .pane-resizer:hover,
 .pane-resizer.dragging {
@@ -812,6 +814,10 @@
 .row-label.untitled {
   color: var(--text-3);
   font-style: italic;
+}
+/* --text-3 is under 4.5:1 on the selected grey (also .result-path below). */
+.row[aria-selected="true"] .row-label.untitled {
+  color: var(--text-2);
 }
 .row-meta {
   color: var(--text-3);
@@ -980,6 +986,9 @@
 }
 .result[aria-current="true"] {
   background: var(--bg-selected);
+}
+.result[aria-current="true"] .result-path {
+  color: var(--text-2);
 }
 .result-title {
   font-weight: 600;
@@ -1176,7 +1185,8 @@
   .rb-gallery {
     display: none;
   }
-  .rb-gallery-fallback {
+  /* (Outranks the hidden-by-default rule further down.) */
+  .ribbon-panel .rb-gallery-fallback {
     display: inline-flex !important;
   }
   .workspace {

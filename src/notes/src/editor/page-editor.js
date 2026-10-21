@@ -1,20 +1,31 @@
 import { h, debounce, clamp, announce } from '../lib/dom.js';
 import { uid } from '../lib/ids.js';
-import { sanitizeHtml, safeUrl } from '../lib/sanitize.js';
+import { sanitizeHtml, safeUrl, htmlToText } from '../lib/sanitize.js';
 import { formatPageDate, formatPageTime } from '../lib/dates.js';
 import { Emitter } from '../lib/emitter.js';
 import { modKey } from '../lib/platform.js';
 import { PAGE_COLORS } from '../data/colors.js';
 import { History, snapshotOf, applySnapshot } from './history.js';
 import { hydrate, serialize, fileSpan } from './embeds.js';
-import { ensureBlocks, fixNesting, editableRoot, currentRange, selectRange, placeCaret, isEmptyBody, textOffset, rangeFromOffsets, blockOf } from './selection.js';
-import { indent, moveBlock, toggleList, insertHtml, insertNode } from './format.js';
+import { ensureBlocks, fixNesting, editableRoot, currentRange, selectRange, placeCaret, isEmptyBody, textOffset, rangeFromOffsets, blockOf, isBlock, blocksInRange } from './selection.js';
+import { indent, moveBlock, toggleList, insertHtml, insertNode, dropRedundantStyles, applyingColor, ownStyleRuns } from './format.js';
 import { moveCell } from './table.js';
 import { setDone } from './tag-edit.js';
 import { InkTools } from './tools.js';
 
 export const ZOOMS = [0.25, 0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
 const TOP_OF_CONTENT = 128;
+
+/*
+ * Whether the styled spans an edit added are Chrome's frozen look of moved
+ * text, for dropRedundantStyles to clean. Not when they are the user's own
+ * formatting: a color just picked (Chrome reports editing commands with no
+ * input type, hence applyingColor), or Enter, which splits the formatted
+ * text it is in into two copies of its span.
+ */
+export function freezesStyles(e) {
+  return e.isTrusted && !/^(insertParagraph|insertLineBreak|formatFontColor|formatBackColor)$/.test(e.inputType) && !applyingColor();
+}
 
 /**
  * The page canvas: a free-form surface with a title header and absolutely
@@ -52,6 +63,20 @@ export class PageEditor extends Emitter {
     this.scroller.append(this.sizer);
     host.append(this.scroller);
 
+    // Elements added to the outlines since the last edit, so the spans
+    // Chrome's own editing leaves behind can be cleaned (dropRedundantStyles).
+    this.addedRecords = [];
+    this.additions = new MutationObserver((records) => this.addedRecords.push(...records));
+    this.additions.observe(this.outlinesEl, { childList: true, subtree: true });
+
+    // Leaving a list or a heading with Enter makes a <p> like every other
+    // paragraph, not a <div> that the next list nests inside.
+    try {
+      document.execCommand('defaultParagraphSeparator', false, 'p');
+    } catch {
+      /* not an editing browser (tests) */
+    }
+
     this.ink = new InkTools(this);
     this.bind();
     this.resizeObserver = new ResizeObserver(() => this.layout());
@@ -63,11 +88,14 @@ export class PageEditor extends Emitter {
   async open(page) {
     this.flush();
     this.page = page;
+    this.removedEmpty = null;
     this.dirty.clear();
     this.activeOutline = null;
     this.selectedOutlines.clear();
     this.ink.clearSelection();
     this.history.reset(snapshotOf(page));
+    this.caretBefore = undefined;
+    this.selBefore = null;
     await this.render();
     this.scroller.scrollTo(0, 0);
   }
@@ -88,8 +116,24 @@ export class PageEditor extends Emitter {
     }
     this.ink.render();
     this.layout();
+    this.takeAdded();
     await Promise.all(jobs);
     this.layout();
+  }
+
+  /** Styled elements added to the outlines since the last call. */
+  takeAdded() {
+    const records = [...this.addedRecords, ...this.additions.takeRecords()];
+    this.addedRecords = [];
+    const out = new Set();
+    for (const r of records) {
+      for (const n of r.addedNodes) {
+        if (n.nodeType !== 1 || !n.isConnected) continue;
+        if (n.hasAttribute('style')) out.add(n);
+        for (const el of n.querySelectorAll('[style]')) out.add(el);
+      }
+    }
+    return out;
   }
 
   updateDate() {
@@ -154,7 +198,12 @@ export class PageEditor extends Emitter {
       right = Math.max(right, inkB.x + inkB.w);
       bottom = Math.max(bottom, inkB.y + inkB.h);
     }
-    const w = Math.max(viewW, right + 240, 960);
+    // Room to the right to click and start another note. Phones (the app's
+    // 760px breakpoint) have no room to spare: there the page is as wide as
+    // the screen unless its content is wider, so it does not always scroll
+    // sideways. Note positions are absolute either way.
+    const phone = window.innerWidth <= 760;
+    const w = Math.max(viewW, right + (phone ? 16 : 240), phone ? 0 : 960);
     const hgt = Math.max(viewH, bottom + 320);
     this.pageEl.style.width = `${w}px`;
     this.pageEl.style.height = `${hgt}px`;
@@ -209,6 +258,8 @@ export class PageEditor extends Emitter {
     s.addEventListener('focusin', (e) => this.onFocusIn(e));
     s.addEventListener('focusout', (e) => this.onFocusOut(e));
     s.addEventListener('paste', (e) => this.onPaste(e));
+    s.addEventListener('copy', (e) => this.onCopy(e));
+    s.addEventListener('cut', (e) => this.onCopy(e, { cut: true }));
     s.addEventListener('drop', (e) => this.onDrop(e));
     s.addEventListener('dragover', (e) => {
       if (!this.readOnly && [...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
@@ -232,10 +283,29 @@ export class PageEditor extends Emitter {
       const range = currentRange();
       if (range && this.scroller.contains(range.commonAncestorContainer) && editableRoot(range.commonAncestorContainer)) {
         this.lastRange = range.cloneRange();
+        // Where the selection was before the next change, for undo to put it
+        // back. A selection is measured now (a formatting command splits its
+        // text nodes); a caret is kept as a node and offset, which typing
+        // leaves valid, and measured only when an edit starts there.
+        this.selBefore = range.collapsed ? { points: [range.startContainer, range.startOffset] } : { caret: this.caretAt([range.startContainer, range.startOffset, range.endContainer, range.endOffset]) };
         this.emit('selection');
       }
     };
     document.addEventListener('selectionchange', this.onSelectionChange);
+    // Paper is white: print a dark page as a light one (light text, ink
+    // and headings would barely show), then put it back.
+    this.onBeforePrint = () => {
+      if (this.surface === 'light') return;
+      this.surfaceBeforePrint = this.surface;
+      this.setSurface('light');
+    };
+    this.onAfterPrint = () => {
+      if (this.surfaceBeforePrint === undefined) return;
+      this.setSurface(this.surfaceBeforePrint);
+      this.surfaceBeforePrint = undefined;
+    };
+    window.addEventListener('beforeprint', this.onBeforePrint);
+    window.addEventListener('afterprint', this.onAfterPrint);
   }
 
   pagePoint(e) {
@@ -334,8 +404,12 @@ export class PageEditor extends Emitter {
     const start = this.pagePoint(e);
     const w0 = outline.offsetWidth;
     const model = this.outlineModel(outline);
+    let resized = false;
     const onMove = (ev) => {
       const p = this.pagePoint(ev);
+      // A click on the edge is not a resize: it would pin an auto width.
+      if (!resized && Math.abs(p.x - start.x) < 2) return;
+      resized = true;
       const w = Math.max(80, Math.round(w0 + p.x - start.x));
       outline.style.width = `${w}px`;
       outline.classList.remove('auto-width');
@@ -343,6 +417,7 @@ export class PageEditor extends Emitter {
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      if (!resized) return;
       model.w = Math.round(outline.offsetWidth);
       this.layout();
       this.changed({ structural: true });
@@ -399,6 +474,7 @@ export class PageEditor extends Emitter {
         const model = this.outlineModel(outline);
         this.page.outlines = this.page.outlines.filter((o) => o.id !== outline.dataset.id);
         outline.remove();
+        if (model) this.removedEmpty = { x: model.x, y: model.y };
         this.dirty.delete(outline);
         // A container that never held anything was never saved: no edit to record.
         if (model?.html) this.changed({ structural: true });
@@ -409,6 +485,11 @@ export class PageEditor extends Emitter {
 
   onInput(e) {
     if (this.readOnly || !this.page) return;
+    const own = this.ownStyles;
+    if (e.inputType !== 'deleteByDrag') this.ownStyles = null;
+    // The first change since the last undo step: remember the selection it
+    // started from (selectionchange has not seen the edit yet).
+    if (!this.dirty.size && !this.commitSoon.pending() && this.caretBefore === undefined) this.caretBefore = this.selBefore?.caret ?? this.caretAt(this.selBefore?.points);
     if (e.target === this.titleEl) {
       this.commitSoon();
       this.emit('title-input', this.titleEl.textContent.replace(/\n/g, ' '));
@@ -417,6 +498,21 @@ export class PageEditor extends Emitter {
     const outline = e.target.closest?.('.outline');
     if (!outline) return;
     this.dirty.add(outline);
+    // The resize handle follows its picture, and goes when the picture is deleted.
+    if (this.selectedImage) {
+      if (this.selectedImage.isConnected) this.placeImageHandle?.();
+      else this.clearImageSelection();
+    }
+    // Plain typing adds no styled elements: skip the cleanup, and drop what
+    // was recorded meanwhile (links made as you type, for one) so the
+    // records don't pile up through a long typing session.
+    if (e.inputType !== 'insertText' && e.inputType !== 'insertCompositionText' && !e.isComposing) {
+      const added = this.takeAdded();
+      if (added.size && freezesStyles(e)) dropRedundantStyles(added, { own: own?.runs });
+    } else if (this.addedRecords.length) {
+      this.addedRecords = [];
+      this.additions.takeRecords();
+    }
     if (e.inputType === 'insertText' && e.data === ' ') {
       this.autoLink();
       this.autoFormat(outline);
@@ -511,11 +607,51 @@ export class PageEditor extends Emitter {
     } else if (e.inputType === 'historyRedo') {
       e.preventDefault();
       this.redo();
+    } else this.noteOwnStyles(e);
+  }
+
+  /**
+   * Before a join (Backspace or Delete across two paragraphs, a selection
+   * deleted across several) or a drag-move, notes the formatting set on
+   * the text it moves (ownStyleRuns), so the cleanup of Chrome's frozen
+   * spans keeps it. A drag-move's drop comes after its delete.
+   */
+  noteOwnStyles(e) {
+    if (e.inputType === 'insertFromDrop' && this.ownStyles?.drag) return;
+    this.ownStyles = null;
+    if (!e.inputType?.startsWith('delete') || !e.getTargetRanges) return;
+    const blocks = new Set();
+    for (const t of e.getTargetRanges()) {
+      const root = editableRoot(t.startContainer);
+      if (!root?.classList.contains('outline-body') || !root.contains(t.endContainer)) continue;
+      const first = blockOf(t.startContainer, root) || root;
+      const last = blockOf(t.endContainer, root) || root;
+      // Deleting inside one paragraph adds no spans.
+      if (first === last && e.inputType !== 'deleteByDrag') continue;
+      const range = document.createRange();
+      try {
+        range.setStart(t.startContainer, t.startOffset);
+        range.setEnd(t.endContainer, t.endOffset);
+      } catch {
+        continue;
+      }
+      for (const b of [first, last, ...blocksInRange(range, root)]) blocks.add(b);
     }
+    if (blocks.size) this.ownStyles = { runs: ownStyleRuns(blocks), drag: e.inputType === 'deleteByDrag' };
   }
 
   onKeyDown(e) {
+    // An attachment is a button: Enter and Space open it, like a click.
+    const file = e.target.closest?.('.nt-file[role="button"]');
+    if (file && (e.key === 'Enter' || e.key === ' ') && !e.repeat) {
+      e.preventDefault();
+      this.emit('open-file', file.dataset);
+      return;
+    }
     if (this.readOnly) return;
+    // Keys pressed while an input method is composing (Escape cancels a
+    // candidate, Tab and arrows move between them) belong to the IME.
+    if (e.isComposing || e.keyCode === 229) return;
     const inBody = e.target.closest?.('.outline-body');
     const mod = modKey(e);
     if (mod && !e.altKey && e.code === 'KeyZ') {
@@ -535,7 +671,7 @@ export class PageEditor extends Emitter {
       if ((e.key === 'Delete' || e.key === 'Backspace') && (this.selectedOutlines.size || this.ink.selected.size) && !e.target.closest?.('.page-title')) {
         e.preventDefault();
         this.deleteSelectedOutlines();
-      } else if (e.key.startsWith('Arrow') && this.selectedOutlines.size && !e.target.closest?.('.page-title')) {
+      } else if (e.key.startsWith('Arrow') && (this.selectedOutlines.size || this.ink.selected.size) && !e.target.closest?.('.page-title')) {
         e.preventDefault();
         const step = e.shiftKey ? 1 : 10;
         const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
@@ -546,6 +682,7 @@ export class PageEditor extends Emitter {
           m.y = Math.max(0, m.y + dy);
           this.place(el, m);
         }
+        this.ink.nudge(dx, dy);
         this.layout();
         this.commitNudge ||= debounce(() => this.changed(), 400);
         this.commitNudge();
@@ -643,8 +780,41 @@ export class PageEditor extends Emitter {
 
   // ------------------------------------------------------------ paste/drop
 
+  /**
+   * Chrome leaves attachments out of a copy (they can't be selected as
+   * text) and copies equations without their TeX, so a selection holding
+   * either is put on the clipboard in the stored form, which paste
+   * rebuilds. Other copies keep the browser's own HTML.
+   */
+  onCopy(e, { cut = false } = {}) {
+    const range = currentRange();
+    if (!range || range.collapsed || !e.clipboardData) return;
+    const root = editableRoot(range.commonAncestorContainer);
+    if (!root?.classList.contains('outline-body') || !this.scroller.contains(root)) return;
+    let content = range.cloneContents();
+    if (!content.querySelector('.nt-file, .nt-math')) return;
+    // Items or cells copied without their list or table keep it. Text
+    // from inside one item or cell is copied as it is.
+    for (let n = range.commonAncestorContainer; n && n !== root; n = n.parentNode) {
+      if (n.nodeType === 1 && ['LI', 'TD', 'TH'].includes(n.tagName)) break;
+      if (n.nodeType !== 1 || !['UL', 'OL', 'TABLE', 'TBODY', 'THEAD', 'TR'].includes(n.tagName)) continue;
+      const wrap = n.cloneNode(false);
+      wrap.append(content);
+      content = wrap;
+    }
+    const holder = document.createElement('div');
+    holder.append(content);
+    const html = serialize(holder, { keepSrc: true });
+    e.preventDefault();
+    e.clipboardData.setData('text/html', html);
+    e.clipboardData.setData('text/plain', htmlToText(html));
+    if (cut && !this.readOnly) document.execCommand('delete');
+  }
+
   async onPaste(e) {
     if (this.readOnly) return;
+    // Pasted text is new: nothing of it was the user's own formatting here.
+    this.ownStyles = null;
     const inBody = e.target.closest?.('.outline-body');
     const inTitle = e.target.closest?.('.page-title');
     if (inTitle) return; // plaintext-only handles it
@@ -665,8 +835,82 @@ export class PageEditor extends Emitter {
       const el = this.createOutlineAt(48, this.nextFreeY());
       el.querySelector('.outline-body').focus();
     } else e.preventDefault();
-    if (html) insertHtml(sanitizeHtml(stripPasteWrapper(html)));
+    if (html) await this.pasteHtml(cleanPastedHtml(html));
     else if (text) insertHtml(textToHtml(text));
+  }
+
+  /**
+   * Inserts (sanitized) pasted HTML at the caret with its equations,
+   * attachments and pictures working at once, not only after a reload.
+   */
+  async pasteHtml(html) {
+    // Chrome's insertHTML splits the paragraph at a non-editable span, so
+    // equations and attachments go in as plain placeholders and are put
+    // back afterwards.
+    const tpl = document.implementation.createHTMLDocument('').createElement('div');
+    tpl.innerHTML = html;
+    const embeds = [...tpl.querySelectorAll('span.nt-file, span.nt-math')];
+    embeds.forEach((el, i) => {
+      const ph = tpl.ownerDocument.createElement('img');
+      ph.setAttribute('data-nt-embed', String(i));
+      el.replaceWith(ph);
+    });
+    const body = editableRoot(currentRange()?.commonAncestorContainer);
+    const before = new Set(body?.querySelectorAll('[data-asset]') || []);
+    insertHtml(tpl.innerHTML);
+    if (!body?.classList.contains('outline-body') || !body.isConnected) return;
+    for (const ph of body.querySelectorAll('img[data-nt-embed]')) {
+      const el = embeds[Number(ph.dataset.ntEmbed)];
+      if (!el) {
+        ph.remove();
+        continue;
+      }
+      // An embed's look comes from the app; drop styles a copy froze on it.
+      const embed = document.importNode(el, true);
+      embed.removeAttribute('style');
+      ph.replaceWith(embed);
+    }
+    const outline = body.closest('.outline');
+    this.dirty.add(outline);
+    const added = [...body.querySelectorAll('[data-asset]')].filter((el) => !before.has(el));
+    await hydrate(body, this.store);
+    if (added.length && (await this.adoptAssets(added))) await hydrate(body, this.store);
+    this.dirty.add(outline);
+    this.commit();
+  }
+
+  /**
+   * Gives pasted pictures and attachments their own copy of the file, saved
+   * for this page's section (sealed when it is protected): a shared file
+   * would break the other page's copy when either is re-encrypted. Files
+   * that can't be read (a locked section's, or deleted ones) are replaced
+   * by their name, with a message. Returns whether anything changed.
+   */
+  async adoptAssets(elements) {
+    const sectionId = this.store.findPage?.(this.page?.id)?.section.id;
+    const ids = [...new Set(elements.map((el) => el.dataset.asset))];
+    let changed = false;
+    for (const id of ids) {
+      const els = elements.filter((el) => el.dataset.asset === id && el.isConnected);
+      if (!els.length) continue;
+      const blob = await Promise.resolve(this.store.assetBlob?.(id)).catch(() => null);
+      if (blob) {
+        const ext = id.endsWith('.sealed') ? id.split('.').at(-2) : id.split('.').pop();
+        const fresh = await this.store.saveAsset(blob instanceof Blob ? blob : new Blob([blob]), `x.${ext}`, { sectionId }).catch(() => null);
+        if (!fresh) continue;
+        for (const el of els) {
+          el.dataset.asset = fresh;
+          if (el.tagName === 'IMG') el.removeAttribute('src');
+          else delete el.dataset.hydrated;
+        }
+      } else {
+        const name = els[0].dataset.name || els[0].getAttribute('alt') || 'picture';
+        for (const el of els) el.replaceWith(document.createTextNode(el.tagName === 'IMG' ? el.getAttribute('alt') || '' : `[${el.dataset.name || 'attachment'}]`));
+        this.emit('insert-failed', { file: { name }, err: new Error("it is in a locked section or was deleted") });
+      }
+      changed = true;
+    }
+    return changed;
   }
 
   async onDrop(e) {
@@ -709,8 +953,22 @@ export class PageEditor extends Emitter {
         return this.lastRange;
       }
     }
-    const el = this.createOutlineAt(48, this.nextFreeY());
+    // A click on the page made an empty container that closed when focus
+    // moved to the ribbon or a dialog: bring it back where it was.
+    // (Removing it left the saved caret in the containers' parent.)
+    const at = this.removedEmpty && this.lastRange?.commonAncestorContainer === this.outlinesEl ? this.removedEmpty : null;
+    const el = at ? this.createOutlineAt(at.x, at.y + 12) : this.createOutlineAt(48, this.nextFreeY());
     return currentRange() || (el && currentRange());
+  }
+
+  /**
+   * Saves the selection a command just made in a note (a font or size from
+   * the ribbon boxes re-selects the text it moved) before selectionchange
+   * records it: the saved range may have collapsed as its text moved.
+   */
+  rememberRange() {
+    const cur = currentRange();
+    if (cur && this.scroller.contains(cur.commonAncestorContainer) && editableRoot(cur.commonAncestorContainer)) this.lastRange = cur.cloneRange();
   }
 
   /** Restores the last caret (after a ribbon control took focus). */
@@ -723,18 +981,29 @@ export class PageEditor extends Emitter {
     return true;
   }
 
+  /** Pasted or dropped files. A failed upload is reported, not dropped silently. */
   async insertFiles(files) {
     for (const file of files) {
-      if (file.type.startsWith('image/')) await this.insertImage(file);
-      else await this.insertAttachment(file);
+      try {
+        if (file.type.startsWith('image/')) await this.insertImage(file);
+        else await this.insertAttachment(file);
+      } catch (err) {
+        console.error(err);
+        this.emit('insert-failed', { file, err });
+      }
     }
   }
 
   async insertImage(file, { alt = '' } = {}) {
+    // A picture the browser can't show (HEIC outside Safari, a damaged
+    // file) goes in as an attachment instead of a broken image.
+    const probe = URL.createObjectURL(file);
+    const width = await imageWidth(probe);
+    URL.revokeObjectURL(probe);
+    if (width === null) return this.insertAttachment(file);
     this.ensureCaret();
     const id = await this.store.saveAsset(file, file.name || 'picture.png', { sectionId: this.store.findPage?.(this.page.id)?.section.id });
     const url = await this.store.assetUrl(id);
-    const width = await imageWidth(url);
     const style = width > 600 ? ' style="width: 600px"' : '';
     this.ensureCaret();
     insertHtml(`<img data-asset="${id}" src="${url}" alt="${escapeAttr(alt || file.name || '')}"${style}>`);
@@ -776,6 +1045,7 @@ export class PageEditor extends Emitter {
     outline.append(handle);
     placeHandle();
     this.imageHandle = handle;
+    this.placeImageHandle = placeHandle;
     handle.addEventListener('pointerdown', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -811,6 +1081,7 @@ export class PageEditor extends Emitter {
     this.selectedImage = null;
     this.imageHandle?.remove();
     this.imageHandle = null;
+    this.placeImageHandle = null;
   }
 
   // ------------------------------------------------------------ commit/undo
@@ -835,10 +1106,29 @@ export class PageEditor extends Emitter {
       this.page.title = titleNow;
       any = true;
     }
-    if (!any) return;
+    if (!any) {
+      this.caretBefore = undefined;
+      return;
+    }
     this.store.pageChanged(this.page, { title: this.page.title });
-    this.history.push(snapshotOf(this.page), this.caret());
+    this.history.push(snapshotOf(this.page), this.caret(), this.caretBefore);
+    this.caretBefore = undefined;
     this.emit('change', {});
+  }
+
+  /**
+   * Follows assets the store re-saved under new ids (re-encrypted when a
+   * section is protected or a page moves): the page on screen and its undo
+   * history must not bring the old, deleted ids back.
+   */
+  renameAssets(map) {
+    for (const [from, to] of Object.entries(map)) {
+      for (const el of this.outlinesEl.querySelectorAll(`[data-asset="${CSS.escape(from)}"]`)) el.dataset.asset = to;
+      for (const entry of this.history.stack) {
+        const doc = entry.snapshot?.doc;
+        if (typeof doc === 'string' && doc.includes(from)) entry.snapshot = { ...entry.snapshot, doc: doc.split(`data-asset=\\"${from}\\"`).join(`data-asset=\\"${to}\\"`) };
+      }
+    }
   }
 
   /** Records a structural change (move, delete, ink, page settings). */
@@ -853,12 +1143,20 @@ export class PageEditor extends Emitter {
 
   caret() {
     const range = currentRange();
-    if (!range) return null;
-    const root = editableRoot(range.startContainer);
+    return range ? this.caretAt([range.startContainer, range.startOffset, range.endContainer, range.endOffset]) : null;
+  }
+
+  /** A selection's boundary points as character offsets in its container (or the title). */
+  caretAt(points) {
+    const [sc, so, ec = sc, eo = so] = points || [];
+    const root = sc?.isConnected && editableRoot(sc);
     if (!root || !this.scroller.contains(root)) return null;
-    if (root === this.titleEl) return { title: true, start: textOffset(root, range.startContainer, range.startOffset) };
+    const fits = (n, o) => o <= (n.nodeType === 3 ? n.length : n.childNodes.length);
+    if (!fits(sc, so) || !fits(ec, eo)) return null;
+    if (root === this.titleEl) return { title: true, start: textOffset(root, sc, so) };
     const outline = root.closest('.outline');
-    return { outlineId: outline.dataset.id, start: textOffset(root, range.startContainer, range.startOffset), end: textOffset(root, range.endContainer, range.endOffset) };
+    const end = ec?.isConnected && root.contains(ec) ? textOffset(root, ec, eo) : textOffset(root, sc, so);
+    return { outlineId: outline.dataset.id, start: textOffset(root, sc, so), end };
   }
 
   restoreCaret(caret) {
@@ -888,10 +1186,15 @@ export class PageEditor extends Emitter {
   }
 
   async restoreSnapshot(entry) {
+    const hadFocus = this.scroller.contains(document.activeElement);
     applySnapshot(this.page, entry.snapshot);
     this.store.pageChanged(this.page, { title: this.page.title });
     await this.render();
     this.restoreCaret(entry.caret);
+    // When the restored state has no container for the caret (undoing the
+    // first typing in a new one), keep focus on the page so the next
+    // Ctrl+Z or Ctrl+Y still reaches the editor.
+    if (hadFocus && !this.scroller.contains(document.activeElement)) this.scroller.focus({ preventScroll: true });
     this.emit('change', { title: true });
   }
 
@@ -930,7 +1233,10 @@ export class PageEditor extends Emitter {
   destroy() {
     this.flush();
     document.removeEventListener('selectionchange', this.onSelectionChange);
+    window.removeEventListener('beforeprint', this.onBeforePrint);
+    window.removeEventListener('afterprint', this.onAfterPrint);
     this.resizeObserver.disconnect();
+    this.additions.disconnect();
     this.scroller.remove();
   }
 }
@@ -956,6 +1262,67 @@ function stripPasteWrapper(html) {
   return m ? m[1] : html;
 }
 
+/**
+ * Pasted HTML ready to insert: Word's list paragraphs become real lists,
+ * the result is sanitized, and the line breaks between blocks are dropped
+ * (Chrome turns them into empty paragraphs).
+ */
+export function cleanPastedHtml(html) {
+  const doc = document.implementation.createHTMLDocument('');
+  const root = doc.createElement('div');
+  root.innerHTML = stripPasteWrapper(String(html ?? ''));
+  wordLists(root, doc);
+  root.innerHTML = sanitizeHtml(root.innerHTML);
+  for (const el of [root, ...root.querySelectorAll('ul, ol, table, tbody, thead, tr, td, th, li, blockquote, div')]) {
+    for (const n of [...el.childNodes]) {
+      if (n.nodeType !== 3 || n.nodeValue.replace(/[\t\n\r ]/g, '')) continue;
+      if (isBlock(n.previousSibling) || isBlock(n.nextSibling)) n.remove();
+    }
+  }
+  return root.innerHTML;
+}
+
+/*
+ * Word writes a bulleted or numbered list as paragraphs styled
+ * "mso-list:l1 level2 lfo1" whose bullet or number is literal text in a
+ * span marked "mso-list:Ignore". Rebuild them as nested <ul>/<ol>.
+ */
+function wordLists(root, doc) {
+  let stack = [];
+  for (const p of root.querySelectorAll('p, h1, h2, h3, h4, h5, h6')) {
+    const m = /mso-list:\s*l\d+\s+level(\d+)/i.exec(p.getAttribute('style') || '');
+    if (!m) continue;
+    const level = Number(m[1]);
+    let marker = '';
+    const ignore = [...p.querySelectorAll('[style]')].find((el) => /mso-list:\s*ignore/i.test(el.getAttribute('style')));
+    if (ignore) {
+      marker = ignore.textContent.replace(/[\s\u00a0]/g, '');
+      // Drop the marker and the wrappers it leaves empty, never the item text.
+      let gone = ignore;
+      while (gone.parentNode !== p && !gone.parentNode.textContent.replace(gone.textContent, '').trim()) gone = gone.parentNode;
+      gone.remove();
+    }
+    const ordered = /^[0-9a-z]{1,5}[.)]$/i.test(marker);
+    // A list continues while its paragraphs follow one another.
+    let prev = p.previousSibling;
+    while (prev && prev.nodeType === 3 && !prev.nodeValue.trim()) prev = prev.previousSibling;
+    if (!stack.length || prev !== stack[0].list) stack = [];
+    while (stack.length && stack.at(-1).level > level) stack.pop();
+    let top = stack.at(-1);
+    if (!top || top.level < level) {
+      const list = doc.createElement(ordered ? 'ol' : 'ul');
+      if (top) top.list.lastElementChild.append(list);
+      else p.before(list);
+      top = { level, list };
+      stack.push(top);
+    }
+    const li = doc.createElement('li');
+    while (p.firstChild) li.append(p.firstChild);
+    top.list.append(li);
+    p.remove();
+  }
+}
+
 /** Plain text to paragraphs, keeping URLs as links. */
 export function textToHtml(text) {
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -969,11 +1336,12 @@ function escapeAttr(s) {
   return String(s).replace(/[&"<>]/g, (c) => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' })[c]);
 }
 
+/** The picture's natural width, or null when the browser can't decode it. */
 function imageWidth(url) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img.naturalWidth);
-    img.onerror = () => resolve(0);
+    img.onerror = () => resolve(null);
     img.src = url;
   });
 }

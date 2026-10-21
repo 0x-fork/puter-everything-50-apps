@@ -163,6 +163,273 @@ describe('password-protected sections: edge cases', () => {
   });
 });
 
+describe('password-protected sections: saving while offline', () => {
+  it('keeps an edit whose save failed when the section locks', async () => {
+    const { backend, store, section, meta } = await setup();
+    await store.protectSection(section.id, 'pw');
+    const page = await store.loadPage(meta.id);
+    page.outlines[0].html = '<p>written offline</p>';
+    store.pageChanged(page);
+    backend.failNext = 1000;
+    await store.lockSection(section.id);
+    expect(store.status).toBe('error');
+    backend.failNext = 0;
+    // Unlocking before the retry ran opens the edit, not the stale file.
+    expect(await store.unlockSection(section.id, 'pw')).toBe(true);
+    expect((await store.loadPage(meta.id)).outlines[0].html).toContain('written offline');
+    await store.lockSection(section.id);
+    await store.flush();
+    expect(store.status).toBe('saved');
+    expect(allText(backend)).not.toContain('written offline');
+    const fresh = new Store(backend, { saveDelay: 0 });
+    await fresh.load();
+    await fresh.unlockSection(section.id, 'pw');
+    expect((await fresh.loadPage(meta.id)).outlines[0].html).toContain('written offline');
+  });
+});
+
+describe('password-protected sections: page versions', () => {
+  it('leaves no plaintext version behind when a page is protected right after an edit', async () => {
+    const { backend, section, meta } = await setup();
+    // A new session, so the first edit keeps the loaded page as a version.
+    const store = new Store(backend, { saveDelay: 0 });
+    await store.load();
+    const page = await store.loadPage(meta.id);
+    backend.delay = 300;
+    page.outlines[0].html = '<p>moved to the cave</p>';
+    store.pageChanged(page);
+    await store.protectSection(section.id, 'pw');
+    backend.delay = 0;
+    await new Promise((r) => setTimeout(r, 400));
+    await store.flush();
+    expect(allText(backend)).not.toContain('treasure');
+    expect(allText(backend)).not.toContain('cave');
+  });
+});
+
+describe('password-protected sections: Deleted Notes', () => {
+  it('locks a section that was deleted while unlocked', async () => {
+    const { store, section, meta } = await setup();
+    await store.protectSection(section.id, 'pw');
+    const entry = store.deleteNode(section.id);
+    await store.lockAll();
+    expect(store.keys.size).toBe(0);
+    expect(store.pages.has(meta.id)).toBe(false);
+    store.restore(entry.id);
+    expect(store.isLocked(section.id)).toBe(true);
+    expect(store.section(section.id).pages).toEqual([]);
+    expect(await store.unlockSection(section.id, 'pw')).toBe(true);
+    expect(store.section(section.id).pages.map((p) => p.title)).toEqual(['Secret plans']);
+  });
+});
+
+describe('password-protected sections: other devices', () => {
+  it('locks a section whose password was changed on another device', async () => {
+    const { backend, store, section } = await setup();
+    await store.protectSection(section.id, 'old');
+    const other = new Store(backend, { saveDelay: 0 });
+    await other.load();
+    expect(await other.unlockSection(section.id, 'old')).toBe(true);
+    await new Promise((r) => setTimeout(r, 5));
+    await store.protectSection(section.id, 'new');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await other.refresh()).toBe(true);
+    expect(other.isLocked(section.id)).toBe(true);
+    // A later save of that notebook must keep the section's pages.
+    other.renameNotebook(other.notebooks[0].id, 'Renamed');
+    await other.flush();
+    const fresh = new Store(backend, { saveDelay: 0 });
+    await fresh.load();
+    expect(await fresh.unlockSection(section.id, 'new')).toBe(true);
+    expect(fresh.section(section.id).pages.map((p) => p.title)).toEqual(['Secret plans']);
+  });
+});
+
+describe('password-protected sections: removing the password', () => {
+  it('keeps deleted pages restorable', async () => {
+    const { backend, store, section, meta } = await setup();
+    await store.protectSection(section.id, 'pw');
+    const page = await store.loadPage(meta.id);
+    const asset = await store.saveAsset(new Blob(['png bytes'], { type: 'image/png' }), 'a.png', { sectionId: section.id });
+    page.outlines[0].html += `<p><img data-asset="${asset}"></p>`;
+    store.pageChanged(page);
+    const entry = store.deletePage(meta.id);
+    await store.lockSection(section.id);
+    expect(await store.unlockSection(section.id, 'pw')).toBe(true);
+    expect(await store.unprotectSection(section.id)).toBe(true);
+    const fresh = new Store(backend, { saveDelay: 0 });
+    await fresh.load();
+    expect(await fresh.openTrash(entry.id)).toBe(true);
+    expect(fresh.trash[0].pages[0].title).toBe('Secret plans');
+    expect(fresh.restore(entry.id).pageId).toBe(meta.id);
+    const back = await fresh.loadPage(meta.id);
+    expect(back.outlines[0].html).toContain('treasure');
+    const img = back.outlines[0].html.match(/data-asset="([^"]+)"/)[1];
+    expect(img.endsWith('.sealed')).toBe(false);
+    expect(await (await fresh.assetBlob(img)).text()).toBe('png bytes');
+  });
+});
+
+describe('password-protected sections: restoring deleted pages', () => {
+  it('encrypts a page restored into a section protected since it was deleted', async () => {
+    const { backend, store, section, meta } = await setup();
+    const entry = store.deletePage(meta.id);
+    await store.protectSection(section.id, 'pw');
+    store.restore(entry.id);
+    await new Promise((r) => setTimeout(r, 10));
+    await store.flush();
+    expect(allText(backend)).not.toContain('treasure');
+    await store.lockSection(section.id);
+    expect(await store.unlockSection(section.id, 'pw')).toBe(true);
+    expect((await store.loadPage(meta.id)).outlines[0].html).toContain('treasure');
+  });
+
+  it('keeps a page readable when its protected section was deleted and it lands elsewhere', async () => {
+    const { backend, store, section, meta } = await setup();
+    const other = store.createSection(store.notebooks[0].id, { name: 'Journal' });
+    await store.protectSection(section.id, 'one');
+    await store.protectSection(other.id, 'two');
+    const entry = store.deletePage(meta.id);
+    store.deleteNode(section.id);
+    for (const s of [...store.sectionsOf(store.notebooks[0])]) if (s.id !== other.id) store.deleteNode(s.id);
+    expect(await store.openTrash(entry.id)).toBe(true);
+    expect(store.restore(entry.id).sectionId).toBe(other.id);
+    await new Promise((r) => setTimeout(r, 10));
+    await store.flush();
+    await store.lockAll();
+    expect(allText(backend)).not.toContain('treasure');
+    const fresh = new Store(backend, { saveDelay: 0 });
+    await fresh.load();
+    expect(await fresh.unlockSection(other.id, 'two')).toBe(true);
+    expect((await fresh.loadPage(meta.id)).outlines[0].html).toContain('treasure');
+  });
+});
+
+describe('password-protected sections: re-encrypting pictures', () => {
+  async function withPicture() {
+    const { backend, store, section, meta } = await setup();
+    const page = await store.loadPage(meta.id);
+    const asset = await store.saveAsset(new Blob(['png bytes'], { type: 'image/png' }), 'a.png');
+    page.outlines[0].html += `<p><img data-asset="${asset}"></p>`;
+    store.pageChanged(page);
+    await store.flush();
+    return { backend, store, section, meta, asset };
+  }
+  async function pictureAfterReload(backend, meta, unlock) {
+    const fresh = new Store(backend, { saveDelay: 0 });
+    await fresh.load();
+    if (unlock) await fresh.unlockSection(...unlock);
+    const page = await fresh.loadPage(meta.id);
+    const id = page.outlines[0].html.match(/data-asset="([^"]+)"/)[1];
+    return fresh.assetBlob(id);
+  }
+
+  it('keeps the old picture until the page pointing at the new one is saved', async () => {
+    const { backend, store, section, meta, asset } = await withPicture();
+    const write = backend.writeJSON;
+    backend.writeJSON = async (path, value) => {
+      if (path.startsWith('pages/')) throw new Error('Simulated network failure');
+      return write(path, value);
+    };
+    await store.protectSection(section.id, 'pw');
+    backend.writeJSON = write;
+    // The session ends before the page save is retried: the stored page
+    // still points at the old picture, which must still be there.
+    expect(await pictureAfterReload(backend, meta, [section.id, 'pw'])).toBeTruthy();
+    await store.flush();
+    expect(backend.files.has(`assets/${asset}`)).toBe(false);
+    expect(await (await pictureAfterReload(backend, meta, [section.id, 'pw'])).text()).toBe('png bytes');
+  });
+
+  it('does the same when a page with a picture moves into a protected section', async () => {
+    const { backend, store, meta, asset } = await withPicture();
+    const safe = store.createSection(store.notebooks[0].id, { name: 'Safe' });
+    await store.protectSection(safe.id, 'pw');
+    const write = backend.writeJSON;
+    backend.writeJSON = async (path, value) => {
+      if (path.startsWith('pages/')) throw new Error('Simulated network failure');
+      return write(path, value);
+    };
+    store.movePage(meta.id, { sectionId: safe.id });
+    await new Promise((r) => setTimeout(r, 20));
+    backend.writeJSON = write;
+    expect(await pictureAfterReload(backend, meta, [safe.id, 'pw'])).toBeTruthy();
+    await store.flush();
+    expect(backend.files.has(`assets/${asset}`)).toBe(false);
+  });
+});
+
+describe('copies and their pictures', () => {
+  it("moving a page's copy into a protected section leaves the original's picture alone", async () => {
+    const { backend, store, meta } = await setup();
+    const page = await store.loadPage(meta.id);
+    const asset = await store.saveAsset(new Blob(['png bytes'], { type: 'image/png' }), 'a.png');
+    page.outlines[0].html += `<p><img data-asset="${asset}"></p>`;
+    store.pageChanged(page);
+    const copy = await store.copyPage(meta.id);
+    await store.flush();
+    // Later, in another session where the original isn't open:
+    const later = new Store(backend, { saveDelay: 0 });
+    await later.load();
+    const safe = later.createSection(later.notebooks[0].id, { name: 'Safe' });
+    await later.protectSection(safe.id, 'pw');
+    later.movePage(copy.id, { sectionId: safe.id });
+    await new Promise((r) => setTimeout(r, 20));
+    await later.flush();
+    const original = await later.loadPage(meta.id);
+    const id = original.outlines[0].html.match(/data-asset="([^"]+)"/)[1];
+    expect(await (await later.assetBlob(id)).text()).toBe('png bytes');
+  });
+});
+
+describe('page versions and protected sections', () => {
+  const versionsOf = (backend, id) => [`versions/${id}.json`].filter((k) => backend.files.has(k));
+  it('deletes the plaintext versions of a page moved into a protected section', async () => {
+    const { backend, store, meta } = await setup();
+    await store.addVersion(meta.id, { id: meta.id, title: 'Old plans', outlines: [], ink: [] });
+    const safe = store.createSection(store.notebooks[0].id, { name: 'Safe' });
+    await store.protectSection(safe.id, 'pw');
+    store.movePage(meta.id, { sectionId: safe.id });
+    await new Promise((r) => setTimeout(r, 20));
+    await store.flush();
+    expect(versionsOf(backend, meta.id)).toEqual([]);
+    expect(allText(backend)).not.toContain('Old plans');
+  });
+
+  it('deletes them for a page restored into a protected section', async () => {
+    const { backend, store, section, meta } = await setup();
+    await store.addVersion(meta.id, { id: meta.id, title: 'Old plans', outlines: [], ink: [] });
+    const entry = store.deletePage(meta.id);
+    await store.protectSection(section.id, 'pw');
+    store.restore(entry.id);
+    await new Promise((r) => setTimeout(r, 20));
+    await store.flush();
+    expect(versionsOf(backend, meta.id)).toEqual([]);
+  });
+});
+
+describe('password-protected sections: damaged page list', () => {
+  it('stays locked and keeps the stored list when it cannot be decrypted', async () => {
+    const { backend, store, section } = await setup();
+    await store.protectSection(section.id, 'pw');
+    await store.lockSection(section.id);
+    await store.flush();
+    const nbId = store.notebooks[0].id;
+    const path = `notebooks/${nbId}.json`;
+    const manifest = JSON.parse(backend.files.get(path));
+    const stored = manifest.sections.find((s) => s.id === section.id);
+    stored.sealed = stored.sealed.slice(0, -8) + 'AAAAAAAA';
+    backend.files.set(path, JSON.stringify(manifest));
+    const fresh = new Store(backend, { saveDelay: 0 });
+    await fresh.load();
+    await expect(fresh.unlockSection(section.id, 'pw')).rejects.toMatchObject({ damaged: true });
+    expect(fresh.isLocked(section.id)).toBe(true);
+    fresh.renameNotebook(nbId, 'Renamed');
+    await fresh.flush();
+    expect(JSON.parse(backend.files.get(path)).sections.find((s) => s.id === section.id).sealed).toBe(stored.sealed);
+  });
+});
+
 describe('asset ids', () => {
   it('only accepts generated names', async () => {
     const { isAssetId } = await import('../src/data/store.js');

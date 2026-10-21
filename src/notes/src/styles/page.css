@@ -25,6 +25,19 @@
 .page.surface-light {
   --note-text: #1b1b1b;
 }
+/* A light page in the dark theme (Switch Background, printing) keeps the
+   light theme's page chrome, so the date, container frame and find
+   marks stay readable on white. */
+:root[data-theme-resolved="dark"] .page.surface-light {
+  --page-meta: #6e6e6e;
+  --page-title-line: #a0a0a0;
+  --outline-line: #c6c6c6;
+  --outline-bar: #ededed;
+  --text-3: #6e6e6e;
+  --bg-hover: rgba(0, 0, 0, 0.05);
+  --find-hit: #ffe36e;
+  --find-current: #ff9f2e;
+}
 .canvas-scroll.surface-light {
   --page-bg-default: #ffffff;
 }
@@ -49,6 +62,14 @@
   outline: none;
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* Each paragraph takes its direction from its own text, so an Arabic or
+   Hebrew line reads right to left (and starts at the right) among
+   English ones. */
+.page-title,
+.outline-body,
+.outline-body :is(p, div, h1, h2, h3, h4, h5, h6, li, blockquote, pre, td, th) {
+  unicode-bidi: plaintext;
 }
 .page-title:empty::before {
   content: attr(data-placeholder);
@@ -75,6 +96,9 @@
 }
 .page.read-only .page-meta button {
   pointer-events: none;
+}
+.page.read-only .page-meta span {
+  padding: 1px 2px;
 }
 
 /* note containers */
@@ -305,7 +329,9 @@
   height: 16px;
   margin: 0 5px 0 -2px;
   vertical-align: -3px;
-  background: var(--tag-color, #2f6fd0);
+  /* A gradient, not background-color: Chrome carries an inline element's
+     background color into text typed after deleting it. */
+  background-image: linear-gradient(var(--tag-color, #2f6fd0), var(--tag-color, #2f6fd0));
   mask: var(--tag-icon) center / 16px 16px no-repeat;
   -webkit-mask: var(--tag-icon) center / 16px 16px no-repeat;
   user-select: none;
@@ -572,6 +598,30 @@ p:has(> .nt-tag[data-done="true"]) {
 .read-only-banner .spacer {
   flex: 1;
 }
+.read-only-banner .banner-narrow {
+  display: none;
+}
+@media (max-width: 760px) {
+  /* One line on phones: a short label and the bare date. */
+  .read-only-banner {
+    gap: 8px;
+    padding: 8px 12px;
+    white-space: nowrap;
+  }
+  .read-only-banner .banner-wide {
+    display: none;
+  }
+  .read-only-banner .banner-narrow {
+    display: inline;
+  }
+  .read-only-banner .banner-published {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+}
 
 @media (max-width: 760px) {
   .page-header {
@@ -626,6 +676,19 @@ p:has(> .nt-tag[data-done="true"]) {
   }
   .outline::before {
     display: none;
+  }
+  /* Tags are masked backgrounds, and highlights, tag shading and table
+     shading are backgrounds too: print them even when the browser leaves
+     background graphics out, or they vanish from the paper. */
+  .outline-body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  /* Find on Page marks are not part of the note. */
+  ::highlight(nt-find),
+  ::highlight(nt-find-current) {
+    background-color: transparent;
+    color: inherit;
   }
 }
 
