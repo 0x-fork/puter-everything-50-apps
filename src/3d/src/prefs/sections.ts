@@ -14,6 +14,8 @@ import { registerPrefSection } from './editor';
 import { pBool, pNum, pEnum, pText, pColor, note, infoRow } from './ui';
 import { setPref } from './store';
 import { ndofDevices } from './ndof';
+import { excludedPathsRows } from './pathlists';
+import { appTemplatesPanel } from './apptemplates';
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -220,12 +222,14 @@ registerPrefSection({
     panel('pf-an-keys', 'Keyframes', () => [
       pBool('use_keyframe_insert_needed', 'Only Insert Needed', 'Skip keyframes that would not change the curve'),
       pBool('use_insertkey_xyz_to_rgb', 'XYZ to RGB', 'New location, rotation and scale curves are coloured red, green and blue'),
+      pBool('use_auto_keyframe_insert_available', 'Only Insert Available', 'Auto keying only keys channels that already have animation'),
     ]),
     panel('pf-an-fcurves', 'F-Curves', () => [
       pNum('fcurve_unselected_alpha', 'Unselected Opacity', { min: 0.01, max: 1, slider: true, precision: 2, tip: 'Opacity of unselected curves in the Graph Editor' }),
       pBool('show_only_selected_curve_keyframes', 'Only Selected Keyframes Handles', 'Show keyframes and handles only on selected curves'),
       pEnum('keyframe_new_interpolation_type', 'Default Interpolation', [E('CONSTANT', 'Constant'), E('LINEAR', 'Linear'), E('BEZIER', 'Bézier')]),
       pEnum('keyframe_new_handle_type', 'Default Handles', [E('FREE', 'Free'), E('ALIGNED', 'Aligned'), E('VECTOR', 'Vector'), E('AUTO', 'Automatic'), E('AUTO_CLAMPED', 'Auto Clamped')]),
+      pEnum('fcurve_new_auto_smoothing', 'Default Smoothing Mode', [E('NONE', 'None'), E('CONT_ACCEL', 'Continuous Acceleration')]),
       pBool('use_negative_frames', 'Allow Negative Frames', 'The current frame may go below 0'),
     ]),
   ],
@@ -412,7 +416,9 @@ registerPrefSection({
     panel('pf-textfiles', 'Text Files', () => [pBool('use_tabs_as_spaces', 'Tabs as Spaces', 'The Tab key in the Text Editor inserts spaces')]),
     panel('pf-autorun', 'Auto Run Scripts', () => [
       pBool('use_scripts_auto_execute', 'Auto Run Scripts', 'Run the texts marked Text ▸ Register when a project is opened. Only turn this on for projects you trust: scripts can change anything in the project.'),
+      excludedPathsRows(),
     ]),
+    appTemplatesPanel(),
     panel('pf-fb', 'File Browser', () => [
       pBool('use_filter_files', 'Filter Files', 'New File Browsers show only projects, images, models and texts'),
       pBool('show_hidden_files_datablocks', 'Show Hidden Files', 'New File Browsers list files whose names start with a dot'),

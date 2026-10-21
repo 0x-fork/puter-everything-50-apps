@@ -113,12 +113,12 @@ describe('container', () => {
 
 describe('robustness', () => {
   it('rejects non-blend data with a clear error', async () => {
-    await expect(readBlend(new TextEncoder().encode('hello world, not a blend'))).rejects.toThrow(/Not a Blender file/);
+    await expect(readBlend(new TextEncoder().encode('hello world, not a blend'))).rejects.toThrow(/Not a .blend file/);
     await expect(readBlend(new Uint8Array(0))).rejects.toThrow(BlendError);
   });
   it('rejects truncated files', async () => {
     for (const frac of [0.01, 0.3, 0.7, 0.999]) {
-      await expect(readBlend(raw.slice(0, Math.floor(raw.length * frac)))).rejects.toThrow(/Truncated|extends past end|Not a Blender/);
+      await expect(readBlend(raw.slice(0, Math.floor(raw.length * frac)))).rejects.toThrow(/Truncated|extends past end|Not a .blend file/);
     }
   });
   it('rejects corrupt compressed data and corrupt SDNA', async () => {
@@ -497,9 +497,10 @@ describe('animation (vs expected, layered/slotted actions)', () => {
 });
 
 // A version 4.3 .blend file (classic 12-byte header, 24-byte block headers, CustomData mesh
-// layers) read from a local install path when present; the expectations below are for this file.
-const LEGACY_43 = '/Applications/Blender.app/Contents/Resources/5.2/datafiles/assets/brushes/essentials_brushes-mesh_vertex.blend';
-describe.skipIf(!existsSync(LEGACY_43))('version 4.3 .blend file (classic layout)', () => {
+// layers), read from the path in LEGACY_43_BLEND when it is set; the expectations below are for
+// that file (a vertex-paint brush library containing a "Suzanne" preview mesh).
+const LEGACY_43 = process.env.LEGACY_43_BLEND ?? '';
+describe.skipIf(!LEGACY_43 || !existsSync(LEGACY_43))('version 4.3 .blend file (classic layout)', () => {
   it('reads the classic layout and CustomData mesh layers', async () => {
     const r = await readBlend(new Uint8Array(readFileSync(LEGACY_43)));
     expect(r.version).toBe('4.3');
@@ -518,7 +519,9 @@ describe.skipIf(!existsSync(LEGACY_43))('version 4.3 .blend file (classic layout
 
 describe('import modes', () => {
   it('reports what was skipped', () => {
-    expect(imp.warnings.some((w) => w.includes('Additional UV maps') && w.includes('Second'))).toBe(true);
+    // further UV maps are kept (as inactive maps), not dropped
+    expect(imp.warnings.some((w) => w.includes('Additional UV maps'))).toBe(false);
+    expect(Object.values(doc.meshes).some((m) => (m.uv_layers_extra ?? []).some((u) => u.name === 'Second' && u.data.length === m.indices.length * 2))).toBe(true);
     expect(imp.warnings.some((w) => w.includes('Loose edges') && w.includes('SkinMesh'))).toBe(true);
   });
 

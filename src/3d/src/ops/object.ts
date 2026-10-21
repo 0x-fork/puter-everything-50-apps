@@ -1,4 +1,5 @@
 // Object-mode operators.
+import { circlePoints } from '../surface/nurbs';
 import { Matrix4, Vector3, Quaternion, Euler } from 'three';
 import { app, registerOperators, type OpContext, type PropDef } from '../app/app';
 import type { DocumentData, ObjectData, MeshData, Mode, ObjectType, ID, Spline } from '../data/types';
@@ -97,18 +98,51 @@ function primitiveOp(idname: string, label: string, name: string, props: PropDef
         if (add) return add(build(p), p);
         return 'CANCELLED';
       }
-      const me = newMeshData(uniqueName(doc, name, 'meshes'), build(p));
+      const arrays = build(p);
+      // the Scale property sizes the new mesh itself (the object keeps a scale of 1)
+      if (Array.isArray(p.scale) && (p.scale as number[]).some((x) => x !== 1)) {
+        const sc = p.scale as number[];
+        const P = new Float32Array(arrays.positions);
+        for (let i = 0; i < P.length; i++) P[i] *= sc[i % 3];
+        arrays.positions = P;
+        // flat corner normals follow the inverse scale
+        const N = new Float32Array(arrays.normals);
+        for (let i = 0; i < N.length; i += 3) {
+          const x = N[i] / (sc[0] || 1),
+            y = N[i + 1] / (sc[1] || 1),
+            z = N[i + 2] / (sc[2] || 1),
+            l = Math.hypot(x, y, z) || 1;
+          N[i] = x / l;
+          N[i + 1] = y / l;
+          N[i + 2] = z / l;
+        }
+        arrays.normals = N;
+      }
+      const me = newMeshData(uniqueName(doc, name, 'meshes'), arrays);
       if (smooth && me.smooth) me.smooth.fill(1);
       doc.meshes[me.id] = me;
       const ob = newObject(name, 'MESH', me.id);
       if (p.location === null) p.location = [...doc.scene.cursor.location];
       if (p.rotation === null) delete p.rotation;
       addObjectToScene(doc, ob, p);
-      if (Array.isArray(p.scale)) ob.scale = [...(p.scale as number[])] as [number, number, number];
       if (!p.rotation) p.rotation = [...ob.rotation_euler];
       return 'FINISHED';
     },
   };
+}
+
+/** Vertices and loose edges of curve polylines (evaluated wire curves). */
+export function polylineMesh(curves: { points: ArrayLike<number>; cyclic?: boolean }[]) {
+  const pos: number[] = [];
+  const edges: number[] = [];
+  for (const c of curves) {
+    const base = pos.length / 3,
+      n = c.points.length / 3;
+    for (let i = 0; i < c.points.length; i++) pos.push(c.points[i]);
+    for (let i = 0; i < n - 1; i++) edges.push(base + i, base + i + 1);
+    if (c.cyclic && n > 2) edges.push(base + n - 1, base);
+  }
+  return { positions: new Float32Array(pos), offsets: new Uint32Array([0]), indices: new Uint32Array(0), uvs: new Float32Array(0), normals: new Float32Array(0), looseEdges: new Uint32Array(edges) };
 }
 
 const sizeProp = (d = 2): PropDef => ({ id: 'size', label: 'Size', type: 'float', default: d, min: 0, subtype: 'distance' });
@@ -460,7 +494,8 @@ registerOperators([
     exec: (ctx, p) => {
       const t = p.type as 'FORCE' | 'WIND' | 'VORTEX' | 'TURBULENCE' | 'DRAG';
       const ob = newObject(t[0] + t.slice(1).toLowerCase(), 'EMPTY', null);
-      ob.empty_display_type = t === 'WIND' ? 'SINGLE_ARROW' : 'SPHERE';
+      // wind and vortex point along their axis; the other fields show plain axes (the field shape is drawn as an overlay)
+      ob.empty_display_type = t === 'WIND' || t === 'VORTEX' ? 'SINGLE_ARROW' : 'PLAIN_AXES';
       ob.field = { type: t, strength: 1, flow: 0, falloff_type: 'SPHERE', noise: 0, seed: 1 };
       if (p.location === null) p.location = [...ctx.doc.scene.cursor.location];
       if (p.rotation === null) delete p.rotation;
@@ -886,7 +921,10 @@ registerOperators([
           return 'CANCELLED';
         }
         const T = new Matrix4().makeTranslation(ob.location[0], ob.location[1], ob.location[2]);
-        const R = new Matrix4().makeRotationFromQuaternion(new Quaternion().setFromRotationMatrix(localMatrix(ob)));
+        // the rotation part of the local matrix (decomposed: the matrix also carries the scale)
+        const rq = new Quaternion();
+        localMatrix(ob).decompose(new Vector3(), rq, new Vector3());
+        const R = new Matrix4().makeRotationFromQuaternion(rq);
         const S = new Matrix4().makeScale(ob.scale[0], ob.scale[1], ob.scale[2]);
         const m = new Matrix4();
         if (p.location) m.premultiply(new Matrix4());
@@ -897,7 +935,7 @@ registerOperators([
         void m;
         const me = objectData(doc, ob);
         if (me) transformMeshData(me, apply);
-        else if ((ob.type === 'CURVE' || ob.type === 'FONT') && ob.data) transformCurve(doc.curves[ob.data].splines, apply);
+        else if ((ob.type === 'CURVE' || ob.type === 'FONT' || ob.type === 'SURFACE') && ob.data) transformCurve(doc.curves[ob.data].splines, apply);
         else if (ob.type === 'LIGHT' || ob.type === 'CAMERA' || ob.type === 'EMPTY') {
           if (p.scale && ob.type === 'EMPTY') ob.empty_display_size *= Math.max(...ob.scale.map(Math.abs));
         }
@@ -979,13 +1017,15 @@ registerOperators([
           ['ARMATURE_NAME', 'With Empty Groups'],
           ['ARMATURE_AUTO', 'With Automatic Weights'],
           ['BONE', 'Bone'],
+          ['BONE_RELATIVE', 'Bone Relative'],
           ['CURVE', 'Curve Deform'],
           ['LATTICE', 'Lattice Deform'],
         ],
       },
       { id: 'keep_transform', label: 'Keep Transform', type: 'bool', default: false },
     ],
-    poll: (ctx) => ctx.doc.mode === 'OBJECT' && !!app.activeObject && app.selectedObjects().length > 1,
+    // in Pose Mode the active armature parents the other selected objects (e.g. to its active bone)
+    poll: (ctx) => (ctx.doc.mode === 'OBJECT' || (ctx.doc.mode === 'POSE' && app.activeObject?.type === 'ARMATURE')) && !!app.activeObject && app.selectedObjects().length > 1,
     exec: (ctx, p) => {
       const parent = app.activeObject!;
       const pw = app.graph.get(parent.id)!.world.clone();
@@ -1006,23 +1046,28 @@ registerOperators([
         ob.parent = parent.id;
         ob.parent_type = 'OBJECT';
         ob.parent_bone = '';
-        if (p.type === 'BONE' && parent.type === 'ARMATURE') {
+        if ((p.type === 'BONE' || p.type === 'BONE_RELATIVE') && parent.type === 'ARMATURE') {
           const arm = parent.data ? ctx.doc.armatures[parent.data] : undefined;
           const pose = app.graph.get(parent.id)?.pose;
           const bname = arm?.active_bone;
           const b = bname ? pose?.bones.get(bname) : undefined;
-          if (b && bname) {
+          const boneData = arm?.bones.find((x) => x.name === bname);
+          if (b && bname && boneData) {
             ob.parent_type = 'BONE';
             ob.parent_bone = bname;
-            const bw = pw.clone().multiply(b.pose).multiply(new Matrix4().makeTranslation(0, b.length, 0));
+            // Bone Relative: the child follows the bone's deformation (pose relative to rest)
+            boneData.use_relative_parent = p.type === 'BONE_RELATIVE';
+            const bw = boneData.use_relative_parent ? pw.clone().multiply(b.deform) : pw.clone().multiply(b.pose).multiply(new Matrix4().makeTranslation(0, b.length, 0));
             ob.matrix_parent_inverse = fromMatrix4(bw.invert());
             applyMatrixToObject(ob, w.clone().premultiply(new Matrix4()));
             continue;
           }
         }
         if (p.keep_transform) {
-          ob.matrix_parent_inverse = [...IDENTITY];
-          applyMatrixToObject(ob, pw.clone().invert().multiply(w));
+          // the current world transform becomes the object's own values (dropping what an earlier
+          // parent contributed), then the parent inverse cancels the new parent as usual
+          applyMatrixToObject(ob, w);
+          ob.matrix_parent_inverse = fromMatrix4(pw.clone().invert());
         } else ob.matrix_parent_inverse = fromMatrix4(pw.clone().invert().multiply(w).multiply(localMatrix(ob).invert()));
         const deformer = (type: string) => {
           if (ob.modifiers.some((m) => m.type === type && m.object === parent.id)) return;
@@ -1473,8 +1518,10 @@ registerOperators([
       for (const hk of convertHooks) targets = hk(doc, targets, !!p.keep_original);
       for (const ob of targets) {
         const ev = app.graph.get(ob.id);
-        if (!ev?.mesh || (ob.type !== 'MESH' && ob.type !== 'CURVE' && ob.type !== 'FONT' && ob.type !== 'META')) continue;
-        const m = ev.mesh;
+        if (!ev?.mesh || (ob.type !== 'MESH' && ob.type !== 'CURVE' && ob.type !== 'FONT' && ob.type !== 'META' && ob.type !== 'SURFACE')) continue;
+        let m = ev.mesh;
+        // a curve without fill, extrusion or bevel is a set of polylines: they become vertices and loose edges
+        if (m.curves?.length && !m.indices.length) m = { ...m, ...polylineMesh(m.curves) };
         let target = ob;
         if (p.keep_original) target = duplicateObject(doc, ob, true);
         const me = newMeshData(uniqueName(doc, ob.name, 'meshes'), {
@@ -1487,6 +1534,7 @@ registerOperators([
           material_index: m.material_index ? new Uint16Array(m.material_index) : undefined,
         });
         me.materials = [...(ob.data ? (doc.meshes[ob.data] ?? doc.curves[ob.data] ?? doc.metaballs?.[ob.data])?.materials ?? [] : [])];
+        if (m.looseEdges?.length) me.loose_edges = new Uint32Array(m.looseEdges);
         if (m.vertex_groups && m.weights) {
           me.vertex_groups = m.vertex_groups.map((g) => ({ name: g.name }));
           me.weights = m.weights.map((w) => new Float32Array(w));
@@ -1777,22 +1825,18 @@ function curveAddOps() {
     };
   };
   const nurbs = (cyclic: boolean, path: boolean, radius: number): Spline => {
+    // a circle: 8 rational points (corners weighted √½) in Bézier knots, an exact circle
     const pts = cyclic
-      ? Array.from({ length: 8 }, (_, i) => {
-          const a = (i / 8) * Math.PI * 2;
-          const w = i % 2 ? Math.SQRT1_2 : 1;
-          const r = i % 2 ? radius * Math.SQRT2 : radius;
-          return { co: [Math.cos(a) * r, Math.sin(a) * r, 0, w] as [number, number, number, number], radius: 1, tilt: 0 };
-        })
+      ? circlePoints(radius).map((co) => ({ co, radius: 1, tilt: 0 }))
       : path
         ? Array.from({ length: 5 }, (_, i) => ({ co: [(i - 2) * radius, 0, 0, 1] as [number, number, number, number], radius: 1, tilt: 0 }))
         : [
-            [-1.5, -0.5],
-            [-0.5, 0.5],
-            [0.5, 0.5],
-            [1.5, -0.5],
+            [-1.5, 0],
+            [-1, 1],
+            [1, 1],
+            [1.5, 0],
           ].map(([x, y]) => ({ co: [x * radius, y * radius, 0, 1] as [number, number, number, number], radius: 1, tilt: 0 }));
-    return { type: 'NURBS', bezier_points: [], points: pts, use_cyclic_u: cyclic, resolution_u: 12, order_u: path ? 5 : 4, use_endpoint_u: path, use_smooth: true, material_index: 0 };
+    return { type: 'NURBS', bezier_points: [], points: pts, use_cyclic_u: cyclic, resolution_u: 12, order_u: cyclic ? 3 : path ? 5 : 4, use_endpoint_u: path || cyclic, use_bezier_u: cyclic, use_smooth: true, material_index: 0 };
   };
   const make = (idname: string, label: string, name: string, spline: (r: number) => Spline, dims: '2D' | '3D' = '3D') => ({
     idname,

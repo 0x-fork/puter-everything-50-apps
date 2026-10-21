@@ -8,6 +8,8 @@
 //
 // All writes mark the document changed; script runs group them into one undo step
 // (see runner.ts).
+import { TEX_MAPPING_NODES, texMapping, setTexMapping } from '../nodes/texmapping';
+import { uvMaps, setActiveUV, addUVMap, removeActiveUV, renameUV, hasActiveUV } from '../mesh/uvmaps';
 import { Matrix4 } from 'three';
 import { app, operators, type OpResult } from '../app/app';
 import type { DocumentData, ObjectData, MeshData, NodeTreeData, NodeData, ID, ImageData, TextData, CollectionData, MaterialData } from '../data/types';
@@ -34,13 +36,15 @@ import { cow, cloneShared } from '../data/cow';
 import { dropUnusedLibraries } from '../library/core';
 import { newModifier, modifierTypes } from '../eval/modifiers';
 import { newConstraint, constraintTypes, boneOnlyConstraints } from '../eval/constraints';
-import { keyProperty, ensureAction, ensureFCurve } from '../anim/keyframes';
+import { keyProperty, ensureFCurve } from '../anim/keyframes';
+import { objectCurves } from '../anim/slots';
 import { insertKeyframe, evaluateFCurve as evaluateFC } from '../anim/fcurve';
 import { localMatrix, applyMatrixToObject } from '../eval/transform';
 import { getValue } from '../data/rna';
 import { driverAdd, driverRemove } from './driverapi';
 import { uiState } from '../app/prefs';
 import { scriptFile, scriptFileNames } from './files';
+import { NODE_TYPE_ENUM } from './nodetypes.gen';
 import { Matrix, Vector, mathutils } from './mathutils';
 import { allSockets, getNodeType, nodeSockets, nodeTypes, socketDefault } from '../nodes/registry';
 import { ctxOf, makeNode } from '../nodes/tree';
@@ -70,6 +74,8 @@ import {
   structHooks,
   mixin,
   assignField,
+  setRotationMode,
+  scriptOnlyData,
   type Raw,
 } from './rna';
 
@@ -296,6 +302,43 @@ export class ObjectStruct extends IDStruct {
   private get ob() {
     return this.__raw as unknown as ObjectData;
   }
+  get rotation_mode() {
+    return this.ob.rotation_mode;
+  }
+  /**
+   * The evaluated geometry as a new mesh (modifiers applied) that is not part of bpy.data;
+   * free it with to_mesh_clear().
+   */
+  to_mesh(_preserve_all_data_layers = false, _depsgraph?: unknown) {
+    ensureEvaluated();
+    const ob = this.ob;
+    const ev = app.graph.get(ob.id)?.mesh;
+    const base = ob.type === 'MESH' && ob.data ? app.doc.meshes[ob.data] : undefined;
+    if (!ev && !base) throw pyError('RuntimeError', `Object "${ob.name}" has no geometry`);
+    const src = (ev ?? base)!;
+    const id = `me_tmp${ob.id}`;
+    const me = newMeshData(ob.name, {
+      positions: new Float32Array(src.positions),
+      offsets: new Uint32Array(src.offsets),
+      indices: new Uint32Array(src.indices),
+      uvs: new Float32Array(src.uvs),
+      normals: new Float32Array(src.normals),
+    });
+    me.id = id;
+    if (src.smooth) me.smooth = new Uint8Array(src.smooth);
+    if (src.material_index) me.material_index = new Uint16Array(src.material_index);
+    me.materials = base ? [...base.materials] : [];
+    (scriptOnlyData.meshes ??= {})[id] = me as unknown as Raw;
+    return wrapId('meshes', id);
+  }
+  to_mesh_clear() {
+    const tmp = scriptOnlyData.meshes;
+    if (tmp) delete tmp[`me_tmp${this.ob.id}`];
+  }
+  /** changing the mode converts the rotation into the new representation */
+  set rotation_mode(v: string) {
+    setRotationMode(this.__raw, String(v));
+  }
   get type() {
     return this.ob.type;
   }
@@ -475,8 +518,7 @@ export class ObjectStruct extends IDStruct {
       throw pyError('TypeError', `bpy_struct.keyframe_insert() property "${data_path}" not animatable`);
     keyProperty(app.doc, ob, data_path, index ?? -1, f);
     if (group) {
-      const act = ensureAction(app.doc, ob);
-      for (const fc of act.fcurves) if (fc.data_path === data_path) fc.group = group;
+      for (const fc of objectCurves(app.doc, ob)) if (fc.data_path === data_path) fc.group = group;
     }
     touched();
     return true;
@@ -487,13 +529,14 @@ export class ObjectStruct extends IDStruct {
     const act = ob.animation_data?.action ? app.doc.actions[ob.animation_data.action] : null;
     if (!act) return false;
     let removed = false;
-    for (const fc of act.fcurves) {
+    const mine = new Set(objectCurves(app.doc, ob));
+    for (const fc of mine) {
       if (fc.data_path !== data_path || (index >= 0 && fc.array_index !== index)) continue;
       const n = fc.keyframe_points.length;
       fc.keyframe_points = fc.keyframe_points.filter((k) => Math.abs(k.co[0] - f) > 1e-4);
       removed ||= fc.keyframe_points.length !== n;
     }
-    act.fcurves = act.fcurves.filter((fc) => fc.keyframe_points.length);
+    act.fcurves = act.fcurves.filter((fc) => !mine.has(fc) || fc.keyframe_points.length);
     if (!removed) throw pyError('RuntimeError', `keyframe_delete: no keyframe at frame ${f} for "${data_path}"`);
     touched();
     return true;
@@ -924,7 +967,7 @@ export class MeshStruct extends IDStruct {
     me.weights = me.vertex_groups.map(() => new Float32Array(vs.length));
     me.shape_keys = [];
     me.color_attributes = [];
-    for (const k of ['custom_normals', 'quad_flip', 'face_strength', 'hide_poly', 'sculpt_face_set', 'sculpt_mask', 'loose_edges', 'uv_select', 'uv_pin', 'uv_hide'] as const) delete (me as unknown as Raw)[k];
+    for (const k of ['custom_normals', 'quad_flip', 'face_strength', 'hide_poly', 'sculpt_face_set', 'sculpt_mask', 'loose_edges', 'uv_select', 'uv_pin', 'uv_hide', 'bevel_weight_edge', 'bevel_weight_vert', 'crease_vert', 'skin_vertices'] as const) delete (me as unknown as Raw)[k];
     // edges that no face uses are kept as loose edges
     const faceEdge = new Set<string>();
     for (const f of polys) for (let k = 0; k < f.verts.length; k++) {
@@ -1007,48 +1050,82 @@ kwMethod(MeshStruct.prototype, 'normals_split_custom_set', ['normals']);
 kwMethod(MeshStruct.prototype, 'normals_split_custom_set_from_vertices', ['normals']);
 const output_warn = (msg: string) => app.report('WARNING', msg);
 
-const hasUVs = (me: MeshData) => me.indices.length > 0 && me.uvs.length === me.indices.length * 2;
 
 /**
- * A mesh's UV maps. Meshes here have one, stored per face corner (loop):
- * uv_layers.active.data[loop_index].uv, or all at once with
- * foreach_get / foreach_set('uv', flat). new() gives the one map a name.
+ * A mesh's UV maps, stored per face corner (loop): uv_layers.active.data[loop_index].uv, or all at once
+ * with foreach_get / foreach_set('uv', flat). new() adds a map (a copy of the active one), remove()
+ * deletes one, active / active_index pick the map that editing and display use.
  */
 class MeshUVLayers extends PropCollection<unknown> {
   constructor(readonly meId: string) {
     super(`bpy.data.meshes[${JSON.stringify(tableOf(app.doc, 'meshes')[meId]?.name)}].uv_layers`);
   }
   list() {
-    return hasUVs(meshOf(this.meId)) ? [this.layer()] : [];
+    return uvMaps(meshOf(this.meId)).map((r) => this.layer(r.name));
   }
   nameOf(x: unknown) {
     return (x as { name: string }).name;
   }
   get active() {
-    return hasUVs(meshOf(this.meId)) ? this.layer() : null;
+    const r = uvMaps(meshOf(this.meId)).find((x) => x.active);
+    return r ? this.layer(r.name) : null;
   }
-  set active(_v: unknown) {
-    /* there is only one */
+  set active(v: unknown) {
+    const name = (v as { name?: string })?.name;
+    const me = meshOf(this.meId);
+    const i = uvMaps(me).findIndex((r) => r.name === name);
+    if (i >= 0 && setActiveUV(me, i)) touched('geometry');
   }
-  /** The mesh's UV map, made (all corners at 0, 0) if it has none; a mesh holds one, so a second new() returns it renamed. */
+  get active_index() {
+    return uvMaps(meshOf(this.meId)).findIndex((r) => r.active);
+  }
+  set active_index(i: number) {
+    if (setActiveUV(meshOf(this.meId), Number(i))) touched('geometry');
+  }
+  /** Add a UV map (a copy of the active one; all corners at 0, 0 without do_init); the active map stays. */
   new(name = 'UVMap', do_init = true) {
-    void do_init;
     const me = meshOf(this.meId);
     if (!me.indices.length) throw pyError('RuntimeError', 'Error: a mesh without faces has no UV map; build its faces first');
-    if (!hasUVs(me)) me.uvs = new Float32Array(me.indices.length * 2);
-    me.uv_map_name = String(name || 'UVMap');
+    // a mesh built from data starts with an empty (all zero) placeholder map: the first new() names it
+    if (uvMaps(me).length === 1 && hasActiveUV(me) && me.uvs.every((x) => x === 0)) {
+      me.uv_map_name = String(name || 'UVMap');
+      touched('geometry');
+      return this.layer(me.uv_map_name);
+    }
+    const before = uvMaps(me).findIndex((r) => r.active);
+    const made = addUVMap(me, String(name || 'UVMap'));
+    if (!do_init) me.uvs = new Float32Array(me.indices.length * 2);
+    if (before >= 0) setActiveUV(me, before);
     touched('geometry');
-    return this.layer();
+    return this.layer(made);
   }
-  remove(_layer: unknown) {
-    throw pyError('RuntimeError', 'Error: this app keeps one UV map per mesh; it cannot be removed');
+  remove(layer: unknown) {
+    const me = meshOf(this.meId);
+    const name = (layer as { name?: string })?.name;
+    const rows = uvMaps(me);
+    const i = rows.findIndex((r) => r.name === name);
+    if (i < 0) throw pyError('ValueError', `UV map "${name}" not found`);
+    if (rows[i].active) removeActiveUV(me);
+    else me.uv_layers_extra = (me.uv_layers_extra ?? []).filter((u) => u.name !== name);
+    touched('geometry');
   }
-  private layer() {
+  private layer(initialName: string) {
     const id = this.meId;
-    const path = `${this.__path}[${JSON.stringify(meshOf(id).uv_map_name || 'UVMap')}]`;
+    let name = initialName;
+    const path = () => `${this.__path}[${JSON.stringify(name)}]`;
+    const isActive = () => (meshOf(id).uv_map_name || 'UVMap') === name && hasActiveUV(meshOf(id));
+    const extra = () => (meshOf(id).uv_layers_extra ?? []).find((u) => u.name === name);
+    const arr = (): Float32Array => (isActive() ? meshOf(id).uvs : (extra()?.data ?? new Float32Array(0)));
+    const writable = (): Float32Array => {
+      if (isActive()) return cow(meshOf(id), 'uvs');
+      const u = extra();
+      if (!u) return new Float32Array(0);
+      u.data = u.data.slice();
+      return u.data;
+    };
     const n = () => meshOf(id).indices.length;
     const write = (i: number, u: number, v: number) => {
-      const uvs = cow(meshOf(id), 'uvs');
+      const uvs = writable();
       uvs[i * 2] = u;
       uvs[i * 2 + 1] = v;
       touched('geometry');
@@ -1059,9 +1136,9 @@ class MeshUVLayers extends PropCollection<unknown> {
       get uv() {
         return boundVector(
           'VECTOR',
-          () => meshOf(id).uvs.subarray(i * 2, i * 2 + 2),
+          () => arr().subarray(i * 2, i * 2 + 2),
           (k, x) => {
-            cow(meshOf(id), 'uvs')[i * 2 + k] = x;
+            writable()[i * 2 + k] = x;
             touched('geometry');
           },
         );
@@ -1070,8 +1147,26 @@ class MeshUVLayers extends PropCollection<unknown> {
         const a = toPlain(v) as number[];
         write(i, Number(a?.[0]), Number(a?.[1]));
       },
-      toString: () => `<bpy_struct, MeshUVLoop at ${path}.data[${i}]>`,
+      toString: () => `<bpy_struct, MeshUVLoop at ${path()}.data[${i}]>`,
     });
+    const uvForeachGet = (attr: string, seq?: unknown) => {
+      if (attr !== 'uv') throw pyError('TypeError', `foreach_get: unsupported attribute "${attr}" (supported: uv)`);
+      const out = Array.from(arr());
+      if (Array.isArray(seq)) for (let i = 0; i < out.length && i < seq.length; i++) seq[i] = out[i];
+      return out;
+    };
+    const uvForeachSet = (attr: string, seq: unknown) => {
+      if (attr !== 'uv') throw pyError('TypeError', `foreach_set: unsupported attribute "${attr}" (supported: uv)`);
+      const a = (toPlain(seq) as unknown[]).flat() as number[];
+      const me = meshOf(id);
+      if (a.length !== me.indices.length * 2) throw pyError('ValueError', `foreach_set: expected ${me.indices.length * 2} values (u, v per loop), got ${a.length}`);
+      if (isActive()) me.uvs = Float32Array.from(a, Number);
+      else {
+        const u = extra();
+        if (u) u.data = Float32Array.from(a, Number);
+      }
+      touched('geometry');
+    };
     const data = new (class extends PropCollection<unknown> {
       override get length() {
         return n();
@@ -1094,37 +1189,39 @@ class MeshUVLayers extends PropCollection<unknown> {
       foreach_set(attr: string, seq: unknown) {
         uvForeachSet(attr, seq);
       }
-    })(`${path}.data`);
-    const uvForeachGet = (attr: string, seq?: unknown) => {
-      if (attr !== 'uv') throw pyError('TypeError', `foreach_get: unsupported attribute "${attr}" (supported: uv)`);
-      const out = Array.from(meshOf(id).uvs);
-      if (Array.isArray(seq)) for (let i = 0; i < out.length && i < seq.length; i++) seq[i] = out[i];
-      return out;
-    };
-    const uvForeachSet = (attr: string, seq: unknown) => {
-      if (attr !== 'uv') throw pyError('TypeError', `foreach_set: unsupported attribute "${attr}" (supported: uv)`);
-      const a = (toPlain(seq) as unknown[]).flat() as number[];
-      const me = meshOf(id);
-      if (a.length !== me.indices.length * 2) throw pyError('ValueError', `foreach_set: expected ${me.indices.length * 2} values (u, v per loop), got ${a.length}`);
-      me.uvs = Float32Array.from(a, Number);
-      touched('geometry');
-    };
+    })(`${path()}.data`);
+    const me0 = () => meshOf(id);
     return {
       __kind: 'struct',
       __type: 'MeshUVLoopLayer',
       get name() {
-        return meshOf(id).uv_map_name || 'UVMap';
+        return name;
       },
       set name(v: string) {
-        meshOf(id).uv_map_name = String(v || 'UVMap');
+        const rows = uvMaps(me0());
+        const i = rows.findIndex((r) => r.name === name);
+        if (i >= 0 && renameUV(me0(), i, String(v || 'UVMap'))) name = String(v || 'UVMap').trim();
         touched();
       },
-      active: true,
-      active_render: true,
+      get active() {
+        return isActive();
+      },
+      set active(v: boolean) {
+        if (!v) return;
+        const i = uvMaps(me0()).findIndex((r) => r.name === name);
+        if (i >= 0 && setActiveUV(me0(), i)) touched('geometry');
+      },
+      get active_render() {
+        return uvMaps(me0()).find((r) => r.name === name)?.render ?? false;
+      },
+      set active_render(v: boolean) {
+        if (v) me0().uv_render_name = name;
+        touched();
+      },
       data,
       foreach_get: uvForeachGet,
       foreach_set: uvForeachSet,
-      toString: () => `<bpy_struct, MeshUVLoopLayer("${meshOf(id).uv_map_name || 'UVMap'}") at ${path}>`,
+      toString: () => `<bpy_struct, MeshUVLoopLayer("${name}") at ${path()}>`,
     };
   }
 }
@@ -1244,8 +1341,31 @@ function nodeLabel(type: string) {
   );
 }
 
+/** RNA class names of node sockets by their data type. */
+const SOCKET_CLASS: Record<string, string> = {
+  VALUE: 'NodeSocketFloat',
+  FLOAT: 'NodeSocketFloat',
+  RGBA: 'NodeSocketColor',
+  VECTOR: 'NodeSocketVector',
+  SHADER: 'NodeSocketShader',
+  INT: 'NodeSocketInt',
+  BOOLEAN: 'NodeSocketBool',
+  STRING: 'NodeSocketString',
+  GEOMETRY: 'NodeSocketGeometry',
+  ROTATION: 'NodeSocketRotation',
+  MATRIX: 'NodeSocketMatrix',
+  OBJECT: 'NodeSocketObject',
+  COLLECTION: 'NodeSocketCollection',
+  IMAGE: 'NodeSocketImage',
+  MATERIAL: 'NodeSocketMaterial',
+  TEXTURE: 'NodeSocketTexture',
+  MENU: 'NodeSocketMenu',
+  BUNDLE: 'NodeSocketBundle',
+  CLOSURE: 'NodeSocketClosure',
+};
+
 function nodeTypeEnum(bl: string) {
-  return nodeLabel(bl).toUpperCase().replace(/\s+/g, '_');
+  return NODE_TYPE_ENUM[bl] ?? nodeLabel(bl).toUpperCase().replace(/\s+/g, '_');
 }
 
 class NodeTreeStruct extends Struct {
@@ -1441,6 +1561,136 @@ class NodeStruct extends Struct {
   }
   get enum_items() {
     return nodeItemsFor(this.getTree, this.__nid, 'enum_items', `${this.__path}.enum_items`);
+  }
+  // optional node fields (absent until set): exposed with their defaults
+  get hide() {
+    return !!this.node.hide;
+  }
+  set hide(v: boolean) {
+    this.node.hide = !!v;
+    touched();
+  }
+  get mute() {
+    return !!this.node.mute;
+  }
+  set mute(v: boolean) {
+    this.node.mute = !!v;
+    touched();
+  }
+  get select() {
+    return !!this.node.select;
+  }
+  set select(v: boolean) {
+    this.node.select = !!v;
+    touched();
+  }
+  get label() {
+    return this.node.label ?? '';
+  }
+  set label(v: string) {
+    this.node.label = String(v ?? '');
+    touched();
+  }
+  get width() {
+    return this.node.width ?? getNodeType(this.node.type)?.width ?? 140;
+  }
+  set width(v: number) {
+    this.node.width = Number(v);
+    touched();
+  }
+  get use_custom_color() {
+    return !!this.node.use_custom_color;
+  }
+  set use_custom_color(v: boolean) {
+    this.node.use_custom_color = !!v;
+    touched();
+  }
+  get color() {
+    const node = () => this.node;
+    const c = node().color ?? [0.608, 0.608, 0.608];
+    return [c[0], c[1], c[2]];
+  }
+  set color(v: unknown) {
+    const a = Array.from(v as ArrayLike<number>).map(Number);
+    this.node.color = [a[0] ?? 0, a[1] ?? 0, a[2] ?? 0] as never;
+    touched();
+  }
+  get show_options() {
+    return !this.node.hide_options;
+  }
+  set show_options(v: boolean) {
+    this.node.hide_options = !v;
+    touched();
+  }
+  get show_preview() {
+    return !!this.node.show_preview;
+  }
+  set show_preview(v: boolean) {
+    this.node.show_preview = !!v;
+    touched();
+  }
+  get parent(): unknown {
+    const id = this.node.parent;
+    return id && this.getTree()?.nodes.some((n) => n.id === id) ? nodeWrapper(this.getTree, id, this.__path.replace(/\[[^\]]*\]$/, '')) : null;
+  }
+  set parent(v: unknown) {
+    if (v === null || v === undefined) this.node.parent = null;
+    else {
+      const id = (v as { __nid?: string }).__nid;
+      const tree = this.getTree();
+      const target = id ? tree?.nodes.find((n) => n.id === id) : undefined;
+      if (!target || target.type !== 'NodeFrame') throw pyError('TypeError', 'Node.parent: expected a Frame node of the same tree');
+      if (target.id === this.__nid) throw pyError('ValueError', 'Node.parent: a node cannot be its own parent');
+      this.node.parent = target.id;
+    }
+    touched();
+  }
+  /** Texture nodes: coordinate mapping (axis remap and location / rotation / scale). */
+  get texture_mapping(): unknown {
+    if (!TEX_MAPPING_NODES.has(this.node.type)) return undefined;
+    const node = () => this.node;
+    const vecProp = (key: 'translation' | 'rotation' | 'scale') => ({
+      get: () =>
+        new Proxy([...texMapping(node())[key]], {
+          set: (arr, i, v) => {
+            (arr as unknown as Record<string | symbol, unknown>)[i] = v;
+            if (typeof i === 'string' && /^[0-2]$/.test(i)) {
+              setTexMapping(node(), { [key]: arr.map(Number) as [number, number, number] });
+              touched();
+            }
+            return true;
+          },
+        }),
+      set: (v: unknown) => {
+        const a = Array.from(v as ArrayLike<number>).map(Number);
+        if (a.length < 3) throw pyError('ValueError', `TexMapping.${key}: expected 3 items`);
+        setTexMapping(node(), { [key]: [a[0], a[1], a[2]] });
+        touched();
+      },
+      enumerable: true,
+    });
+    const enumProp = (key: 'vector_type' | 'mapping_x' | 'mapping_y' | 'mapping_z', items: string[]) => ({
+      get: () => texMapping(node())[key],
+      set: (v: unknown) => {
+        if (!items.includes(String(v))) throw pyError('TypeError', `bpy_struct: item.${key} = '${v}': enum "${v}" not found in (${items.map((x) => `'${x}'`).join(', ')})`);
+        setTexMapping(node(), { [key]: String(v) } as never);
+        touched();
+      },
+      enumerable: true,
+    });
+    const axes = ['NONE', 'X', 'Y', 'Z'];
+    return Object.defineProperties(
+      { __kind: 'struct', __type: 'TexMapping', toString: () => '<bpy_struct, TexMapping>' },
+      {
+        translation: vecProp('translation'),
+        rotation: vecProp('rotation'),
+        scale: vecProp('scale'),
+        vector_type: enumProp('vector_type', ['POINT', 'TEXTURE', 'VECTOR', 'NORMAL']),
+        mapping_x: enumProp('mapping_x', axes),
+        mapping_y: enumProp('mapping_y', axes),
+        mapping_z: enumProp('mapping_z', axes),
+      },
+    );
   }
   get paired_output(): unknown {
     const id = this.node.props.paired_output;
@@ -1695,11 +1945,13 @@ class SocketsCollection extends PropCollection<unknown> {
     const fallback = () => (d ? socketDefault(d) : ((SOCKET_DEFAULTS[self.node().type]?.[id] as unknown) ?? null));
     return {
       __kind: 'struct',
-      __type: this.output ? 'NodeSocketOutput' : 'NodeSocketInput',
+      // the socket class name scripts see (type(sock).__name__), from the socket's data type
+      __type: SOCKET_CLASS[d?.type ?? 'VALUE'] ?? 'NodeSocket',
       __socket: { node: this.nid, name: id, output: this.output, tree: this.getTree },
       name,
       identifier: id,
-      type: d?.type ?? 'VALUE',
+      // float sockets report VALUE, as in the desktop API
+      type: !d?.type || d.type === 'FLOAT' ? 'VALUE' : d.type,
       is_output: this.output,
       enabled,
       get node() {
@@ -1845,6 +2097,15 @@ class WorldStruct extends IDStruct {
 class NodeGroupStruct extends IDStruct {
   override __hidden() {
     return TREE_HIDDEN;
+  }
+  /** Python's bpy.data.node_groups.new() gives an empty group (no nodes, links or sockets), as on the desktop. */
+  _script_empty() {
+    const ng = tableOf(app.doc, 'node_groups')[this.__id] as unknown as { tree: NodeTreeData } | undefined;
+    if (!ng) return;
+    ng.tree.nodes = [];
+    ng.tree.links = [];
+    ng.tree.interface = [];
+    touched();
   }
   get nodes() {
     const id = this.__id;
@@ -2261,6 +2522,7 @@ class IDCollection extends PropCollection<unknown> {
           type = TABLE_OBTYPE[data.__table];
           did = data.__id;
           if (data.__table === 'curves' && (tableOf(app.doc, 'curves')[did] as { body?: string })?.body !== undefined) type = 'FONT';
+          if (data.__table === 'curves' && (tableOf(app.doc, 'curves')[did] as { surface?: boolean })?.surface) type = 'SURFACE';
         }
         const ob = newObject(name || 'Object', type, did);
         OBJECT_DATA_HOOKS[type]?.(ob, did);
@@ -2303,7 +2565,11 @@ class IDCollection extends PropCollection<unknown> {
         return this.add(newWorld(name || 'World'));
       case 'curves': {
         const cu = newCurve(name || 'Curve');
-        if (String(rest[0] ?? 'CURVE').toUpperCase() === 'FONT') cu.body = 'Text';
+        if (String(rest[0] ?? 'CURVE').toUpperCase() === 'FONT') {
+          // the settings a text object starts with (as Add ▸ Text)
+          Object.assign(cu, { body: 'Text', dimensions: '2D', fill_mode: 'BOTH', size: 1, align_x: 'LEFT', align_y: 'TOP_BASELINE', space_line: 1, space_character: 1, space_word: 1, offset_x: 0, offset_y: 0, shear: 0 });
+        }
+        if (String(rest[0] ?? 'CURVE').toUpperCase() === 'SURFACE') Object.assign(cu, { surface: true, resolution_u: 4, resolution_v: 4 });
         return this.add(cu);
       }
       case 'armatures':
@@ -2639,7 +2905,8 @@ export class Context {
   }
   get space_data() {
     const a = app.hoverArea ?? app.activeArea;
-    return a ? { __kind: 'struct', __type: 'Space', type: a.type } : null;
+    if (!a) return null;
+    return spaceDataProviders[a.type]?.(a.editor) ?? { __kind: 'struct', __type: 'Space', type: a.type };
   }
   get material() {
     const ob = app.activeObject;
@@ -2664,6 +2931,9 @@ export class Context {
     return '<bpy_struct, Context>';
   }
 }
+
+/** Space structs of bpy.context.space_data by editor type (modules register theirs). */
+export const spaceDataProviders: Record<string, (editor: unknown) => unknown> = {};
 
 // ---------------------------------------------------------------------------
 // bpy.data
@@ -2784,11 +3054,16 @@ export const opHooks = {
   run: (fn: () => OpResult): OpResult => fn(),
 };
 
+/** Operators whose `modifier` property holds the modifier's id (scripts pass its name). */
+const MODIFIER_BY_ID = new Set(['object.modifier_move_to_index', 'object.modifier_copy', 'object.modifier_copy_to_selected', 'object.modifier_apply']);
+
 /** Run an operator from a script: `{'FINISHED'}` / `{'CANCELLED'}`, raises on poll failure or errors. */
 export function callOperator(idname: string, props: Record<string, unknown> = {}, execContext: ExecContext = 'EXEC_DEFAULT'): 'FINISHED' | 'CANCELLED' | 'RUNNING_MODAL' | 'PASS_THROUGH' {
   const op = operators.get(idname);
   if (!op) throw pyError('AttributeError', `Calling operator "bpy.ops.${idname}" error, could not be found`);
   const invoke = String(execContext).startsWith('INVOKE');
+  // operators see the scene as the script left it (visibility, selection, transforms)
+  ensureEvaluated();
   if (!app.poll(idname)) throw pyError('RuntimeError', `Operator bpy.ops.${idname}.poll() failed, context is incorrect`);
   const plain: Record<string, unknown> = {};
   // macro operators (duplicate_move, extrude_region_move…) take their parts' settings as
@@ -2798,6 +3073,14 @@ export function callOperator(idname: string, props: Record<string, unknown> = {}
     const m = /^([A-Z0-9]+)_OT_(\w+)$/.exec(k);
     if (m) parts.push([`${m[1].toLowerCase()}.${m[2]}`, (v ?? {}) as Record<string, unknown>]);
     else plain[k] = toPlain(v);
+  }
+  // scripts name modifiers by their name; these operators keep the modifier's id
+  if (MODIFIER_BY_ID.has(idname) && typeof plain.modifier === 'string') {
+    const ob = app.activeObject;
+    if (ob && !ob.modifiers.some((m) => m.id === plain.modifier)) {
+      const m = ob.modifiers.find((x) => x.name === plain.modifier);
+      if (m) plain.modifier = m.id;
+    }
   }
   // rotation/value props given as Euler etc. are plain arrays now
   const before = app.reports.length;
@@ -2907,11 +3190,14 @@ export const bpy: Record<string, unknown> = {
     get binary_path() {
       return '';
     },
+    /** temporary folder of the session file store (files there are never downloaded) */
+    tempdir: '/tmp/',
     background: false,
     toString: () => '<bpy.app>',
   },
   path: {
-    abspath: (p: string) => p,
+    abspath: (p: string) => (String(p).startsWith('//') ? `/project/${String(p).slice(2)}` : p),
+    relpath: (p: string) => (String(p).startsWith('/project/') ? `//${String(p).slice(9)}` : p),
     basename: (p: string) => String(p).split(/[\\/]/).pop() ?? '',
     display_name: (p: string) =>
       String(p)

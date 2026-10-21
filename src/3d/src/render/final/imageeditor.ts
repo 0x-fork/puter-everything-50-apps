@@ -12,9 +12,17 @@ import { imageCanvas, imageTexture, touchImage, generatedPixels } from '../image
 import { lastImage } from '../../ops/data';
 import type { ImageData as Img } from '../../data/types';
 import { renderResult, passToRGBA8, samplePixel, encodeRGBA8, canvasBytes, download, toBW, EXT, virtualImages, onVirtualImageChange, PASS_ORDER, passLabel, type PassName, type ChannelMode, type FileFormat, type RenderResult } from './result';
+import { stereoResult } from './stereo';
+import { stereoDisplay } from './stereoops';
+import { outputView } from './outputview';
+import { activeLayerIndex, ensureViewLayers } from '../../scenes/viewlayers';
+import { isExr, resultExr, type ExrFormat } from './renderexr';
+
+/** Formats the Save As dialog offers (OpenEXR for render results). */
+type SaveFormat = FileFormat | ExrFormat;
 import { renderSize } from './units';
 import { LOOKS, displayPixel } from './colormanage';
-import { pngWithText } from './stamp';
+import { pngWithText, pngText } from './stamp';
 import { num } from '../../ui/props';
 import { modifiedImages, type View2D } from './imageops';
 import { scopesPanel } from './scopes';
@@ -22,13 +30,22 @@ import { lastOpPanel } from '../../ui/redo';
 import { uiList } from '../../editors/properties/uilist';
 import { isTiled, tileName, tileView, atlasLayout, tileCell } from '../udim';
 import { makeTiled, makeSingle, openImageFiles, saveTiles } from './udimops';
-import { imagePaintStroke, paintBrush } from './imagepaint';
+import { drawPaintOverlay, imagePaintRightDown, imagePaintStroke, paintBrush } from './imagepaint';
 import { paintImage } from '../../paint/tpaint';
 import { BRUSH_LISTS } from '../../paint/brushes';
-import { toolHeaderSettings } from '../../paint/ui';
+import { imagePaintKey, paintToolPanels, toolHeaderSettings } from '../../paint/ui';
 import { activeTools } from '../../app/prefs';
 import { formatTime } from './units';
 import type { ViewSettings } from './colormanage';
+import { drawMask, drawMaskMatte, hostMask, type MaskHost, type MaskDisplayType } from '../../mask/clipmask';
+import { maskSelectMenu, maskAddMenu, maskMenu, maskBrowse, maskSidebar, maskProportionalHeader } from '../../mask/maskui';
+import { maskTable } from '../../mask/types';
+import './imageextra';
+import { imageMedia, mediaReady, mediaSource, mediaFrameIndex, openMediaFiles } from './imagemedia';
+import { pickFiles } from '../../sequencer/add';
+import { navGizmo2D } from './navgizmo2d';
+import { annotatePointerDown, annotateKeyHeld, annotateModeOf, annotateToolSlot, annotationsPanel, drawAnnotations2D, isAnnotateTool, type AnnotateTool, type Annotate2DHost, type Annotation2DOwner } from '../../mask/annotate2d';
+import { imageMaskToolbar, imageMaskPointerDown, imageMaskToolSettings, draw2DCursor, placeCursor, drawMaskStrip, maskStripRect, maskStripFrame, IMAGE_MASK_TOOLS, type ImageMaskTool } from '../../mask/imagemask';
 
 export const RENDER_RESULT = '__render_result__';
 
@@ -73,6 +90,31 @@ function resultLayer(r: RenderResult | null, layer: ResultLayer): RenderResult |
   return layer === 'VIEW_LAYER' ? { ...r, passes: r.viewLayer } : { ...r, passes: { Combined: r.passes.Combined } };
 }
 
+const stereoCache = new WeakMap<RenderResult, { key: string; res: RenderResult }>();
+
+/** View of a multi-view render shown: a view by name, or 'STEREO' for the combined eyes. */
+function resultView(r: RenderResult | null, view: string): RenderResult | null {
+  if (!r?.views?.length) return r;
+  if (view === 'STEREO') {
+    const key = `${r.version}|${JSON.stringify(stereoDisplay)}`;
+    const c = stereoCache.get(r);
+    if (c?.key === key) return c.res;
+    const res = stereoResult(r, stereoDisplay);
+    if (!res) return r;
+    stereoCache.set(r, { key, res });
+    return res;
+  }
+  const v = r.views.find((x) => x.name === view) ?? r.views[0];
+  return v.passes === r.passes ? r : { ...r, passes: v.passes, viewLayer: v.viewLayer };
+}
+
+/** Entries of the view menu of a multi-view render result. */
+function viewItems(r: RenderResult): { value: string; label: string; description?: string }[] {
+  const out = r.views!.map((v) => ({ value: v.name, label: v.name === 'left' ? 'Left' : v.name === 'right' ? 'Right' : v.name, description: 'The image of this view' }));
+  if (r.views!.length === 2 && r.stereo) out.push({ value: 'STEREO', label: 'Stereo 3D', description: 'Both eyes combined as set in Window ▸ Set Stereo 3D' });
+  return out;
+}
+
 /** Entries of the layer menu of a render result. */
 function layerItems(r: RenderResult): { value: string; label: string; description?: string }[] {
   const out: { value: string; label: string; description?: string }[] = [];
@@ -89,13 +131,17 @@ function sceneView(r: RenderResult | null): ViewSettings {
   return app.doc.scene.render;
 }
 
-export class ImageEditor implements Editor, View2D {
+export class ImageEditor implements Editor, View2D, MaskHost, Annotate2DHost {
   el: HTMLElement;
-  keymaps = ['Image Generic', 'Image', 'Frames', 'Window', 'Screen'];
+  get keymaps() {
+    return this.maskEditing() ? ['Mask Editing', 'Image Generic', 'Image', 'Frames', 'Window', 'Screen'] : ['Image Generic', 'Image', 'Frames', 'Window', 'Screen'];
+  }
   imageId: string | null = null;
   pass: PassName = 'Combined';
   channel: ChannelMode = 'COLOR_ALPHA';
   layer: ResultLayer = 'COMPOSITE';
+  /** view of a multi-view render ('' = the first, 'STEREO' = combined eyes) */
+  view = '';
   zoom = 1;
   offX = 0;
   offY = 0;
@@ -104,15 +150,33 @@ export class ImageEditor implements Editor, View2D {
   sidebarTab = 'Image';
   /** show the render info line over the image */
   showMetadata = true;
-  /** View or Paint; unset follows the object mode (Paint while in Texture Paint mode) */
-  uiMode: 'VIEW' | 'PAINT' | null = null;
+  /** View, Paint or Mask; unset follows the object mode (Paint while in Texture Paint mode) */
+  uiMode: 'VIEW' | 'PAINT' | 'MASK' | null = null;
+  /** Mask mode: the edited mask, active tool, 2D cursor (frame space 0..1, y up) and pivot */
+  maskId: string | null = null;
+  maskTool: ImageMaskTool = 'select_box';
+  cursor: [number, number] = [0.5, 0.5];
+  pivot: 'MEDIAN_POINT' | 'BOUNDING_BOX_CENTER' | 'CURSOR' = 'BOUNDING_BOX_CENTER';
+  maskCircleRadius = 25;
+  maskPrimitiveSize = 0.2;
+  shapeOverlay: MaskHost['shapeOverlay'] = null;
+  /** navigation buttons (Ctrl `) */
+  showGizmo = true;
+  /** View mode tool: Sample or one of the Annotate tools */
+  viewTool: 'sample' | AnnotateTool = 'sample';
+  private lastAnnotate: AnnotateTool = 'annotate';
+  /** Overlays popover: master switch and the mask display */
+  overlays = { show_overlays: true, show_mask_spline: true, mask_display_type: 'OUTLINE' as MaskDisplayType, mask_overlay_mode: 'NONE' as 'NONE' | 'COMBINED' | 'ALPHACHANNEL', blend_factor: 0.5 };
+  /** a right-drag in Paint mode was used by the brush (no context menu on release) */
+  private skipContextMenu = false;
   showToolbar = true;
   /** View mode: show the Sample tool's settings over the image */
   showToolSettings = true;
   /** width of the square averaged when sampling pixels */
   sampleSize = 1;
   private hover: { x: number; y: number } | null = null;
-  private canvas: HTMLCanvasElement;
+  private cursorPlaced = false;
+  canvas: HTMLCanvasElement;
   private ui: HTMLElement;
   private cache: { key: string; canvas: HTMLCanvasElement } | null = null;
   private sample: { x: number; y: number } | null = null;
@@ -135,8 +199,17 @@ export class ImageEditor implements Editor, View2D {
     this.ui = document.createElement('div');
     this.ui.className = 'ie-ui';
     this.el.append(this.canvas, this.ui);
-    const st = (state ?? {}) as { toolSettings?: boolean; sampleSize?: number; render?: boolean; image?: string | null; pass?: PassName; channel?: ChannelMode; zoom?: number; off?: [number, number]; sidebar?: boolean; layer?: ResultLayer; mode?: 'VIEW' | 'PAINT'; toolbar?: boolean };
-    if (st.mode === 'VIEW' || st.mode === 'PAINT') this.uiMode = st.mode;
+    const st = (state ?? {}) as { toolSettings?: boolean; sampleSize?: number; render?: boolean; image?: string | null; pass?: PassName; channel?: ChannelMode; zoom?: number; off?: [number, number]; sidebar?: boolean; layer?: ResultLayer; mode?: 'VIEW' | 'PAINT' | 'MASK'; toolbar?: boolean; mask?: string | null; maskTool?: ImageMaskTool; cursor?: [number, number]; pivot?: ImageEditor['pivot']; tab?: string };
+    if (st.mode === 'VIEW' || st.mode === 'PAINT' || st.mode === 'MASK') this.uiMode = st.mode;
+    if (st.mask !== undefined) this.maskId = st.mask;
+    if (st.maskTool && IMAGE_MASK_TOOLS.includes(st.maskTool)) this.maskTool = st.maskTool;
+    if (Array.isArray(st.cursor)) this.cursor = [Number(st.cursor[0]) || 0, Number(st.cursor[1]) || 0];
+    if (st.pivot) this.pivot = st.pivot;
+    if (st.tab) this.sidebarTab = st.tab;
+    const vt = (state as { viewTool?: string } | undefined)?.viewTool;
+    if (vt && isAnnotateTool(vt)) this.viewTool = vt;
+    const ov = (state as { overlays?: Partial<ImageEditor['overlays']> } | undefined)?.overlays;
+    if (ov) Object.assign(this.overlays, ov);
     if (st.toolbar === false) this.showToolbar = false;
     if (st.toolSettings === false) this.showToolSettings = false;
     if (st.sampleSize) this.sampleSize = st.sampleSize;
@@ -185,8 +258,66 @@ export class ImageEditor implements Editor, View2D {
     return this.uiMode === 'PAINT' || (this.uiMode === null && app.doc.mode === 'TEXTURE_PAINT');
   }
 
+  /** Editing a mask over the image (Mask mode). */
+  maskEditing(): boolean {
+    return !this.host.close && this.uiMode === 'MASK';
+  }
+
+  setMaskMode() {
+    this.setMode('MASK');
+  }
+
+  setMode(m: 'VIEW' | 'PAINT' | 'MASK') {
+    this.uiMode = m;
+    // a mask to edit: the only one there is
+    if (m === 'MASK' && !hostMask(this)) {
+      const ids = Object.keys(maskTable(app.doc));
+      if (ids.length === 1) this.maskId = ids[0];
+    }
+    this.fitted = false;
+    this.draw();
+    this.drawUI();
+    this.host.redrawHeader();
+    app.changed('ui');
+  }
+
+  redrawHeader() {
+    this.host.redrawHeader();
+  }
+
+  /** Mask frame size in pixels: the image's, or the render size without an image. */
+  frameSize(): [number, number] {
+    const s = this.imageSize();
+    if (s) return s;
+    return renderSize(app.doc.scene.render) as [number, number];
+  }
+
+  annToScreen(u: number, v: number): [number, number] {
+    const [W, H] = this.frameSize();
+    return this.toScreen(u * W, (1 - v) * H);
+  }
+
+  annFromClient(clientX: number, clientY: number): [number, number] {
+    const q = this.local({ clientX, clientY });
+    const [W, H] = this.frameSize();
+    const [x, y] = this.toImage(q.x, q.y);
+    return [x / W, 1 - y / H];
+  }
+
+  /** Notes are kept on the shown image. */
+  annotationOwner(): Annotation2DOwner | null {
+    return (this.result ? null : (this.image as unknown as Annotation2DOwner | null)) ?? null;
+  }
+
+  /** image pixel (top-left origin) → editor-local screen pixel */
+  toScreen(x: number, y: number): [number, number] {
+    const s = this.frameSize();
+    const { w, h: hh } = this.viewSize();
+    return [(x - s[0] / 2 + this.offX) * this.zoom + w / 2, (y - s[1] / 2 + this.offY) * this.zoom + hh / 2];
+  }
+
   get result(): RenderResult | null {
-    if (this.imageId === RENDER_RESULT) return resultLayer(renderResult.get(), this.layer);
+    if (this.imageId === RENDER_RESULT) return resultLayer(resultView(renderResult.get(), this.view), this.layer);
     const v = this.imageId ? virtualImages.get(this.imageId) : undefined;
     return v ? v.get() : null;
   }
@@ -228,10 +359,16 @@ export class ImageEditor implements Editor, View2D {
     const r = this.result;
     if (r) {
       const v = sceneView(r);
-      return `R${this.imageId}|${this.imageId === RENDER_RESULT ? renderResult.slot : ''}|${r.version}|${this.layer}|${this.pass}|${this.channel}|${v.view_transform}|${v.exposure}|${v.gamma}|${v.look}|${v.use_white_balance ? `${v.white_balance_temperature},${v.white_balance_tint}` : ''}|${v.use_curve_mapping ? JSON.stringify(v.curve_mapping) : ''}|${r.width}x${r.height}|${r.overlay ? 'S' : ''}`;
+      return `R${this.imageId}|${this.imageId === RENDER_RESULT ? renderResult.slot : ''}|${r.version}|${this.layer}|${this.view}:${this.view === 'STEREO' ? JSON.stringify(stereoDisplay) : ''}|${this.pass}|${this.channel}|${v.view_transform}|${v.exposure}|${v.gamma}|${v.look}|${v.use_white_balance ? `${v.white_balance_temperature},${v.white_balance_tint}` : ''}|${v.use_curve_mapping ? JSON.stringify(v.curve_mapping) : ''}|${r.width}x${r.height}|${r.overlay ? 'S' : ''}`;
     }
     const img = this.image;
     if (!img) return '';
+    const m = imageMedia(img);
+    if (m) {
+      const idx = mediaFrameIndex(m, app.doc.scene.frame_current);
+      const src = mediaReady(m);
+      return `M${img.id}|${idx}|${src && idx !== null && src.peek(idx) ? 1 : 0}|${this.channel}`;
+    }
     const tex = imageTexture(img);
     return `I${img.id}|${img.revision ?? 0}|${tex.version}|${img.width}x${img.height}|${this.channel}|${img.generated_type}|${img.generated_color?.join(',')}`;
   }
@@ -254,7 +391,9 @@ export class ImageEditor implements Editor, View2D {
       canvas.getContext('2d')!.putImageData(new ImageData(px as Uint8ClampedArray<ArrayBuffer>, r.width, r.height), 0, 0);
     } else {
       const img = this.image!;
-      const src = imageCanvas(img);
+      const m = imageMedia(img);
+      const src = m ? this.mediaFrameCanvas(img.id, m) : imageCanvas(img);
+      if (!src) return null;
       if (this.channel === 'COLOR_ALPHA') canvas = src;
       else {
         canvas = document.createElement('canvas');
@@ -276,6 +415,31 @@ export class ImageEditor implements Editor, View2D {
 
   scopeKey() {
     return this.sourceKey();
+  }
+
+  private mediaCanvas: HTMLCanvasElement | null = null;
+
+  /** The decoded frame of a movie / sequence image for the current scene frame (decodes it when needed). */
+  private mediaFrameCanvas(id: string, m: NonNullable<ReturnType<typeof imageMedia>>): HTMLCanvasElement | null {
+    const src = mediaReady(m);
+    const idx = mediaFrameIndex(m, app.doc.scene.frame_current);
+    const c = (this.mediaCanvas ??= document.createElement('canvas'));
+    if (!src) {
+      void mediaSource(m)?.then(() => this.draw());
+      return null;
+    }
+    c.width = src.width;
+    c.height = src.height;
+    const g = c.getContext('2d')!;
+    g.clearRect(0, 0, c.width, c.height);
+    if (idx === null) return c; // outside the frames shown: transparent
+    const bmp = src.peek(idx);
+    if (bmp) g.drawImage(bmp, 0, 0);
+    else
+      void src.get(idx).then(() => {
+        if (this.imageId === id) this.draw();
+      });
+    return c;
   }
 
   /** Canvas with the pixels as displayed (for scopes). */
@@ -301,7 +465,7 @@ export class ImageEditor implements Editor, View2D {
 
   /** screen (client px relative to the editor) → image pixel coordinates (top-left origin) */
   toImage(sx: number, sy: number): [number, number] {
-    const s = this.imageSize() ?? [1, 1];
+    const s = this.imageSize() ?? (this.maskEditing() ? this.frameSize() : [1, 1]);
     const { w, h: hh } = this.viewSize();
     return [(sx - w / 2) / this.zoom + s[0] / 2 - this.offX, (sy - hh / 2) / this.zoom + s[1] / 2 - this.offY];
   }
@@ -361,6 +525,32 @@ export class ImageEditor implements Editor, View2D {
     this.draw();
   }
 
+  /** Mask mode: put the 2D cursor in the middle of the view. */
+  centerCursor() {
+    const [W, H] = this.frameSize();
+    this.offX = W / 2 - this.cursor[0] * W;
+    this.offY = H / 2 - (1 - this.cursor[1]) * H;
+    this.fitted = true;
+    this.draw();
+  }
+
+  /** Mask mode: put the 2D cursor at the middle of the view. */
+  cursorToCenter() {
+    const { w, h: hh } = this.viewSize();
+    const [W, H] = this.frameSize();
+    const [x, y] = this.toImage(w / 2, hh / 2);
+    this.cursor = [x / W, 1 - y / H];
+    this.draw();
+  }
+
+  /** Pan by screen pixels. */
+  panBy(dx: number, dy: number) {
+    this.offX += dx / this.zoom;
+    this.offY += dy / this.zoom;
+    this.fitted = true;
+    this.draw();
+  }
+
   setRatio(z: number) {
     this.zoom = z;
     this.fitted = true;
@@ -387,7 +577,8 @@ export class ImageEditor implements Editor, View2D {
     this.lastKey = this.sourceKey();
     const src = this.source();
     const size = this.imageSize();
-    if (!src && this.imageId === RENDER_RESULT) return this.drawEmptyResult(ctx, w, hh);
+    if (!src && this.imageId === RENDER_RESULT && !this.maskEditing()) return this.drawEmptyResult(ctx, w, hh);
+    if ((!src || !size) && this.maskEditing()) return this.drawMaskOverlay(ctx, true);
     if (!src || !size) return;
     if (!this.fitted) {
       this.fitted = true;
@@ -415,6 +606,7 @@ export class ImageEditor implements Editor, View2D {
     const shownImg = this.result ? null : this.image;
     if (isTiled(shownImg)) this.drawTiles(ctx, shownImg, x, y, dw, dh);
     if (this.paintMode()) this.drawUVOverlay(ctx, x, y, dw, dh);
+    if (this.maskEditing() && this.overlays.show_overlays) this.drawMaskOverlay(ctx, false);
     // brush circle
     if (this.paintMode() && this.hover && this.image) {
       const b = paintBrush();
@@ -426,6 +618,11 @@ export class ImageEditor implements Editor, View2D {
         ctx.stroke();
       }
     }
+    if (this.paintMode()) drawPaintOverlay(ctx, (ix, iy) => [x + ix * this.zoom, y + iy * this.zoom], this.image?.id ?? null, hh, () => this.draw());
+    if (this.overlays.show_overlays && !this.host.close) drawAnnotations2D(this, ctx);
+    // movies and sequences: the frames shown, along the bottom
+    const media = imageMedia(shownImg);
+    if (media && !this.maskEditing() && !this.paintMode()) drawMaskStrip(ctx, this.mediaRange(media), this.maskStrip(), app.doc.scene.frame_current);
     // sample cross-hair
     if (this.sample) {
       const sx = x + (Math.floor(this.sample.x) + 0.5) * this.zoom,
@@ -439,6 +636,49 @@ export class ImageEditor implements Editor, View2D {
       ctx.lineTo(sx, sy + 8);
       ctx.stroke();
     }
+  }
+
+  /** Mask mode: the mask (matte and splines) and the 2D cursor; without an image, an empty frame first. */
+  private drawMaskOverlay(ctx: CanvasRenderingContext2D, emptyFrame: boolean) {
+    if (emptyFrame) {
+      if (!this.fitted) {
+        this.fitted = true;
+        const [W, H] = this.frameSize();
+        const { w, h: hh } = this.viewSize();
+        this.zoom = Math.max(1 / 64, Math.min(1, (w - 40) / W, (hh - 40) / H));
+        this.offX = this.offY = 0;
+      }
+      const [W, H] = this.frameSize();
+      const [x0, y0] = this.toScreen(0, 0),
+        [x1, y1] = this.toScreen(W, H);
+      ctx.fillStyle = canvasGrey(0x26);
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(x0) - 0.5, Math.round(y0) - 0.5, Math.round(x1 - x0) + 1, Math.round(y1 - y0) + 1);
+    }
+    if (!this.overlays.show_overlays) return;
+    const m = hostMask(this);
+    if (m) {
+      const mode = this.overlays.mask_overlay_mode;
+      drawMaskMatte(this, ctx, mode, this.overlays.blend_factor);
+      drawMask(this, ctx, this.overlays.show_mask_spline, this.overlays.mask_display_type);
+    }
+    const [W, H] = this.frameSize();
+    const [cx, cy] = this.toScreen(this.cursor[0] * W, (1 - this.cursor[1]) * H);
+    draw2DCursor(ctx, cx, cy);
+    if (m) drawMaskStrip(ctx, m, this.maskStrip(), app.doc.scene.frame_current);
+  }
+
+  /** Frame range of a movie / sequence image as a strip range. */
+  private mediaRange(m: NonNullable<ReturnType<typeof imageMedia>>) {
+    return { frame_start: m.frame_start, frame_end: m.frame_start + Math.max(1, m.frame_duration) - 1, layers: [] as { shape_keys: { frame: number }[] }[] };
+  }
+
+  /** The mask frame strip along the bottom of the view (between the toolbar and the sidebar). */
+  private maskStrip() {
+    const { w, h: hh } = this.viewSize();
+    return maskStripRect(w, hh, this.showToolbar ? 48 : 0, this.showSidebar ? 270 : 0);
   }
 
   /** UDIM tiles: outline each tile's cell, label it, and mark the active one. */
@@ -510,13 +750,32 @@ export class ImageEditor implements Editor, View2D {
     } else if (this.imageId === RENDER_RESULT) {
       // the empty result draws its own hint
     } else if (this.imageId && virtualImages.has(this.imageId)) info.push(h('div', { class: 'ie-meta', key: 'meta' }, `${virtualImages.get(this.imageId)!.label} is empty`));
+    else if (this.showMetadata && this.overlays.show_overlays && !this.maskEditing()) {
+      // text stored in the image file (e.g. renders saved with metadata)
+      const meta = this.imageMetadata();
+      if (meta.length) info.push(h('div', { class: 'ie-meta', key: 'meta' }, meta.map(([k, v]) => `${k}: ${v}`).join(' | ')));
+    }
     const paint = this.paintMode();
+    const mask = this.maskEditing();
     patch(this.ui, [
       ...info,
-      paint ? h('div', { key: 'ie-toolhdr', class: 'hdr-row ie-toolhdr' }, toolHeaderSettings('TEXTURE_PAINT')) : this.showToolSettings && (this.image || this.result) && !this.host.close ? this.sampleToolHeader() : null,
+      paint
+        ? h('div', { key: 'ie-toolhdr', class: 'hdr-row ie-toolhdr' }, toolHeaderSettings('TEXTURE_PAINT'))
+        : mask
+          ? this.showToolSettings
+            ? h('div', { key: 'ie-maskhdr', class: 'hdr-row ie-toolhdr ie-samplehdr' }, imageMaskToolSettings(this))
+            : null
+          : this.showToolSettings && (this.image || this.result) && !this.host.close
+            ? isAnnotateTool(this.viewTool)
+              ? h('div', { key: 'ie-annhdr', class: 'hdr-row ie-toolhdr ie-samplehdr' }, h('span', { class: 'ie-tool-name' }, icon('annotate'), 'Annotate'), h('span', { class: 'ie-tool-label' }, 'D + drag draws with any tool; Ctrl erases'))
+              : this.sampleToolHeader()
+            : null,
       paint && this.showToolbar ? this.paintToolbar() : null,
+      mask && this.showToolbar ? imageMaskToolbar(this) : null,
+      !paint && !mask && this.showToolbar && !this.host.close ? this.viewToolbar() : null,
       this.sampleBar(),
       this.showSidebar ? this.sidebar() : null,
+      navGizmo2D(this, this.showSidebar ? 270 : 0, this.showGizmo && !this.host.close, paint || (this.showToolSettings && (mask || this.image || this.result)) ? 36 : 8),
       this.host.area ? lastOpPanel(this) : null,
     ]);
   }
@@ -657,13 +916,16 @@ export class ImageEditor implements Editor, View2D {
             [
               { value: 'VIEW', label: 'View', icon: 'image', description: 'View and sample the image' },
               { value: 'PAINT', label: 'Paint', icon: 'tpaint_hlt', description: 'Paint on the image with the Texture Paint brushes' },
+              { value: 'MASK', label: 'Mask', icon: 'mod_mask', description: 'Draw and edit masks over the image' },
             ],
-            this.paintMode() ? 'PAINT' : 'VIEW',
-            (v) => ((this.uiMode = v as 'VIEW'), this.fitted = false, this.draw(), this.drawUI(), this.host.redrawHeader()),
+            this.maskEditing() ? 'MASK' : this.paintMode() ? 'PAINT' : 'VIEW',
+            (v) => this.setMode(v as 'VIEW'),
             { tip: 'Editing context of the Image Editor', className: 'ie-mode' },
           ),
       menu('View', () => this.viewMenu()),
+      this.maskEditing() ? menu('Select', () => maskSelectMenu()) : null,
       menu('Image', () => this.imageMenu()),
+      this.maskEditing() ? [menu('Add', () => maskAddMenu()), menu('Mask', () => maskMenu())] : null,
       h(
         'div',
         { class: 'ie-browse' },
@@ -706,6 +968,15 @@ export class ImageEditor implements Editor, View2D {
             { tip: 'Render layer to display' },
           )
         : null,
+      fullResult?.views?.length
+        ? enumMenu(
+            'ie-view',
+            viewItems(fullResult),
+            viewItems(fullResult).some((i) => i.value === this.view) ? this.view : fullResult.views[0].name,
+            (v) => ((this.view = v), (this.cache = null), this.draw(), this.drawUI(), this.host.redrawHeader()),
+            { tip: 'View of the multi-view render to display' },
+          )
+        : null,
       isRender
         ? enumMenu(
             'ie-slot',
@@ -716,7 +987,41 @@ export class ImageEditor implements Editor, View2D {
           )
         : null,
       r && passItems.length > 1 ? enumMenu('ie-pass', passItems, this.pass, (v) => ((this.pass = v as PassName), this.cache = null, this.draw(), this.drawUI(), this.host.redrawHeader()), { tip: 'Render pass to display' }) : null,
+      this.maskEditing() ? maskBrowse(this) : null,
+      this.maskEditing()
+        ? enumMenu(
+            'ie-mask-pivot',
+            [
+              { value: 'BOUNDING_BOX_CENTER', label: 'Bounding Box Center', icon: 'pivot_boundbox' },
+              { value: 'CURSOR', label: '2D Cursor', icon: 'pivot_cursor' },
+              { value: 'MEDIAN_POINT', label: 'Median Point', icon: 'pivot_median' },
+            ],
+            this.pivot,
+            (v) => ((this.pivot = v as 'CURSOR'), this.host.redrawHeader()),
+            { iconOnly: true, tip: 'Pivot Point\nCenter for rotating and scaling mask points (.)', title: 'Pivot Point' },
+          )
+        : null,
+      this.maskEditing() ? maskProportionalHeader() : null,
       h('div', { class: 'hdr-spacer' }),
+      this.host.close
+        ? null
+        : h(
+            'div',
+            { class: 'hdr-group', key: 'ie-overlay' },
+            h('button', { class: { 'hdr-toggle': true, on: this.overlays.show_overlays }, 'data-tip': 'Show Overlays (Shift Alt Z)', onclick: () => this.toggleOverlays() }, icon('overlay')),
+            h(
+              'button',
+              {
+                class: 'hdr-icondrop ie-overlays',
+                'data-tip': 'Overlays',
+                onpointerdown: (e: PointerEvent) => {
+                  e.preventDefault();
+                  openPopover(e.currentTarget as HTMLElement, () => this.overlayPopover(), { width: 240 });
+                },
+              },
+              icon('down_arrow_hlt', 'tiny'),
+            ),
+          ),
       enumMenu(
         'ie-channels',
         CHANNELS.filter((c) => c.value !== 'Z' || !!r?.passes.Depth),
@@ -732,15 +1037,68 @@ export class ImageEditor implements Editor, View2D {
     );
   }
 
+  toggleOverlays() {
+    this.overlays.show_overlays = !this.overlays.show_overlays;
+    this.draw();
+    this.drawUI();
+    this.host.redrawHeader();
+  }
+
+  /** Header ▸ Overlays popover. */
+  private overlayPopover(): Child {
+    const ov = this.overlays;
+    const redraw = () => (this.draw(), this.drawUI(), app.changed('ui'));
+    return h(
+      'div',
+      { class: 'pop-panel' },
+      h('div', { class: 'pop-title' }, 'Image'),
+      checkbox('ie-ov-meta', 'Metadata', this.showMetadata, (v) => ((this.showMetadata = v), redraw()), { tip: 'Show the render information over render results' }),
+      this.maskEditing()
+        ? [
+            h('div', { class: 'pop-title' }, 'Mask Display'),
+            checkbox('ie-ov-spline', 'Spline', ov.show_mask_spline, (v) => ((ov.show_mask_spline = v), redraw())),
+            enumRow(
+              'ie-ov-mdisplay',
+              [
+                { value: 'OUTLINE', label: 'Outline', description: 'Light splines with a dark border' },
+                { value: 'DASH', label: 'Dash', description: 'Dashed splines' },
+                { value: 'BLACK', label: 'Black', description: 'Thin black splines' },
+                { value: 'WHITE', label: 'White', description: 'Thin white splines' },
+              ],
+              ov.mask_display_type,
+              (v) => ((ov.mask_display_type = v as MaskDisplayType), redraw()),
+            ),
+            splitRow(
+              'Overlay',
+              enumMenu(
+                'ie-ov-maskmode',
+                [
+                  { value: 'NONE', label: 'None', description: 'Only the splines' },
+                  { value: 'ALPHACHANNEL', label: 'Alpha Channel', description: 'Show the mask as a black and white matte instead of the image' },
+                  { value: 'COMBINED', label: 'Combined', description: 'Darken the image outside the mask' },
+                ],
+                ov.mask_overlay_mode,
+                (v) => ((ov.mask_overlay_mode = v as 'NONE'), redraw()),
+              ),
+            ),
+            numberField({ id: 'ie-ov-blend', label: 'Blending Factor', value: ov.blend_factor, min: 0, max: 1, slider: true, unit: 'factor', set: (v) => ((ov.blend_factor = v), this.draw()) }),
+          ]
+        : null,
+    );
+  }
+
   private viewMenu(): MenuItem[] {
     const items: MenuItem[] = [
-      ...(this.paintMode() ? [{ label: 'Toolbar', checked: this.showToolbar, shortcut: 'T', action: () => ((this.showToolbar = !this.showToolbar), this.drawUI()) }] : []),
+      ...(this.host.close ? [] : [{ label: 'Toolbar', checked: this.showToolbar, shortcut: 'T', action: () => ((this.showToolbar = !this.showToolbar), this.drawUI()) }]),
       { label: 'Sidebar', checked: this.showSidebar, shortcut: 'N', action: () => this.toggleSidebar() },
       ...(this.paintMode() || this.host.close ? [] : [{ label: 'Tool Settings', checked: this.showToolSettings, action: () => ((this.showToolSettings = !this.showToolSettings), this.drawUI()) }]),
+      { separator: true },
+      ...(this.host.close ? [] : [{ label: 'Show Metadata', checked: this.showMetadata, action: () => ((this.showMetadata = !this.showMetadata), this.drawUI()) }, { label: 'Navigation Gizmo', checked: this.showGizmo, shortcut: 'Ctrl `', action: () => ((this.showGizmo = !this.showGizmo), this.drawUI()) }]),
       { separator: true },
       { label: 'Zoom In', op: 'image.view_zoom_in', shortcut: 'Numpad +' },
       { label: 'Zoom Out', op: 'image.view_zoom_out', shortcut: 'Numpad -' },
       { label: 'Fractional Zoom', submenu: () => RATIOS.map(([l, z]) => ({ label: `Zoom ${l}`, op: 'image.view_zoom_ratio', props: { ratio: z }, shortcut: z === 1 ? 'Numpad 1' : z < 1 ? `Numpad ${Math.round(1 / z)}` : `Ctrl Numpad ${z}` })) },
+      ...(this.maskEditing() ? [{ label: 'Center View to Cursor', op: 'image.view_center_cursor' }, { label: 'Cursor to Center View', op: 'image.view_cursor_center', shortcut: 'Shift C' }] : []),
       { label: 'Zoom Region…', op: 'image.view_zoom_border', shortcut: 'Shift B' },
       { separator: true },
       { label: 'Frame All', op: 'image.view_all', props: { fit_view: false }, shortcut: 'Home' },
@@ -768,10 +1126,13 @@ export class ImageEditor implements Editor, View2D {
     return [
       { label: 'New', icon: 'add', shortcut: 'Alt N', action: () => this.newDialog() },
       { label: 'Open…', icon: 'file_folder', shortcut: 'Alt O', action: () => this.open() },
+      { label: 'Open Image Sequence…', action: () => void this.openSequence() },
+      { label: 'Open Cached Render', op: 'image.read_viewlayers', shortcut: 'Ctrl R' },
       ...(img
         ? [
             { label: 'Replace…', op: 'image.replace' },
             { label: 'Reload', shortcut: 'Alt R', action: () => this.reload() },
+            ...(img.source !== 'TILED' ? [{ label: 'Edit Externally…', op: 'image.external_edit' }] : []),
           ]
         : []),
       { separator: true },
@@ -779,6 +1140,7 @@ export class ImageEditor implements Editor, View2D {
       { label: 'Save As…', shortcut: 'Shift Alt S', disabled: !hasPixels, action: () => this.saveAsDialog() },
       { label: 'Save a Copy…', disabled: !hasPixels, action: () => this.saveAsDialog() },
       { label: 'Save All Images', op: 'image.save_all_modified' },
+      ...(imageMedia(img) ? [{ label: 'Save Sequence', op: 'image.save_sequence' }, { label: 'Match Movie Length', op: 'image.match_movie_length' }] : []),
       ...(img
         ? [
             { separator: true },
@@ -843,13 +1205,29 @@ export class ImageEditor implements Editor, View2D {
     const input = document.createElement('input');
     input.type = 'file';
     input.multiple = true;
-    input.accept = 'image/png,image/jpeg,image/webp,image/gif,image/bmp,.hdr,.exr';
+    input.accept = 'image/png,image/jpeg,image/webp,image/gif,image/bmp,.hdr,.exr,video/*,.mp4,.m4v,.mov,.webm,.mkv';
     input.onchange = async () => {
-      const ids = await openImageFiles(Array.from(input.files ?? []));
+      const files = Array.from(input.files ?? []);
+      const video = (f: File) => f.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|mkv)$/i.test(f.name);
+      const ids: string[] = [];
+      // movies open as moving images, still images as images (or UDIM tiles)
+      for (const f of files.filter(video)) {
+        const id = await openMediaFiles([f]);
+        if (id) ids.push(id);
+      }
+      ids.push(...(await openImageFiles(files.filter((f) => !video(f)))));
       this.seenLastImage = lastImage;
       if (ids[0]) this.setImage(ids[0]);
     };
     input.click();
+  }
+
+  /** Open several images as one image sequence (frames in name order). */
+  async openSequence() {
+    const files = await pickFiles('image/*,.png,.jpg,.jpeg,.webp,.bmp', true);
+    if (!files.length) return;
+    const id = await openMediaFiles(files);
+    if (id) this.setImage(id);
   }
 
   reload() {
@@ -873,7 +1251,9 @@ export class ImageEditor implements Editor, View2D {
     const r = this.result;
     if (r) {
       const alpha = colorMode === 'RGBA' && format !== 'JPEG';
-      let px = passToRGBA8(r, this.pass, this.channel === 'Z' ? 'Z' : this.channel === 'ALPHA' ? 'ALPHA' : 'COLOR_ALPHA', sceneView(r), { keepAlpha: alpha && r.filmTransparent, dither: app.doc.scene.render.dither_intensity });
+      // render results are written with the output's colour management (Output ▸ Color Management)
+      const view = this.imageId === RENDER_RESULT ? outputView(app.doc.scene.render, r.view) : sceneView(r);
+      let px = passToRGBA8(r, this.pass, this.channel === 'Z' ? 'Z' : this.channel === 'ALPHA' ? 'ALPHA' : 'COLOR_ALPHA', view, { keepAlpha: alpha && r.filmTransparent, dither: app.doc.scene.render.dither_intensity });
       if (colorMode === 'BW') px = toBW(px);
       const bytes = await encodeRGBA8(px, r.width, r.height, format, { alpha, quality });
       return format === 'PNG' && r.metadata?.length && this.pass === 'Combined' ? pngWithText(bytes, r.metadata.map((f) => [f.key, f.value])) : bytes;
@@ -887,12 +1267,12 @@ export class ImageEditor implements Editor, View2D {
     return encodeRGBA8(px, src.width, src.height, format, { alpha: false, quality });
   }
 
-  private defaultName(format: FileFormat) {
+  private defaultName(format: SaveFormat) {
     const base = this.image?.name.replace(/\.[a-z0-9]+$/i, '') ?? (this.result ? `render_${this.result.info.frame}${this.pass !== 'Combined' ? '_' + this.pass.toLowerCase() : ''}` : 'image');
-    return `${base}.${EXT[format]}`;
+    return `${base}.${isExr(format) ? 'exr' : EXT[format]}`;
   }
 
-  private outputDefaults(): { format: FileFormat; colorMode: 'BW' | 'RGB' | 'RGBA' } {
+  private outputDefaults(): { format: SaveFormat; colorMode: 'BW' | 'RGB' | 'RGBA' } {
     const r = app.doc.scene.render;
     if (this.result) return { format: r.file_format === 'WEBM' ? 'PNG' : r.file_format, colorMode: r.color_mode };
     const img = this.image;
@@ -907,8 +1287,17 @@ export class ImageEditor implements Editor, View2D {
     await this.saveWith(format, colorMode, 0.9, this.defaultName(format));
   }
 
-  private async saveWith(format: FileFormat, colorMode: 'BW' | 'RGB' | 'RGBA', quality: number, name: string) {
+  private async saveWith(format: SaveFormat, colorMode: 'BW' | 'RGB' | 'RGBA', quality: number, name: string) {
     try {
+      if (isExr(format)) {
+        // render results as scene-linear OpenEXR (all passes for MultiLayer)
+        const res = this.imageId === RENDER_RESULT ? resultView(renderResult.get(), this.view) : this.result;
+        if (!res) return void app.report('ERROR', 'OpenEXR is available for render results');
+        const sc = app.doc.scene;
+        download(resultExr(res, { ...sc.render, color_mode: colorMode }, format, ensureViewLayers(sc)[activeLayerIndex(sc)]?.name), name, 'image/x-exr');
+        app.report('INFO', `Saved "${name}"`);
+        return;
+      }
       const bytes = await this.encode(format, colorMode, quality);
       if (!bytes) return;
       download(bytes, name, `image/${EXT[format] === 'jpg' ? 'jpeg' : EXT[format]}`);
@@ -939,11 +1328,12 @@ export class ImageEditor implements Editor, View2D {
                 { value: 'PNG', label: 'PNG' },
                 { value: 'JPEG', label: 'JPEG' },
                 { value: 'WEBP', label: 'WebP' },
+                ...(this.result ? [{ value: 'OPEN_EXR', label: 'EXR' }, { value: 'OPEN_EXR_MULTILAYER', label: 'EXR Layers', description: 'OpenEXR with every render pass' }] : []),
               ],
               p.format,
               (v) => {
-                p.format = v as FileFormat;
-                p.name = p.name.replace(/\.[a-z0-9]+$/i, '') + '.' + EXT[p.format];
+                p.format = v as SaveFormat;
+                p.name = p.name.replace(/\.[a-z0-9]+$/i, '') + '.' + (isExr(p.format) ? 'exr' : EXT[p.format]);
                 if (p.format === 'JPEG' && p.colorMode === 'RGBA') p.colorMode = 'RGB';
                 pop.redraw();
               },
@@ -962,7 +1352,7 @@ export class ImageEditor implements Editor, View2D {
               (v) => ((p.colorMode = v as 'RGB'), pop.redraw()),
             ),
           ),
-          p.format !== 'PNG' ? splitRow('Quality', numberField({ id: 'ie-save-q', value: p.quality, int: true, min: 1, max: 100, unit: 'percentage', slider: true, set: (v) => ((p.quality = v), pop.redraw()) })) : null,
+          p.format !== 'PNG' && !isExr(p.format) ? splitRow('Quality', numberField({ id: 'ie-save-q', value: p.quality, int: true, min: 1, max: 100, unit: 'percentage', slider: true, set: (v) => ((p.quality = v), pop.redraw()) })) : null,
           h(
             'div',
             { class: 'ie-dialog-buttons' },
@@ -1048,7 +1438,9 @@ export class ImageEditor implements Editor, View2D {
         panel('ie-image', 'Image', () => [
           splitRow(
             'Source',
-            img.source === 'FILE' || img.source === 'GENERATED' || img.source === 'TILED'
+            imageMedia(img)
+              ? h('span', { class: 'ie-value' }, imageMedia(img)!.kind === 'MOVIE' ? 'Movie' : 'Image Sequence')
+              : img.source === 'FILE' || img.source === 'GENERATED' || img.source === 'TILED'
               ? enumMenu(
                   `ie-src-${img.id}`,
                   [
@@ -1065,7 +1457,20 @@ export class ImageEditor implements Editor, View2D {
                 )
               : h('span', { class: 'ie-value' }, img.source),
           ),
-          img.filepath ? splitRow('File', h('span', { class: 'ie-value' }, img.filepath)) : null,
+          img.source === 'FILE' && !imageMedia(img)
+            ? splitRow(
+                'File',
+                h(
+                  'div',
+                  { class: 'ie-file-row' },
+                  h('span', { class: 'ie-value', title: img.filepath ?? '' }, img.filepath || '—'),
+                  h('button', { class: 'hdr-toggle', 'data-tip': 'Browse Image\nPick another file for this image', onclick: () => app.run('image.file_browse', {}, { area: this.host.area ?? null }) }, icon('file_folder')),
+                  h('button', { class: 'hdr-toggle', 'data-tip': 'Reload Image (Alt R)', onclick: () => this.reload() }, icon('file_refresh')),
+                ),
+              )
+            : img.filepath
+              ? splitRow('File', h('span', { class: 'ie-value' }, img.filepath))
+              : null,
           splitRow('Size', h('span', { class: 'ie-value' }, isTiled(img) ? `${img.tiles!.length} tile${img.tiles!.length > 1 ? 's' : ''}, RGBA byte` : `${c.width} × ${c.height}, RGBA byte`)),
           splitRow(
             'Color Space',
@@ -1082,6 +1487,10 @@ export class ImageEditor implements Editor, View2D {
           ),
         ]),
         isTiled(img) ? this.udimPanel(img) : null,
+        imageMedia(img) ? this.mediaPanel(img) : null,
+        this.imageMetadata().length
+          ? panel('ie-file-meta', 'Metadata', () => this.imageMetadata().map(([k, v]) => h('div', { key: k }, splitRow(k, h('span', { class: 'ie-value', title: v }, v)))), { closed: true })
+          : null,
         img.source === 'GENERATED'
           ? panel('ie-gen', 'Generated', () => [
               splitRow('X', numberField({ id: `ie-gx-${img.id}`, value: img.width, int: true, min: 1, max: 16384, unit: 'pixel', set: (v, f) => ((img.width = v), f && set('Image Size'), app.changed('doc')) })),
@@ -1104,18 +1513,54 @@ export class ImageEditor implements Editor, View2D {
           : null,
       );
     } else body.push(h('div', { class: 'sb-empty' }, 'No image'));
-    const tabs = r ? ['Image', 'View', 'Scopes', 'Metadata'] : ['Image', 'View', 'Scopes'];
+    const tabs = [...(this.host.close ? [] : ['Tool']), ...(this.maskEditing() ? ['Mask'] : []), 'Image', 'View', 'Scopes', ...(r ? ['Metadata'] : [])];
     const tab = tabs.includes(this.sidebarTab) ? this.sidebarTab : 'Image';
     return h(
       'div',
       { key: 'sidebar', class: 'v3d-sidebar ie-sidebar' },
-      h('div', { class: 'sb-body' }, tab === 'Scopes' ? scopesPanel(this) : tab === 'View' ? this.viewTab() : tab === 'Metadata' && r ? this.metadataTab(r) : body),
+      h('div', { class: 'sb-body' }, tab === 'Scopes' ? scopesPanel(this) : tab === 'View' ? this.viewTab() : tab === 'Metadata' && r ? this.metadataTab(r) : tab === 'Tool' ? (this.paintMode() ? paintToolPanels('TEXTURE_PAINT') : this.toolTab()) : tab === 'Mask' ? maskSidebar(this) : body),
       h(
         'div',
         { class: 'sb-tabs' },
         tabs.map((t) => h('button', { key: t, class: { 'sb-tab': true, on: t === tab }, onclick: () => ((this.sidebarTab = t), this.drawUI()) }, t)),
       ),
     );
+  }
+
+  /** Frames of a movie / sequence image (the editor's image user). */
+  private mediaPanel(img: Img): Child {
+    const m = imageMedia(img)!;
+    const set = (label: string) => (app.pushUndo(label), app.changed('doc'), this.draw());
+    return panel('ie-media', 'Frames', () => [
+      splitRow('Length', h('span', { class: 'ie-value' }, `${m.frames} frames${m.kind === 'MOVIE' ? ` at ${Math.round(m.fps * 100) / 100} fps` : ''}`)),
+      splitRow('Frames', numberField({ id: `ie-md-dur-${img.id}`, value: m.frame_duration, int: true, min: 1, max: 1048574, set: (v, f) => ((m.frame_duration = v), f ? set('Frames') : this.draw()) })),
+      splitRow('Start Frame', numberField({ id: `ie-md-start-${img.id}`, value: m.frame_start, int: true, set: (v, f) => ((m.frame_start = v), f ? set('Start Frame') : this.draw()) })),
+      splitRow('Offset', numberField({ id: `ie-md-off-${img.id}`, value: m.frame_offset, int: true, set: (v, f) => ((m.frame_offset = v), f ? set('Offset') : this.draw()) })),
+      splitRow('', checkbox(`ie-md-cyc-${img.id}`, 'Cyclic', m.use_cyclic, (v) => ((m.use_cyclic = v), set('Cyclic')))),
+      h('div', { class: 'btn-col' }, button('ie-md-match', 'Match Movie Length', () => app.run('image.match_movie_length', {}, { area: this.host.area ?? null }))),
+    ]);
+  }
+
+  /** Text entries stored in the shown PNG file. */
+  imageMetadata(): [string, string][] {
+    const img = this.image;
+    if (!img?.bytes?.length || !/png/i.test(img.mime)) return [];
+    try {
+      return pngText(img.bytes);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Sidebar ▸ Tool: the active tool and its settings. */
+  private toolTab(): Child {
+    if (this.paintMode()) return panel('ie-tool-active', 'Active Tool', () => [h('div', { class: 'ie-tool-row' }, toolHeaderSettings('TEXTURE_PAINT'))]);
+    if (this.maskEditing()) return panel('ie-tool-active', 'Active Tool', () => [h('div', { class: 'ie-tool-row ie-samplehdr' }, imageMaskToolSettings(this))]);
+    if (isAnnotateTool(this.viewTool)) return annotationsPanel('ie-tool', this);
+    return panel('ie-tool-active', 'Active Tool', () => [
+      h('div', { class: 'ie-tool-row ie-samplehdr' }, h('span', { class: 'ie-tool-name' }, icon('eyedropper'), 'Sample')),
+      splitRow('Sample Size', numberField({ id: 'ie-tool-sample-size', value: this.sampleSize, int: true, min: 1, max: 128, unit: 'pixel', set: (v) => ((this.sampleSize = Math.max(1, Math.round(v))), this.drawUI()) })),
+    ]);
   }
 
   /** Sidebar ▸ View: display options (and the scene's colour management for render results). */
@@ -1131,6 +1576,17 @@ export class ImageEditor implements Editor, View2D {
         r ? splitRow('', checkbox('ie-show-meta', 'Show Metadata', this.showMetadata, (v) => ((this.showMetadata = v), this.drawUI()), { tip: 'Show the render information over the image' })) : null,
         h('div', { class: 'btn-col' }, button('ie-frame-all', 'Frame All', () => this.frameAll(false)), button('ie-frame-fit', 'Frame All Fit', () => this.frameAll(true))),
       ]),
+      !this.host.close && this.annotationOwner() ? annotationsPanel('ie', this) : null,
+      this.maskEditing()
+        ? panel('ie-view-cursor', '2D Cursor', () => {
+            const [W, H] = this.frameSize();
+            const set = (i: 0 | 1, v: number) => ((this.cursor[i] = v / (i ? H : W)), this.draw());
+            return [
+              splitRow('Location X', numberField({ id: 'ie-cur-x', value: this.cursor[0] * W, unit: 'pixel', precision: 1, set: (v) => set(0, v) })),
+              splitRow('Y', numberField({ id: 'ie-cur-y', value: this.cursor[1] * H, unit: 'pixel', precision: 1, set: (v) => set(1, v) })),
+            ];
+          })
+        : null,
       r && !r.view
         ? panel('ie-view-cm', 'Color Management', () => [
             splitRow(
@@ -1181,9 +1637,30 @@ export class ImageEditor implements Editor, View2D {
   // ---------------------------------------------------------------------
   // input
 
-  private local(e: { clientX: number; clientY: number }) {
+  local(e: { clientX: number; clientY: number }) {
     const r = this.el.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  /** View mode toolbar: the Sample tool. */
+  private viewToolbar(): Child {
+    return h(
+      'div',
+      { key: 'ie-view-toolbar', class: 'v3d-toolbar ie-toolbar' },
+      h(
+        'button',
+        {
+          key: 'sample',
+          class: { 'tb-tool': true, on: this.viewTool === 'sample' },
+          'data-tool': 'sample',
+          'data-tip': 'Sample\nClick and drag over the image to read pixel values (Ctrl: set the display black point, Shift: the white point)',
+          onpointerdown: (e: PointerEvent) => (e.preventDefault(), (this.viewTool = 'sample'), this.drawUI()),
+        },
+        icon('eyedropper'),
+      ),
+      h('div', { key: 'sep', class: 'tb-sep' }),
+      annotateToolSlot(this.viewTool, this.lastAnnotate, (t) => ((this.viewTool = t), (this.lastAnnotate = t), this.drawUI())),
+    );
   }
 
   /** Texture Paint brushes as a toolbar (shared with painting in the 3D Viewport). */
@@ -1293,7 +1770,12 @@ export class ImageEditor implements Editor, View2D {
     el.addEventListener('pointerdown', (e) => {
       this.el.focus({ preventScroll: true });
       const start = this.local(e);
-      if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      // Paint mode: right-drag moves the clone source of the Clone brush
+      if (e.button === 2 && this.paintMode() && imagePaintRightDown(this, e)) {
+        this.skipContextMenu = true;
+        return;
+      }
+      if (e.button === 1 || (e.button === 0 && e.altKey && !annotateKeyHeld())) {
         e.preventDefault();
         el.setPointerCapture(e.pointerId);
         let last = start;
@@ -1316,6 +1798,57 @@ export class ImageEditor implements Editor, View2D {
         el.addEventListener('pointerup', up);
         return;
       }
+      if (annotateKeyHeld() && (e.button === 0 || e.button === 2) && !this.host.close) {
+        if (e.button === 2) this.cursorPlaced = true; // no context menu
+        annotatePointerDown(this, e, e.button === 2 ? 'ERASER' : e.altKey ? (e.shiftKey ? 'DRAW_POLY' : 'DRAW_STRAIGHT') : 'DRAW');
+        return;
+      }
+      const media = imageMedia(this.image);
+      if (e.button === 0 && media && !this.paintMode() && !this.maskEditing() && !this.host.close) {
+        const r = this.maskStrip();
+        if (start.y >= r.y - 2 && start.x >= r.x0 && start.x <= r.x1) {
+          // drag along the frame strip to change the frame
+          const range = this.mediaRange(media);
+          const go = (ev: { clientX: number; clientY: number }) => {
+            const f = maskStripFrame(range, r, this.local(ev).x);
+            if (f !== app.doc.scene.frame_current) app.run('image.change_frame', { frame: f }, { area: this.host.area ?? null });
+          };
+          go(e);
+          const up = () => (removeEventListener('pointermove', go), removeEventListener('pointerup', up));
+          addEventListener('pointermove', go);
+          addEventListener('pointerup', up);
+          return;
+        }
+      }
+      if (e.button === 0 && !this.paintMode() && !this.maskEditing() && isAnnotateTool(this.viewTool) && !this.host.close) {
+        annotatePointerDown(this, e, annotateModeOf(this.viewTool));
+        return;
+      }
+      if (this.maskEditing() && e.button === 2 && e.shiftKey) {
+        // Shift right click places the 2D cursor
+        placeCursor(this, start.x, start.y);
+        this.cursorPlaced = true;
+        return;
+      }
+      if (e.button === 0 && this.maskEditing()) {
+        e.preventDefault();
+        const m = hostMask(this);
+        const r = this.maskStrip();
+        if (m && this.overlays.show_overlays && start.y >= r.y - 2 && start.x >= r.x0 && start.x <= r.x1) {
+          // drag along the frame strip to change the frame
+          const go = (ev: { clientX: number; clientY: number }) => {
+            const f = maskStripFrame(m, r, this.local(ev).x);
+            if (f !== app.doc.scene.frame_current) app.setFrame(f);
+          };
+          go(e);
+          const up = () => (removeEventListener('pointermove', go), removeEventListener('pointerup', up));
+          addEventListener('pointermove', go);
+          addEventListener('pointerup', up);
+          return;
+        }
+        imageMaskPointerDown(this, e);
+        return;
+      }
       if (e.button === 0 && this.paintMode()) {
         const img = this.image;
         if (!img) app.report('WARNING', 'No image to paint on: create or open one, or add a paint slot to the object');
@@ -1334,6 +1867,12 @@ export class ImageEditor implements Editor, View2D {
     });
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+      if (this.skipContextMenu) {
+        this.skipContextMenu = false;
+        return;
+      }
+      if (this.cursorPlaced) return void (this.cursorPlaced = false);
+      if (this.maskEditing()) return void openMenu(maskContextMenu(), { x: e.clientX, y: e.clientY }, { title: 'Mask' });
       openMenu(this.imageMenu(), { x: e.clientX, y: e.clientY }, { title: 'Image' });
     });
   }
@@ -1341,8 +1880,12 @@ export class ImageEditor implements Editor, View2D {
   onKey(e: KeyboardEvent): boolean {
     if (e.type !== 'keydown') return false;
     const ctrl = e.ctrlKey || e.metaKey;
+    // Paint mode: brush keys (swap colors, brush size, stroke method, stabilizer...)
+    if (this.paintMode() && imagePaintKey(e)) return true;
     if (e.code === 'KeyN' && !ctrl && !e.altKey && !e.shiftKey) return this.toggleSidebar(), true;
-    if (e.code === 'KeyT' && !ctrl && !e.altKey && !e.shiftKey && this.paintMode()) return ((this.showToolbar = !this.showToolbar), this.drawUI()), true;
+    if (e.code === 'KeyT' && !ctrl && !e.altKey && !e.shiftKey && !this.host.close) return ((this.showToolbar = !this.showToolbar), this.drawUI()), true;
+    if (e.code === 'KeyZ' && !ctrl && e.altKey && e.shiftKey && !this.host.close) return this.toggleOverlays(), true;
+    if (e.code === 'Backquote' && ctrl && !e.altKey && !e.shiftKey && !this.host.close) return ((this.showGizmo = !this.showGizmo), this.drawUI()), true;
 
     if (e.key === 'Escape' && this.host.close && !app.modal) return this.host.close(), true;
     return false;
@@ -1362,7 +1905,7 @@ export class ImageEditor implements Editor, View2D {
     if (kinds.has('doc') || kinds.has('ui')) {
       this.draw();
       this.drawUI();
-    }
+    } else if (kinds.has('frame') && (this.maskEditing() || imageMedia(this.image))) this.draw();
   }
 
   resize() {
@@ -1370,7 +1913,7 @@ export class ImageEditor implements Editor, View2D {
   }
 
   serialize() {
-    return { image: this.imageId, pass: this.pass, channel: this.channel, zoom: this.zoom, off: [this.offX, this.offY], sidebar: this.showSidebar, layer: this.layer, mode: this.uiMode ?? undefined, toolbar: this.showToolbar, toolSettings: this.showToolSettings, sampleSize: this.sampleSize };
+    return { image: this.imageId, pass: this.pass, channel: this.channel, zoom: this.zoom, off: [this.offX, this.offY], sidebar: this.showSidebar, layer: this.layer, mode: this.uiMode ?? undefined, toolbar: this.showToolbar, toolSettings: this.showToolSettings, sampleSize: this.sampleSize, mask: this.maskId, maskTool: this.maskTool, cursor: this.cursor, pivot: this.pivot, tab: this.sidebarTab, overlays: this.overlays, viewTool: this.viewTool };
   }
 
   dispose() {
@@ -1475,3 +2018,21 @@ registerEditor({
   group: 'General',
   create: (area, state) => new ImageEditor({ area, redrawHeader: () => area.drawHeader() }, state),
 });
+
+/** Right-click menu of the Mask mode. */
+function maskContextMenu(): MenuItem[] {
+  return [
+    { label: 'Set Handle Type', submenu: () => (['AUTO', 'VECTOR', 'ALIGNED', 'FREE'] as const).map((type) => ({ label: type[0] + type.slice(1).toLowerCase(), op: 'mask.handle_type_set', props: { type } })) },
+    { label: 'Switch Direction', op: 'mask.switch_direction' },
+    { label: 'Toggle Cyclic', op: 'mask.cyclic_toggle' },
+    { separator: true },
+    { label: 'Copy Splines', op: 'mask.copy_splines' },
+    { label: 'Paste Splines', op: 'mask.paste_splines' },
+    { separator: true },
+    { label: 'Re-Key Shape Points', op: 'mask.shape_key_rekey' },
+    { label: 'Clear Feather Weight', op: 'mask.feather_weight_clear' },
+    { label: 'Reset Feather Animation', op: 'mask.shape_key_feather_reset' },
+    { separator: true },
+    { label: 'Delete', op: 'mask.delete' },
+  ];
+}

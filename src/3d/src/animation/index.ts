@@ -14,3 +14,8 @@ import './nlaops';
 import '../anim/keyingsets';
 import './miscops';
 import './driverops';
+import './slotops';
+import './nlamods';
+import './nlasound';
+import './clickops';
+import './animutils';

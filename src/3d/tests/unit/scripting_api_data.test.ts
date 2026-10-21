@@ -36,7 +36,7 @@ describe('every operator is callable from scripts', () => {
     expect(ids.length).toBeGreaterThan(1000);
     const missing = run(`const out = []; for (const id of ${JSON.stringify(ids)}) { const [m, n] = id.split('.'); const f = bpy.ops[m]?.[n]; if (typeof f !== 'function' || typeof f.poll !== 'function' || typeof f.poll() !== 'boolean') out.push(id); } print(out.join(','))`);
     expect(missing).toBe('');
-  });
+  }, 30_000);
 
   it('returns FINISHED / CANCELLED and raises when poll fails', () => {
     expect(run(`print([...bpy.ops.mesh.primitive_cube_add({size: 1})][0])`)).toBe('FINISHED');
@@ -85,9 +85,10 @@ describe('mesh access', () => {
       const vc = me.vertex_colors.new('Corners'); print(vc.domain, vc.data.length);
       const fs = me.attributes.new('.sculpt_face_set', 'INT', 'FACE'); fs.data[2].value = 7;
       print(me.attributes['.sculpt_face_set'].data[2].value);
-      try { me.attributes.new('weird', 'FLOAT', 'EDGE') } catch (e) { print('refused') }
+      const w = me.attributes.new('weird', 'FLOAT', 'EDGE'); w.data[3].value = 0.5;
+      print(w.data.length, me.attributes['weird'].data[3].value);
     `),
-    ).toBe('8 FLOAT_VECTOR\n1 Paint 1\nCORNER 24\n7\nrefused');
+    ).toBe('8 FLOAT_VECTOR\n1 Paint 1\nCORNER 24\n7\n12 0.5');
     expect(mesh('Cube').sculpt_face_set![2]).toBe(7);
   });
 

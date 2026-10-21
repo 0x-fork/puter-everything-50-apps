@@ -10,6 +10,7 @@ import { newConstraint, constraintTypes, boneOnlyConstraints } from '../eval/con
 import { boneRestMatrix } from '../eval/armature';
 import type { GPDrawing, GPFrame, GPLayer, GreasePencilData } from '../greasepencil/types';
 import { emptyDrawing, fromStrokes, newGreasePencil, newLayer as newGPLayer, newPoint, newStroke, toStrokes } from '../greasepencil/data';
+import { setCurveType } from '../greasepencil/curvefit';
 import { FX_TYPES, newEffect } from '../greasepencil/fxtypes';
 import { defaultSpeaker, type SpeakerSettings } from '../object/speakerdata';
 import { maskTable, newLayer as newMaskLayer, newMask, newPoint as newMaskPoint } from '../mask/types';
@@ -20,7 +21,7 @@ import { addKey, hasRetiming, resetRetiming, retimable, setSegmentSpeed, speedAt
 import { allStrips, ensureEditor, findStrip, inputCount, newStrip, uniqueName as uniqueStripName, updateEffectRanges } from '../sequencer/strips';
 import { ID_MIXINS, NEW_DATA, NEW_PARAMS, OBJECT_DATA_HOOKS, ObjectStruct, SceneStruct, addDataCollection, bpyData, uniqueName, viewLayer, wrapId, TABLE_OBTYPE } from './api';
 import { Matrix, Vector } from './mathutils';
-import { PropCollection, Struct, arrayFactories, boundVector, expectId, kwMethod, mixin, proxify, pyError, toPlain, touched, ensureEvaluated, type Raw } from './rna';
+import { PropCollection, Struct, arrayFactories, boundVector, expectId, kwMethod, mixin, proxify, pyError, toPlain, touched, ensureEvaluated, setRotationMode, type Raw } from './rna';
 
 type Any = Record<string, unknown>;
 const q = (s: string) => JSON.stringify(s);
@@ -253,6 +254,14 @@ function poseBoneStruct(obId: string, name: string): unknown {
       },
     },
     constraints: { get: () => new PoseBoneConstraints(obId, name) },
+    rotation_mode: {
+      get: () => (raw() as unknown as PoseBone | undefined)?.rotation_mode ?? 'QUATERNION',
+      // changing the mode converts the rotation into the new representation
+      set: (v: string) => {
+        const pb = raw();
+        if (pb) setRotationMode(pb as unknown as Raw, String(v));
+      },
+    },
   });
   return proxify(s);
 }
@@ -495,7 +504,42 @@ class GPStrokes extends PropCollection<unknown> {
       },
       toString: () => `<bpy_struct, GreasePencilStroke at ${self.__path}[${si}]>`,
     };
-    return Object.defineProperties(o, { cyclic: curveField('cyclic', true), material_index: curveField('material_index'), start_cap: curveField('start_cap'), end_cap: curveField('end_cap'), fill_opacity: curveField('fill_opacity') });
+    return Object.defineProperties(o, {
+      cyclic: curveField('cyclic', true),
+      material_index: curveField('material_index'),
+      start_cap: curveField('start_cap'),
+      end_cap: curveField('end_cap'),
+      fill_opacity: curveField('fill_opacity'),
+      // spline type as an int (0 Catmull-Rom, 1 poly, 2 Bézier, 3 NURBS)
+      curve_type: {
+        get: () => d().curve_type?.[si] ?? 1,
+        set: (v: unknown) => {
+          const list = toStrokes(d());
+          list[si] = setCurveType(list[si], Math.max(0, Math.min(3, Math.round(Number(v)))), false);
+          writeDrawing(gpOf(self.gpId), self.di, fromStrokes(list));
+        },
+        enumerable: true,
+      },
+      softness: {
+        get: () => d().softness?.[si] ?? 0,
+        set: (v: unknown) => {
+          const list = toStrokes(d());
+          list[si] = { ...list[si], softness: Math.max(0, Math.min(1, Number(v))) };
+          writeDrawing(gpOf(self.gpId), self.di, fromStrokes(list));
+        },
+        enumerable: true,
+      },
+      hide_stroke: {
+        get: () => ((d().stroke_type?.[si] ?? 0) === 2),
+        set: (v: unknown) => {
+          const list = toStrokes(d());
+          const prev = list[si].stroke_type ?? 0;
+          list[si] = { ...list[si], stroke_type: v ? 2 : prev === 2 ? 3 : prev };
+          writeDrawing(gpOf(self.gpId), self.di, fromStrokes(list));
+        },
+        enumerable: true,
+      },
+    });
   }
 }
 
@@ -904,7 +948,19 @@ class ObjectData_ {
     if (ob.type !== 'ARMATURE') return null;
     ob.pose ??= {};
     const id = self.__id;
-    return { __kind: 'struct', __type: 'Pose', bones: new PoseBones(id), toString: () => `<bpy_struct, Pose at ${obPath(id)}.pose>` };
+    const pose: Record<string, unknown> = { __kind: 'struct', __type: 'Pose', bones: new PoseBones(id), toString: () => `<bpy_struct, Pose at ${obPath(id)}.pose>` };
+    // pose options (X-Axis Mirror, Relative Mirror, Auto IK)
+    for (const key of ['use_mirror_x', 'use_mirror_relative', 'use_auto_ik'] as const)
+      Object.defineProperty(pose, key, {
+        enumerable: true,
+        get: () => !!(obOf(id) as { pose_options?: Record<string, boolean> }).pose_options?.[key],
+        set: (v: unknown) => {
+          const o = obOf(id) as { pose_options?: Record<string, boolean> };
+          (o.pose_options ??= {})[key] = !!v;
+          touched();
+        },
+      });
+    return pose;
   }
   get shader_effects() {
     return new ShaderEffects((this as unknown as ObjectStruct).__id);

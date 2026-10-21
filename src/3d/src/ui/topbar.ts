@@ -15,7 +15,7 @@ import { assistantOpen } from '../assistant';
 import { renderContext } from '../render/context';
 import { shell, type Shell } from './shell';
 import './topbar.css';
-import { externalDataMenu } from '../io/externaldata';
+import { externalDataMenu, previewsMenu } from '../io/fileops';
 import { quickSetupBody, quickSetupPending, splashArt } from './quicksetup';
 
 /** File ▸ New entries (application templates, e.g. 2D Animation); modules append to it. */
@@ -67,9 +67,11 @@ export function fileMenu(): MenuItem[] {
     { separator: true },
     { label: 'Link…', icon: 'link', op: 'wm.link' },
     { label: 'Append…', icon: 'append_blend', op: 'wm.append' },
+    { label: 'Data Previews', submenu: previewsMenu },
     { separator: true },
     { label: 'Import', icon: 'import', submenu: importMenu },
     { label: 'Export', icon: 'export', submenu: exportMenu },
+    { label: 'Export All Collections', op: 'wm.collection_export_all' },
     { separator: true },
     { label: 'External Data', submenu: externalDataMenu },
     { label: 'Clean Up', submenu: () => [{ label: 'Purge Unused Data…', op: 'outliner.orphans_purge' }, { label: 'Manage Unused Data…', op: 'outliner.orphans_manage' }] },
@@ -151,8 +153,10 @@ export function renderMenu(): MenuItem[] {
 export function windowMenu(sh: Shell): MenuItem[] {
   return [
     { label: 'New Window', op: 'wm.window_new' },
+    { label: 'New Main Window', op: 'wm.window_new_main' },
     { separator: true },
     { label: 'Toggle Window Fullscreen', icon: 'fullscreen_enter', op: 'wm.window_fullscreen_toggle' },
+    ...(app.doc.scene.render.use_multiview ? [{ label: 'Set Stereo 3D…', op: 'wm.set_stereo_3d' }] : []),
     { separator: true },
     { label: 'Next Workspace', shortcut: 'Ctrl Page Down', op: 'screen.workspace_cycle', props: { direction: 'NEXT' } },
     { label: 'Previous Workspace', shortcut: 'Ctrl Page Up', op: 'screen.workspace_cycle', props: { direction: 'PREV' } },
@@ -194,11 +198,17 @@ export function appMenu(): MenuItem[] {
     { label: 'Splash Screen', op: 'wm.splash' },
     { label: 'About', icon: 'info_small', op: 'wm.splash_about' },
     { separator: true },
+    { label: 'Install Application Template…', op: 'preferences.app_template_install' },
+    { separator: true },
     {
       label: 'System',
       submenu: () => [
+        { label: 'Reload Scripts', op: 'script.reload' },
+        { separator: true },
         { label: 'Memory Statistics', op: 'wm.memory_statistics' },
         { label: 'Redraw Timer', submenu: () => REDRAW_TYPES.map(([id, label]) => ({ label, op: 'wm.redraw_timer', props: { type: id } })) },
+        { separator: true },
+        { label: 'Clean Up Operator Presets', op: 'wm.operator_presets_cleanup' },
       ],
     },
   ];

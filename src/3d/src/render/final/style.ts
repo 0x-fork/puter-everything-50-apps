@@ -1,5 +1,11 @@
 // Styles for the Image Editor, render window and viewport render status (injected once).
 const css = /* css */ `
+.rs-curve-presets { display: flex; gap: 2px; margin: 4px 0 2px; padding-left: 40%; }
+.rs-curve-presets > .btn { flex: 1; min-width: 0; padding: 0; height: 20px; justify-content: center; }
+.btn.out-swap, .btn.ca-eyedropper { width: 20px; height: 20px; padding: 0; margin-left: 2px; justify-content: center; flex: none; }
+.sr-value.rs-checknum { display: flex; align-items: center; gap: 4px; }
+.sr-value.rs-checknum > .checkbox { flex: none; }
+.sr-value.rs-checknum > .num-field { flex: 1; min-width: 0; }
 .ie-root { position: absolute; inset: 0; outline: none; overflow: hidden; background: #2d2e30; }
 .ie-canvas { position: absolute; left: 0; top: 0; touch-action: none; }
 .ie-ui { position: absolute; inset: 0; pointer-events: none; }
@@ -35,6 +41,8 @@ const css = /* css */ `
 .ie-header::-webkit-scrollbar { display: none; }
 .ie-header > * { flex: none; }
 .ie-header > .hdr-spacer { flex: 1 1 0; min-width: 4px; }
+.ie-file-row { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.ie-file-row > .ie-value { flex: 1; min-width: 0; }
 .ie-value { color: #d0d1d3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .ie-color { width: 100%; height: 20px; padding: 0; border: 1px solid #3a3b3d; border-radius: 4px; background: #1a1b1c; }
 .ie-dialog .enum-row { flex-wrap: wrap; }

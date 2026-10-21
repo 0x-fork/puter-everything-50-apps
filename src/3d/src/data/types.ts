@@ -5,6 +5,8 @@
 // edits replace arrays instead of writing into them (see data/cow.ts).
 
 import type { RealtimeRenderSettings, RealtimeLightSettings, RealtimeMaterialSettings, RealtimeWorldSettings, LightProbeSettings } from '../render/realtime/types';
+import type { MultiviewSettings, CameraStereoData } from '../render/final/stereo';
+import type { OutputViewSettings } from '../render/final/outputview';
 export type ID = string;
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -17,6 +19,7 @@ export type ObjectType =
   | 'MESH'
   | 'CURVE'
   | 'FONT'
+  | 'SURFACE'
   | 'EMPTY'
   | 'LIGHT'
   | 'CAMERA'
@@ -73,6 +76,10 @@ export interface ShapeKey {
   vertex_group?: string;
   /** protected from edits (Edit Mode shape editing, sculpting) */
   lock_shape?: boolean;
+  /** absolute shape keys: the evaluation time at which this key is reached */
+  frame?: number;
+  /** absolute shape keys: interpolation from this key to the next */
+  interpolation?: 'KEY_LINEAR' | 'KEY_CARDINAL' | 'KEY_CATMULL_ROM' | 'KEY_BSPLINE';
 }
 
 export interface ColorAttribute {
@@ -80,6 +87,17 @@ export interface ColorAttribute {
   domain: 'POINT' | 'CORNER';
   /** RGBA, linear. */
   data: Float32Array;
+}
+
+/** Data types of generic mesh attributes (colors live in color_attributes, the UV map in uvs). */
+export type AttributeType = 'FLOAT' | 'INT' | 'INT8' | 'BOOLEAN' | 'FLOAT2' | 'INT32_2D' | 'FLOAT_VECTOR' | 'QUATERNION' | 'FLOAT4X4';
+
+/** A named data layer on one domain. EDGE values are stored per face corner (the edge starting there), then per loose edge. */
+export interface MeshAttribute {
+  name: string;
+  domain: 'POINT' | 'EDGE' | 'FACE' | 'CORNER';
+  data_type: AttributeType;
+  data: Float32Array | Int32Array | Uint8Array;
 }
 
 export interface MeshData {
@@ -101,6 +119,12 @@ export interface MeshData {
   sharp?: Uint32Array;
   /** per-corner edge crease weight (0..1) for subdivision */
   creases?: Float32Array;
+  /** per-corner edge bevel weight (0..1), the edge starting at this corner (Bevel modifier "Weight" limit) */
+  bevel_weight_edge?: Float32Array;
+  /** per-vertex bevel weight (0..1) for vertex bevels limited by weight */
+  bevel_weight_vert?: Float32Array;
+  /** per-vertex subdivision crease (0..1): sharpens the subdivided surface at the vertex */
+  crease_vert?: Float32Array;
   /** custom split normals, xyz per face corner (overrides the computed shading normals) */
   custom_normals?: Float32Array;
   /** per face: split this quad along the other diagonal than the automatic choice */
@@ -122,14 +146,30 @@ export interface MeshData {
   shape_keys: ShapeKey[];
   active_shape_key_index: number;
   use_shape_key_edit_mode?: boolean;
+  /** shape keys blend relative to their reference key (default); false: absolute keys reached in turn by `eval_time` */
+  use_relative?: boolean;
+  /** absolute shape keys: evaluation time (animatable as data.shape_keys.eval_time) */
+  eval_time?: number;
   color_attributes: ColorAttribute[];
   active_color_index: number;
+  /** generic attributes (Attributes panel, geometry nodes Named Attribute, scripts) */
+  attributes?: MeshAttribute[];
+  /** name of the active attribute of the Attributes list */
+  active_attribute?: string;
   uv_map_name: string;
+  /** the other UV maps (per corner u, v), in list order with the active map left out */
+  uv_layers_extra?: { name: string; data: Float32Array }[];
+  /** position of the active map (uvs / uv_map_name) in the UV Maps list */
+  uv_active_index?: number;
+  /** name of the UV map used for rendering (default: the first map) */
+  uv_render_name?: string;
   /** Material slots (material ids or null for empty slot). */
   materials: (ID | null)[];
   /** Auto smooth by angle (radians); undefined = off. */
   auto_smooth_angle?: number;
   remesh_voxel_size?: number;
+  /** Remesh panel: voxel remesh or quad remesh */
+  remesh_mode?: 'VOXEL' | 'QUAD';
   /** Sculpt mode mask, one value per vertex (0 = unmasked, 1 = fully masked). */
   sculpt_mask?: Float32Array;
   /** Sculpt face sets, one id per face (ids start at 1). */
@@ -197,6 +237,18 @@ export interface Spline {
   resolution_u: number;
   order_u: number;
   use_endpoint_u?: boolean;
+  /** NURBS knots in Bézier segments (interior knots repeated order-1 times) */
+  use_bezier_u?: boolean;
+  /** NURBS surfaces: `points` is a grid of point_count_u × point_count_v (U varies fastest) */
+  point_count_u?: number;
+  point_count_v?: number;
+  order_v?: number;
+  resolution_v?: number;
+  use_cyclic_v?: boolean;
+  use_endpoint_v?: boolean;
+  use_bezier_v?: boolean;
+  /** hidden in Edit Mode */
+  hide?: boolean;
   use_smooth: boolean;
   material_index: number;
 }
@@ -214,6 +266,27 @@ export interface CurveData {
   eval_time?: number;
   splines: Spline[];
   resolution_u: number;
+  /** data of NURBS surface objects */
+  surface?: boolean;
+  /** how the profile turns along 3D curves, and how much that turning is smoothed */
+  twist_mode?: 'MINIMUM' | 'Z_UP' | 'TANGENT';
+  twist_smooth?: number;
+  /** the part of each spline the bevel covers, and how the factors are measured */
+  bevel_factor_start?: number;
+  bevel_factor_end?: number;
+  bevel_factor_mapping_start?: 'RESOLUTION' | 'SEGMENTS' | 'SPLINE';
+  bevel_factor_mapping_end?: 'RESOLUTION' | 'SEGMENTS' | 'SPLINE';
+  /** how the taper object's value combines with the point radius; map it to the covered part only */
+  taper_radius_mode?: 'OVERRIDE' | 'MULTIPLY' | 'ADD';
+  use_map_taper?: boolean;
+  /** curve deform: scale by the curve radius, stretch the deformed object over the whole curve, clamp to its bounds */
+  use_radius?: boolean;
+  use_stretch?: boolean;
+  use_deform_bounds?: boolean;
+  /** surfaces: preview resolution along V; render resolutions (0 = use the preview ones) */
+  resolution_v?: number;
+  render_resolution_u?: number;
+  render_resolution_v?: number;
   bevel_depth: number;
   bevel_resolution: number;
   extrude: number;
@@ -306,6 +379,15 @@ export interface LightData extends RealtimeLightSettings {
   diffuse_factor: number;
   specular_factor: number;
   volume_factor: number;
+  /** colour from a black body temperature (kelvin), multiplied with `color` */
+  use_temperature?: boolean;
+  temperature?: number;
+  /** brightness scale in stops (2^exposure) */
+  exposure?: number;
+  /** area lights: keep the total power when the size changes (off: power per square metre) */
+  normalize?: boolean;
+  /** area lights: angle of the cone the light emits into (π = the whole hemisphere) */
+  spread?: number;
   users?: number;
 }
 
@@ -334,10 +416,18 @@ export interface CameraData {
     /** anamorphic distortion of the bokeh (1 = round) */
     aperture_ratio?: number;
   };
+  /** stereo rig used by stereo 3D renders (render/final/stereo.ts) */
+  stereo?: CameraStereoData;
   display_size: number;
   show_passepartout: boolean;
   passepartout_alpha: number;
   show_limits?: boolean;
+  /** draw the world's mist range along the camera axis */
+  show_mist?: boolean;
+  /** camera view: outline of the sensor area */
+  show_sensor?: boolean;
+  /** colour of the composition guides (RGBA) */
+  composition_guide_color?: [number, number, number, number];
   /** camera view overlays (src/render/final/cameraoverlay.ts) */
   show_name?: boolean;
   show_safe_areas?: boolean;
@@ -402,6 +492,41 @@ export interface Bone {
   /** B-Bone display size (default: a tenth of the bone length) */
   bbone_x?: number;
   bbone_z?: number;
+  /** location is applied in the bone's own space (false: in the parent's space) */
+  use_local_location?: boolean;
+  /** objects parented to the bone follow its deformation (pose relative to rest) instead of its tail */
+  use_relative_parent?: boolean;
+  /** envelope deformation strength and whether it multiplies vertex group weights */
+  envelope_weight?: number;
+  use_envelope_multiply?: boolean;
+  /** colour of the bone (Edit Mode / rest; pose bones can override it) */
+  color?: BoneColor;
+  // B-Bone shape (rest): curve offsets, roll, scale and ease of the start / end handles
+  bbone_curveinx?: number;
+  bbone_curveinz?: number;
+  bbone_curveoutx?: number;
+  bbone_curveoutz?: number;
+  bbone_rollin?: number;
+  bbone_rollout?: number;
+  use_endroll_as_inroll?: boolean;
+  bbone_scalein?: Vec3;
+  bbone_scaleout?: Vec3;
+  bbone_easein?: number;
+  bbone_easeout?: number;
+  use_scale_easing?: boolean;
+  /** what the B-Bone's start / end handles follow */
+  bbone_handle_type_start?: 'AUTO' | 'ABSOLUTE' | 'RELATIVE' | 'TANGENT';
+  bbone_handle_type_end?: 'AUTO' | 'ABSOLUTE' | 'RELATIVE' | 'TANGENT';
+  bbone_custom_handle_start?: string;
+  bbone_custom_handle_end?: string;
+  /** how vertices map to segments: by projection on the straight bone or on the curve */
+  bbone_mapping_mode?: 'STRAIGHT' | 'CURVED';
+}
+
+/** Bone colour: a theme colour set or custom colours for the normal / selected / active states. */
+export interface BoneColor {
+  palette: string;
+  custom?: { normal: Color; select: Color; active: Color; show_colored_constraints?: boolean };
 }
 
 /** Named group of bones (visibility, selection, organisation). */
@@ -420,6 +545,10 @@ export interface ArmatureData {
   show_names: boolean;
   show_axes: boolean;
   show_in_front?: boolean;
+  /** draw bones in their colours */
+  show_bone_colors?: boolean;
+  /** draw custom shapes instead of the bones (default on) */
+  show_bone_custom_shapes?: boolean;
   active_bone?: string | null;
   users?: number;
   collections?: BoneCollection[];
@@ -437,6 +566,27 @@ export interface PoseBone {
   scale: Vec3;
   constraints: Constraint[];
   custom_shape?: ID | null;
+  /** custom shape placement (relative to the bone) and line width */
+  custom_shape_translation?: Vec3;
+  custom_shape_rotation_euler?: Vec3;
+  custom_shape_scale_xyz?: Vec3;
+  custom_shape_wire_width?: number;
+  /** the custom shape is drawn at this other bone's transform (Override Transform) */
+  custom_shape_transform?: string;
+  use_custom_shape_bone_size?: boolean;
+  /** pose colour (overrides the bone's colour when its palette is not DEFAULT) */
+  color?: BoneColor;
+  // B-Bone shape (pose, added to the rest values)
+  bbone_curveinx?: number;
+  bbone_curveinz?: number;
+  bbone_curveoutx?: number;
+  bbone_curveoutz?: number;
+  bbone_rollin?: number;
+  bbone_rollout?: number;
+  bbone_scalein?: Vec3;
+  bbone_scaleout?: Vec3;
+  bbone_easein?: number;
+  bbone_easeout?: number;
   lock_location?: [boolean, boolean, boolean];
   lock_rotation?: [boolean, boolean, boolean];
   lock_scale?: [boolean, boolean, boolean];
@@ -469,8 +619,22 @@ export interface LatticeData {
   /** deformed point positions (u*v*w*3), in lattice local space ±0.5 */
   points: Float32Array;
   interpolation: 'KEY_LINEAR' | 'KEY_BSPLINE';
+  /** interpolation per axis (default: `interpolation`) */
+  interpolation_type_u?: LatticeInterpolation;
+  interpolation_type_v?: LatticeInterpolation;
+  interpolation_type_w?: LatticeInterpolation;
+  /** only the outer points deform; inner points follow them */
+  use_outside?: boolean;
+  /** vertex group whose weights scale each point's influence */
+  vertex_group?: string;
+  /** lattice vertex groups and their weights per point */
+  vertex_groups?: { name: string }[];
+  weights?: Float32Array[];
+  active_vertex_group_index?: number;
   users?: number;
 }
+
+export type LatticeInterpolation = 'KEY_LINEAR' | 'KEY_CARDINAL' | 'KEY_CATMULL_ROM' | 'KEY_BSPLINE';
 
 // ---------------------------------------------------------------------------
 // Node trees (shader, geometry, compositor, world)
@@ -584,6 +748,8 @@ export interface WorldData extends RealtimeWorldSettings {
   mist_start?: number;
   mist_depth?: number;
   mist_falloff?: 'QUADRATIC' | 'LINEAR' | 'INVERSE_QUADRATIC';
+  /** World ▸ Ray Visibility ▸ Camera: the background is seen by the camera (off: black) */
+  visible_camera?: boolean;
   users?: number;
 }
 
@@ -729,6 +895,26 @@ export interface FCurve {
   color?: Color;
   /** baked samples (frame, value) used when the curve has no keyframes */
   sampled_points?: [number, number][];
+  /** how automatic handles are computed: independently (NONE) or for a smooth acceleration (CONT_ACCEL) */
+  auto_smoothing?: 'NONE' | 'CONT_ACCEL';
+  /** handle of the action slot this curve animates (actions with slots; the first slot when absent) */
+  slot?: number;
+  /** set when the curve's property could not be found during evaluation ("Revive Disabled F-Curves" clears it) */
+  disabled?: boolean;
+}
+
+/**
+ * A slot of an action: one data-block's worth of animation. Several data-blocks can play
+ * the same action, each through its own slot (or share one).
+ */
+export interface ActionSlot {
+  /** stable number the users refer to (unique within the action) */
+  handle: number;
+  /** two-letter data-block type code ('OB', 'ME', …; 'XX' until first assigned) followed by the name */
+  identifier: string;
+  select?: boolean;
+  /** expanded in the channel list of the Action Editor */
+  show_expanded?: boolean;
 }
 
 export interface ActionData {
@@ -740,6 +926,14 @@ export interface ActionData {
   /** markers stored with the action (shown in the Action Editor with Show Pose Markers) */
   pose_markers?: TimelineMarker[];
   users?: number;
+  /** slots (absent / empty: a single implicit slot playing every curve on whatever uses the action) */
+  slots?: ActionSlot[];
+  /** last slot handle handed out */
+  last_slot_handle?: number;
+  /** handle of the slot shown as active in the Action Editor */
+  active_slot?: number;
+  /** groups pinned in the Graph Editor (listed while their bone is unselected) */
+  pinned_groups?: string[];
 }
 
 export interface NlaStrip {
@@ -759,9 +953,17 @@ export interface NlaStrip {
   select?: boolean;
   extrapolation: 'HOLD' | 'HOLD_FORWARD' | 'NOTHING';
   /** strip kind (action clip when absent) */
-  type?: 'CLIP' | 'TRANSITION' | 'META';
+  type?: 'CLIP' | 'TRANSITION' | 'META' | 'SOUND';
   /** META: the grouped strips, in inner time (action_frame_start..end) */
   strips?: NlaStrip[];
+  /** slot of the action the strip plays (0: none; absent: found through the owner, see anim/slots.ts) */
+  action_slot_handle?: number;
+  /** F-Modifiers acting on every channel the strip produces */
+  modifiers?: FModifier[];
+  /** SOUND strips: the speaker's sound plays from the strip start */
+  sound?: ID | null;
+  /** control curves of the strip (`influence` while the influence is animated) */
+  fcurves?: FCurve[];
 }
 
 export interface NlaTrack {
@@ -780,7 +982,15 @@ export interface AnimData {
   action_influence?: number;
   drivers: Driver[];
   /** NLA tweak mode: the strip whose action is being edited */
-  tweak?: { track: number; strip: number; prev_action: ID | null; upper: boolean } | null;
+  tweak?: { track: number; strip: number; prev_action: ID | null; upper: boolean; prev_slot?: number; prev_slot_action?: ID | null } | null;
+  /** slot of `action` this data-block plays (0: none); valid while slot_action equals action */
+  action_slot_handle?: number;
+  /** the action action_slot_handle refers to (when it differs from action, the slot is found again) */
+  slot_action?: ID | null;
+  /** identifier of the slot last assigned, used to find a slot again when another action is assigned */
+  last_slot_identifier?: string;
+  /** Graph Editor: channels stay listed while the owner is unselected ("Only Show Selected") */
+  use_pin?: boolean;
 }
 
 export type DriverIdType = 'OBJECT' | 'SCENE' | 'MESH' | 'CURVE' | 'LIGHT' | 'CAMERA' | 'ARMATURE' | 'LATTICE' | 'MATERIAL' | 'WORLD' | 'IMAGE' | 'ACTION' | 'NODETREE' | 'TEXT' | 'COLLECTION' | 'PARTICLE';
@@ -892,7 +1102,8 @@ export interface ParticleSettings {
   use_rotations?: boolean;
   angular_velocity_factor?: number;
   seed?: number;
-  display_color?: Color;
+  /** how particles are coloured in the viewport */
+  display_color?: 'NONE' | 'MATERIAL' | 'VELOCITY' | 'ACCELERATION';
   child_type?: 'NONE' | 'SIMPLE' | 'INTERPOLATED';
   rendered_child_count?: number;
   clump_factor?: number;
@@ -1036,8 +1247,15 @@ export interface CollectionData {
 
 export type RenderEngine = 'RASTER' | 'PATHTRACE' | 'SOLID';
 
-export interface RenderSettings extends RealtimeRenderSettings {
+export interface RenderSettings extends RealtimeRenderSettings, MultiviewSettings, OutputViewSettings {
   engine: RenderEngine;
+  /** Render ▸ Curves: strand shape in the realtime engine and its subdivisions */
+  hair_type?: 'STRAND' | 'STRIP' | 'CYLINDER';
+  hair_subdiv?: number;
+  /** Render ▸ Curves of the path tracer */
+  cycles_curves?: import('../render/final/curvesettings').CyclesCurves;
+  /** path tracer options (src/render/final/ptsettings.ts) */
+  cycles?: import('../render/final/ptsettings').PathTraceSettings;
   /** texture baking (src/bake/settings.ts) */
   bake?: import('../bake/settings').BakeSettings;
   bake_type?: import('../bake/settings').BakeType;
@@ -1049,7 +1267,10 @@ export interface RenderSettings extends RealtimeRenderSettings {
   film_transparent: boolean;
   fps: number;
   fps_base: number;
-  file_format: 'PNG' | 'JPEG' | 'WEBP' | 'WEBM';
+  file_format: 'PNG' | 'JPEG' | 'WEBP' | 'WEBM' | 'OPEN_EXR' | 'OPEN_EXR_MULTILAYER';
+  /** OpenEXR: half (16) or full (32) floats, and the compression */
+  color_depth?: '16' | '32';
+  exr_codec?: 'NONE' | 'ZIPS' | 'ZIP';
   color_mode: 'BW' | 'RGB' | 'RGBA';
   filepath: string;
   // sampling
@@ -1087,6 +1308,8 @@ export interface RenderSettings extends RealtimeRenderSettings {
   use_pass_mist: boolean;
   use_pass_ambient_occlusion?: boolean;
   use_pass_emit?: boolean;
+  use_pass_environment?: boolean;
+  use_pass_transmission_color?: boolean;
   use_pass_diffuse_color?: boolean;
   use_pass_object_index?: boolean;
   use_compositing: boolean;
@@ -1114,6 +1337,8 @@ export interface RenderSettings extends RealtimeRenderSettings {
   // --- depth of field / motion blur / film
   use_bokeh_jittered?: boolean;
   motion_blur_position?: 'START' | 'CENTER' | 'END';
+  /** shutter openness over the shutter interval (control points x, y in 0..1); absent = fully open */
+  motion_blur_shutter_curve?: [number, number][];
   filter_size?: number;
   pixel_filter_type?: 'BOX' | 'GAUSSIAN' | 'BLACKMAN_HARRIS';
   filter_width?: number;
@@ -1188,7 +1413,15 @@ export interface RenderSettings extends RealtimeRenderSettings {
 
 export interface ToolSettings {
   use_snap: boolean;
-  snap_elements: ('INCREMENT' | 'VERTEX' | 'EDGE' | 'FACE' | 'VOLUME' | 'EDGE_MIDPOINT' | 'GRID')[];
+  snap_elements: ('INCREMENT' | 'VERTEX' | 'EDGE' | 'FACE' | 'VOLUME' | 'EDGE_MIDPOINT' | 'GRID' | 'EDGE_PERPENDICULAR' | 'FACE_CENTER')[];
+  /** snapping skips faces turned away from the view */
+  use_snap_backface_culling?: boolean;
+  /** objects that cannot be selected are not snapped to */
+  use_snap_selectable?: boolean;
+  /** which transforms the snap toggle applies to (Move on, Rotate / Scale off by default) */
+  use_snap_translate?: boolean;
+  use_snap_rotate?: boolean;
+  use_snap_scale?: boolean;
   snap_target: 'CLOSEST' | 'CENTER' | 'MEDIAN' | 'ACTIVE';
   use_snap_align_rotation?: boolean;
   use_snap_grid_absolute?: boolean;
@@ -1205,6 +1438,12 @@ export interface ToolSettings {
   use_mesh_automerge: boolean;
   double_threshold: number;
   use_keyframe_insert_auto: boolean;
+  /** auto keying adds and replaces keys, or only replaces keys that exist on the frame */
+  auto_keying_mode?: 'ADD_REPLACE_KEYS' | 'REPLACE_KEYS';
+  /** auto keying keys the active keying set only */
+  use_keyframe_insert_keyingset?: boolean;
+  /** keys inserted on curves with a Cycles modifier land inside the cycle (and keep both ends equal) */
+  use_keyframe_cycle_aware?: boolean;
   /** markers can't be selected, moved or deleted */
   lock_markers?: boolean;
   /** proportional editing of keys in the Dope Sheet / Graph Editor */
@@ -1397,6 +1636,10 @@ export interface DocumentData {
   pointclouds?: Record<ID, import('../pointcloud/types').PointCloudData>;
   /** Library files this file links data-blocks from (src/library); absent in older files */
   libraries?: Record<ID, import('../library/types').LibraryData>;
+  /** Color palettes of the paint modes (src/paint/palette.ts); absent in older files */
+  palettes?: Record<ID, import('../paint/palettemath').PaletteData>;
+  /** Paint curves the Curve stroke method follows (src/paint/paintcurve.ts); absent in older files */
+  paint_curves?: Record<ID, import('../paint/strokemath').PaintCurveData>;
   /** Mode of the active object */
   mode: Mode;
   /** Ordering of object ids for stable iteration */
@@ -1411,7 +1654,8 @@ export interface BrushData {
   mode: 'SCULPT' | 'TEXTURE_PAINT' | 'VERTEX_PAINT' | 'WEIGHT_PAINT';
   strength: number;
   radius: number;
-  falloff: SculptSettings['falloff'];
+  /** falloff preset (src/paint/math.ts), 'CUSTOM' uses the brush's own curve */
+  falloff: import('../paint/math').Falloff;
   direction: 'ADD' | 'SUBTRACT';
   color?: Color;
   blend?: 'MIX' | 'ADD' | 'SUB' | 'MUL' | 'LIGHTEN' | 'DARKEN' | 'ERASE_ALPHA';

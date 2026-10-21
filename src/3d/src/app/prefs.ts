@@ -146,6 +146,12 @@ export interface Preferences {
   show_only_selected_curve_keyframes: boolean;
   keyframe_new_interpolation_type: 'CONSTANT' | 'LINEAR' | 'BEZIER';
   keyframe_new_handle_type: 'FREE' | 'ALIGNED' | 'VECTOR' | 'AUTO' | 'AUTO_CLAMPED';
+  /** Handle Smoothing of new F-Curves */
+  fcurve_new_auto_smoothing: 'NONE' | 'CONT_ACCEL';
+  /** auto keying only keys channels that are already animated */
+  use_auto_keyframe_insert_available: boolean;
+  /** channels auto keying (and plain Insert Keyframe without a keying set) keys */
+  key_insert_channels: ('LOCATION' | 'ROTATION' | 'SCALE')[];
   use_negative_frames: boolean;
 
   // --- System
@@ -169,6 +175,8 @@ export interface Preferences {
   show_hidden_files_datablocks: boolean;
   use_filter_files: boolean;
   use_scripts_auto_execute: boolean;
+  /** project name patterns (* wildcards) whose registered scripts never run automatically */
+  autoexec_paths: string[];
 
   // --- File Paths
   render_output_directory: string;
@@ -300,6 +308,9 @@ export const defaultPreferences = (): Preferences => ({
   show_only_selected_curve_keyframes: false,
   keyframe_new_interpolation_type: 'BEZIER',
   keyframe_new_handle_type: 'AUTO_CLAMPED',
+  fcurve_new_auto_smoothing: 'CONT_ACCEL',
+  use_auto_keyframe_insert_available: false,
+  key_insert_channels: ['LOCATION', 'ROTATION', 'SCALE'],
   use_negative_frames: true,
 
   undo_steps: 64,
@@ -319,6 +330,7 @@ export const defaultPreferences = (): Preferences => ({
   show_hidden_files_datablocks: false,
   use_filter_files: true,
   use_scripts_auto_execute: false,
+  autoexec_paths: [],
 
   render_output_directory: '//render/',
 });

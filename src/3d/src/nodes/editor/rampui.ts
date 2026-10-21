@@ -7,6 +7,7 @@ import type { NodeData } from '../../data/types';
 import { getNodeType } from '../registry';
 import { readRamp, writeRamp, bakeRamp, evalRamp, readCurve, writeCurve, evalCurve, evalPeriodicCurve, CURVE_NAMES, CURVE_RANGE, defaultCurves, type CurveKind, type CurvePoint } from '../curves';
 import type { NodeDrawContext } from '../types';
+import { setHoveredRamp, type RampStopLike } from '../../ui/rampdropper';
 
 const css = (c: number[]) =>
   `rgba(${c
@@ -114,7 +115,18 @@ export function drawRamp(ctx: NodeDrawContext): Child {
   const key = `${ctx.key}:ramp`;
   return h(
     'div',
-    { class: 'nd-ramp' },
+    {
+      class: 'nd-ramp',
+      // the color ramp eyedroppers (E / Alt E over the ramp) sample into it
+      onpointerenter: (e: PointerEvent) =>
+        setHoveredRamp(e.currentTarget as HTMLElement, {
+          stops: () => readRamp(n.props).stops as RampStopLike[],
+          set: (s) => {
+            n.props.ramp_active = Math.min(rampActive(n, s.length), Math.max(0, s.length - 1));
+            setStops(s, 'Eyedropper Colorband', false);
+          },
+        }),
+    },
     h(
       'div',
       { class: 'nd-ramp-tools' },
@@ -313,7 +325,7 @@ export function drawCurves(ctx: NodeDrawContext): Child {
   const pts = readCurve(n.props, active);
   const sel = Math.max(-1, Math.min(pts.length - 1, (n.props.curve_point as number) ?? -1));
   const [x0, y0, x1, y1] = CURVE_RANGE[kind];
-  const extend = (n.props.curve_extend as string) ?? 'HORIZONTAL';
+  const extend = (n.props.curve_extend as string) ?? 'EXTRAPOLATED';
   const W = 200,
     H = CURVE_SIZE;
   const sx = (x: number) => ((x - x0) / (x1 - x0)) * W;
@@ -611,15 +623,22 @@ export function curveHeight(n: NodeData) {
   return 24 + CURVE_SIZE + 6 + 24 + (curveKind(n) === 'RGB' || curveKind(n) === 'HUE' ? 24 : 0) + 6;
 }
 
-// attach to node types
-const ramp = getNodeType('ShaderNodeValToRGB');
-if (ramp) {
-  ramp.drawBody = drawRamp;
-  ramp.bodyHeight = () => RAMP_HEIGHT;
+/**
+ * Attach the ramp / curve bodies to the shader node types. Called from `rampattach.ts`, which the
+ * nodes entry imports after the shader definitions: this module is also imported early by other
+ * areas (modifier panels, sequencer), before the node types exist.
+ */
+export function attachRampBodies() {
+  const ramp = getNodeType('ShaderNodeValToRGB');
+  if (ramp) {
+    ramp.drawBody = drawRamp;
+    ramp.bodyHeight = () => RAMP_HEIGHT;
+  }
+  for (const id of ['ShaderNodeRGBCurve', 'ShaderNodeVectorCurve', 'ShaderNodeFloatCurve']) {
+    const d = getNodeType(id);
+    if (!d) continue;
+    d.drawBody = drawCurves;
+    d.bodyHeight = curveHeight;
+  }
 }
-for (const id of ['ShaderNodeRGBCurve', 'ShaderNodeVectorCurve', 'ShaderNodeFloatCurve']) {
-  const d = getNodeType(id);
-  if (!d) continue;
-  d.drawBody = drawCurves;
-  d.bodyHeight = curveHeight;
-}
+attachRampBodies();
