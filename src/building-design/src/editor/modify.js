@@ -7,10 +7,12 @@ import { add, sub, scale, dot, norm, perp, dist, len, angleOf, closestOnSegment,
 import {
   transformElements,
   copyElements,
+  arrayRadial,
   translation,
   rotation,
   mirrorAcross,
-  splitWall,
+  splitLinear,
+  scaling,
   cornerWalls,
   extendToLine,
   offsetElement,
@@ -19,7 +21,7 @@ import {
 } from '../core/ops.js';
 import { formatAngle, parseAngle } from '../core/units.js';
 import { strokeModel, drawTempDim, drawTag } from '../views/overlay.js';
-import { previewGraphics } from './draw.js';
+import { previewGraphics, ANNOTATION_VIEWS } from './draw.js';
 import { h } from '../ui/dom.js';
 
 function selectionIds(app) {
@@ -344,21 +346,47 @@ export class ArrayTool extends SelectionTool {
     return 'Array';
   }
 
+  get o() {
+    return this.app.toolOptions('array', { count: 3, mode: 'linear', angle: 360 });
+  }
+
   get prompt() {
+    if (this.o.mode === 'radial') return 'Click the center to turn the copies about';
     return this.base ? 'Click the position of the second item' : 'Click the start point';
   }
 
   options() {
-    const o = this.app.toolOptions('array', { count: 3 });
+    const o = this.o;
     const inp = h('input.input.sm.num', { type: 'number', min: 2, max: 200, value: o.count, 'aria-label': 'Number of items' });
     inp.addEventListener('change', () => (o.count = this.count = Math.max(2, Math.min(200, Math.round(+inp.value || 2)))));
     inp.addEventListener('keydown', (e) => e.stopPropagation());
-    return [h('div.ob-group', h('label', 'Number of items'), inp)];
+    const mode = h('select.input.sm', { 'aria-label': 'Array type' }, h('option', { value: 'linear' }, 'Linear'), h('option', { value: 'radial' }, 'Radial'));
+    mode.value = o.mode;
+    mode.addEventListener('change', () => {
+      o.mode = mode.value;
+      this.base = null;
+      this.app.renderOptions();
+      this.app.setPrompt(this.prompt);
+    });
+    const out = [h('div.ob-group', h('label', 'Type'), mode), h('div.ob-group', h('label', 'Number of items'), inp)];
+    if (o.mode === 'radial') {
+      const ang = h('input.input.sm.num', { type: 'number', min: -360, max: 360, value: o.angle, 'aria-label': 'Total angle in degrees' });
+      ang.addEventListener('change', () => (o.angle = Math.max(-360, Math.min(360, +ang.value || 360))));
+      ang.addEventListener('keydown', (e) => e.stopPropagation());
+      out.push(h('div.ob-group', h('label', 'Angle'), ang));
+    }
+    return out;
   }
 
   down(ev) {
     const p = this.snap(ev, this.base, { exclude: this.exclude });
     if (!p) return;
+    if (this.o.mode === 'radial') {
+      const o = this.o;
+      this.app.commit('Radial array', () => arrayRadial(this.doc, this.ids, p, o.count, (o.angle * Math.PI) / 180));
+      this.app.cancelTool();
+      return;
+    }
     if (!this.base) {
       this.base = p;
       this.app.setPrompt(this.prompt);
@@ -375,7 +403,13 @@ export class ArrayTool extends SelectionTool {
   }
 
   drawOverlay(ctx, vc, vp) {
-    if (this.base && this.cursor) {
+    if (this.o.mode === 'radial' && this.cursor) {
+      const o = this.o;
+      const sweep = (o.angle * Math.PI) / 180;
+      const full = Math.abs(Math.abs(sweep) - Math.PI * 2) < 1e-6;
+      const step = full ? sweep / o.count : sweep / Math.max(1, o.count - 1);
+      for (let i = 1; i < Math.min(o.count, 60); i++) this.preview(ctx, vc, vp, rotation(this.cursor, step * i));
+    } else if (this.base && this.cursor) {
       const d = sub(this.cursor, this.base);
       for (let i = 1; i < Math.min(this.count, 30); i++) this.preview(ctx, vc, vp, translation(scale(d, i)));
       const S = (p) => vc.modelToScreen(p);
@@ -598,10 +632,26 @@ export class SplitTool extends Tool {
     return 'Click on a wall or line where it should be split';
   }
 
+  get gap() {
+    return this.app.toolOptions('split', { gap: 0 }).gap;
+  }
+
+  options() {
+    const o = this.app.toolOptions('split', { gap: 0 });
+    const input = h('input.input.sm.num', { type: 'text', value: this.fmt(o.gap), 'aria-label': 'Gap' });
+    input.addEventListener('change', () => {
+      const v = this.parseLen(input.value);
+      if (Number.isFinite(v) && v >= 0) o.gap = v;
+      input.value = this.fmt(o.gap);
+    });
+    input.addEventListener('keydown', (e) => e.stopPropagation());
+    return [h('div.ob-group', h('label', 'Gap'), input), h('span.ob-label', o.gap ? 'Leaves a gap of this width at the split.' : 'Set a gap to split with an opening between the parts.')];
+  }
+
   target(ev) {
     for (const id of this.vc.hitTest(ev.x, ev.y)) {
       const el = this.doc.get(id);
-      if (el && ['wall', 'detailLine', 'roomSeparator', 'beam'].includes(el.kind)) return el;
+      if (el && ['wall', 'detailLine', 'roomSeparator', 'beam', 'modelLine', 'refPlane', 'areaBoundary', 'insulation'].includes(el.kind)) return el;
     }
     return null;
   }
@@ -618,18 +668,8 @@ export class SplitTool extends Tool {
     if (!el) return;
     const p = this.snap(ev) || ev.p;
     const c = closestOnSegment(p, el.a, el.b).point;
-    if (el.kind === 'wall') {
-      const r = this.app.commit('Split wall', () => splitWall(this.doc, el, c));
-      if (r === null) this.app.toast('Click away from the ends of the wall.', { kind: 'error' });
-    } else {
-      if (dist(c, el.a) < 1 || dist(c, el.b) < 1) return;
-      this.app.commit('Split', () => {
-        const { id: _id, ...rest } = el;
-        void _id;
-        this.doc.update(el.id, { b: c });
-        this.doc.add({ ...rest, a: c });
-      });
-    }
+    const r = this.app.commit(el.kind === 'wall' ? 'Split wall' : 'Split', () => splitLinear(this.doc, el, c, this.gap));
+    if (r === null) this.app.toast(this.gap ? 'The gap does not fit there. Click farther from the ends.' : 'Click away from the ends.', { kind: 'error' });
   }
 
   drawOverlay(ctx, vc, vp) {
@@ -644,13 +684,115 @@ export class SplitTool extends Tool {
   }
 }
 
+/**
+ * Scale the selection about a base point: graphically (a reference length,
+ * then the new length) or by a typed factor.
+ */
+export class ScaleTool extends SelectionTool {
+  get title() {
+    return 'Scale';
+  }
+
+  get prompt() {
+    if (!this.base) return 'Click the base point (it stays in place), or type a scale factor in the options bar';
+    if (!this.ref) return 'Click the end of the reference length';
+    return 'Click to set the new length, or type it';
+  }
+
+  options() {
+    const f = h('input.input.sm.num', { type: 'text', placeholder: '2', 'aria-label': 'Scale factor' });
+    f.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        const k = parseFloat(f.value);
+        if (!(k > 0)) return f.setAttribute('aria-invalid', 'true');
+        if (!this.base) {
+          const b = this.vc.extents?.(new Set(this.ids));
+          this.base = b ? [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2] : [0, 0];
+        }
+        this.apply(k);
+      }
+    });
+    return [h('div.ob-group', h('label', 'Factor'), f), h('span.ob-label', 'Positions and lengths scale; the sizes of doors, furniture and other types stay.')];
+  }
+
+  down(ev) {
+    const p = this.snap(ev, this.ref || this.base, { exclude: this.exclude });
+    if (!p) return;
+    if (!this.base) this.base = p;
+    else if (!this.ref) {
+      if (dist(p, this.base) < 1) return;
+      this.ref = p;
+    } else {
+      const k = dist(p, this.base) / dist(this.ref, this.base);
+      if (k > 0) this.apply(k);
+      return;
+    }
+    this.app.setPrompt(this.prompt);
+  }
+
+  apply(k) {
+    this.app.commit('Scale', () => transformElements(this.doc, this.ids, scaling(this.base, k)));
+    this.app.cancelTool();
+  }
+
+  move(ev) {
+    this.cursor = this.snap(ev, this.ref || this.base, { exclude: this.exclude });
+    this.app.requestRender();
+  }
+
+  key(e) {
+    if (this.ref && isNumericStart(e)) {
+      e.preventDefault();
+      const s = this.vc.modelToScreen(this.cursor || this.ref);
+      const input = this.openInput(s.x, s.y, {
+        label: 'New length',
+        onSubmit: (v) => {
+          const L = this.parseLen(v);
+          if (!(L > 0)) return false;
+          this.apply(L / dist(this.ref, this.base));
+          return true;
+        },
+      });
+      input.value = e.key;
+      return true;
+    }
+    return false;
+  }
+
+  cancel() {
+    if (this.ref || this.base) {
+      if (this.ref) this.ref = null;
+      else this.base = null;
+      this.app.setPrompt(this.prompt);
+      return false;
+    }
+    return true;
+  }
+
+  drawOverlay(ctx, vc, vp) {
+    const S = (p) => vc.modelToScreen(p);
+    if (this.base && this.cursor) {
+      strokeModel(ctx, [this.base, this.ref || this.cursor], S, vp.theme.preview, 1.4, [5, 4]);
+      if (this.ref) {
+        const k = dist(this.cursor, this.base) / dist(this.ref, this.base);
+        strokeModel(ctx, [this.base, this.cursor], S, vp.theme.preview, 1.4);
+        this.preview(ctx, vc, vp, scaling(this.base, k));
+        const s = S(this.cursor);
+        drawTag(ctx, s.x + 30, s.y + 20, `x ${Math.round(k * 1000) / 1000}`, { bg: vp.theme.bgCss, fg: vp.theme.inkCss, border: vp.theme.preview });
+      }
+    }
+    this.drawSnap(ctx, vc, vp);
+  }
+}
+
 export class MeasureTool extends Tool {
   get title() {
     return 'Measure';
   }
 
   get viewKinds() {
-    return ['plan', 'ceilingPlan', 'elevation', 'section'];
+    return ANNOTATION_VIEWS;
   }
 
   get prompt() {
@@ -744,7 +886,7 @@ export class ZoomRegionTool extends Tool {
   }
 
   get viewKinds() {
-    return ['plan', 'ceilingPlan', 'elevation', 'section'];
+    return ANNOTATION_VIEWS;
   }
 
   get prompt() {

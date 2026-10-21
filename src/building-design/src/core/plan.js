@@ -8,15 +8,25 @@
  * Colours: null means the theme's ink colour; INK(a) is ink at alpha a;
  * BG is the canvas colour (used to mask what lies underneath).
  */
-import { add, sub, scale, dot, norm, perp, len, dist, lerp, arcPoints, rotate, pointInPolygon, bbox, mid, angleOf } from './geom.js';
-import { verticalExtent, openingSize, levelElevation, wallAxis } from './model.js';
+import { add, sub, scale, dot, norm, perp, len, dist, lerp, arcPoints, rotate, pointInPolygon, bbox, mid, angleOf, area as polyArea } from './geom.js';
+import { verticalExtent, openingSize, levelElevation, wallAxis, rampLayout, rampOutline } from './model.js';
 import { axisParam, facePoint, hubsOf } from './walls.js';
-import { wallOpenings, keepIntervals, splitByCuts, roofGeometry, curtainGrid } from './build3d.js';
+import { wallOpenings, keepIntervals, splitByCuts, roofGeometry, curtainGrid, footingOutline, wallFootingOutline } from './build3d.js';
+import { mepSize, mepPlan, systemOf } from './mep.js';
+import { delaunay, contours, topoBoundary } from './topo.js';
 import { stairFlights, flightOutline, flightPoint } from './stairs.js';
 import { buildFamily } from './families.js';
 import { Frame } from './mesh.js';
 import { categoryOf } from './catalog.js';
 import { formatDimension, formatArea } from './units.js';
+import { annotationGraphics, arrowHead, leaderStart } from './annotate.js';
+import { planSpace } from './spaces.js';
+import { planBasePoint } from './coords.js';
+import { planSweep } from './sweeps.js';
+import { planScopeBox } from './scopebox.js';
+import { planTruss } from './truss.js';
+import { planImported } from './imported.js';
+import { planModelText } from './modeltext.js';
 
 export const INK = (a = 255) => [-1, -1, -1, a];
 export const BG = [-2, -2, -2, 255];
@@ -92,7 +102,7 @@ export class PlanBuilder {
  * Plan context for one view:
  * { doc, view, level, cutZ, bottomZ, topZ, scale, detail, walls, rooms, ceiling }
  */
-export function planContext(doc, view, walls, rooms) {
+export function planContext(doc, view, walls, rooms, areas = null) {
   const level = doc.get(view.levelId);
   const elev = level?.elevation ?? 0;
   const above = level ? doc.levelAbove(level.id) : null;
@@ -102,6 +112,7 @@ export function planContext(doc, view, walls, rooms) {
     level,
     walls,
     rooms,
+    areas,
     ceiling: view.kind === 'ceilingPlan',
     cutZ: elev + (+view.cutHeight || 1200),
     bottomZ: elev + (+view.viewDepth || 0),
@@ -127,6 +138,7 @@ function tint(hex, a) {
 /** Is this element hidden in the view by category or by element? */
 export function hiddenInView(doc, view, el) {
   if (view.hiddenIds?.includes(el.id)) return true;
+  if (el.groupId && view.hiddenIds?.includes(el.groupId)) return true;
   const cat = categoryOf(el, doc);
   return !!(cat && view.hiddenCats?.includes(cat));
 }
@@ -171,6 +183,33 @@ export function planGraphics(pc, el) {
     case 'room':
       planRoom(pc, el, b);
       break;
+    case 'space':
+      planSpace(pc, el, b);
+      break;
+    case 'basePoint':
+      planBasePoint(pc, el, b);
+      break;
+    case 'wallSweep':
+      planSweep(pc, el, b);
+      break;
+    case 'scopeBox':
+      planScopeBox(pc, el, b);
+      break;
+    case 'truss':
+      planTruss(pc, el, b);
+      break;
+    case 'wire':
+      planWire(pc, el, b);
+      break;
+    case 'importedModel':
+      planImported(pc, el, b);
+      break;
+    case 'modelText':
+      planModelText(pc, el, b);
+      break;
+    case 'matchline':
+      planMatchline(pc, el, b);
+      break;
     case 'roomSeparator':
       if (el.levelId === pc.view.levelId) b.line(el.a, el.b, W.thin, 0, null);
       break;
@@ -186,8 +225,11 @@ export function planGraphics(pc, el) {
     case 'tag':
       if (el.viewId === pc.view.id) drawTag(pc, el, b);
       break;
+    case 'treadNumbers':
+      if (el.viewId === pc.view.id) drawTreadNumbers(pc, el, b);
+      break;
     case 'detailLine':
-      if (el.viewId === pc.view.id) drawDetailLine(el, b);
+      if (el.viewId === pc.view.id) drawDetailLine(pc, el, b);
       break;
     case 'region':
       if (el.viewId === pc.view.id && el.boundary?.length >= 3) {
@@ -203,10 +245,202 @@ export function planGraphics(pc, el) {
     case 'elevation':
       planElevationMarker(pc, el, b);
       break;
+    case 'refPlane':
+      planRefPlane(pc, el, b);
+      break;
+    case 'plan':
+    case 'ceilingPlan':
+    case 'areaPlan':
+      if (el.calloutOf === pc.view.id && el.crop) planCalloutMarker(pc, el, b);
+      break;
+    case 'footing':
+      if (el.levelId === pc.view.levelId && !pc.ceiling) {
+        const o = footingOutline(pc.doc, el);
+        b.poly(o, true, W.thin, 2);
+        b.pick(o);
+      }
+      break;
+    case 'wallFooting': {
+      const w = pc.doc.get(el.wallId);
+      const o = w && w.levelId === pc.view.levelId && !pc.ceiling ? wallFootingOutline(pc.doc, el) : null;
+      if (o) {
+        b.poly(o, true, W.thin, 2);
+        b.pick(o);
+      }
+      break;
+    }
+    case 'brace':
+      planBrace(pc, el, b);
+      break;
+    case 'duct':
+    case 'pipe':
+    case 'cableTray':
+    case 'conduit':
+      planMep(pc, el, b);
+      break;
+    case 'topo':
+      planTopo(pc, el, b);
+      break;
+    case 'propertyLine':
+      if (el.boundary?.length >= 3 && !pc.ceiling) {
+        b.poly(el.boundary, true, W.medium, 3);
+        const c = el.boundary.reduce((s, p) => [s[0] + p[0] / el.boundary.length, s[1] + p[1] / el.boundary.length], [0, 0]);
+        b.text(c, `Property ${formatArea(polyArea(el.boundary), pc.units)}`, { size: P(pc, 2.2), color: INK(170) });
+        for (let i = 0; i < el.boundary.length; i++) {
+          const p = el.boundary[i];
+          const q = el.boundary[(i + 1) % el.boundary.length];
+          const n = perp(norm(sub(q, p)));
+          const pad = P(pc, 1);
+          b.pick([add(p, scale(n, -pad)), add(q, scale(n, -pad)), add(q, scale(n, pad)), add(p, scale(n, pad))]);
+        }
+      }
+      break;
+    case 'mass': {
+      if (!el.boundary || el.boundary.length < 3) break;
+      const base = levelElevation(pc.doc, el.levelId) + (+el.baseOffset || 0);
+      const top = base + (+el.height || 10000);
+      if (top < pc.bottomZ || base > pc.cutZ) break;
+      if (base <= pc.cutZ && top > pc.cutZ) b.fill(el.boundary, el.holes || [], [176, 190, 214, 70]);
+      b.poly(el.boundary, true, W.light, 0, [90, 110, 150, 255]);
+      b.pick(el.boundary);
+      break;
+    }
+    case 'modelLine':
+      if (el.levelId === pc.view.levelId) drawDetailLine(pc, el, b);
+      break;
+    case 'ramp':
+      if (!pc.ceiling) planRamp(pc, el, b);
+      break;
+    case 'area':
+      planArea(pc, el, b);
+      break;
+    case 'areaBoundary':
+      if (el.levelId === pc.view.levelId) {
+        b.line(el.a, el.b, W.cut, 0, AREA_LINE);
+        const n = perp(norm(sub(el.b, el.a)));
+        const pad = P(pc, 0.8);
+        b.pick([add(el.a, scale(n, -pad)), add(el.b, scale(n, -pad)), add(el.b, scale(n, pad)), add(el.a, scale(n, pad))]);
+      }
+      break;
     default:
-      return null;
+      if (!annotationGraphics(pc, el, b)) return null;
   }
   return b.empty ? null : b;
+}
+
+// Bracing, building services and topography -----------------------------------------------------
+
+function planBrace(pc, el, b) {
+  if (el.levelId !== pc.view.levelId || pc.ceiling || !el.a || !el.b) return;
+  b.line(el.a, el.b, W.light, 2);
+  // A small mark at the low end.
+  const d = norm(sub(el.b, el.a));
+  const n = perp(d);
+  const s = P(pc, 1.2);
+  b.line(add(el.a, scale(n, -s)), add(el.a, scale(n, s)), W.light);
+  const pad = P(pc, 1);
+  b.pick([add(el.a, scale(n, -pad)), add(el.b, scale(n, -pad)), add(el.b, scale(n, pad)), add(el.a, scale(n, pad))]);
+}
+
+function planMep(pc, el, b) {
+  if (el.levelId !== pc.view.levelId || !el.a || !el.b) return;
+  const { round } = mepSize(pc.doc, el);
+  const sys = systemOf(el);
+  const col = tint(sys.color, 255);
+  const g = mepPlan(pc.doc, el);
+  const [p0, p1, p2, p3] = g.outline;
+  if (el.kind === 'pipe' || el.kind === 'conduit') {
+    // Single line at coarse and medium detail, the pipe's width at fine.
+    if (pc.detail === 'fine' && el.kind === 'pipe') {
+      b.line(p0, p1, W.thin, 0, col);
+      b.line(p3, p2, W.thin, 0, col);
+    }
+    b.line(el.a, el.b, el.kind === 'pipe' ? W.medium : W.thin, el.kind === 'conduit' ? 1 : 0, col);
+  } else {
+    b.fill(g.outline, [], tint(sys.color, 28));
+    b.line(p0, p1, W.light, 0, col);
+    b.line(p3, p2, W.light, 0, col);
+    if (round) b.line(g.a, g.b, W.thin, 3, col);
+    if (el.kind === 'cableTray') {
+      // Rungs.
+      const L = dist(g.a, g.b);
+      for (let s = 300; s < L; s += 300) b.line(add(p0, scale(g.d, s)), add(p3, scale(g.d, s)), W.thin, 0, col);
+    }
+  }
+  b.pick(g.outline);
+}
+
+function planTopo(pc, el, b) {
+  const P0 = el.points || [];
+  if (P0.length < 3 || pc.ceiling) return;
+  // Shown in plans of the lowest level (site plans).
+  const lowest = pc.doc.levels()[0];
+  if (lowest && pc.view.levelId !== lowest.id) return;
+  const tris = delaunay(P0);
+  const interval = +el.contour || (pc.units.system === 'imperial' ? 304.8 : 500);
+  for (const c of contours(el, interval, tris)) b.line(c.a, c.b, c.major ? W.light : W.thin, 0, c.major ? INK(200) : INK(120));
+  const hull = topoBoundary(el);
+  b.poly(hull, true, W.thin, 0, INK(150));
+  b.pick(hull);
+}
+
+/** Colours of datum and area annotations. */
+export const REF_PLANE = [46, 139, 87, 255];
+export const AREA_LINE = [150, 80, 200, 255];
+
+// Reference planes, ramps and areas ------------------------------------------------------------
+
+function planRefPlane(pc, el, b) {
+  const d = norm(sub(el.b, el.a));
+  if (!len(d)) return;
+  b.line(el.a, el.b, W.thin, 3, REF_PLANE);
+  if (el.name) b.text(add(el.b, scale(d, P(pc, 3))), el.name, { size: P(pc, 2.2), color: REF_PLANE, rot: readableAngle(angleOf(d)), align: 'left' });
+  const n = perp(d);
+  const pad = P(pc, 1);
+  b.pick([add(el.a, scale(n, -pad)), add(el.b, scale(n, -pad)), add(el.b, scale(n, pad)), add(el.a, scale(n, pad))]);
+}
+
+function planRamp(pc, el, b) {
+  const atBase = el.levelId === pc.view.levelId;
+  const atTop = el.topLevelId && el.topLevelId === pc.view.levelId;
+  if (!atBase && !atTop) return;
+  const g = rampLayout(pc.doc, el);
+  const outline = rampOutline(pc.doc, el);
+  b.poly(outline, true, W.light);
+  b.pick(outline);
+  // Arrow up the slope, with the direction and the slope.
+  const a0 = add(el.a, scale(g.dir, Math.min(g.run * 0.1, P(pc, 4))));
+  const a1 = sub(g.end, scale(g.dir, Math.min(g.run * 0.1, P(pc, 4))));
+  b.line(a0, a1, W.thin);
+  const ah = P(pc, 2.2);
+  b.poly([add(add(a1, scale(g.dir, -ah)), scale(g.side, ah * 0.45)), a1, add(add(a1, scale(g.dir, -ah)), scale(g.side, -ah * 0.45))], false, W.thin);
+  const rot = readableAngle(angleOf(g.dir));
+  const m = mid(el.a, g.end);
+  b.text(add(m, scale(g.side, P(pc, 2.2))), atBase ? 'UP' : 'DN', { size: P(pc, 2.2), rot, mask: true });
+  b.text(add(m, scale(g.side, -P(pc, 2.2))), `1:${Math.round(g.ratio * 10) / 10}`, { size: P(pc, 2), rot, mask: true });
+}
+
+function areaColor(name) {
+  const c = roomColor(name);
+  return [c[0], c[1], c[2], 70];
+}
+
+function planArea(pc, el, b) {
+  if (el.levelId !== pc.view.levelId) return;
+  const region = pc.areas?.area(el);
+  const at = el.tagAt || el.at;
+  if (region) {
+    b.fill(region.outer, region.holes, areaColor(el.name));
+    b.pick(region.outer);
+  } else {
+    const s = P(pc, 1.5);
+    b.line(add(el.at, [-s, -s]), add(el.at, [s, s]), W.thin, 0, RED);
+    b.line(add(el.at, [-s, s]), add(el.at, [s, -s]), W.thin, 0, RED);
+    b.pick([add(el.at, [-s, -s]), add(el.at, [s, -s]), add(el.at, [s, s]), add(el.at, [-s, s])]);
+  }
+  const sz = P(pc, 2.5);
+  b.text([at[0], at[1] + sz * 0.9], (el.name || 'Area').toUpperCase(), { size: sz, bold: true, mask: true });
+  b.text([at[0], at[1] - sz * 0.6], region ? formatArea(region.area, pc.units) : 'Not enclosed', { size: P(pc, 2), color: region ? null : RED, mask: true });
 }
 
 // Walls ----------------------------------------------------------------------------------
@@ -304,14 +538,14 @@ function planCurtain(pc, w, g, type, b, cut) {
   const c = type.curtain || {};
   const mw = +c.mullionWidth || 50;
   const md = +c.mullionDepth || 150;
-  const { nu, du } = curtainGrid(axis.length, top - base, type);
+  const { us } = curtainGrid(axis.length, top - base, type, w);
   const wt = cut ? W.medium : W.thin;
   const P0 = (u, y) => add(add(axis.a, scale(axis.dir, u)), scale(axis.n, y));
   b.line(P0(0, 0), P0(axis.length, 0), W.thin);
   b.line(P0(0, -6), P0(axis.length, -6), W.thin);
   b.line(P0(0, 6), P0(axis.length, 6), W.thin);
-  for (let i = 0; i <= nu; i++) {
-    const u = Math.min(axis.length - mw / 2, Math.max(mw / 2, i * du));
+  for (const gu of us) {
+    const u = Math.min(axis.length - mw / 2, Math.max(mw / 2, gu));
     const r = [P0(u - mw / 2, -md / 2), P0(u + mw / 2, -md / 2), P0(u + mw / 2, md / 2), P0(u - mw / 2, md / 2)];
     if (cut) b.fill(r, [], INK(160));
     b.poly(r, true, wt);
@@ -480,6 +714,7 @@ function planRoof(pc, el, b) {
   const { poly, ridges } = roofGeometry(pc.doc, el);
   b.poly(poly, true, W.light);
   for (const [p, q] of ridges) b.line(p, q, W.thin);
+  for (const hole of el.holes || []) b.poly(hole, true, W.light);
   b.pick(poly);
 }
 
@@ -537,6 +772,7 @@ function planStair(pc, el, b) {
   const atTop = el.topLevelId === pc.view.levelId;
   if ((!atBase && !atTop) || pc.ceiling) return;
   const g = stairFlights(pc.doc, el);
+  if (g.spiral) return planSpiral(pc, el, g, atBase, b);
   const { riserHeight: rh, tread: td, width: Wd } = g;
   const walk = [];
   let stopped = false;
@@ -598,6 +834,126 @@ function planStair(pc, el, b) {
   }
 }
 
+/** Matchline: where the building continues on another sheet, in every plan of the levels it spans. */
+function planMatchline(pc, el, b) {
+  const z = pc.level?.elevation ?? 0;
+  if (el.z0 != null && z < el.z0 - 1) return;
+  if (el.z1 != null && z > el.z1 + 1) return;
+  const d = norm(sub(el.b, el.a));
+  const n = perp(d);
+  b.line(el.a, el.b, W.heavy, 3, [120, 60, 160, 255]);
+  const L = dist(el.a, el.b);
+  const sz = P(pc, 2.5);
+  const rot = readableAngle(angleOf(d));
+  for (const s of [0.15, 0.85]) b.text(add(add(el.a, scale(d, L * s)), scale(n, sz * 0.9)), el.name ? `MATCH LINE - ${el.name}` : 'MATCH LINE', { size: sz, rot, bold: true, color: [120, 60, 160, 255], mask: true });
+  const pad = P(pc, 1.2);
+  b.pick([add(el.a, scale(n, -pad)), add(el.b, scale(n, -pad)), add(el.b, scale(n, pad)), add(el.a, scale(n, pad))]);
+}
+
+/** Numbers on the treads of a stair, counted from the bottom, on one side of the walk line. */
+function drawTreadNumbers(pc, el, b) {
+  const stair = pc.doc.get(el.stairId);
+  if (!stair) return;
+  const g = stairFlights(pc.doc, stair);
+  const { tread: td, width: Wd } = g;
+  if (g.spiral) {
+    const s = g.spiral;
+    const r = el.side === 'left' ? s.rin + Wd * 0.78 : s.rin + Wd * 0.22;
+    const sz2 = P(pc, 1.8);
+    for (let i = 0; i < s.treads - 1; i++) {
+      const a = s.a0 + s.step * (i + 0.5);
+      const p = [s.c[0] + Math.cos(a) * r, s.c[1] + Math.sin(a) * r];
+      b.text(p, String((+el.start || 1) + i), { size: sz2, mask: true });
+      b.pick([add(p, [-sz2, -sz2]), add(p, [sz2, -sz2]), add(p, [sz2, sz2]), add(p, [-sz2, sz2])]);
+    }
+    return;
+  }
+  const w = el.side === 'left' ? Wd * 0.78 : Wd * 0.22;
+  const sz = P(pc, 1.8);
+  let n = +el.start || 1;
+  for (const f of g.flights) {
+    // Risers are numbered; the last riser of a flight lands on the landing or floor.
+    for (let i = 0; i < f.risers - 1; i++) {
+      const p = flightPoint(f, Wd, (i + 0.5) * td, w);
+      b.text(p, String(n++), { size: sz, rot: readableAngle(angleOf(f.dir)), mask: true });
+      b.pick([add(p, [-sz, -sz]), add(p, [sz, -sz]), add(p, [sz, sz]), add(p, [-sz, sz])]);
+    }
+    n++;
+  }
+}
+
+/** Wiring: an arc between the two ends, with tick marks for the conductors and the circuit name. */
+function planWire(pc, el, b) {
+  if (el.levelId !== pc.view.levelId || !el.a || !el.b) return;
+  const L = dist(el.a, el.b);
+  if (L < 10) return;
+  const d = norm(sub(el.b, el.a));
+  const n = perp(d);
+  const sag = L * 0.18;
+  const pts = [];
+  for (let i = 0; i <= 24; i++) {
+    const t = i / 24;
+    pts.push(add(add(el.a, scale(d, L * t)), scale(n, sag * 4 * t * (1 - t))));
+  }
+  b.poly(pts, false, W.thin, 0, [40, 90, 200, 255]);
+  const m = add(mid(el.a, el.b), scale(n, sag));
+  const ticks = Math.max(0, Math.min(6, +el.ticks || 0));
+  const tl = P(pc, 1.2);
+  for (let i = 0; i < ticks; i++) {
+    const c = add(m, scale(d, (i - (ticks - 1) / 2) * P(pc, 0.8)));
+    b.line(add(c, scale(n, -tl)), add(c, scale(n, tl)), W.thin, 0, [40, 90, 200, 255]);
+  }
+  if (el.circuit) b.text(add(m, scale(n, P(pc, 2.6))), String(el.circuit), { size: P(pc, 2), rot: readableAngle(angleOf(d)), color: [40, 90, 200, 255] });
+  for (let i = 0; i + 1 < pts.length; i += 4) {
+    const p = pts[i];
+    const q = pts[Math.min(pts.length - 1, i + 4)];
+    const pn = scale(perp(norm(sub(q, p))), P(pc, 1));
+    b.pick([sub(p, pn), sub(q, pn), add(q, pn), add(p, pn)]);
+  }
+}
+
+/** A spiral stair in plan: tread lines, the column, the cut, and the walking line with its arrow. */
+function planSpiral(pc, el, g, atBase, b) {
+  const s = g.spiral;
+  const P = (r, a) => [s.c[0] + Math.cos(a) * r, s.c[1] + Math.sin(a) * r];
+  const n = s.treads;
+  // Treads above the cut plane (in the base plan) are dashed.
+  const cutAt = atBase ? Math.floor((pc.cutZ - g.base) / g.riserHeight) : n;
+  for (let i = 0; i <= n; i++) {
+    // Past a full turn the treads above the cut lie over the ones below it.
+    if (i > cutAt && Math.abs(s.step * i) >= 2 * Math.PI) break;
+    const a = s.a0 + s.step * i;
+    b.line(P(s.rin, a), P(s.rout, a), W.thin, i > cutAt ? 2 : 0);
+  }
+  const aEnd = s.a0 + s.step * n;
+  const lo = Math.min(s.a0, aEnd);
+  const hi = Math.max(s.a0, aEnd);
+  b.arc(s.c, s.rout, lo, hi, W.light);
+  b.circle(s.c, s.rin, W.light);
+  if (cutAt < n) {
+    const ac = s.a0 + s.step * (cutAt + 0.5);
+    b.line(P(s.rin * 0.6, ac), P(s.rout * 1.08, ac), W.light);
+  }
+  // Walking line up to the cut (or all the way in the top plan).
+  const last = Math.min(n, cutAt) - 0.3;
+  const pts = [];
+  for (let k = 0; k <= 24; k++) pts.push(P(s.rwalk, s.a0 + s.step * (0.4 + ((last - 0.4) * k) / 24)));
+  if (pts.length > 1 && last > 0.5) {
+    b.poly(pts, false, W.thin);
+    b.circle(pts[0], P(pc, 0.8), W.thin);
+    const tip = pts.at(-1);
+    const d = norm(sub(tip, pts.at(-2)));
+    const n2 = perp(d);
+    const ah = P(pc, 2.2);
+    b.poly([add(add(tip, scale(d, -ah)), scale(n2, ah * 0.45)), tip, add(add(tip, scale(d, -ah)), scale(n2, -ah * 0.45))], false, W.thin);
+  }
+  b.text(P(s.rwalk, s.a0 - s.step * 0.6), atBase ? 'UP' : 'DN', { size: P(pc, 2.2) });
+  const outline = [];
+  for (let k = 0; k <= 32; k++) outline.push(P(s.rout, lo + ((hi - lo) * k) / 32));
+  outline.push(s.c);
+  b.pick(outline);
+}
+
 function planRailing(pc, el, b) {
   if (el.levelId !== pc.view.levelId || !el.path || el.path.length < 2 || pc.ceiling) return;
   const type = pc.doc.get(el.typeId) || {};
@@ -619,7 +975,8 @@ function planComponent(pc, el, b) {
   if (!type) return;
   const z = levelElevation(pc.doc, el.levelId) + (+el.offset || 0) + (+type.elevation || 0);
   if (z < pc.bottomZ - 1 || z >= pc.topZ) return;
-  if (pc.ceiling && type.category !== 'lighting') return;
+  if (pc.ceiling && type.category !== 'lighting' && type.category !== 'airTerminals') return;
+  if (!pc.ceiling && type.category === 'airTerminals') return;
   const frame = new Frame(el.at, ((+el.rotation || 0) * Math.PI) / 180);
   const sym = buildFamily(type, frame, null, () => null);
   const outline = sym.outline.map((p) => frame.apply(p));
@@ -630,6 +987,11 @@ function planComponent(pc, el, b) {
 }
 
 // Rooms ------------------------------------------------------------------------------------------
+
+/** Fill colour for a room value (name, department...), stable across sessions. */
+export function roomColorFor(value) {
+  return roomColor(value);
+}
 
 function roomColor(name) {
   let h = 0;
@@ -654,7 +1016,7 @@ function planRoom(pc, el, b) {
   const region = pc.rooms.room(el);
   const at = el.tagAt || el.at;
   if (region) {
-    if (pc.view.roomFill) b.fill(region.outer, region.holes, roomColor(el.name));
+    if (pc.view.roomFill) b.fill(region.outer, region.holes, roomColor(String(el[pc.view.roomFillBy || 'name'] || '(none)')));
     b.pick(region.outer);
   } else {
     const s = P(pc, 1.5);
@@ -769,13 +1131,31 @@ function drawDimension(pc, el, b) {
   const ang = readableAngle(angleOf(dir));
   const up = rotate([0, 1], ang);
   const tsz = P(pc, 2.5);
+  const eq = el.eq && el.refs.length >= 3 && el.eqDisplay !== 'value';
   for (let i = 0; i + 1 < sorted.length; i++) {
     const v = sorted[i + 1].s - sorted[i].s;
     if (v < 0.5) continue;
     const m = g.at((sorted[i].s + sorted[i + 1].s) / 2);
-    b.text(add(m, scale(up, tsz * 0.75)), el.override || formatDimension(v, pc.units), { size: tsz, rot: ang });
+    b.text(add(m, scale(up, tsz * 0.75)), eq ? 'EQ' : el.override || formatDimension(v, pc.units), { size: tsz, rot: ang });
+    // A small padlock under locked segments.
+    const a = g.order[i];
+    const c = g.order[i + 1];
+    if (el.locks?.some((lk) => (lk.i === a && lk.j === c) || (lk.i === c && lk.j === a))) drawPadlock(b, add(m, scale(up, -tsz * 1.1)), tsz * 0.9, ang);
   }
   b.pick([add(g.at(first - ext), scale(n, -tsz)), add(g.at(last + ext), scale(n, -tsz)), add(g.at(last + ext), scale(n, tsz * 1.8)), add(g.at(first - ext), scale(n, tsz * 1.8))]);
+}
+
+function drawPadlock(b, c, s, ang) {
+  const R = (p) => add(c, rotate(p, ang));
+  const body = [
+    [-s * 0.6, -s * 0.55],
+    [s * 0.6, -s * 0.55],
+    [s * 0.6, s * 0.2],
+    [-s * 0.6, s * 0.2],
+  ].map(R);
+  b.fill(body, [], INK(255));
+  const arc = arcPoints([0, s * 0.2], s * 0.38, 0, Math.PI, Math.PI / 8).map(R);
+  b.poly(arc, false, W.thin);
 }
 
 function drawText(pc, el, b) {
@@ -793,14 +1173,41 @@ function drawText(pc, el, b) {
     [x0, hgt / 2],
   ].map((p) => add(el.at, rotate(p, rot)));
   b.pick(corners);
+  for (const tip of el.leaders || []) {
+    const start = leaderStart(el, tip, w, hgt);
+    if (dist(start, tip) < sz) continue;
+    // A short horizontal shoulder off the text, then the leader to the tip.
+    const shoulder = add(start, rotate([Math.sign(rotate(sub(tip, el.at), -rot)[0] - x0 - w / 2) * sz * 0.8, 0], rot));
+    b.line(start, shoulder, W.thin);
+    b.line(shoulder, tip, W.thin);
+    arrowHead(b, tip, sub(tip, shoulder), P(pc, 2));
+  }
 }
 
-export function tagText(doc, target) {
+/** The main material of an element: the core layer of layered types, else the type's material. */
+export function materialOf(doc, el) {
+  const type = doc.get(el?.typeId);
+  if (!type) return null;
+  if (type.layers?.length) {
+    const core = type.layers.find((l) => l.function === 'structure') || type.layers[0];
+    return doc.get(core.materialId) ?? null;
+  }
+  return doc.get(type.materialId || type.panelMaterialId || type.frameMaterialId) ?? null;
+}
+
+/** Text of a tag. show: 'mark' (default) | 'type' | 'material' | 'keynote' | 'name'. */
+export function tagText(doc, target, show = 'mark') {
   if (!target) return '?';
+  const type = doc.get(target.typeId);
+  if (show === 'type') return type?.mark || type?.name || '?';
+  if (show === 'material') return materialOf(doc, target)?.name || '?';
+  if (show === 'keynote') return target.keynote || type?.keynote || '?';
+  if (show === 'name') return target.name || type?.name || '?';
   if (target.kind === 'door' || target.kind === 'window') return target.mark || '?';
   if (target.kind === 'room') return target.number || target.name || '?';
-  if (target.kind === 'wall') return doc.get(target.typeId)?.mark || '?';
-  return target.mark || doc.get(target.typeId)?.mark || '?';
+  if (target.kind === 'area') return target.name || '?';
+  if (target.kind === 'wall') return type?.mark || '?';
+  return target.mark || type?.mark || '?';
 }
 
 /** Anchor point of a tag's target in plan. */
@@ -818,15 +1225,48 @@ export function tagAnchor(doc, target) {
   return null;
 }
 
+/** Where a tag's leader points, in the coordinates of the view it is drawn in. */
+export function tagAnchorInView(pc, target) {
+  const p = tagAnchor(pc.doc, target);
+  if (!p || !pc.frame) return p;
+  // Elevations and sections: along the view, at the middle of the element's height.
+  const f = pc.frame;
+  const u = (p[0] - f.origin[0]) * f.right[0] + (p[1] - f.origin[1]) * f.right[1];
+  const b = pc.meshOf?.(target)?.bounds;
+  const z = b ? (b.min[2] + b.max[2]) / 2 : (pc.doc.get(target.levelId)?.elevation ?? 0) + 1000;
+  return [u, z];
+}
+
 function drawTag(pc, el, b) {
   const target = pc.doc.get(el.targetId);
   if (!target) return;
-  const text = tagText(pc.doc, target);
+  const show = el.show || 'mark';
+  const text = tagText(pc.doc, target, show);
   const sz = P(pc, 2.5);
   const at = el.at;
+  if (show === 'material') {
+    // Material tags are plain text on a leader.
+    b.text(at, text, { size: sz, align: 'left', mask: true });
+    const w = sz * 0.6 * text.length;
+    const anchor = tagAnchorInView(pc, target);
+    if (anchor && dist(anchor, at) > sz) {
+      const start = add(at, [anchor[0] < at[0] ? -sz * 0.3 : w + sz * 0.3, 0]);
+      b.line(start, anchor, W.thin);
+      arrowHead(b, anchor, sub(anchor, start), P(pc, 2));
+    }
+    b.pick([add(at, [-sz * 0.3, -sz * 0.7]), add(at, [w + sz * 0.3, -sz * 0.7]), add(at, [w + sz * 0.3, sz * 0.7]), add(at, [-sz * 0.3, sz * 0.7])]);
+    return;
+  }
   const r = Math.max(sz * 0.95, sz * 0.36 * text.length + sz * 0.4);
   let outline;
-  if (target.kind === 'door') outline = arcPoints(at, r, 0, Math.PI * 2, Math.PI / 16).slice(0, -1);
+  if (show === 'keynote' || show === 'type' || show === 'name')
+    outline = [
+      [at[0] - r * 1.1, at[1] - sz * 0.9],
+      [at[0] + r * 1.1, at[1] - sz * 0.9],
+      [at[0] + r * 1.1, at[1] + sz * 0.9],
+      [at[0] - r * 1.1, at[1] + sz * 0.9],
+    ];
+  else if (target.kind === 'door') outline = arcPoints(at, r, 0, Math.PI * 2, Math.PI / 16).slice(0, -1);
   else if (target.kind === 'window')
     outline = [0, 1, 2, 3, 4, 5].map((i) => {
       const a = (i * Math.PI) / 3;
@@ -843,7 +1283,7 @@ function drawTag(pc, el, b) {
   b.poly(outline, true, W.thin);
   b.text(at, text, { size: sz });
   if (el.leader) {
-    const anchor = tagAnchor(pc.doc, target);
+    const anchor = tagAnchorInView(pc, target);
     if (anchor && dist(anchor, at) > r * 1.5) {
       const d = norm(sub(anchor, at));
       b.line(add(at, scale(d, r)), anchor, W.thin);
@@ -852,11 +1292,25 @@ function drawTag(pc, el, b) {
   b.pick(outline);
 }
 
-const LINE_STYLE = { thin: [W.thin, 0], medium: [W.medium, 0], wide: [W.heavy, 0], dashed: [W.thin, 1], hidden: [W.thin, 2], center: [W.thin, 3] };
+export const LINE_STYLE = { thin: [W.thin, 0], medium: [W.medium, 0], wide: [W.heavy, 0], dashed: [W.thin, 1], hidden: [W.thin, 2], center: [W.thin, 3] };
 
-function drawDetailLine(el, b) {
-  const [w, d] = LINE_STYLE[el.style] || LINE_STYLE.thin;
-  b.line(el.a, el.b, w, d);
+/**
+ * Weight, dash and colour of a line style: a built-in name, or the id of a
+ * project line style ({ name, weight, dash, color }).
+ */
+export function lineStyleOf(doc, style, fallback = 'thin') {
+  const custom = doc?.get(style);
+  if (custom?.kind === 'lineStyle') {
+    const n = parseInt(String(custom.color || '#000000').slice(1, 7), 16) || 0;
+    return [+custom.weight || W.thin, +custom.dash || 0, custom.color && custom.color !== '#000000' ? [(n >> 16) & 255, (n >> 8) & 255, n & 255, 255] : null];
+  }
+  const [w, d] = LINE_STYLE[style] || LINE_STYLE[fallback];
+  return [w, d, null];
+}
+
+function drawDetailLine(pc, el, b) {
+  const [w, d, c] = lineStyleOf(pc.doc, el.style);
+  b.line(el.a, el.b, w, d, c);
   const n = perp(norm(sub(el.b, el.a)));
   const pad = 20;
   b.pick([add(el.a, scale(n, -pad)), add(el.b, scale(n, -pad)), add(el.b, scale(n, pad)), add(el.a, scale(n, pad))]);
@@ -913,6 +1367,38 @@ function planElevationMarker(pc, v, b) {
   b.text(c, abbreviation(v.name), { size: P(pc, 2) });
   b.pick(circle);
   b.pick(tri);
+}
+
+/** A callout in its parent view: the cropped area, a leader and a bubble with the view's name. */
+function planCalloutMarker(pc, v, b) {
+  const r = v.crop;
+  const rad = Math.min(P(pc, 3), (r.x1 - r.x0) / 4, (r.y1 - r.y0) / 4);
+  // Rounded rectangle.
+  const pts = [];
+  const corner = (cx, cy, a0) => pts.push(...arcPoints([cx, cy], rad, a0, a0 + Math.PI / 2, Math.PI / 12));
+  corner(r.x1 - rad, r.y0 + rad, -Math.PI / 2);
+  corner(r.x1 - rad, r.y1 - rad, 0);
+  corner(r.x0 + rad, r.y1 - rad, Math.PI / 2);
+  corner(r.x0 + rad, r.y0 + rad, Math.PI);
+  b.poly(pts, true, W.medium, 1);
+  const bubbleR = P(pc, 4);
+  const c = [r.x1 + bubbleR * 2.2, r.y1 + bubbleR * 1.6];
+  b.line([r.x1 - rad * 0.3, r.y1 - rad * 0.3], add(c, scale(norm(sub([r.x1, r.y1], c)), bubbleR)), W.thin);
+  const circle = arcPoints(c, bubbleR, 0, Math.PI * 2, Math.PI / 20).slice(0, -1);
+  b.fill(circle, [], BG);
+  b.circle(c, bubbleR, W.light);
+  b.line(add(c, [-bubbleR, 0]), add(c, [bubbleR, 0]), W.thin);
+  b.text(add(c, [0, bubbleR * 0.42]), abbreviation(v.name), { size: P(pc, 2) });
+  b.text(add(c, [0, -bubbleR * 0.45]), v.sheetRef || '', { size: P(pc, 1.6) });
+  // Picks: the outline band and the bubble, so what is inside stays selectable.
+  const pad = P(pc, 1);
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % pts.length];
+    const n = perp(norm(sub(q, p)));
+    b.pick([add(p, scale(n, -pad)), add(q, scale(n, -pad)), add(q, scale(n, pad)), add(p, scale(n, pad))]);
+  }
+  b.pick(circle);
 }
 
 function abbreviation(name) {

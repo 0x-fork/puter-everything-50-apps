@@ -6,12 +6,19 @@
  */
 import { MeshBuilder, Frame, hexToRgba } from './mesh.js';
 import { add, scale, sub, dot, norm, perp, len, clipHalfPlane, triangulate } from './geom.js';
-import { verticalExtent, openingSize, hostedBy, levelElevation, stairLayout, wallAxis } from './model.js';
+import { verticalExtent, openingSize, hostedBy, levelElevation, stairLayout, wallAxis, rampLayout } from './model.js';
+import { cutFace, segmentInside, segmentOutside } from './roofcut.js';
+import { buildSweep } from './sweeps.js';
+import { buildTruss } from './truss.js';
+import { buildImported } from './imported.js';
+import { buildModelText } from './modeltext.js';
 import { axisParam, hubsOf } from './walls.js';
 import { typeThickness } from './catalog.js';
 import { roofFaces, roofHeightAt, verticalThickness, planeHeight, edgeProfile } from './roof.js';
 import { buildFamily } from './families.js';
-import { stairFlights, flightOutline } from './stairs.js';
+import { stairFlights, flightOutline, SPIRAL_CORE } from './stairs.js';
+import { mepSize, mepPlan, systemOf } from './mep.js';
+import { delaunay } from './topo.js';
 
 export function materialColor(ctx, id, fallback = '#c8c8c8') {
   const m = id ? ctx.material(id) : null;
@@ -32,6 +39,14 @@ export function build3D(ctx, el) {
   switch (el.kind) {
     case 'wall':
       return buildWall(ctx, el);
+    case 'wallSweep':
+      return buildSweep(ctx, el);
+    case 'truss':
+      return buildTruss(ctx, el);
+    case 'importedModel':
+      return buildImported(el);
+    case 'modelText':
+      return buildModelText(ctx, el);
     case 'floor':
       return buildSlab(ctx, el, 'floor');
     case 'ceiling':
@@ -52,9 +67,230 @@ export function build3D(ctx, el) {
       return buildRailing(ctx, el);
     case 'component':
       return buildComponent(ctx, el);
+    case 'ramp':
+      return buildRamp(ctx, el);
+    case 'modelLine':
+      return buildModelLine(ctx, el);
+    case 'footing':
+      return buildFooting(ctx, el);
+    case 'wallFooting':
+      return buildWallFooting(ctx, el);
+    case 'brace':
+      return buildBrace(ctx, el);
+    case 'duct':
+    case 'pipe':
+    case 'cableTray':
+    case 'conduit':
+      return buildMep(ctx, el);
+    case 'topo':
+      return buildTopo(ctx, el);
+    case 'mass':
+      return buildMass(ctx, el);
     default:
       return null;
   }
+}
+
+// Foundations, bracing, services, site and masses ------------------------------------------------
+
+/** Plan outline of an isolated footing. */
+export function footingOutline(doc, el) {
+  const t = doc.get(el.typeId) || {};
+  const w = +t.width || 1200;
+  const l = +t.length || w;
+  const fr = new Frame(el.at, ((+el.rotation || 0) * Math.PI) / 180);
+  return [
+    [-w / 2, -l / 2],
+    [w / 2, -l / 2],
+    [w / 2, l / 2],
+    [-w / 2, l / 2],
+  ].map((p) => fr.apply(p));
+}
+
+function buildFooting(ctx, el) {
+  const t = ctx.doc.get(el.typeId) || {};
+  const top = levelElevation(ctx.doc, el.levelId) + (+el.offset || 0);
+  const b = new MeshBuilder();
+  b.prism(footingOutline(ctx.doc, el), [], top - (+t.thickness || 450), top, materialColor(ctx, t.materialId || 'mat-concrete'));
+  return b.build();
+}
+
+/** Plan outline of a wall foundation: the strip under its wall, past the free ends. */
+export function wallFootingOutline(doc, el) {
+  const w = doc.get(el.wallId);
+  if (!w) return null;
+  const t = doc.get(el.typeId) || {};
+  const width = +t.width || 600;
+  const ax = wallAxis(doc, w);
+  const ext = width / 2 - ax.half;
+  const a = sub(ax.a, scale(ax.dir, Math.max(0, ext)));
+  const c = add(ax.b, scale(ax.dir, Math.max(0, ext)));
+  const hw = scale(ax.n, width / 2);
+  return [sub(a, hw), sub(c, hw), add(c, hw), add(a, hw)];
+}
+
+function buildWallFooting(ctx, el) {
+  const w = ctx.doc.get(el.wallId);
+  const outline = wallFootingOutline(ctx.doc, el);
+  if (!w || !outline) return null;
+  const t = ctx.doc.get(el.typeId) || {};
+  const { base } = verticalExtent(ctx.doc, w);
+  const b = new MeshBuilder();
+  b.prism(outline, [], base - (+t.thickness || 300), base, materialColor(ctx, t.materialId || 'mat-concrete'));
+  return b.build();
+}
+
+/** End heights of a brace. */
+export function braceHeights(doc, el) {
+  const z0 = levelElevation(doc, el.levelId) + (+el.baseOffset || 0);
+  const z1 = el.topLevelId && doc.get(el.topLevelId) ? levelElevation(doc, el.topLevelId) + (+el.topOffset || 0) : z0 + (+el.height || 3000);
+  return { z0, z1 };
+}
+
+function buildBrace(ctx, el) {
+  const t = ctx.doc.get(el.typeId) || {};
+  const { z0, z1 } = braceHeights(ctx.doc, el);
+  const b = new MeshBuilder();
+  b.beam3([el.a[0], el.a[1], z0], [el.b[0], el.b[1], z1], +t.width || 200, +t.depth || 200, materialColor(ctx, t.materialId || 'mat-steel'));
+  return b.build();
+}
+
+function buildMep(ctx, el) {
+  if (!el.a || !el.b) return null;
+  const { round, w, h } = mepSize(ctx.doc, el);
+  const { a, b: e } = mepPlan(ctx.doc, el);
+  const z = levelElevation(ctx.doc, el.levelId) + (+el.offset || 0);
+  const col = hexToRgba(systemOf(el).color);
+  const b = new MeshBuilder();
+  if (round) b.tube([a[0], a[1], z], [e[0], e[1], z], w / 2, col, { segments: el.kind === 'conduit' ? 8 : 16 });
+  else b.beam3([a[0], a[1], z], [e[0], e[1], z], w, h, col);
+  // Fittings where runs meet: a sleeve on this run, and the joint itself
+  // (drawn by one of the runs that meet there).
+  if (el.kind === 'duct' || el.kind === 'pipe') {
+    const len = Math.hypot(el.b[0] - el.a[0], el.b[1] - el.a[1]);
+    const d = len > 1e-6 ? [(el.b[0] - el.a[0]) / len, (el.b[1] - el.a[1]) / len] : [1, 0];
+    const fit = [Math.round(col[0] * 0.82), Math.round(col[1] * 0.82), Math.round(col[2] * 0.82), col[3]];
+    for (const [p, into] of [
+      [el.a, d],
+      [el.b, [-d[0], -d[1]]],
+    ]) {
+      const others = ctx.doc.all(el.kind).filter((o) => o.id !== el.id && o.levelId === el.levelId && ((Math.abs(o.a[0] - p[0]) < 1 && Math.abs(o.a[1] - p[1]) < 1) || (Math.abs(o.b[0] - p[0]) < 1 && Math.abs(o.b[1] - p[1]) < 1)));
+      if (!others.length) continue;
+      const at = (s) => [p[0] + into[0] * s, p[1] + into[1] * s, z];
+      if (round) {
+        const r = w / 2;
+        b.tube(at(r * 0.9), at(r * 1.6), r * 1.15, fit, { segments: 16 });
+        if (others.every((o) => o.id > el.id)) b.sphere([p[0], p[1], z], r * 1.12, fit, { segments: 16, rings: 10 });
+      } else {
+        b.beam3(at(w / 2), at(w / 2 + 60), w + 30, h + 30, fit);
+        if (others.every((o) => o.id > el.id)) b.beam3([p[0] - w * 0.55 * into[0], p[1] - w * 0.55 * into[1], z], [p[0] + w * 0.55 * into[0], p[1] + w * 0.55 * into[1], z], w * 1.1, h * 1.05, fit);
+      }
+    }
+  }
+  return b.build();
+}
+
+function buildTopo(ctx, el) {
+  const P = el.points || [];
+  if (P.length < 3) return null;
+  const tris = delaunay(P);
+  if (!tris.length) return null;
+  const col = materialColor(ctx, el.materialId || 'mat-earth');
+  const zMin = Math.min(...P.map((p) => p[2])) - (+el.thickness || 1000);
+  const b = new MeshBuilder();
+  const count = new Map();
+  for (const [i, j, k] of tris) {
+    const A = P[i];
+    const C = P[j];
+    const D = P[k];
+    orientedTri(b, A, C, D, col, true);
+    orientedTri(b, [A[0], A[1], zMin], [C[0], C[1], zMin], [D[0], D[1], zMin], col, false);
+    for (const [u, v] of [
+      [i, j],
+      [j, k],
+      [k, i],
+    ]) {
+      const key = u < v ? `${u},${v}` : `${v},${u}`;
+      count.set(key, (count.get(key) || 0) + 1);
+    }
+  }
+  // Skirt along the outer edges (used by one triangle only).
+  for (const [key, n] of count) {
+    if (n !== 1) continue;
+    const [u, v] = key.split(',').map(Number);
+    const p = P[u];
+    const q = P[v];
+    b.quad([p[0], p[1], zMin], [q[0], q[1], zMin], q, p, col);
+    b.edge(p, q);
+    b.edge([p[0], p[1], zMin], [q[0], q[1], zMin]);
+  }
+  return b.build();
+}
+
+function buildMass(ctx, el) {
+  if (!el.boundary || el.boundary.length < 3) return null;
+  const base = levelElevation(ctx.doc, el.levelId) + (+el.baseOffset || 0);
+  const b = new MeshBuilder();
+  b.prism(el.boundary, el.holes || [], base, base + (+el.height || 10000), [176, 190, 214, 110]);
+  return b.build();
+}
+
+// Ramps and model lines -------------------------------------------------------------------
+
+function buildRamp(ctx, el) {
+  const g = rampLayout(ctx.doc, el);
+  if (g.run < 1) return null;
+  const type = ctx.doc.get(el.typeId) || {};
+  const col = materialColor(ctx, type.materialId || 'mat-concrete');
+  const b = new MeshBuilder();
+  const origin = add(el.a, scale(g.side, -g.width / 2));
+  const th = g.thickness;
+  b.extrudeProfile(
+    [
+      [0, g.base - th],
+      [g.run, g.top - th],
+      [g.run, g.top],
+      [0, g.base],
+    ],
+    origin,
+    g.dir,
+    g.width,
+    col,
+  );
+  if (el.railings !== false) {
+    const rail = materialColor(ctx, 'mat-steel');
+    const H = 900;
+    for (const off of [50, g.width - 50]) {
+      const p0 = add(origin, scale(g.side, off));
+      b.extrudeProfile(
+        [
+          [0, g.base + H - 40],
+          [g.run, g.top + H - 40],
+          [g.run, g.top + H],
+          [0, g.base + H],
+        ],
+        add(p0, scale(g.side, -20)),
+        g.dir,
+        40,
+        rail,
+      );
+      const posts = Math.max(2, Math.round(g.run / 1200) + 1);
+      for (let i = 0; i < posts; i++) {
+        const s = (g.run * i) / (posts - 1);
+        const z = g.base + (g.rise * s) / g.run;
+        b.cylinder(add(p0, scale(g.dir, s)), 15, z, z + H - 40, rail, { segments: 8, edges: false });
+      }
+    }
+  }
+  return b.build();
+}
+
+function buildModelLine(ctx, el) {
+  if (!el.a || !el.b) return null;
+  const z = levelElevation(ctx.doc, el.levelId) + (+el.offset || 0);
+  const b = new MeshBuilder();
+  b.edge([el.a[0], el.a[1], z], [el.b[0], el.b[1], z]);
+  return b.build();
 }
 
 // Walls -----------------------------------------------------------------------------
@@ -341,12 +577,21 @@ function dedupe(loop) {
   return out;
 }
 
-/** Curtain wall grid: equal panels between mullions. */
-export function curtainGrid(axisLength, height, type) {
+/**
+ * Curtain wall grid line positions: `us` along the wall and `vs` up from
+ * its base, both including the two ends. The type spaces panels equally;
+ * a wall's own grid lines (curtainU, curtainV) replace that layout.
+ */
+export function curtainGrid(axisLength, height, type, wall = null) {
   const c = type.curtain || {};
-  const nu = Math.max(1, Math.round(axisLength / (+c.hSpacing || 1500)));
-  const nv = Math.max(1, Math.round(height / (+c.vSpacing || 1200)));
-  return { nu, nv, du: axisLength / nu, dv: height / nv };
+  const lines = (own, total, spacing) => {
+    if (own?.length) return [0, ...[...new Set(own.map((x) => Math.round(+x)))].filter((x) => x > 1 && x < total - 1).sort((a, b) => a - b), total];
+    const n = Math.max(1, Math.round(total / spacing));
+    return Array.from({ length: n + 1 }, (_, i) => (total * i) / n);
+  };
+  const us = lines(wall?.curtainU, axisLength, +c.hSpacing || 1500);
+  const vs = lines(wall?.curtainV, height, +c.vSpacing || 1200);
+  return { us, vs, nu: us.length - 1, nv: vs.length - 1 };
 }
 
 function buildCurtainWall(ctx, w, g, type) {
@@ -360,31 +605,46 @@ function buildCurtainWall(ctx, w, g, type) {
   const glass = materialColor(ctx, 'mat-glass');
   const L = axis.length;
   const H = top - base;
-  const { nu, nv, du, dv } = curtainGrid(L, H, type);
+  const { us, vs, nu, nv } = curtainGrid(L, H, type, w);
   const frame = new Frame(axis.a, Math.atan2(dir[1], dir[0]), base);
-  const box = (x0, y0, z0, x1, y1, z1, col) => b.prism([[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map((p) => frame.apply(p)), [], base + z0, base + z1, col);
+  const box = (x0, y0, z0, x1, y1, z1, col, opts) => b.prism([[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map((p) => frame.apply(p)), [], base + z0, base + z1, col, opts);
+  // Mullion segments can be removed one by one (wall.mullionsOff: 'v:i:j' and 'h:j:i').
+  const off = new Set(w.mullionsOff || []);
   for (let i = 0; i <= nu; i++) {
-    const u = Math.min(L - mw / 2, Math.max(mw / 2, i * du));
-    box(u - mw / 2, -md / 2, 0, u + mw / 2, md / 2, H, mul);
+    const u = Math.min(L - mw / 2, Math.max(mw / 2, us[i]));
+    for (let j = 0; j < nv; j++) if (!off.has(`v:${i}:${j}`)) box(u - mw / 2, -md / 2, vs[j], u + mw / 2, md / 2, vs[j + 1], mul);
   }
   for (let j = 0; j <= nv; j++) {
-    const z = Math.min(H - mw / 2, Math.max(mw / 2, j * dv));
-    for (let i = 0; i < nu; i++) box(i * du + mw / 2, -md / 2 + 10, z - mw / 2, (i + 1) * du - mw / 2, md / 2 - 10, z + mw / 2, mul);
+    const z = Math.min(H - mw / 2, Math.max(mw / 2, vs[j]));
+    for (let i = 0; i < nu; i++) if (!off.has(`h:${j}:${i}`)) box(us[i] + mw / 2, -md / 2 + 10, z - mw / 2, us[i + 1] - mw / 2, md / 2 - 10, z + mw / 2, mul);
   }
+  // Panels: glass unless the wall says otherwise (wall.panels['i:j'] = 'solid' | 'empty' | 'door').
+  const solid = materialColor(ctx, c.panelMaterialId || 'mat-paint-white');
   for (let i = 0; i < nu; i++)
     for (let j = 0; j < nv; j++) {
-      const x0 = i * du + mw / 2;
-      const x1 = (i + 1) * du - mw / 2;
-      const z0 = j * dv + mw / 2;
-      const z1 = (j + 1) * dv - mw / 2;
+      const kind = w.panels?.[`${i}:${j}`] || 'glass';
+      if (kind === 'empty') continue;
+      const x0 = us[i] + mw / 2;
+      const x1 = us[i + 1] - mw / 2;
+      const z0 = vs[j] + mw / 2;
+      const z1 = vs[j + 1] - mw / 2;
       if (x1 - x0 < 1 || z1 - z0 < 1) continue;
-      const pts = [
-        [x0, -6],
-        [x1, -6],
-        [x1, 6],
-        [x0, 6],
-      ].map((p) => frame.apply(p));
-      b.prism(pts, [], base + z0, base + z1, glass, { edges: false });
+      if (kind === 'solid') {
+        box(x0, -15, z0, x1, 15, z1, solid);
+        continue;
+      }
+      if (kind === 'door') {
+        // A glazed door leaf: a frame round the glass and a pull handle.
+        const f = Math.min(80, (x1 - x0) / 6);
+        box(x0, -25, z0, x0 + f, 25, z1, mul);
+        box(x1 - f, -25, z0, x1, 25, z1, mul);
+        box(x0 + f, -25, z0, x1 - f, 25, z0 + f * 1.5, mul);
+        box(x0 + f, -25, z1 - f, x1 - f, 25, z1, mul);
+        box(x1 - f * 2.2, 25, z0 + (z1 - z0) * 0.35, x1 - f * 1.8, 70, z0 + (z1 - z0) * 0.6, mul);
+        box(x0 + f, -6, z0 + f * 1.5, x1 - f, 6, z1 - f, glass, { edges: false });
+        continue;
+      }
+      box(x0, -6, z0, x1, 6, z1, glass, { edges: false });
     }
   void n;
   return b.build();
@@ -423,19 +683,47 @@ function buildRoof(ctx, el) {
   const topCol = layerColor(ctx, type, 'first');
   const coreCol = layerColor(ctx, type, 'core');
   const zb = (p, pl) => base + (pl ? planeHeight(pl, p) : 0);
+  const holes = (el.holes || []).filter((h) => h.length >= 3);
   for (const f of faces) {
     const vt = verticalThickness(th, f.plane);
-    const { points, tris } = triangulate(f.poly);
-    for (let i = 0; i < tris.length; i += 3) {
-      const [a, c, d] = [points[tris[i]], points[tris[i + 1]], points[tris[i + 2]]];
-      const A = [a[0], a[1], zb(a, f.plane) + vt];
-      const C = [c[0], c[1], zb(c, f.plane) + vt];
-      const D = [d[0], d[1], zb(d, f.plane) + vt];
-      orientedTri(b, A, C, D, topCol, true);
-      orientedTri(b, [a[0], a[1], zb(a, f.plane)], [c[0], c[1], zb(c, f.plane)], [d[0], d[1], zb(d, f.plane)], coreCol, false);
+    // Openings inside the face are holes; openings across its edge take a notch out of it.
+    const { pieces, inner, crossing } = cutFace(f.poly, holes);
+    for (const piece of pieces) {
+      const { points, tris } = triangulate(piece.outer, piece.holes);
+      for (let i = 0; i < tris.length; i += 3) {
+        const [a, c, d] = [points[tris[i]], points[tris[i + 1]], points[tris[i + 2]]];
+        const A = [a[0], a[1], zb(a, f.plane) + vt];
+        const C = [c[0], c[1], zb(c, f.plane) + vt];
+        const D = [d[0], d[1], zb(d, f.plane) + vt];
+        orientedTri(b, A, C, D, topCol, true);
+        orientedTri(b, [a[0], a[1], zb(a, f.plane)], [c[0], c[1], zb(c, f.plane)], [d[0], d[1], zb(d, f.plane)], coreCol, false);
+      }
     }
-    const loop = f.poly.map((p) => [p[0], p[1], zb(p, f.plane) + vt]);
-    b.edgeLoop(loop);
+    const lerp = (p, q, t) => [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+    const top = (p) => [p[0], p[1], zb(p, f.plane) + vt];
+    // The face outline, except where openings cross it.
+    for (let i = 0; i < f.poly.length; i++) {
+      const p = f.poly[i];
+      const q = f.poly[(i + 1) % f.poly.length];
+      for (const [t0, t1] of crossing.length ? segmentOutside(p, q, crossing) : [[0, 1]]) b.edge(top(lerp(p, q, t0)), top(lerp(p, q, t1)));
+    }
+    // Sides of openings cut through this face (only the part of each side on this face).
+    for (const h of [...inner, ...crossing]) {
+      const whole = inner.includes(h);
+      for (let i = 0; i < h.length; i++) {
+        const hp = h[i];
+        const hq = h[(i + 1) % h.length];
+        for (const [t0, t1] of whole ? [[0, 1]] : segmentInside(hp, hq, f.poly)) {
+          const p = lerp(hp, hq, t0);
+          const q = lerp(hp, hq, t1);
+          const P0 = [p[0], p[1], zb(p, f.plane)];
+          const Q0 = [q[0], q[1], zb(q, f.plane)];
+          b.quad(Q0, P0, [p[0], p[1], P0[2] + vt], [q[0], q[1], Q0[2] + vt], coreCol);
+          b.edge([p[0], p[1], P0[2] + vt], [q[0], q[1], Q0[2] + vt]);
+          b.edge(P0, Q0);
+        }
+      }
+    }
   }
   // Sides along the footprint.
   const activeAt = (p) => {
@@ -676,6 +964,48 @@ function buildStair(ctx, el) {
   const th = +type.thickness || 150;
   const col = materialColor(ctx, type.materialId || 'mat-concrete');
   const b = new MeshBuilder();
+  if (g.spiral) {
+    // Wedge treads around a central column, each at its riser height.
+    const s = g.spiral;
+    const tt = Math.min(th, g.riserHeight * 0.8);
+    const arc = (r, a0, a1) => Array.from({ length: 7 }, (_, k) => {
+      const a = a0 + ((a1 - a0) * k) / 6;
+      return [s.c[0] + Math.cos(a) * r, s.c[1] + Math.sin(a) * r];
+    });
+    for (let i = 0; i < s.treads; i++) {
+      const a0 = s.a0 + s.step * i;
+      const a1 = a0 + s.step * 1.04;
+      const outer = arc(s.rout, a0, a1);
+      const inner = arc(s.rin, a1, a0);
+      const z = g.base + (i + 1) * g.riserHeight;
+      b.prism([...outer, ...inner], [], z - tt, z, col);
+    }
+    b.cylinder(s.c, SPIRAL_CORE, g.base, g.base + g.risers * g.riserHeight + 900, materialColor(ctx, 'mat-steel'), { segments: 16 });
+    if (el.railings !== false) {
+      // A helical handrail round the outer edge, on a baluster per tread.
+      const rail = materialColor(ctx, 'mat-steel');
+      const rr = s.rout - 40;
+      const at = (t) => {
+        const a = s.a0 + s.step * t;
+        return [s.c[0] + Math.cos(a) * rr, s.c[1] + Math.sin(a) * rr];
+      };
+      const zr = (t) => g.base + t * g.riserHeight + 900;
+      const segs = s.treads * 3;
+      for (let k = 0; k < segs; k++) {
+        const t0 = 0.5 + ((s.treads - 0.5) * k) / segs;
+        const t1 = 0.5 + ((s.treads - 0.5) * (k + 1)) / segs;
+        const p0 = at(t0);
+        const d = sub(at(t1), p0);
+        const L = len(d);
+        if (L < 1) continue;
+        const dir = scale(d, 1 / L);
+        const prof = [[0, zr(t0) - 40], [L, zr(t1) - 40], [L, zr(t1)], [0, zr(t0)]];
+        b.extrudeProfile(prof, add(p0, scale(perp(dir), -20)), dir, 40, rail);
+      }
+      for (let i = 0; i < s.treads; i++) b.cylinder(at(i + 0.5), 12, g.base + (i + 1) * g.riserHeight, zr(i + 0.5), rail, { segments: 8, edges: false });
+    }
+    return b.build();
+  }
   for (const f of g.flights) buildFlight(b, el, type, f, g, th, col, ctx);
   for (const l of g.landings) b.prism(l.poly, [], l.z - (type.monolithic !== false ? th : 40), l.z, col);
   return b.build();

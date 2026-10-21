@@ -7,8 +7,11 @@ import { wallAxis } from './model.js';
 import { isView } from './doc.js';
 
 /** Point-valued fields of elements. */
-const POINT_FIELDS = ['a', 'b', 'at', 'origin', 'line', 'tagAt'];
-const POLY_FIELDS = ['boundary', 'path'];
+const POINT_FIELDS = ['a', 'b', 'at', 'origin', 'line', 'tagAt', 'c', 'leader'];
+const POLY_FIELDS = ['boundary', 'path', 'leaders'];
+
+/** Kinds whose `rotation` (degrees) turns with them. */
+const ROTATING = new Set(['component', 'column', 'text', 'group', 'symbol', 'detailItem', 'image', 'link', 'importedModel', 'modelText']);
 
 // Deleting ----------------------------------------------------------------------------
 
@@ -17,7 +20,7 @@ const POLY_FIELDS = ['boundary', 'path'];
  * tags, dimension references, views of deleted levels and their content.
  * Returns the set of deleted ids.
  */
-export function deleteElements(doc, ids) {
+export function deleteElements(doc, ids, { keepEmptyGroups = false } = {}) {
   const gone = new Set();
   const queue = [...ids];
   while (queue.length) {
@@ -27,11 +30,17 @@ export function deleteElements(doc, ids) {
     const el = doc.get(id);
     for (const other of doc.items.values()) {
       if (gone.has(other.id)) continue;
-      if (other.hostId === id || other.targetId === id || other.viewId === id || other.placedId === id) queue.push(other.id);
+      if (other.hostId === id || other.targetId === id || other.viewId === id || other.placedId === id || other.groupId === id || other.wallId === id || other.stairId === id) queue.push(other.id);
       else if (el.kind === 'level' && (other.levelId === id || (isView(other) && other.levelId === id))) queue.push(other.id);
     }
   }
+  const emptied = new Set([...gone].map((id) => doc.get(id)?.groupId).filter(Boolean));
   for (const id of gone) doc.remove(id);
+  // A group whose last member is gone goes too.
+  if (emptied.size && !keepEmptyGroups) {
+    for (const el of doc.items.values()) if (el.groupId) emptied.delete(el.groupId);
+    for (const g of emptied) doc.remove(g);
+  }
   // Clean up references held by survivors.
   for (const other of [...doc.items.values()]) {
     if (other.kind === 'dimension' && other.refs?.some((r) => gone.has(r.id))) {
@@ -57,17 +66,37 @@ export function transformPatch(el, xf) {
   for (const f of POINT_FIELDS) if (Array.isArray(el[f]) && typeof el[f][0] === 'number') patch[f] = xf.point(el[f]);
   for (const f of POLY_FIELDS) if (Array.isArray(el[f])) patch[f] = el[f].map(xf.point);
   if (Array.isArray(el.holes)) patch.holes = el.holes.map((h) => h.map(xf.point));
+  if (el.kind === 'topo' && Array.isArray(el.points)) patch.points = el.points.map((p) => [...xf.point(p), p[2]]);
+  if (el.crop && el.calloutOf) {
+    const p = xf.point([el.crop.x0, el.crop.y0]);
+    const q = xf.point([el.crop.x1, el.crop.y1]);
+    patch.crop = { x0: Math.min(p[0], q[0]), y0: Math.min(p[1], q[1]), x1: Math.max(p[0], q[0]), y1: Math.max(p[1], q[1]) };
+  }
   if (el.kind === 'dimension') {
     if (el.refs) patch.refs = el.refs.map((r) => ({ ...r, at: xf.point(r.at) }));
     if (el.dir) patch.dir = norm(sub(xf.point(add(el.line, el.dir)), xf.point(el.line)));
   }
   const deg = ((xf.angle || 0) * 180) / Math.PI;
-  if (el.kind === 'component' || el.kind === 'column' || el.kind === 'text') {
+  if (ROTATING.has(el.kind)) {
     let r = +el.rotation || 0;
     if (xf.mirror) r = xf.mirrorAngle(r);
     else r += deg;
     patch.rotation = normalizeDeg(r);
   }
+  // Angles in radians: arcs and angular dimensions keep their sweep, which a mirror reverses.
+  const rad = (a) => (xf.mirror ? (xf.mirrorAngle((a * 180) / Math.PI) * Math.PI) / 180 : a + (xf.angle || 0));
+  if (el.kind === 'detailArc' || el.kind === 'angularDim') {
+    if (xf.mirror) {
+      patch.a0 = rad(el.a1);
+      patch.a1 = rad(el.a0);
+      while (patch.a1 <= patch.a0) patch.a1 += Math.PI * 2;
+    } else {
+      patch.a0 = rad(el.a0);
+      patch.a1 = rad(el.a1);
+    }
+  }
+  if (el.kind === 'radialDim') patch.angle = rad(+el.angle || 0);
+  if (xf.scale && (el.kind === 'detailArc' || el.kind === 'angularDim' || el.kind === 'radialDim') && el.r) patch.r = el.r * xf.scale;
   if (el.kind === 'elevation') {
     const look = [Math.cos(el.look), Math.sin(el.look)];
     const p0 = xf.point(el.origin);
@@ -97,14 +126,27 @@ export function rotation(center, angle) {
   return { point: (p) => rotate(p, angle, center), angle };
 }
 
+/** Uniform scaling about a base point (positions and lengths; sizes of types stay). */
+export function scaling(base, k) {
+  return { point: (p) => [base[0] + (p[0] - base[0]) * k, base[1] + (p[1] - base[1]) * k], angle: 0, scale: k };
+}
+
 export function mirrorAcross(a, b) {
   const axisDeg = (angleOf(sub(b, a)) * 180) / Math.PI;
   return { point: (p) => reflect(p, a, b), mirror: true, mirrorAngle: (r) => 2 * axisDeg - r };
 }
 
+/** Ids plus the members of any groups among them. */
+export function expandGroups(doc, ids) {
+  const set = new Set(ids);
+  const groups = new Set([...set].filter((id) => doc.get(id)?.kind === 'group'));
+  if (groups.size) for (const el of doc.items.values()) if (groups.has(el.groupId)) set.add(el.id);
+  return set;
+}
+
 /** Elements that move with their hosts are skipped when their host moves too. */
 function movable(doc, ids) {
-  const set = new Set(ids);
+  const set = expandGroups(doc, ids);
   return [...set].map((id) => doc.get(id)).filter((el) => el && el.id !== 'project' && !(el.hostId && set.has(el.hostId)) && el.kind !== 'level' && !el.pinned);
 }
 
@@ -136,7 +178,7 @@ export function moveElements(doc, ids, d) {
  * along. Returns the ids of the new elements (top-level copies first).
  */
 export function copyElements(doc, ids, xf, { levelId = null } = {}) {
-  const set = new Set(ids);
+  const set = expandGroups(doc, ids);
   const map = new Map();
   const out = [];
   const levelElev = levelId ? doc.get(levelId)?.elevation ?? 0 : 0;
@@ -185,10 +227,40 @@ export function copyElements(doc, ids, xf, { levelId = null } = {}) {
       }
     }
   }
+  // Copied members belong to the copied group; members copied alone leave their group.
+  for (const [oldId, newId] of map) {
+    const g = doc.get(oldId)?.groupId;
+    if (g) doc.update(newId, { groupId: map.get(g) ?? doc.addDefaults?.fields?.groupId ?? null });
+  }
   return out;
 }
 
 // Walls ---------------------------------------------------------------------------------
+
+/**
+ * Split a line-like element (wall, line, beam...) at the point nearest p,
+ * leaving a gap of `gap` millimetres centred there. Returns the new piece.
+ */
+export function splitLinear(doc, el, p, gap = 0) {
+  const L = dist(el.a, el.b);
+  const d = norm(sub(el.b, el.a));
+  const t = dot(sub(p, el.a), d);
+  const g = Math.max(0, gap) / 2;
+  if (t - g <= 10 || t + g >= L - 10) return null;
+  if (el.kind === 'wall') {
+    const second = splitWall(doc, el, p);
+    if (!second || !g) return second;
+    doc.update(el.id, { b: sub(doc.get(el.id).b, scale(d, g)) });
+    doc.update(second.id, { a: add(second.a, scale(d, g)) });
+    for (const h of doc.all('door', 'window', 'opening')) if (h.hostId === second.id) doc.update(h.id, { t: h.t - g });
+    return doc.get(second.id);
+  }
+  const m = add(el.a, scale(d, t));
+  const { id: _id, ...rest } = el;
+  void _id;
+  doc.update(el.id, { b: sub(m, scale(d, g)) });
+  return doc.add({ ...rest, a: add(m, scale(d, g)) });
+}
 
 /** Split a wall at the point nearest p; hosted elements go with their half. */
 export function splitWall(doc, wall, p) {
@@ -260,6 +332,15 @@ export function offsetElement(doc, el, distance, toward) {
 }
 
 /** Linear array: count total items (including the original) spaced by d. */
+/** Copies turned about a center, spread over `sweep` radians (a full turn spaces them evenly). */
+export function arrayRadial(doc, ids, center, count, sweep = Math.PI * 2) {
+  const out = [];
+  const full = Math.abs(Math.abs(sweep) - Math.PI * 2) < 1e-6;
+  const step = full ? sweep / count : sweep / Math.max(1, count - 1);
+  for (let i = 1; i < count; i++) out.push(...copyElements(doc, ids, rotation(center, step * i)));
+  return out;
+}
+
 export function arrayLinear(doc, ids, d, count) {
   const out = [];
   for (let i = 1; i < count; i++) out.push(...copyElements(doc, ids, translation(scale(d, i))));

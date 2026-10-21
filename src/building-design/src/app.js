@@ -4,25 +4,31 @@
  */
 import { buildShell, buildCube } from './ui/shell.js';
 import { Ribbon } from './ui/ribbon.js';
-import { contextualPanels } from './ui/ribbon-def.js';
+import { contextualPanels, GROUP_EDIT_PANEL } from './ui/ribbon-def.js';
 import { PropertiesPanel, pluralLabel } from './ui/properties.js';
 import { ProjectBrowser } from './ui/browser.js';
-import { installTooltips, hideTooltip } from './ui/tooltip.js';
+import { installTooltips, hideTooltip, setTooltipMode } from './ui/tooltip.js';
+import * as options from './ui/options.js';
+import { Assistant } from './ui/assistant.js';
 import { showMenu, closeMenus } from './ui/menu.js';
 import { toast, confirmDialog, promptDialog } from './ui/dialog.js';
 import { h, clear, MOD } from './ui/dom.js';
 import { icon, KIND_ICON } from './ui/icons.js';
-import { COMMANDS } from './commands.js';
+import { COMMANDS, applyShortcuts } from './commands.js';
 import { Scene, MODEL_KINDS } from './core/scene.js';
-import { createProject, default3DView } from './core/template.js';
+import { createProject, default3DView, upgradeDoc } from './core/template.js';
 import { createSampleProject } from './core/sample.js';
-import { isView, newId } from './core/doc.js';
+import { isView, newId, PLAN_VIEW_KINDS, isPlanView } from './core/doc.js';
+import { defaultCrop } from './core/props.js';
 import { categoryOf, defaultTypeFor } from './core/catalog.js';
 import { describe as describeEl } from './core/props.js';
 import { formatArea, formatLength, parseLength } from './core/units.js';
 import { temporaryDimensions } from './editor/tempdims.js';
 import { drawTempDim } from './views/overlay.js';
-import { deleteElements, moveElements, uniqueName } from './core/ops.js';
+import { deleteElements, moveElements, uniqueName, expandGroups } from './core/ops.js';
+import { groupable, createGroup, propagateGroup, ungroup } from './core/groups.js';
+import { viewGraphics, hiddenByFilters, templateSettings, templateKindOf, hasGraphics } from './core/graphics.js';
+import { phaseLook, phased } from './core/phases.js';
 import { Viewport } from './views/viewport.js';
 import { PlanController } from './views/plan.js';
 import { ModelController } from './views/model.js';
@@ -49,8 +55,14 @@ import {
 import { renderViewbar } from './ui/viewbar.js';
 import { renderHome } from './ui/home.js';
 import { Settings } from './settings.js';
+import { SyncManager } from './io/sync.js';
+import { solveConstraints } from './core/constraints.js';
+import { applyGlobals } from './core/globals.js';
+import { applyScopeBoxes } from './core/scopebox.js';
+import { worksharingOn, worksetable, worksets, defaultWorkset, DATUM_KINDS } from './core/worksets.js';
+import { setEditingOption, editingOption, optionable, optionLabel, optionSets, optionsOf } from './core/designopts.js';
 
-const PLAN_KINDS = new Set(['plan', 'ceilingPlan']);
+const PLAN_KINDS = new Set(PLAN_VIEW_KINDS);
 
 export class App {
   constructor(root) {
@@ -74,6 +86,8 @@ export class App {
     this.file = null;
     this.settingsStore = new Settings();
     this.flagsVersion = 0;
+    this.sync = new SyncManager(this);
+    this.activeWorksetId = null;
   }
 
   get settings() {
@@ -92,6 +106,7 @@ export class App {
 
   async start() {
     this.settingsStore.load();
+    this.applyPreferences();
     this.applyTheme();
     this.shell = buildShell(this);
     this.ribbon = new Ribbon(this);
@@ -104,6 +119,7 @@ export class App {
     this.viewport = new Viewport(this, this.shell.canvasWrap, this.shell.glCanvas, this.shell.overlay);
     this.bindKeys();
     this.bindDock();
+    this.sync.on(() => this.renderCollab());
     this.buildPhonebar();
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => this.applyTheme());
     window.addEventListener('beforeunload', (e) => {
@@ -121,6 +137,8 @@ export class App {
       if (!ok) return;
       this.renderAccount();
       await this.settingsStore.syncFromCloud();
+      this.applyPreferences();
+      this.ribbon.renderBody();
       this.applyTheme();
       files.handleLaunchItems(this);
     });
@@ -146,6 +164,18 @@ export class App {
     this.viewport.r3.clear();
     this.viewport.r3.origin = [0, 0, 0];
     this.originSet = false;
+    upgradeDoc(doc);
+    this.groupEdit = null;
+    // New model elements belong to the phase of the view they are drawn in.
+    doc.addHooks = [
+      (item) => (!item.phaseId && phased(item) && this.activeView?.phaseId ? { phaseId: this.activeView.phaseId } : null),
+      // ...and to the active workset of whoever draws them.
+      // ...and to the design option being edited.
+      (item) => (!item.optionId && editingOption() && doc.has(editingOption()) && optionable(doc, item) ? { optionId: editingOption() } : null),
+      (item) => (!item.worksetId && worksharingOn(doc) && worksetable(doc, item) ? { worksetId: DATUM_KINDS.has(item.kind) ? worksets(doc).find((w) => w.shared)?.id ?? this.activeWorkset()?.id : this.activeWorkset()?.id } : null),
+    ];
+    // Dimension constraints follow every edit.
+    doc.solver = (drivers) => new Set([...applyGlobals(doc, drivers), ...solveConstraints(doc, this.scene?.walls, drivers), ...applyScopeBoxes(doc, drivers)]);
     this.doc = doc;
     this.file = file;
     this.docId = file?.recoveryId || newId('doc');
@@ -159,7 +189,8 @@ export class App {
     this.openViews = [];
     this.activeViewId = null;
     doc.on((ev) => this.docChanged(ev));
-    const first = doc.all('plan').sort((a, b) => (doc.get(a.levelId)?.elevation ?? 0) - (doc.get(b.levelId)?.elevation ?? 0))[0] || doc.all('view3d')[0];
+    const start = doc.get(doc.get('project')?.startViewId);
+    const first = (isView(start) ? start : null) || doc.all('plan').sort((a, b) => (doc.get(a.levelId)?.elevation ?? 0) - (doc.get(b.levelId)?.elevation ?? 0))[0] || doc.all('view3d')[0];
     if (first) this.openView(first.id);
     this.renderBrowser();
     this.updateTitle();
@@ -167,9 +198,77 @@ export class App {
     this.ribbon.refresh();
     this.setPrompt('Ready');
     files.scheduleRecovery(this);
+    this.activeWorksetId = null;
+    setEditingOption(null);
+    this.sync.attach(null, null, doc.modified);
+    this.renderCollab();
+  }
+
+  // Collaboration --------------------------------------------------------------------------------
+
+  activeWorkset() {
+    const w = this.doc?.get(this.activeWorksetId);
+    return w?.kind === 'workset' ? w : defaultWorkset(this.doc);
+  }
+
+  setActiveWorkset(id) {
+    this.activeWorksetId = id;
+    this.renderCollab();
+  }
+
+  /** Edit a design option (null: the main model). Every view shows the option being edited. */
+  editOption(id) {
+    setEditingOption(id && this.doc.has(id) ? id : null);
+    this.scene.version++;
+    this.flagsVersion++;
+    this.renderCollab();
+    this.ribbon.refresh();
+    this.requestRender();
+    this.setPrompt(id ? `Editing ${optionLabel(this.doc, id)}. New elements go into this option.` : 'Editing the main model.');
+  }
+
+  /** Synchronizing needs the project in the cloud; offer to put it there. */
+  async requireShared() {
+    if (this.sync.active) return true;
+    const ok = await confirmDialog('Save to Puter first', 'Working together needs the project in your Puter cloud storage. Save it there now? You can then share it with Share Project.', { confirm: 'Save to Puter' });
+    if (ok) await this.saveAs();
+    return this.sync.active;
+  }
+
+  /** Status bar: synchronization state and the active workset. */
+  renderCollab() {
+    const sb = this.shell?.syncBtn;
+    if (!sb || !this.doc) return;
+    const st = this.sync.state;
+    sb.hidden = st === 'off';
+    const label = { synced: 'Up to date', pending: 'Changes to share', syncing: 'Synchronizing...', offline: 'Offline' }[st] || '';
+    clear(sb);
+    sb.append(icon(st === 'offline' ? 'cloud-off' : st === 'syncing' ? 'refresh' : 'cloud', 14), h('span', label));
+    sb.dataset.state = st;
+    sb.setAttribute('data-tip-desc', st === 'pending' ? 'Click to synchronize: bring in others\' changes and share yours' : 'Changes others save appear automatically. Click to synchronize now.');
+    const opt = this.shell.optSelect;
+    const sets = optionSets(this.doc);
+    opt.parentElement.hidden = !sets.length;
+    if (sets.length) {
+      clear(opt);
+      opt.append(h('option', { value: '' }, 'Main Model'));
+      for (const set of sets) opt.append(h('optgroup', { label: set.name }, optionsOf(this.doc, set.id).map((o) => h('option', { value: o.id }, `${o.name}${o.primary ? ' (primary)' : ''}`))));
+      opt.value = editingOption() && this.doc.has(editingOption()) ? editingOption() : '';
+      opt.parentElement.classList.toggle('active', !!opt.value);
+    }
+    const ws = this.shell.wsSelect;
+    const on = worksharingOn(this.doc);
+    ws.parentElement.hidden = !on;
+    if (on) {
+      clear(ws);
+      for (const w of worksets(this.doc)) ws.append(h('option', { value: w.id }, w.name));
+      ws.value = this.activeWorkset()?.id ?? '';
+    }
   }
 
   docChanged(ev) {
+    if (!ev.preview && this.sync.active && !ev.remote && this.sync.state === 'synced') this.sync.setState('pending');
+    if (!ev.preview && [...ev.ids].some((id) => ['workset', 'optionSet', 'designOption'].includes(this.doc.get(id)?.kind) || !this.doc.has(id))) this.renderCollab();
     // Selection may refer to deleted items.
     let selChanged = false;
     for (const id of [...this.selection])
@@ -220,7 +319,7 @@ export class App {
   controllerFor(view) {
     let c = this.controllers.get(view.id);
     if (c) return c;
-    if (PLAN_KINDS.has(view.kind)) c = new PlanController(this, view);
+    if (PLAN_KINDS.has(view.kind) || view.kind === 'drafting' || view.kind === 'legend') c = new PlanController(this, view);
     else if (view.kind === 'view3d' || view.kind === 'elevation' || view.kind === 'section') c = new ModelController(this, view);
     else if (view.kind === 'schedule') c = new ScheduleController(this, view);
     else if (view.kind === 'sheet') c = new SheetController(this, view);
@@ -233,7 +332,30 @@ export class App {
     const view = this.doc.get(id);
     if (!view || !isView(view)) return;
     if (!this.openViews.includes(id)) this.openViews.push(id);
+    // While views are tiled, a newly opened drawing view joins them.
+    const tiles = this.viewport.tileIds;
+    if (tiles && !tiles.includes(id) && this.controllerFor(view)?.graphical) this.viewport.setTiles([...tiles, id]);
     this.activateView(id);
+  }
+
+  /** Show the open drawing views side by side. */
+  tileViews() {
+    const ids = this.openViews.filter((id) => {
+      const v = this.doc.get(id);
+      return v && this.controllerFor(v)?.graphical;
+    });
+    if (ids.length < 2) return this.toast('Open two or more plans, sections, elevations, 3D views or sheets to tile them.');
+    this.shell.viewcube.hidden = true;
+    this.viewport.setTiles(ids);
+    this.setPrompt('Views tiled. Click or scroll in a view to work in it; Tab Views (TW) shows one view again.');
+    this.ribbon.refresh();
+  }
+
+  tabViews() {
+    this.viewport.setTiles(null);
+    this.vc?.updateCube?.();
+    this.ribbon.refresh();
+    this.requestRender();
   }
 
   activateView(id) {
@@ -269,6 +391,8 @@ export class App {
     const i = this.openViews.indexOf(id);
     if (i < 0) return;
     this.openViews.splice(i, 1);
+    const tiles = this.viewport.tileIds;
+    if (tiles?.includes(id)) this.viewport.setTiles(tiles.filter((x) => x !== id));
     const c = this.controllers.get(id);
     if (c) {
       c.deactivate?.();
@@ -393,8 +517,16 @@ export class App {
     const t = this.temp.get(this.activeViewId);
     const reveal = this.reveal.has(this.activeViewId);
     clear(b);
-    b.hidden = !t && !reveal;
-    if (t) b.append(h('span', t.mode === 'isolate' ? 'Temporary isolate' : 'Temporary hide'), h('button.btn.sm', { type: 'button', onClick: () => this.temporary('reset') }, 'Reset'));
+    const ge = this.groupEdit;
+    b.hidden = !t && !reveal && !ge;
+    if (ge) {
+      const type = this.doc.get(this.doc.get(ge.groupId)?.typeId);
+      b.append(
+        h('span', `Editing group: ${type?.name || 'Group'}`),
+        h('button.btn.sm.primary', { type: 'button', onClick: () => this.finishGroupEdit(true) }, 'Finish'),
+        h('button.btn.sm', { type: 'button', onClick: () => this.finishGroupEdit(false) }, 'Cancel'),
+      );
+    } else if (t) b.append(h('span', t.mode === 'isolate' ? 'Temporary isolate' : 'Temporary hide'), h('button.btn.sm', { type: 'button', onClick: () => this.temporary('reset') }, 'Reset'));
     else if (reveal) b.append(h('span', 'Revealing hidden elements'), h('button.btn.sm', { type: 'button', onClick: () => this.toggleReveal() }, 'Close'));
   }
 
@@ -433,15 +565,70 @@ export class App {
     this.openView(v.id);
   }
 
-  duplicateView(id) {
+  duplicateView(id, { detailing = false } = {}) {
     const v = this.doc.get(id || this.activeViewId);
     if (!v || !isView(v) || v.kind === 'schedule' || v.kind === 'sheet') return this.toast('Choose a plan, 3D view or section to duplicate.', { kind: 'error' });
     const names = this.doc.filter((x) => isView(x)).map((x) => x.name);
     const { id: _id, ...rest } = v;
     void _id;
     let copy;
-    this.commit('Duplicate view', () => (copy = this.doc.add({ ...rest, id: newId('v'), name: uniqueName(names, `${v.name} Copy 1`) })));
+    this.commit(detailing ? 'Duplicate view with detailing' : 'Duplicate view', () => {
+      copy = this.doc.add({ ...rest, id: newId('v'), name: uniqueName(names, `${v.name} Copy 1`) });
+      if (!detailing) return;
+      for (const el of this.doc.filter((x) => x.viewId === v.id && x.kind !== 'viewport')) {
+        const { id: _eid, ...er } = el;
+        void _eid;
+        this.doc.add({ ...er, viewId: copy.id });
+      }
+    });
     if (copy) this.openView(copy.id);
+  }
+
+  /** Place a raster image (PNG, JPEG, SVG...) in the active 2D view, to trace over or show. */
+  importImage() {
+    const v = this.activeView;
+    const c = this.vc;
+    if (!v || !c?.is2D || v.kind === 'sheet') return this.toast('Open a plan, drafting view or legend to place an image.', { kind: 'error' });
+    const input = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml', hidden: true });
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      if (file.size > 12e6) return this.toast('That image is larger than 12 MB. Please use a smaller one.', { kind: 'error' });
+      const reader = new FileReader();
+      reader.onload = () => {
+        const src = String(reader.result);
+        const img = new Image();
+        img.onload = () => {
+          // Half the visible width, centred in the view.
+          const viewW = this.viewport.width / c.cam.zoom;
+          const w = viewW * 0.5;
+          const hh = (w * img.naturalHeight) / Math.max(1, img.naturalWidth);
+          const at = [c.cam.cx - w / 2, c.cam.cy - hh / 2];
+          let el;
+          this.commit('Import image', () => (el = this.doc.add({ kind: 'image', viewId: v.id, at, w, h: hh, rotation: 0, opacity: 1, src, name: file.name })));
+          this.select([el.id]);
+          this.setPrompt('Image placed. Drag it to move, and drag its corner to scale it.');
+        };
+        img.onerror = () => this.toast('That file could not be read as an image.', { kind: 'error' });
+        img.src = src;
+      };
+      reader.readAsDataURL(file);
+    });
+    document.body.append(input);
+    input.click();
+  }
+
+  newFlatView(kind) {
+    return dialogs.newFlatViewDialog(this, kind);
+  }
+
+  toggleCrop(key) {
+    const v = this.activeView;
+    if (!v || !isPlanView(v)) return this.toast('Crop regions are for plan views.', { kind: 'error' });
+    const on = !v[key];
+    this.commit(key === 'cropOn' ? 'Crop view' : 'Show crop region', () => this.doc.update(v.id, { [key]: on, ...(on && !v.crop ? { crop: defaultCrop(this, v) } : {}) }));
+    this.renderViewbar();
   }
 
   /** The level new elements go on: the plan's level, else the first level. */
@@ -525,15 +712,18 @@ export class App {
       return;
     }
     const sel = [...this.selection].map((id) => this.doc.get(id)).filter(Boolean);
-    if (!sel.length) return this.ribbon.setContextual(null);
+    const groupPanel = this.groupEdit ? [GROUP_EDIT_PANEL] : [];
+    if (!sel.length) return this.ribbon.setContextual(this.groupEdit ? { id: 'ctx-groupedit', label: 'Modify | Edit Group', panels: groupPanel } : null);
     const kinds = [...new Set(sel.map((e) => e.kind))];
     const label = kinds.length === 1 ? pluralLabel(kinds[0]) : 'Multi-Select';
-    this.ribbon.setContextual({ id: `ctx-${kinds.length === 1 ? kinds[0] : 'multi'}`, label: `Modify | ${label}`, panels: contextualPanels(kinds) });
+    this.ribbon.setContextual({ id: `ctx-${kinds.length === 1 ? kinds[0] : 'multi'}`, label: `Modify | ${label}`, panels: [...groupPanel, ...contextualPanels(kinds)] });
   }
 
   updateSelInfo() {
     const n = this.selection.size;
-    this.shell.selInfo.textContent = n ? `${n} selected` : '';
+    const el = this.shell.selInfo;
+    el.hidden = !n;
+    el.replaceChildren(icon('filter', 13), h('span', `${n} selected`));
   }
 
   setHover(id) {
@@ -546,50 +736,78 @@ export class App {
     this.requestRender();
   }
 
-  /** Flags for an element in the active view: selection, hover, hidden, isolate. */
-  flagsOf(id) {
+  /** Flags for an element in a view (the active one by default): selection, hover, hidden, isolate. */
+  flagsOf(id, view = this.activeView) {
     if (typeof id === 'string' && id.startsWith('u:')) return FLAG.dim;
     let f = 0;
     if (this.selection.has(id)) f |= FLAG.selected;
     if (this.hoverId === id) f |= FLAG.hover;
-    const view = this.activeView;
+    const gid = this.doc?.get(id)?.groupId;
+    if (gid) {
+      if (this.selection.has(gid)) f |= FLAG.selected;
+      if (this.hoverId === gid) f |= FLAG.hover;
+    }
+    if (this.groupEdit && gid !== this.groupEdit.groupId && groupable(this.doc.get(id))) f |= FLAG.dim;
+    const active = view?.id === this.activeViewId;
     if (view) {
       const el = this.doc.get(id);
       const reveal = this.reveal.has(view.id);
       if (el && this.hiddenInView(view, el)) f |= reveal ? FLAG.halftone : FLAG.hidden;
+      else if (el && hasGraphics(this.doc, view) && viewGraphics(this.doc, view, el).halftone) f |= FLAG.halftone;
+      if (el && this.phaseCount > 1 && phased(el)) {
+        const look = phaseLook(this.doc, view, el);
+        if (look === 'hidden') f |= reveal ? FLAG.halftone : FLAG.hidden;
+        else if (look === 'halftone' || look === 'dashed') f |= FLAG.halftone;
+      }
       const t = this.temp.get(view.id);
       if (t) {
         const inSet = t.ids.has(id) || (el?.hostId && t.ids.has(el.hostId));
         if ((t.mode === 'hide' && inSet) || (t.mode === 'isolate' && !inSet && !(el?.kind === 'level' || el?.kind === 'grid'))) f |= reveal ? FLAG.halftone : FLAG.hidden;
       }
-      if (el && this.tool?.dimOthers && !this.tool.dimOthers.has(id)) f |= FLAG.dim;
+      if (active && el && this.tool?.dimOthers && !this.tool.dimOthers.has(id)) f |= FLAG.dim;
     }
     return f;
   }
 
   hiddenInView(view, el) {
     if (view.hiddenIds?.includes(el.id)) return true;
+    if (el.groupId && view.hiddenIds?.includes(el.groupId)) return true;
     const cat = categoryOf(el, this.doc);
     if (cat && view.hiddenCats?.includes(cat)) return true;
     if (el.hostId) {
       const host = this.doc.get(el.hostId);
       if (host && view.hiddenIds?.includes(host.id)) return true;
     }
-    return false;
+    return hiddenByFilters(this.doc, view, el);
   }
 
   /** Refresh the per-element state texture before drawing. */
-  updateStateFlags() {
-    const key = `${this.flagsVersion}|${this.activeViewId}|${this.scene?.version}`;
+  updateStateFlags(c = null) {
+    const view = c?.view || this.activeView;
+    const key = `${this.flagsVersion}|${view?.id}|${this.scene?.version}`;
     if (this.flagsKey === key) return;
     this.flagsKey = key;
+    this.phaseCount = this.doc?.count('phase') ?? 0;
     const entries = [];
     const scene = this.scene;
     if (!scene) return;
+    // 3D views show colour and transparency overrides on surfaces.
+    const surfaces = view && !isPlanView(view) && view.kind !== 'drafting' && view.kind !== 'legend' && !!(view.overrides || view.filters?.length || view.elOverrides);
     for (let i = 0; i < scene.ids.length; i++) {
       const id = scene.ids[i];
-      const f = this.flagsOf(id);
-      if (f) entries.push([i + 1, f]);
+      let f = this.flagsOf(id, view);
+      let rgba = null;
+      if (surfaces && !(f & FLAG.hidden)) {
+        const el = this.doc.get(id);
+        const g = el ? viewGraphics(this.doc, view, el, { surfaces: true }) : null;
+        if (g?.color || g?.transparency) {
+          const n = parseInt(String(g.color || '#ffffff').slice(1, 7), 16) || 0;
+          rgba = [(n >> 16) & 255, (n >> 8) & 255, n & 255, Math.round(255 * (1 - Math.min(0.95, (+g.transparency || 0) / 100)))];
+          if (g.color) f |= FLAG.color;
+          if (g.transparency) f |= FLAG.transparent;
+        }
+      }
+      if (f) entries.push([i + 1, f, rgba]);
     }
     this.viewport.state.setAll(entries);
   }
@@ -620,6 +838,82 @@ export class App {
 
   selectInstancesOfType(typeId) {
     this.select(this.doc.filter((e) => e.typeId === typeId).map((e) => e.id));
+  }
+
+  // Groups ---------------------------------------------------------------------------------------
+
+  /** What a click on elements selects: a member's group, unless that group is being edited. */
+  pickTargets(ids) {
+    const out = [];
+    for (const id of ids) {
+      const el = this.doc.get(id);
+      let t = id;
+      if (this.groupEdit) {
+        // While a group is edited, only its members (and annotations) can be picked.
+        if (groupable(el) && el.groupId !== this.groupEdit.groupId) continue;
+      } else if (el?.groupId && this.doc.has(el.groupId)) t = el.groupId;
+      // Selection options in the status bar.
+      const target = this.doc.get(t);
+      if (target?.pinned && this.settings.selectPinned === false) continue;
+      if (this.settings.selectLinks === false && target?.kind === 'link') continue;
+      if (!out.includes(t)) out.push(t);
+    }
+    return out;
+  }
+
+  async createGroup() {
+    const ids = [...this.selection];
+    if (!ids.length) return this.toast('Select the elements to group first.', { kind: 'error' });
+    const names = this.doc.all('groupType').map((t) => t.name);
+    const name = await promptDialog('Create Model Group', 'Group name', uniqueName(names, `Group ${names.length + 1}`), { okLabel: 'Create', validate: (v) => (!v ? 'Enter a name.' : names.includes(v) ? 'A group with this name exists.' : null) });
+    if (!name) return;
+    let g = null;
+    this.commit('Create group', () => (g = createGroup(this.doc, ids, { name, levelId: this.activeLevelId() })));
+    if (!g) return this.toast('None of the selected elements can be grouped (views, levels, grids and annotations cannot).', { kind: 'error' });
+    this.select([g.id]);
+    this.setPrompt(`Created ${name}. Place more copies with Place Group, and edit them all at once with Edit Group.`);
+  }
+
+  startGroupEdit(groupId) {
+    const g = this.doc.get(groupId || [...this.selection][0]);
+    if (g?.kind !== 'group') return this.toast('Select a model group to edit.', { kind: 'error' });
+    this.cancelTool(true);
+    this.groupEdit = { groupId: g.id, undoDepth: this.doc.undoStack.length };
+    this.doc.addDefaults = { fields: { groupId: g.id }, accept: (it) => groupable(it) && !it.groupId };
+    this.select([]);
+    this.flagsVersion++;
+    this.updateContextual();
+    this.renderBanner();
+    this.requestRender();
+    this.setPrompt('Editing the group: change its members, add or remove elements, then click Finish.');
+  }
+
+  finishGroupEdit(keep = true) {
+    const ge = this.groupEdit;
+    if (!ge) return;
+    this.doc.addDefaults = null;
+    this.groupEdit = null;
+    this.cancelTool(true);
+    if (!keep) {
+      while (this.doc.undoStack.length > ge.undoDepth && this.doc.canUndo) this.doc.undo();
+    } else if (this.doc.has(ge.groupId)) {
+      let n = 0;
+      this.commit('Finish group', () => (n = propagateGroup(this.doc, ge.groupId)));
+      if (n) this.toast(`Updated ${n} other instance${n === 1 ? '' : 's'} of the group.`, { kind: 'success' });
+    }
+    this.select(this.doc.has(ge.groupId) ? [ge.groupId] : []);
+    this.flagsVersion++;
+    this.updateContextual();
+    this.renderBanner();
+    this.requestRender();
+  }
+
+  ungroupSelection() {
+    const groups = [...this.selection].filter((id) => this.doc.get(id)?.kind === 'group');
+    if (!groups.length) return this.toast('Select a model group.', { kind: 'error' });
+    const members = groups.flatMap((g) => this.doc.filter((el) => el.groupId === g).map((el) => el.id));
+    this.commit('Ungroup', () => groups.forEach((g) => ungroup(this.doc, g)));
+    this.select(members);
   }
 
   viewName(v) {
@@ -666,10 +960,15 @@ export class App {
 
   isCommandActive(cmd) {
     if (cmd === 'thinLines') return !!this.settings.thinLines;
+    if (cmd === 'workPlaneGrid') return !!this.settings.workPlaneGrid;
+    if (cmd === 'cropView') return !!this.activeView?.cropOn;
+    if (cmd === 'cropShow') return !!this.activeView?.cropShow;
     if (cmd === 'roomFill') return !!this.activeView?.roomFill;
     if (cmd === 'revealHidden') return this.reveal.has(this.activeViewId);
     if (cmd === 'sectionBox') return !!this.activeView?.sectionBox;
     if (cmd === 'modify') return !this.tool || this.tool instanceof SelectTool;
+    const toggle = COMMANDS[cmd]?.toggle;
+    if (toggle) return !!toggle(this);
     if (this.tool && this.tool.commandName === cmd) return true;
     return null;
   }
@@ -791,7 +1090,7 @@ export class App {
 
   placeType(type, kind) {
     this.setCurrentType(kind, type.id);
-    const cmd = { wall: 'wall', door: 'door', window: 'window', floor: 'floor', roof: 'roof', ceiling: 'ceiling', column: 'column', beam: 'beam', stair: 'stair', railing: 'railing', component: 'component' }[kind];
+    const cmd = { wall: 'wall', door: 'door', window: 'window', floor: 'floor', roof: 'roof', ceiling: 'ceiling', column: 'column', beam: 'beam', stair: 'stair', ramp: 'ramp', railing: 'railing', component: 'component', group: 'groupPlace', footing: 'footing', wallFooting: 'wallFooting', brace: 'brace', duct: 'duct', pipe: 'pipe', cableTray: 'cableTray', conduit: 'conduit', wallSweep: 'wallSweep', truss: 'truss' }[kind];
     if (cmd) this.run(cmd);
   }
 
@@ -804,7 +1103,9 @@ export class App {
   editElement(id, ev) {
     const el = this.doc.get(id);
     if (!el) return;
-    if (el.kind === 'section' || el.kind === 'elevation') return this.openView(el.id);
+    if (el.kind === 'section' || el.kind === 'elevation' || isView(el)) return this.openView(el.id);
+    if (el.kind === 'viewRef' && this.doc.has(el.targetId)) return this.openView(el.targetId);
+    if (el.kind === 'group') return this.startGroupEdit(el.id);
     if (el.kind === 'floor' || el.kind === 'roof' || el.kind === 'ceiling' || el.kind === 'railing') {
       this.select([id]);
       return this.editBoundary();
@@ -1053,6 +1354,7 @@ export class App {
           { label: 'Elements', action: () => this.hideInView('element') },
           { label: 'Category', action: () => this.hideInView('category') },
         ] },
+        { label: 'Override Graphics in View...', icon: 'wsDisplay', shortcut: 'OG', action: () => this.run('overrideEl') },
         { label: 'Isolate Temporarily', icon: 'isolate', shortcut: 'HI', action: () => this.temporary('isolate') },
         this.reveal.has(this.activeViewId) ? { label: 'Unhide in View', icon: 'eye', action: () => this.unhideSelected() } : null,
         { separator: true },
@@ -1075,7 +1377,7 @@ export class App {
   // Clipboard ------------------------------------------------------------------------------------
 
   copyToClipboard(cut = false) {
-    const ids = [...this.selection];
+    const ids = [...expandGroups(this.doc, this.selection)];
     const items = ids.map((id) => this.doc.get(id)).filter((el) => el && !isView(el) && el.kind !== 'level' && el.id !== 'project');
     if (!items.length) return;
     // Hosted elements of copied walls come along.
@@ -1090,10 +1392,42 @@ export class App {
     this.ribbon.refresh();
   }
 
-  paste() {
+  /** Paste onto several levels: the clipboard's model elements, aligned with where they were copied. */
+  pasteToLevels() {
     const cb = this.clipboard;
-    if (!cb) return;
-    const levelId = this.activeLevelId();
+    if (!cb) return this.toast('Copy elements first.', { kind: 'error' });
+    dialogs.chooseLevelsDialog(this, 'Paste Aligned to Selected Levels', 'Paste').then((levels) => {
+      if (!levels?.length) return;
+      const all = [];
+      for (const l of levels) all.push(...this.paste(l.id, true));
+      this.select(all);
+      this.setPrompt(`Pasted on ${levels.length} level${levels.length === 1 ? '' : 's'}.`);
+    });
+  }
+
+  /** Start placing another element like the selected one (same kind and type). */
+  createSimilar() {
+    const el = this.doc.get([...this.selection][0]);
+    if (!el) return this.toast('Select an element first.', { kind: 'error' });
+    const type = this.doc.get(el.typeId);
+    if (type) return this.placeType(type, el.kind === 'column' ? 'column' : el.kind);
+    const byKind = { room: 'room', grid: 'grid', level: 'level', text: 'text', dimension: 'dimension', detailLine: 'detailLine', region: 'region', roomSeparator: 'roomSeparator', refPlane: 'refPlane', modelLine: 'modelLine', area: 'area', areaBoundary: 'areaBoundary', revisionCloud: 'revisionCloud', insulation: 'insulation', detailItem: 'detailItem', detailArc: 'detailArc', spot: 'spotElevation', symbol: 'symbol', tag: 'tag', section: 'section', elevation: 'elevation' };
+    const cmd = byKind[el.kind];
+    if (!cmd) return this.toast('There is no tool for this kind of element.', { kind: 'error' });
+    if (el.kind === 'detailLine' || el.kind === 'modelLine') this.toolOptions(el.kind, {}).style = el.style;
+    if (el.kind === 'detailItem') Object.assign(this.toolOptions('detailItem', {}), { family: el.family });
+    if (el.kind === 'symbol') Object.assign(this.toolOptions('symbol', {}), { family: el.family });
+    this.run(cmd);
+  }
+
+  selectionFilterDialog() {
+    return dialogs.selectionFilterDialog(this);
+  }
+
+  paste(toLevelId = null, quiet = false) {
+    const cb = this.clipboard;
+    if (!cb) return [];
+    const levelId = toLevelId || this.activeLevelId();
     const targetView = this.activeViewId;
     const ids = [];
     this.commit('Paste', () => {
@@ -1101,6 +1435,8 @@ export class App {
       for (const it of cb.items) {
         if (it.hostId && cb.items.some((x) => x.id === it.hostId)) continue;
         if (it.hostId && !this.doc.has(it.hostId)) continue;
+        // Pasting to other levels takes the model, not the annotations of the copied view.
+        if (toLevelId && it.viewId) continue;
         const { id, ...rest } = it;
         const patch = {};
         if (rest.levelId && levelId) patch.levelId = levelId;
@@ -1115,14 +1451,18 @@ export class App {
       }
       for (const it of cb.items) {
         if (!it.hostId || !map.has(it.hostId)) continue;
-        const { id: _id, ...rest } = it;
-        void _id;
+        const { id, ...rest } = it;
         const n = this.doc.add({ ...rest, hostId: map.get(it.hostId) });
+        map.set(id, n.id);
         ids.push(n.id);
       }
+      // Pasted members belong to the pasted copy of their group.
+      for (const it of cb.items) if (it.groupId && map.has(it.id)) this.doc.update(map.get(it.id), { groupId: map.get(it.groupId) ?? this.doc.addDefaults?.fields?.groupId ?? null });
     });
+    if (quiet) return ids;
     this.select(ids);
     this.setPrompt(`Pasted ${ids.length} element${ids.length === 1 ? '' : 's'}. Use Move (MV) to position them.`);
+    return ids;
   }
 
   // Keyboard ----------------------------------------------------------------------------------
@@ -1412,6 +1752,8 @@ export class App {
       await signIn();
       await this.renderAccount();
       await this.settingsStore.syncFromCloud();
+      this.applyPreferences();
+      this.ribbon.renderBody();
       this.applyTheme();
       return true;
     } catch {
@@ -1428,6 +1770,16 @@ export class App {
   }
 
   // Menus -------------------------------------------------------------------------------------------
+
+  selectionOptionsMenu(anchor) {
+    const flip = (k) => this.settingsStore.set(k, this.settings[k] === false);
+    showMenu(anchor, [
+      { label: 'Select Pinned Elements', checked: this.settings.selectPinned !== false, action: () => flip('selectPinned') },
+      { label: 'Drag Elements When Selecting', checked: this.settings.dragOnSelect !== false, action: () => flip('dragOnSelect') },
+      { separator: true },
+      { label: 'Options...', icon: 'settings', action: () => this.run('options') },
+    ], { label: 'Selection options' });
+  }
 
   appMenu(anchor) {
     const recent = files.recentFiles().slice(0, 6);
@@ -1447,7 +1799,8 @@ export class App {
         { label: 'Project Information...', icon: 'info', action: () => this.run('projectInfo') },
         { separator: true },
         { label: 'Home', icon: 'house', action: () => this.showHome() },
-        { label: 'Keyboard Shortcuts', icon: 'keyboard', action: () => this.run('shortcuts') },
+        { label: 'Options...', icon: 'settings', action: () => this.run('options') },
+        { label: 'Keyboard Shortcuts...', icon: 'keyboard', action: () => this.run('shortcuts') },
         { label: 'About Building Design', icon: 'info', action: () => this.run('about') },
       ].filter(Boolean),
       { label: 'File', className: 'app-menu' },
@@ -1543,7 +1896,42 @@ export class App {
     return dialogs.purgeDialog(this);
   }
   shortcutsDialog() {
-    return dialogs.shortcutsDialog(this);
+    return options.shortcutsDialog(this);
+  }
+
+  optionsDialog() {
+    return options.optionsDialog(this);
+  }
+
+  /** Open a plan of the elements' level, select them and zoom to them. */
+  showElements(ids) {
+    const live = ids.filter((id) => this.doc.has(id));
+    const first = this.doc.get(live[0]);
+    const plan = first?.levelId && this.doc.all('plan').find((p) => p.levelId === first.levelId && !p.calloutOf);
+    if (plan && this.activeView?.levelId !== first.levelId) this.openView(plan.id);
+    this.select(live);
+    this.vc?.zoomExtents?.(true, new Set(live));
+  }
+
+  /** Show or hide the assistant panel (created the first time). */
+  toggleAssistant(show) {
+    const pane = this.shell.assist;
+    const open = show ?? pane.hidden;
+    if (open && !this.assistant) this.assistant = new Assistant(this, pane);
+    pane.hidden = !open;
+    this.shell.assistBtn.setAttribute('aria-pressed', String(open));
+    if (open) setTimeout(() => this.assistant?.input?.focus(), 0);
+    this.viewport.resize();
+  }
+
+  elementOverrideDialog() {
+    return dialogs.elementOverrideDialog(this);
+  }
+
+  /** User preferences that live outside the settings object. */
+  applyPreferences() {
+    applyShortcuts(this.settings.shortcuts || {});
+    setTooltipMode(this.settings.tooltips);
   }
   helpDialog() {
     return dialogs.helpDialog(this);
@@ -1553,6 +1941,34 @@ export class App {
   }
   planViewDialog() {
     return dialogs.planViewDialog(this);
+  }
+  areaPlanDialog() {
+    return dialogs.areaPlanDialog(this);
+  }
+  revisionsDialog() {
+    return dialogs.revisionsDialog(this);
+  }
+  filtersDialog() {
+    return dialogs.filtersDialog(this);
+  }
+  templatesDialog() {
+    return dialogs.templatesDialog(this);
+  }
+  startingViewDialog() {
+    return dialogs.startingViewDialog(this);
+  }
+
+  async templateFromView() {
+    const v = this.activeView;
+    if (!v || !['plan', 'areaPlan', 'ceilingPlan', 'view3d', 'elevation', 'section'].includes(v.kind)) return this.toast('Open a plan, 3D view, elevation or section first.', { kind: 'error' });
+    const names = this.doc.all('viewTemplate').map((t) => t.name);
+    const name = await promptDialog('New View Template', 'Template name', uniqueName(names, `${v.name} Template`), { okLabel: 'Create', validate: (x) => (!x ? 'Enter a name.' : names.includes(x) ? 'A template with this name exists.' : null) });
+    if (!name) return;
+    this.commit('New view template', () => this.doc.add({ kind: 'viewTemplate', name, viewKind: templateKindOf(v.kind), settings: templateSettings(v) }));
+    this.toast(`Created the view template "${name}". Assign it to views in their properties, or in View Templates.`, { kind: 'success' });
+  }
+  findReplaceDialog() {
+    return dialogs.findReplaceDialog(this);
   }
   newScheduleDialog(category) {
     return dialogs.newScheduleDialog(this, category);
@@ -1571,6 +1987,9 @@ export class App {
   }
   scheduleFieldsDialog(id) {
     return dialogs.scheduleFieldsDialog(this, id);
+  }
+  scheduleFilterDialog(id) {
+    return dialogs.scheduleFilterDialog(this, id);
   }
 }
 

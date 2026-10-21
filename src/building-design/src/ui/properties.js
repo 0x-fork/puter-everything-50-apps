@@ -7,12 +7,14 @@
 import { h, clear } from './dom.js';
 import { icon, KIND_ICON } from './icons.js';
 import { showMenu } from './menu.js';
-import { instanceParams, paramValue, paramPatch, isReadOnly, GROUPS } from '../core/props.js';
+import { bindingMenu } from './globals.js';
+import { instanceParams, worksetParams, paramValue, paramPatch, isReadOnly, GROUPS } from '../core/props.js';
 import { TYPE_KIND, KIND_LABEL, FAMILY_BY_KIND } from '../core/catalog.js';
 import { formatLength, formatArea, formatVolume, parseLength } from '../core/units.js';
-import { isView } from '../core/doc.js';
+import { isView, VIEW_LABEL } from '../core/doc.js';
+import { swapGroupType } from '../core/groups.js';
+import { paramDescriptors } from '../core/params.js';
 
-const VIEW_LABEL = { plan: 'Floor Plan', ceilingPlan: 'Ceiling Plan', view3d: '3D View', elevation: 'Elevation', section: 'Section', schedule: 'Schedule', sheet: 'Sheet' };
 
 export class PropertiesPanel {
   constructor(app, body) {
@@ -151,14 +153,14 @@ export class PropertiesPanel {
     const body = h('div.props-body');
     if (t.mode === 'tool') body.append(h('p.props-empty', 'Choose the type above. Options for placing are in the options bar.'));
     else if (t.mode === 'sel' && !t.kind) body.append(this.renderParams([commentsParam()], t.all));
-    else if (items.length) body.append(this.renderParams(instanceParams(items[0]), items));
+    else if (items.length) body.append(this.renderParams([...instanceParams(items[0]), ...worksetParams(doc, items[0]), ...paramDescriptors(doc, items[0])], items));
     wrap.append(body);
     this.body.append(wrap);
   }
 
   renderParams(params, items) {
     const app = this.app;
-    const ctx = { doc: app.doc, scene: app.scene, app };
+    const ctx = { doc: app.doc, scene: app.scene, app, items };
     const frag = h('div');
     for (const group of GROUPS.concat(['Materials and Finishes'])) {
       const list = params.filter((p) => p.group === group);
@@ -192,7 +194,7 @@ export class PropertiesPanel {
     const same = values.every((v) => JSON.stringify(v) === JSON.stringify(values[0]));
     const value = same ? values[0] : undefined;
     const ro = items.some((el) => isReadOnly(p, el, ctx));
-    const id = `prop-${p.key}`;
+    const id = `prop-${p.key.replace(/[^\w-]/g, '_')}`;
     const label = h('label.prow-label', { for: id, title: p.label }, p.label);
     const cell = h('div.prow-value');
     const commit = (raw) => {
@@ -215,6 +217,15 @@ export class PropertiesPanel {
       if (typeof v === 'number') return formatLength(v, units);
       return String(v);
     };
+    // Lengths and numbers stored on the element can follow a global parameter.
+    const bindable = (p.type === 'length' || p.type === 'number') && !p.set && !p.get && !p.action && !ro && items.every((el) => !el.kind.endsWith('Type'));
+    const bound = bindable ? items[0].bindings?.[p.key] : null;
+    const linkBtn = () =>
+      h('button.icon-btn.sm.prow-link', { type: 'button', 'aria-label': `Associate ${p.label} with a global parameter`, 'data-tip': bound ? `Follows ${app.doc.get(bound)?.name}` : 'Associate with a global parameter', 'aria-pressed': bound ? 'true' : 'false', onClick: (e) => bindingMenu(app, e.currentTarget, p, items) }, icon('globalParams', 13));
+    if (bound && items.every((el) => el.bindings?.[p.key] === bound)) {
+      cell.append(h('span.ro-text.bound', { id }, fmtVal(value, p.type === 'length' ? 'length' : 'text'), h('span.file-meta', ` = ${app.doc.get(bound)?.name ?? ''}`)), linkBtn());
+      return h('div.prow', label, cell);
+    }
     if (p.type === 'readonly' || (ro && p.type !== 'bool')) {
       cell.append(h('span.ro-text', { id }, same ? fmtVal(value, p.format || (p.type === 'length' ? 'length' : p.type === 'readonly' ? p.format : 'text')) : 'Varies'));
       return h('div.prow.ro', label, cell);
@@ -260,6 +271,7 @@ export class PropertiesPanel {
         });
         input.addEventListener('change', apply);
         cell.append(input);
+        if (bindable && app.doc.count('globalParam')) cell.append(linkBtn());
         break;
       }
       case 'textarea': {
@@ -330,7 +342,8 @@ export class PropertiesPanel {
           checked: current?.id === t.id,
           radio: true,
           action: () => {
-            if (items.length && app.selection.size) app.commit('Change type', () => items.forEach((el) => app.doc.update(el.id, { typeId: t.id })));
+            if (items.length && app.selection.size && kind === 'group') app.commit('Change group type', () => swapGroupType(app.doc, items.map((el) => el.id), t));
+            else if (items.length && app.selection.size) app.commit('Change type', () => items.forEach((el) => app.doc.update(el.id, { typeId: t.id })));
             app.setCurrentType(kind, t.id);
             this.render();
           },
@@ -346,7 +359,8 @@ function commentsParam() {
 
 export function pluralLabel(kind) {
   const l = KIND_LABEL[kind] || VIEW_LABEL[kind] || kind || 'Elements';
-  if (l.endsWith('y') && !l.endsWith('ay')) return `${l.slice(0, -1)}ies`;
+  if (l.endsWith('y') && !/[aeiou]y$/.test(l)) return `${l.slice(0, -1)}ies`;
+  if (/(x|ch|sh)$/.test(l)) return `${l}es`;
   if (l.endsWith('s')) return l;
   return `${l}s`;
 }

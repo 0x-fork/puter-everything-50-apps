@@ -5,7 +5,8 @@
  * with nearby points.
  */
 import { add, sub, scale, dot, dist, norm, closestOnSegment, lineIntersect, len, angleOf, mid } from '../core/geom.js';
-import { wallAxis } from '../core/model.js';
+import { wallAxis, rampOutline } from '../core/model.js';
+import { footingOutline } from '../core/build3d.js';
 import { columnOutline } from '../core/plan.js';
 import { buildFamily } from '../core/families.js';
 import { Frame } from '../core/mesh.js';
@@ -46,10 +47,52 @@ export function snapFeatures(scene, el) {
       }
       break;
     }
+    case 'ramp': {
+      const o = rampOutline(doc, el);
+      o.forEach((p) => P(p));
+      for (let i = 0; i < o.length; i++) Lg(o[i], o[(i + 1) % o.length], 'edge');
+      P(el.a, 'midpoint');
+      break;
+    }
     case 'grid':
     case 'detailLine':
     case 'roomSeparator':
     case 'beam':
+    case 'detailArc': {
+      P(el.c, 'center');
+      const full = Math.abs((el.a1 ?? Math.PI * 2) - (el.a0 ?? 0)) >= Math.PI * 2 - 1e-6;
+      if (!full) for (const a of [el.a0, el.a1]) P([el.c[0] + Math.cos(a) * el.r, el.c[1] + Math.sin(a) * el.r]);
+      break;
+    }
+    case 'footing': {
+      const o = footingOutline(doc, el);
+      P(el.at, 'center');
+      o.forEach((p) => P(p));
+      for (let i = 0; i < o.length; i++) Lg(o[i], o[(i + 1) % o.length], 'edge');
+      break;
+    }
+    case 'propertyLine':
+    case 'mass': {
+      const bnd = el.boundary || [];
+      bnd.forEach((p) => P(p));
+      for (let i = 0; i < bnd.length; i++) Lg(bnd[i], bnd[(i + 1) % bnd.length], 'edge');
+      break;
+    }
+    case 'topo':
+      (el.points || []).forEach((p) => P([p[0], p[1]]));
+      break;
+    case 'refPlane':
+    case 'modelLine':
+    case 'areaBoundary':
+    case 'insulation':
+    case 'brace':
+    case 'truss':
+    case 'wire':
+    case 'matchline':
+    case 'duct':
+    case 'pipe':
+    case 'cableTray':
+    case 'conduit':
       P(el.a);
       P(el.b);
       P(mid(el.a, el.b), 'midpoint');

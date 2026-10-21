@@ -8,6 +8,7 @@ import { h, clear } from './dom.js';
 import { icon, KIND_ICON } from './icons.js';
 import { showMenu } from './menu.js';
 import { FAMILY_BY_KIND, CATEGORIES } from '../core/catalog.js';
+import { AREA_SCHEMES } from '../core/props.js';
 
 const TYPE_GROUPS = [
   { label: 'Walls', typeKind: 'wallType', kind: 'wall' },
@@ -19,7 +20,17 @@ const TYPE_GROUPS = [
   { label: 'Columns', typeKind: 'columnType', kind: 'column', byFamily: true },
   { label: 'Structural Framing', typeKind: 'beamType', kind: 'beam' },
   { label: 'Stairs', typeKind: 'stairType', kind: 'stair' },
+  { label: 'Ramps', typeKind: 'rampType', kind: 'ramp' },
   { label: 'Railings', typeKind: 'railingType', kind: 'railing' },
+  { label: 'Model Groups', typeKind: 'groupType', kind: 'group' },
+  { label: 'Structural Foundations', typeKind: 'footingType', kind: 'footing' },
+  { label: 'Wall Foundations', typeKind: 'wallFootingType', kind: 'wallFooting' },
+  { label: 'Wall Sweeps and Reveals', typeKind: 'wallSweepType', kind: 'wallSweep' },
+  { label: 'Structural Trusses', typeKind: 'trussType', kind: 'truss' },
+  { label: 'Ducts', typeKind: 'ductType', kind: 'duct', byFamily: true },
+  { label: 'Pipes', typeKind: 'pipeType', kind: 'pipe' },
+  { label: 'Cable Trays', typeKind: 'cableTrayType', kind: 'cableTray' },
+  { label: 'Conduits', typeKind: 'conduitType', kind: 'conduit' },
 ];
 
 export class ProjectBrowser {
@@ -52,9 +63,11 @@ export class ProjectBrowser {
     const views = [
       { key: 'views/plan', label: 'Floor Plans', children: doc.all('plan').sort((a, b) => levelElev(a) - levelElev(b) || sortByName(a, b)).map(viewNode) },
       { key: 'views/ceilingPlan', label: 'Ceiling Plans', children: doc.all('ceilingPlan').sort((a, b) => levelElev(a) - levelElev(b)).map(viewNode) },
+      ...AREA_SCHEMES.map((s) => ({ key: `views/areaPlan/${s.value}`, label: `Area Plans (${s.label})`, children: doc.all('areaPlan').filter((v) => (v.scheme || 'gross') === s.value).sort((a, b) => levelElev(a) - levelElev(b)).map(viewNode) })),
       { key: 'views/view3d', label: '3D Views', children: doc.all('view3d').sort(sortByName).map(viewNode) },
       { key: 'views/elevation', label: 'Elevations', children: doc.all('elevation').map(viewNode) },
       { key: 'views/section', label: 'Sections', children: doc.all('section').sort(sortByName).map(viewNode) },
+      { key: 'views/drafting', label: 'Drafting Views', children: doc.all('drafting').sort(sortByName).map(viewNode) },
     ].filter((g) => g.children.length);
     const fam = [];
     for (const g of TYPE_GROUPS) {
@@ -89,6 +102,7 @@ export class ProjectBrowser {
     }
     return [
       { key: 'views', label: 'Views (all)', icon: 'layers', children: views },
+      { key: 'legends', label: 'Legends', icon: 'legend', children: doc.all('legend').sort(sortByName).map(viewNode) },
       { key: 'schedules', label: 'Schedules/Quantities', icon: 'schedule', children: doc.all('schedule').sort(sortByName).map(viewNode) },
       { key: 'sheets', label: 'Sheets (all)', icon: 'sheet', children: doc.all('sheet').sort((a, b) => String(a.number).localeCompare(String(b.number), undefined, { numeric: true })).map(viewNode) },
       { key: 'families', label: 'Families', icon: 'types', children: fam },

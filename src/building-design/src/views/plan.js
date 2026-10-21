@@ -4,7 +4,7 @@
  * text overlay.
  */
 import { viewMatrix2D } from '../render/renderer2d.js';
-import { planContext } from '../core/plan.js';
+import { planContext, PlanBuilder, W } from '../core/plan.js';
 import { pointInPolygon, distToSegment, bboxIntersects, bboxContains, segmentIntersectsBox, bboxUnion } from '../core/geom.js';
 import { snapFeatures } from '../editor/snap.js';
 import { drawLayerTexts } from './overlay.js';
@@ -19,12 +19,29 @@ const PICK_RANK = {
   component: 2,
   column: 2,
   stair: 2,
+  ramp: 2,
   railing: 2,
   detailLine: 2,
+  modelLine: 2,
   roomSeparator: 2,
+  areaBoundary: 2,
+  duct: 2,
+  pipe: 2,
+  cableTray: 2,
+  conduit: 2,
   wall: 3,
   beam: 3,
+  brace: 3,
   grid: 4,
+  propertyLine: 4,
+  footing: 6,
+  wallFooting: 6,
+  mass: 6,
+  topo: 8,
+  refPlane: 4,
+  plan: 4,
+  ceilingPlan: 4,
+  area: 5,
   section: 4,
   elevation: 4,
   room: 5,
@@ -82,7 +99,7 @@ export class PlanController {
     if (!view) return;
     const scene = this.scene;
     if (this.syncedVersion === scene.version && this.syncedView === view) return;
-    const pc = planContext(scene.doc, view, scene.walls, scene.rooms);
+    const pc = planContext(scene.doc, view, scene.walls, scene.rooms, scene.areas);
     const keep = new Set();
     this.grid.clear();
     this.bounds.clear();
@@ -109,6 +126,25 @@ export class PlanController {
         keep.add(key);
         this.layer.set(key, scene.indexOf(key), el.kind === 'wall' ? 'floor' : el.kind, g);
       }
+    }
+    // The crop region's outline, when it is shown (not an element: not selectable).
+    if (view.cropShow && view.crop) {
+      const key = `crop:${view.id}`;
+      const r = view.crop;
+      const b = new PlanBuilder();
+      b.poly(
+        [
+          [r.x0, r.y0],
+          [r.x1, r.y0],
+          [r.x1, r.y1],
+          [r.x0, r.y1],
+        ],
+        true,
+        W.light,
+        1,
+      );
+      keep.add(key);
+      this.layer.set(key, scene.indexOf(key), 'overlay', b);
     }
     this.layer.retain(keep);
     this.syncedVersion = scene.version;
@@ -182,6 +218,11 @@ export class PlanController {
     if (!this.cam) this.zoomExtents(false);
     const view = this.view;
     const scale = +view?.scale || 100;
+    const images = this.app.doc.all('image').filter((i) => i.viewId === view.id);
+    if (images.length) {
+      const { cx, cy, zoom } = this.cam;
+      vp.images.draw(images, viewMatrix2D(cx, cy, zoom, vp.width, vp.height), vp.theme, (id) => this.app.flagsOf(id));
+    }
     this.vp.r2.draw(this.layer, this.camera(), vp.theme, { dashScale: scale, spacing: scale * 1.6, thin: this.app.settings.thinLines });
   }
 
@@ -197,7 +238,37 @@ export class PlanController {
   }
 
   drawOverlay(ctx, vp) {
+    if (this.app.settings.workPlaneGrid) this.drawWorkPlane(ctx, vp);
     drawLayerTexts(ctx, this.layer, (p) => this.modelToScreen(p), this.cam.zoom, vp.theme, (id) => this.app.flagsOf(id));
+  }
+
+  /** A light grid on the level, spaced so lines stay at least ~28 px apart. */
+  drawWorkPlane(ctx, vp) {
+    const imp = this.app.doc.units.system === 'imperial';
+    const steps = imp ? [152.4, 304.8, 609.6, 1524, 3048, 6096, 15240, 30480] : [100, 250, 500, 1000, 2500, 5000, 10000, 25000];
+    const step = steps.find((s) => s * this.cam.zoom >= 28) ?? steps.at(-1);
+    const a = this.screenToModel(0, vp.height);
+    const b = this.screenToModel(vp.width, 0);
+    ctx.save();
+    ctx.strokeStyle = vp.theme.inkCss;
+    ctx.lineWidth = 1;
+    for (const major of [false, true]) {
+      const s = major ? step * 5 : step;
+      ctx.globalAlpha = major ? 0.14 : 0.06;
+      ctx.beginPath();
+      for (let x = Math.ceil(a[0] / s) * s; x <= b[0]; x += s) {
+        const px = Math.round(this.modelToScreen([x, 0]).x) + 0.5;
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, vp.height);
+      }
+      for (let y = Math.ceil(a[1] / s) * s; y <= b[1]; y += s) {
+        const py = Math.round(this.modelToScreen([0, y]).y) + 0.5;
+        ctx.moveTo(0, py);
+        ctx.lineTo(vp.width, py);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   // Coordinates -----------------------------------------------------------------------

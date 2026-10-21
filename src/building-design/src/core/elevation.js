@@ -3,8 +3,9 @@
  * map to the 2D view) and the 2D annotations drawn over the 3D render:
  * levels, grids, and the view's own dimensions, text and lines.
  */
-import { PlanBuilder, W, BG, INK, planGraphics, sectionFrame } from './plan.js';
+import { PlanBuilder, W, BG, INK, planGraphics, sectionFrame, REF_PLANE } from './plan.js';
 import { formatLength } from './units.js';
+import { categoryOf } from './catalog.js';
 import { sub, dot, norm, lineIntersect } from './geom.js';
 
 /**
@@ -59,11 +60,11 @@ export function viewClip(frame) {
  * range: { u0, u1, z0, z1 } extents of the model in view coordinates.
  * Returns [{ id, kind, g }].
  */
-export function elevationAnnotations(doc, view, frame, range, walls) {
+export function elevationAnnotations(doc, view, frame, range, walls, meshOf = null) {
   const out = [];
   const scale = +view.scale || 100;
   const P = (mm) => mm * scale;
-  const pc = { doc, view, scale, units: doc.units, walls, detail: view.detail || 'medium', cutZ: 0, bottomZ: 0, topZ: 0, ceiling: false };
+  const pc = { doc, view, scale, units: doc.units, walls, detail: view.detail || 'medium', cutZ: 0, bottomZ: 0, topZ: 0, ceiling: false, elevationView: true, frame, meshOf };
   const pad = P(12);
   const u0 = (frame.u0 ?? range.u0) - pad;
   const u1 = (frame.u1 ?? range.u1) + pad;
@@ -116,16 +117,38 @@ export function elevationAnnotations(doc, view, frame, range, walls) {
       out.push({ id: gr.id, kind: 'grid', g: b });
     }
   }
+  if (!view.hiddenCats?.includes('refPlanes')) {
+    const zTop = range.z1 + P(6);
+    const zBot = range.z0 - P(4);
+    for (const rp of doc.all('refPlane')) {
+      const d = norm(sub(rp.b, rp.a));
+      if (Math.abs(dot(d, frame.right)) > 0.985) continue;
+      const hit = lineIntersect(rp.a, d, frame.origin, frame.right);
+      if (!hit) continue;
+      const u = dot(sub(hit.point, frame.origin), frame.right);
+      if (frame.u0 != null && (u < frame.u0 - 1 || u > frame.u1 + 1)) continue;
+      const b = new PlanBuilder();
+      b.line([u, zBot], [u, zTop], W.thin, 3, REF_PLANE);
+      if (rp.name) b.text([u, zTop + P(2)], rp.name, { size: P(2.2), color: REF_PLANE });
+      b.pick([
+        [u - P(1), zBot],
+        [u + P(1), zBot],
+        [u + P(1), zTop],
+        [u - P(1), zTop],
+      ]);
+      out.push({ id: rp.id, kind: 'refPlane', g: b });
+    }
+  }
   for (const el of doc.items.values()) {
     if (el.viewId !== view.id) continue;
-    if (view.hiddenCats?.includes(catOf(el.kind))) continue;
+    if (view.hiddenCats?.includes(categoryOf(el, doc))) continue;
     const g = planGraphics(pc, el);
     if (g) out.push({ id: el.id, kind: el.kind, g });
   }
   return out;
 }
 
-const CUT_KINDS = new Set(['wall', 'floor', 'roof', 'ceiling', 'column', 'beam', 'stair']);
+const CUT_KINDS = new Set(['wall', 'floor', 'roof', 'ceiling', 'column', 'beam', 'stair', 'ramp']);
 
 /**
  * Cut fills for a section: the loops where the section plane cuts each
@@ -243,8 +266,4 @@ function clipU(loop, u0, u1) {
     return res;
   };
   return clip(clip(loop, (u) => u - u0), (u) => u1 - u);
-}
-
-function catOf(kind) {
-  return { dimension: 'dimensions', text: 'text', tag: 'tags', detailLine: 'lines' }[kind] || kind;
 }

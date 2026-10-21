@@ -26,6 +26,7 @@ export function buildShell(app) {
     h('span.search-text', 'Search commands'),
     h('kbd', `${MOD} K`),
   );
+  const assistBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Assistant', 'aria-pressed': 'false', 'data-tip': 'Assistant', 'data-tip-desc': 'Ask about the project or ask for changes in plain words', onClick: () => app.toggleAssistant() }, icon('sparkles', 17));
   const themeBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Theme', 'aria-haspopup': 'menu', 'data-tip': 'Theme', onClick: (e) => app.themeMenu(e.currentTarget) }, icon('monitor', 17));
   const helpBtn = h('button.icon-btn.hide-phone', { type: 'button', 'aria-label': 'Help', 'data-tip': 'Help', 'data-tip-keys': 'F1', onClick: () => app.run('help') }, icon('help', 17));
   const code = h('a.icon-btn.hide-phone', { href: REPO_URL, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Source code (opens in a new tab)', 'data-tip': 'Source code' }, icon('code', 17));
@@ -46,7 +47,7 @@ export function buildShell(app) {
       ),
     ),
     title,
-    h('div.tb-right', search, themeBtn, helpBtn, code, account),
+    h('div.tb-right', search, assistBtn, themeBtn, helpBtn, code, account),
   );
 
   const optionsbar = h('div.optionsbar', { role: 'toolbar', 'aria-label': 'Options' });
@@ -83,14 +84,21 @@ export function buildShell(app) {
   const canvasWrap = h('div.canvas-wrap', glCanvas, overlay, canvasHelp, domView, nav, viewcube, banner);
   const viewbar = h('div.viewbar', { role: 'toolbar', 'aria-label': 'View controls' });
   const viewarea = h('div.viewarea', vtabs, canvasWrap, viewbar);
-  const main = h('div.main', dock, dockResize, viewarea);
+  const assist = h('aside.assist-pane', { hidden: true, 'aria-labelledby': 'assist-title' });
+  const main = h('div.main', dock, dockResize, viewarea, assist);
 
   // Status bar
   const prompt = h('div.sb-prompt', { role: 'status', 'aria-live': 'polite' });
-  const selInfo = h('span.sb-item', { 'aria-live': 'polite' });
+  const selInfo = h('button.sb-item', { type: 'button', hidden: true, 'aria-live': 'polite', 'data-tip': 'Filter the selection by category', onClick: () => app.selectionFilterDialog() });
   const snapBtn = h('button.sb-item', { type: 'button', 'aria-pressed': 'true', 'data-tip': 'Snaps', 'data-tip-desc': 'Snap to endpoints, midpoints, intersections and angles', onClick: () => app.toggleSnaps() }, icon('magnet', 14), h('span', 'Snaps'));
   const coords = h('span.sb-item.sb-coords', { 'aria-hidden': 'true' });
-  const statusbar = h('footer.statusbar', prompt, selInfo, snapBtn, coords);
+  const syncBtn = h('button.sb-item.sb-sync', { type: 'button', hidden: true, 'data-tip': 'Shared project', onClick: () => app.run('syncNow') });
+  const wsSelect = h('select.sb-select', { 'aria-label': 'Active workset', onChange: (e) => app.setActiveWorkset(e.target.value) });
+  const wsWrap = h('label.sb-item.sb-ws', { hidden: true, 'data-tip': 'Active workset', 'data-tip-desc': 'New elements go into this workset' }, icon('worksets', 14), wsSelect);
+  const selOpts = h('button.sb-item', { type: 'button', 'aria-haspopup': 'menu', 'aria-label': 'Selection options', 'data-tip': 'Selection options', 'data-tip-desc': 'Whether pinned elements can be selected, and whether a click starts a drag', onClick: (e) => app.selectionOptionsMenu(e.currentTarget) }, icon('pointer', 14));
+  const optSelect = h('select.sb-select', { 'aria-label': 'Design option being edited', onChange: (e) => app.editOption(e.target.value || null) });
+  const optWrap = h('label.sb-item.sb-opt', { hidden: true, 'data-tip': 'Design option', 'data-tip-desc': 'The option you are editing. New elements go into it, and every view shows it.' }, icon('designOptions', 14), optSelect);
+  const statusbar = h('footer.statusbar', prompt, selInfo, optWrap, wsWrap, syncBtn, selOpts, snapBtn, coords);
 
   const phonebar = h('nav.phonebar', { 'aria-label': 'Tools' });
   const root = h('div.app-root', titlebar, h('div.ribbon-slot', { style: { display: 'contents' } }), optionsbar, main, statusbar, phonebar);
@@ -103,6 +111,11 @@ export function buildShell(app) {
     undoBtn,
     redoBtn,
     optionsbar,
+    syncBtn,
+    assist,
+    assistBtn,
+    wsSelect,
+    optSelect,
     dock,
     dockSplit,
     dockResize,

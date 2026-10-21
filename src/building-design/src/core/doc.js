@@ -131,6 +131,7 @@ export class Doc {
   /** Publish the changes made so far in an open transaction (live preview). */
   flush() {
     if (!this.tx || !this.tx.pending.size) return;
+    this.solve();
     const ids = this.tx.pending;
     this.tx.pending = new Set();
     this.emit({ ids, label: this.tx.label, preview: true, meta: this.tx.meta });
@@ -139,6 +140,7 @@ export class Doc {
   commit() {
     const tx = this.tx;
     if (!tx) return false;
+    this.solve();
     this.tx = null;
     const changes = [];
     for (const [id, c] of tx.changes) {
@@ -156,6 +158,24 @@ export class Doc {
     this.revision++;
     this.emit({ ids: new Set(changes.map((c) => c[0])), label: tx.label, meta: tx.meta });
     return true;
+  }
+
+  /**
+   * Let `this.solver(drivers)` (set by the app: dimension constraints) move
+   * other elements to follow the ones edited in the open transaction.
+   */
+  solve() {
+    const tx = this.tx;
+    if (!this.solver || !tx || tx.solving) return;
+    tx.solved ??= new Set();
+    const drivers = new Set([...tx.changes.keys()].filter((id) => !tx.solved.has(id)));
+    if (!drivers.size) return;
+    tx.solving = true;
+    try {
+      for (const id of this.solver(drivers)) tx.solved.add(id);
+    } finally {
+      tx.solving = false;
+    }
   }
 
   rollback() {
@@ -201,8 +221,19 @@ export class Doc {
 
   // Edits ---------------------------------------------------------------------
 
+  /**
+   * Fields merged into elements added while set (for example the group being
+   * edited). `addDefaults.accept(item)` decides which items get them.
+   */
   add(item) {
-    const it = Object.freeze({ ...item, id: item.id || newId(prefixFor(item.kind)) });
+    const extra = this.addDefaults?.accept(item) ? this.addDefaults.fields : null;
+    // Hooks fill in fields the caller left out (for example the active phase).
+    let hooked = null;
+    for (const hook of this.addHooks || []) {
+      const p = hook(item);
+      if (p) hooked = { ...hooked, ...p };
+    }
+    const it = Object.freeze({ ...hooked, ...item, ...extra, id: item.id || newId(prefixFor(item.kind)) });
     if (!it.kind) throw new Error('Item needs a kind');
     this._record(it.id);
     this._put(it.id, it);
@@ -287,6 +318,28 @@ export class Doc {
     this.redoStack.length = 0;
   }
 
+  /**
+   * Apply changes made by someone else ([[id, item | null]]). They are not
+   * undoable, and undo steps that touch the same elements are dropped so
+   * undo never reverts another person's work.
+   */
+  applyRemote(changes, label = 'Changes from others') {
+    if (!changes.length || this.tx) return false;
+    const wasSaved = !this.modified;
+    const ids = new Set();
+    for (const [id, item] of changes) {
+      this._put(id, item ? Object.freeze(item) : null);
+      ids.add(id);
+    }
+    const touches = (step) => step.changes.some((c) => ids.has(c[0]));
+    this.undoStack = this.undoStack.filter((s) => !touches(s));
+    this.redoStack = this.redoStack.filter((s) => !touches(s));
+    this.revision++;
+    if (wasSaved) this.savedRevision = this.revision;
+    this.emit({ ids, label, remote: true });
+    return true;
+  }
+
   /** Project-level settings (info, units) change through a pseudo item so they undo too. */
   setInfo(patch) {
     this.transact('Project information', () => {
@@ -334,8 +387,22 @@ function prefixFor(kind) {
   return 'e';
 }
 
-export const VIEW_KINDS = new Set(['plan', 'ceilingPlan', 'view3d', 'elevation', 'section', 'schedule', 'sheet']);
+export const VIEW_KINDS = new Set(['plan', 'ceilingPlan', 'areaPlan', 'view3d', 'elevation', 'section', 'drafting', 'legend', 'schedule', 'sheet']);
+
+/** Views drawn as plans of a level (2D, model cut at a height). */
+export const PLAN_VIEW_KINDS = ['plan', 'ceilingPlan', 'areaPlan'];
+
+export const VIEW_LABEL = { plan: 'Floor Plan', ceilingPlan: 'Ceiling Plan', areaPlan: 'Area Plan', drafting: 'Drafting View', legend: 'Legend', view3d: '3D View', elevation: 'Elevation', section: 'Section', schedule: 'Schedule', sheet: 'Sheet' };
 
 export function isView(item) {
   return !!item && VIEW_KINDS.has(item.kind);
+}
+
+export function isPlanView(item) {
+  return !!item && PLAN_VIEW_KINDS.includes(item.kind);
+}
+
+/** Views drawn with 2D plan graphics: plans of levels, drafting views and legends. */
+export function isFlatView(item) {
+  return !!item && (PLAN_VIEW_KINDS.includes(item.kind) || item.kind === 'drafting' || item.kind === 'legend');
 }

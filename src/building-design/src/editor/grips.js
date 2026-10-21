@@ -4,8 +4,31 @@
  * (called inside a live transaction with the snapped pointer point) or a
  * click handler.
  */
-import { add, sub, scale, perp, mid, dot, eq } from '../core/geom.js';
-import { wallAxis, openingSize } from '../core/model.js';
+import { add, sub, scale, perp, mid, dot, eq, dist, angleOf } from '../core/geom.js';
+import { radialTarget } from '../core/annotate.js';
+
+/** Edge and corner handles that resize a crop rectangle stored on a view. */
+export function cropGrips(doc, view, r) {
+  const set = (patch) => {
+    const c = { ...doc.get(view.id).crop, ...patch };
+    if (c.x1 - c.x0 < 100 || c.y1 - c.y0 < 100) return;
+    doc.update(view.id, { crop: c });
+  };
+  const mx = (r.x0 + r.x1) / 2;
+  const my = (r.y0 + r.y1) / 2;
+  const g = (at, f) => ({ at, shape: 'square', title: 'Drag to resize the crop region', drag: (p) => set(f(p)) });
+  return [
+    g([r.x0, my], (p) => ({ x0: p[0] })),
+    g([r.x1, my], (p) => ({ x1: p[0] })),
+    g([mx, r.y0], (p) => ({ y0: p[1] })),
+    g([mx, r.y1], (p) => ({ y1: p[1] })),
+    g([r.x0, r.y0], (p) => ({ x0: p[0], y0: p[1] })),
+    g([r.x1, r.y0], (p) => ({ x1: p[0], y0: p[1] })),
+    g([r.x1, r.y1], (p) => ({ x1: p[0], y1: p[1] })),
+    g([r.x0, r.y1], (p) => ({ x0: p[0], y1: p[1] })),
+  ];
+}
+import { wallAxis, openingSize, rampLayout } from '../core/model.js';
 import { sectionFrame } from '../core/plan.js';
 import { dimensionGeometry } from '../core/plan.js';
 
@@ -20,10 +43,85 @@ function wallsEndingAt(doc, p, except) {
   return out;
 }
 
+/** Grips of view annotations; the same in plans, elevations and sections. */
+function annotationGrips(doc, el, out) {
+  const end = (key, title = 'Drag end') => out.push({ at: el[key], shape: 'circle', title, exclude: [el.id], drag: (p) => doc.update(el.id, { [key]: p }) });
+  switch (el.kind) {
+    case 'spot':
+      end('at', 'Drag the measured point');
+      if (el.leader) end('leader', 'Drag the label');
+      break;
+    case 'insulation':
+      end('a');
+      end('b');
+      break;
+    case 'image': {
+      // The far corner scales the picture, keeping its proportions.
+      const rot = ((+el.rotation || 0) * Math.PI) / 180;
+      const w = +el.w || 1000;
+      const hh = +el.h || 1000;
+      const corner = add(el.at, [w * Math.cos(rot) - hh * Math.sin(rot), w * Math.sin(rot) + hh * Math.cos(rot)]);
+      out.push({ at: corner, shape: 'square', title: 'Drag to resize', exclude: [el.id], drag: (p) => {
+        const k = dist(p, el.at) / Math.hypot(w, hh);
+        if (k > 0.01) doc.update(el.id, { w: w * k, h: hh * k });
+      } });
+      break;
+    }
+    case 'angularDim': {
+      let a1 = el.a1;
+      while (a1 < el.a0) a1 += Math.PI * 2;
+      const am = (el.a0 + a1) / 2;
+      out.push({ at: add(el.c, scale([Math.cos(am), Math.sin(am)], el.r)), shape: 'diamond', title: 'Drag the arc', exclude: [el.id], drag: (p) => doc.update(el.id, { r: Math.max(10, dist(el.c, p)) }) });
+      break;
+    }
+    case 'radialDim': {
+      const { c, r } = radialTarget(doc, el);
+      out.push({ at: add(c, scale([Math.cos(el.angle || 0), Math.sin(el.angle || 0)], r)), shape: 'diamond', title: 'Drag around the circle', noSnap: true, drag: (p) => doc.update(el.id, { angle: angleOf(sub(p, c)) }) });
+      break;
+    }
+    case 'detailArc':
+      out.push({ at: add(el.c, scale([Math.cos(el.a0 ?? 0), Math.sin(el.a0 ?? 0)], el.r)), shape: 'diamond', title: 'Drag the radius', exclude: [el.id], drag: (p) => doc.update(el.id, { r: Math.max(1, dist(el.c, p)) }) });
+      break;
+    case 'revisionCloud':
+      (el.boundary || []).forEach((v, i) =>
+        out.push({
+          at: v,
+          shape: 'square',
+          title: 'Drag vertex',
+          exclude: [el.id],
+          drag: (p) => {
+            const b = el.boundary.slice();
+            b[i] = p;
+            doc.update(el.id, { boundary: b });
+          },
+        }),
+      );
+      break;
+    case 'text':
+      (el.leaders || []).forEach((tip, i) =>
+        out.push({
+          at: tip,
+          shape: 'circle',
+          title: 'Drag the leader',
+          exclude: [el.id],
+          drag: (p) => {
+            const l = el.leaders.slice();
+            l[i] = p;
+            doc.update(el.id, { leaders: l });
+          },
+        }),
+      );
+      break;
+    default:
+      break;
+  }
+}
+
 export function gripsFor(app, el, vc) {
   const doc = app.doc;
   const out = [];
   if (!el) return out;
+  if (el.viewId) annotationGrips(doc, el, out);
   if (vc.is2D) {
     switch (el.kind) {
       case 'wall': {
@@ -82,7 +180,57 @@ export function gripsFor(app, el, vc) {
       case 'detailLine':
       case 'roomSeparator':
       case 'beam':
+      case 'ramp':
+        out.push({ at: el.a, shape: 'circle', title: 'Drag start', exclude: [el.id], drag: (p) => doc.update(el.id, { a: p, b: add(p, sub(el.b, el.a)) }) });
+        out.push({ at: rampLayout(doc, el).end, shape: 'circle', title: 'Drag to turn the ramp', exclude: [el.id], drag: (p) => doc.update(el.id, { b: p }) });
+        break;
+      case 'scopeBox':
+        for (const [kx, ky] of [['x0', 'y0'], ['x1', 'y0'], ['x1', 'y1'], ['x0', 'y1']])
+          out.push({ at: [el[kx], el[ky]], shape: 'square', title: 'Drag corner', exclude: [el.id], drag: (p) => doc.update(el.id, { [kx]: p[0], [ky]: p[1] }) });
+        break;
+      case 'propertyLine':
+      case 'mass':
+        (el.boundary || []).forEach((v, i) =>
+          out.push({
+            at: v,
+            shape: 'square',
+            title: 'Drag vertex',
+            exclude: [el.id],
+            drag: (p) => {
+              const b = el.boundary.slice();
+              b[i] = p;
+              doc.update(el.id, { boundary: b });
+            },
+          }),
+        );
+        break;
+      case 'topo':
+        (el.points || []).forEach((v, i) =>
+          out.push({
+            at: [v[0], v[1]],
+            shape: 'square',
+            title: `Drag point (elevation ${v[2]})`,
+            exclude: [el.id],
+            drag: (p) => {
+              const pts = el.points.slice();
+              pts[i] = [p[0], p[1], v[2]];
+              doc.update(el.id, { points: pts });
+            },
+          }),
+        );
+        break;
       case 'stair':
+      case 'refPlane':
+      case 'modelLine':
+      case 'areaBoundary':
+      case 'brace':
+      case 'truss':
+      case 'wire':
+      case 'matchline':
+      case 'duct':
+      case 'pipe':
+      case 'cableTray':
+      case 'conduit':
         for (const end of ['a', 'b'])
           out.push({
             at: el[end],
@@ -149,8 +297,14 @@ export function gripsFor(app, el, vc) {
           }),
         );
         break;
+      case 'plan':
+      case 'ceilingPlan':
+      case 'areaPlan':
+        if (el.calloutOf && el.crop) out.push(...cropGrips(doc, el, el.crop).slice(4));
+        break;
       case 'room':
-        out.push({ at: el.tagAt || el.at, shape: 'diamond', title: 'Move room tag', exclude: [el.id], drag: (p) => doc.update(el.id, { tagAt: p }) });
+      case 'area':
+        out.push({ at: el.tagAt || el.at, shape: 'diamond', title: 'Move label', exclude: [el.id], drag: (p) => doc.update(el.id, { tagAt: p }) });
         break;
       case 'dimension': {
         if (!el.refs?.length) break;

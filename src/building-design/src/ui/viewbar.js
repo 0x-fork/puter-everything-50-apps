@@ -7,6 +7,8 @@ import { h, clear } from './dom.js';
 import { icon } from './icons.js';
 import { showMenu } from './menu.js';
 import { scaleOptions, scaleLabel } from '../core/units.js';
+import { isPlanView } from '../core/doc.js';
+import { TEMPLATE_KEYS } from '../core/graphics.js';
 
 const STYLES = [
   ['wireframe', 'Wireframe', 'styleWire'],
@@ -27,7 +29,11 @@ export function renderViewbar(app) {
   clear(bar);
   const view = app.activeView;
   if (!view || !app.doc) return;
-  const set = (patch, label) => app.commit(label, () => app.doc.update(view.id, patch));
+  const set = (patch, label) => {
+    const tpl = view.templateId && app.doc.get(view.templateId);
+    if (tpl && Object.keys(patch).some((k) => TEMPLATE_KEYS.includes(k))) return app.toast(`The view template "${tpl.name}" controls this setting. Change the template, or remove it in the view's properties.`, { kind: 'error' });
+    app.commit(label, () => app.doc.update(view.id, patch));
+  };
   const btn = (content, label, onClick, pressed = null, extra = {}) =>
     h('button.vb-btn', { type: 'button', 'aria-label': label, 'data-tip': label, 'aria-pressed': pressed == null ? null : String(pressed), 'aria-haspopup': extra.menu ? 'menu' : null, onClick, ...extra.attrs }, content);
   const sep = () => h('span.vb-sep');
@@ -48,11 +54,13 @@ export function renderViewbar(app) {
     bar.append(
       btn(icon(d[2], 16), `Detail level: ${d[1]}`, (e) => showMenu(e.currentTarget, DETAILS.map(([v, l, ic]) => ({ label: l, icon: ic, checked: view.detail === v, radio: true, action: () => set({ detail: v }, 'Detail level') })), { label: 'Detail level' }), null, { menu: true }),
     );
-    if (view.kind !== 'plan' && view.kind !== 'ceilingPlan') {
+    if (view.kind === 'view3d' || view.kind === 'elevation' || view.kind === 'section') {
       const s = STYLES.find((x) => x[0] === (view.style || 'shaded')) || STYLES[2];
       bar.append(btn(icon(s[2], 16), `Visual style: ${s[1]}`, (e) => showMenu(e.currentTarget, STYLES.map(([v, l, ic]) => ({ label: l, icon: ic, checked: view.style === v, radio: true, action: () => set({ style: v }, 'Visual style') })), { label: 'Visual style' }), null, { menu: true }));
     }
     bar.append(btn(icon('thinLines', 16), 'Thin lines', () => app.toggleSetting('thinLines'), !!app.settings.thinLines));
+    if (view.kind === 'view3d' || view.kind === 'elevation' || view.kind === 'section')
+      bar.append(btn(icon('shadows', 16), view.shadows ? 'Shadows: on' : 'Shadows: off', () => app.run('shadows'), !!view.shadows), btn(icon('sun-l', 16), 'Sun settings', () => app.run('sunSettings')));
     if (view.kind === 'view3d') {
       const persp = app.vc?.cam?.persp !== false;
       bar.append(
@@ -68,6 +76,7 @@ export function renderViewbar(app) {
       );
     }
     if (view.kind === 'plan') bar.append(btn(icon('palette', 16), 'Room color fill', () => app.toggleViewProp('roomFill'), !!view.roomFill));
+    if (isPlanView(view)) bar.append(btn(icon('cropView', 16), view.cropOn ? 'Crop view: on' : 'Crop view: off', () => app.toggleCrop('cropOn'), !!view.cropOn), btn(icon('cropShow', 16), view.cropShow ? 'Hide crop region' : 'Show crop region', () => app.toggleCrop('cropShow'), !!view.cropShow));
     bar.append(sep());
     const t = app.temp.get(view.id);
     bar.append(

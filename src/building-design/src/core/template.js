@@ -5,6 +5,8 @@
 import { Doc, newId } from './doc.js';
 import { defaultMaterials, defaultTypes } from './catalog.js';
 import { MM_PER_FOOT } from './units.js';
+import { defaultPhases } from './phases.js';
+import { defaultBasePoints } from './coords.js';
 
 export const VIEW_DEFAULTS = {
   plan: { detail: 'medium', cutHeight: 1200, hiddenCats: [], hiddenIds: [] },
@@ -52,6 +54,29 @@ export function default3DView(name = '3D View') {
 }
 
 /**
+ * Bring a document opened from an older file up to date: type kinds and
+ * materials added since it was saved get their defaults. Runs outside the
+ * undo history and does not mark the project modified.
+ */
+export function upgradeDoc(doc) {
+  const system = doc.units.system === 'imperial' ? 'imperial' : 'metric';
+  const missingKinds = new Set();
+  for (const t of defaultTypes(system)) if (!doc.count(t.kind)) missingKinds.add(t.kind);
+  const used = new Set();
+  for (const t of defaultTypes(system)) {
+    // Kinds the project has none of, and component categories added since it was saved.
+    const newCategory = t.kind === 'componentType' && !doc.find((x) => x.kind === 'componentType' && x.category === t.category);
+    if ((!missingKinds.has(t.kind) && !newCategory) || doc.has(t.id)) continue;
+    doc._put(t.id, Object.freeze(t));
+    if (t.materialId) used.add(t.materialId);
+  }
+  for (const m of defaultMaterials()) if (used.has(m.id) && !doc.has(m.id)) doc._put(m.id, Object.freeze(m));
+  if (!doc.count('phase')) for (const p of defaultPhases()) doc._put(p.id, Object.freeze(p));
+  if (!doc.count('basePoint')) for (const p of defaultBasePoints(doc)) doc._put(p.id, Object.freeze(p));
+  return doc;
+}
+
+/**
  * Create an empty project. system: 'metric' | 'imperial'.
  */
 export function createProject({ system = 'metric', name = 'Untitled' } = {}) {
@@ -71,6 +96,7 @@ export function createProject({ system = 'metric', name = 'Untitled' } = {}) {
     });
     for (const m of defaultMaterials()) doc.add(m);
     for (const t of defaultTypes(system)) doc.add(t);
+    for (const p of defaultPhases()) doc.add(p);
     const h = imp ? 10 * MM_PER_FOOT : 3000;
     const l1 = doc.add({ kind: 'level', name: 'Level 1', elevation: 0 });
     const l2 = doc.add({ kind: 'level', name: 'Level 2', elevation: h });

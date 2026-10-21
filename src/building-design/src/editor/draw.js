@@ -24,8 +24,8 @@ import {
   closestOnSegment,
   area as polyArea,
 } from '../core/geom.js';
-import { typeThickness } from '../core/catalog.js';
-import { wallAxis, openingSize, hostedBy, stairLayout } from '../core/model.js';
+import { typeThickness, CATEGORIES, categoryOf } from '../core/catalog.js';
+import { wallAxis, openingSize, hostedBy, stairLayout, rampLayout } from '../core/model.js';
 import { planGraphics, planContext, tagAnchor, sectionFrame } from '../core/plan.js';
 import { nextMark, nextRoomNumber, nextGridName, uniqueName } from '../core/ops.js';
 import { VIEW_DEFAULTS, planView } from '../core/template.js';
@@ -35,8 +35,14 @@ import { formatAngle } from '../core/units.js';
 import { strokeModel, fillModel, drawTempDim, drawTag } from '../views/overlay.js';
 import { h } from '../ui/dom.js';
 import { icon } from '../ui/icons.js';
-import { newId } from '../core/doc.js';
+import { newId, isPlanView, PLAN_VIEW_KINDS } from '../core/doc.js';
+
+/** Views that take 2D annotations. */
+export const ANNOTATION_VIEWS = [...PLAN_VIEW_KINDS, 'elevation', 'section', 'drafting', 'legend'];
 import { STAIR_SHAPES } from '../core/stairs.js';
+import { lineStyleOptions } from '../core/props.js';
+import { newRevision } from '../core/revisions.js';
+import { MEP_KINDS, SYSTEMS, mepSize } from '../core/mep.js';
 import { MM_PER_FOOT } from '../core/units.js';
 
 export const REGION_PATTERNS = [
@@ -54,7 +60,7 @@ export const REGION_PATTERNS = [
 /** Draw plan graphics of a temporary element on the overlay. */
 export function previewGraphics(app, vc, el, ctx, color, alpha = 0.12) {
   const view = vc.view;
-  const pc = planContext(app.doc, view.kind === 'plan' || view.kind === 'ceilingPlan' ? view : { ...view, levelId: app.activeLevelId() }, app.scene.walls, app.scene.rooms);
+  const pc = planContext(app.doc, isPlanView(view) ? view : { ...view, levelId: app.activeLevelId() }, app.scene.walls, app.scene.rooms, app.scene.areas);
   if (!vc.is2D) {
     pc.scale = +view.scale || 100;
   }
@@ -510,7 +516,8 @@ export class ComponentTool extends Tool {
   }
 
   get title() {
-    return this.kind === 'column' ? 'Place Column' : 'Place Component';
+    if (this.kind === 'column') return this.opts.structural ? 'Place Structural Column' : 'Place Column';
+    return 'Place Component';
   }
 
   get prompt() {
@@ -557,7 +564,7 @@ export class ComponentTool extends Tool {
     const el = { kind: this.kind, typeId: type.id, levelId: this.app.activeLevelId(), at: p, rotation: Math.round(rot * 1000) / 1000, offset: o.offset || 0 };
     if (this.kind === 'column') {
       const top = o.topLevelId === undefined ? this.doc.levelAbove(el.levelId)?.id ?? null : o.topLevelId;
-      Object.assign(el, { baseOffset: o.offset || 0, topLevelId: top, topOffset: 0, height: 3000 });
+      Object.assign(el, { baseOffset: o.offset || 0, topLevelId: top, topOffset: 0, height: 3000, structural: !!this.opts.structural });
     }
     return el;
   }
@@ -593,7 +600,7 @@ export class ComponentTool extends Tool {
 
 export class LineTool extends Tool {
   get placingKind() {
-    return this.kind === 'beam' ? 'beam' : null;
+    return this.kind === 'beam' || this.kind === 'brace' || this.kind === 'truss' || MEP_KINDS.includes(this.kind) ? this.kind : null;
   }
 
   constructor(app, opts) {
@@ -604,34 +611,96 @@ export class LineTool extends Tool {
   }
 
   get title() {
-    return { grid: 'Place Grid', beam: 'Place Beam', detailLine: 'Detail Lines', roomSeparator: 'Room Separation Lines' }[this.kind];
+    return { grid: 'Place Grid', beam: 'Place Beam', brace: 'Place Brace', truss: 'Place Truss', wire: 'Wire', matchline: 'Matchline', detailLine: 'Detail Lines', roomSeparator: 'Room Separation Lines', refPlane: 'Reference Plane', modelLine: 'Model Lines', areaBoundary: 'Area Boundary', duct: 'Duct', pipe: 'Pipe', cableTray: 'Cable Tray', conduit: 'Conduit' }[this.kind];
   }
 
   get prompt() {
+    if (this.pickMode) return 'Click a wall face, line, grid or edge to draw along it';
     return this.start ? 'Click the end point (type a length to enter it)' : 'Click the start point';
   }
 
   get viewKinds() {
-    return this.kind === 'detailLine' ? ['plan', 'ceilingPlan', 'elevation', 'section'] : ['plan', 'ceilingPlan'];
+    if (this.kind === 'areaBoundary') return ['areaPlan'];
+    return this.kind === 'detailLine' ? ANNOTATION_VIEWS : PLAN_VIEW_KINDS;
   }
 
   get chain() {
-    return this.kind === 'detailLine' || this.kind === 'roomSeparator' || this.kind === 'beam';
+    return ['detailLine', 'roomSeparator', 'beam', 'modelLine', 'areaBoundary', 'wire', ...MEP_KINDS].includes(this.kind);
+  }
+
+  /** Line kinds that can be drawn by picking existing lines. */
+  get canPick() {
+    return ['refPlane', 'modelLine', 'areaBoundary', 'detailLine', 'roomSeparator'].includes(this.kind);
+  }
+
+  get pickMode() {
+    return this.canPick && this.app.toolOptions(`line-${this.kind}`, { mode: 'draw' }).mode === 'pick';
   }
 
   options() {
-    if (this.kind === 'detailLine') {
-      const o = this.app.toolOptions('detailLine', { style: 'medium' });
-      const s = h('select.input.sm', { 'aria-label': 'Line style' }, ...['thin', 'medium', 'wide', 'dashed', 'hidden', 'center'].map((v) => h('option', { value: v }, v[0].toUpperCase() + v.slice(1))));
+    const out = [];
+    if (this.canPick) {
+      const o = this.app.toolOptions(`line-${this.kind}`, { mode: 'draw' });
+      out.push(
+        segmented(
+          [
+            { value: 'draw', label: 'Line', icon: 'line', text: false, tip: 'Draw' },
+            { value: 'pick', label: 'Pick lines', icon: 'pickLines', text: false, tip: 'Pick lines' },
+          ],
+          o.mode,
+          (v) => {
+            o.mode = v;
+            this.start = null;
+            this.app.renderOptions();
+            this.app.setPrompt(this.prompt);
+          },
+          'Draw mode',
+        ),
+        h('span.ob-sep'),
+      );
+    }
+    if (this.kind === 'detailLine' || this.kind === 'modelLine') {
+      const o = this.app.toolOptions(this.kind, { style: this.kind === 'modelLine' ? 'thin' : 'medium' });
+      const s = h('select.input.sm', { 'aria-label': 'Line style' }, ...lineStyleOptions(this.doc).map((v) => h('option', { value: v.value }, v.label)));
       s.value = o.style;
       s.addEventListener('change', () => (o.style = s.value));
-      return [h('div.ob-group', h('label', 'Style'), s)];
+      out.push(h('div.ob-group', h('label', 'Style'), s));
     }
-    if (this.kind === 'beam') {
-      const o = this.app.toolOptions('beam', { offset: 0 });
-      return [lengthField(this, 'Offset from level', o.offset, (v) => (o.offset = v))];
+    if (this.kind === 'beam' || this.kind === 'modelLine') {
+      const o = this.app.toolOptions(this.kind, { offset: 0 });
+      out.push(lengthField(this, 'Offset from level', o.offset || 0, (v) => (o.offset = v)));
     }
-    return null;
+    if (this.kind === 'truss') {
+      const o = this.app.toolOptions('truss', { offset: this.doc.units.system === 'imperial' ? 9 * MM_PER_FOOT : 2800 });
+      out.push(lengthField(this, 'Bottom chord height', o.offset, (v) => (o.offset = v)));
+    }
+    if (MEP_KINDS.includes(this.kind)) {
+      const imp = this.doc.units.system === 'imperial';
+      const o = this.app.toolOptions(this.kind, { offset: this.kind === 'duct' ? (imp ? 9 * MM_PER_FOOT : 2800) : this.kind === 'cableTray' ? (imp ? 9.5 * MM_PER_FOOT : 2900) : imp ? 8.5 * MM_PER_FOOT : 2600, system: SYSTEMS[this.kind][0].value });
+      out.push(lengthField(this, 'Middle elevation', o.offset, (v) => (o.offset = v)));
+      const size = mepSize(this.doc, { kind: this.kind, typeId: this.app.currentType(this.kind)?.id, ...o });
+      if (size.round) out.push(lengthField(this, 'Diameter', o.diameter ?? size.w, (v) => (o.diameter = v > 0 ? v : null)));
+      else out.push(lengthField(this, 'Width', o.width ?? size.w, (v) => (o.width = v > 0 ? v : null)), lengthField(this, 'Height', o.height ?? size.h, (v) => (o.height = v > 0 ? v : null)));
+      if (SYSTEMS[this.kind].length > 1) {
+        const s = h('select.input.sm', { 'aria-label': 'System' }, ...SYSTEMS[this.kind].map((x) => h('option', { value: x.value }, x.label)));
+        s.value = o.system;
+        s.addEventListener('change', () => (o.system = s.value));
+        out.push(h('div.ob-group', h('label', 'System'), s));
+      }
+    }
+    if (this.kind === 'brace') {
+      const o = this.app.toolOptions('brace', { baseOffset: 0 });
+      out.push(lengthField(this, 'Start offset', o.baseOffset, (v) => (o.baseOffset = v)));
+      out.push(h('div.ob-group', h('label', 'End'), levelSelect(this.app, o.topLevelId === undefined ? this.doc.levelAbove(this.app.activeLevelId())?.id : o.topLevelId, (v) => (o.topLevelId = v), { none: 'Unconnected (3000)' })));
+    }
+    if (this.kind === 'refPlane') {
+      const o = this.app.toolOptions('refPlane', { name: '' });
+      const inp = h('input.input.sm', { type: 'text', value: o.name, 'aria-label': 'Name', placeholder: 'Optional' });
+      inp.addEventListener('input', () => (o.name = inp.value));
+      inp.addEventListener('keydown', (e) => e.stopPropagation());
+      out.push(h('div.ob-group', h('label', 'Name'), inp));
+    }
+    return out.length ? out : null;
   }
 
   make(a, b) {
@@ -645,9 +714,50 @@ export class LineTool extends Tool {
         return { kind: 'detailLine', viewId: view.id, a, b, style: this.app.toolOptions('detailLine', { style: 'medium' }).style };
       case 'roomSeparator':
         return { kind: 'roomSeparator', levelId: this.app.activeLevelId(), a, b };
+      case 'refPlane':
+        return { kind: 'refPlane', a, b, name: this.app.toolOptions('refPlane', { name: '' }).name || '' };
+      case 'modelLine': {
+        const o = this.app.toolOptions('modelLine', { style: 'thin', offset: 0 });
+        return { kind: 'modelLine', levelId: this.app.activeLevelId(), a, b, offset: o.offset || 0, style: o.style };
+      }
+      case 'areaBoundary':
+        return { kind: 'areaBoundary', levelId: view.levelId, scheme: view.scheme || 'gross', a, b };
+      case 'duct':
+      case 'pipe':
+      case 'cableTray':
+      case 'conduit': {
+        const o = this.app.toolOptions(this.kind, {});
+        const el = { kind: this.kind, typeId: this.app.currentType(this.kind)?.id, levelId: this.app.activeLevelId(), a, b, offset: o.offset ?? 2700, system: o.system };
+        for (const k of ['width', 'height', 'diameter']) if (o[k] > 0) el[k] = o[k];
+        return el;
+      }
+      case 'matchline': {
+        const lv = this.doc.levels();
+        return { kind: 'matchline', a, b, name: '', z0: (lv[0]?.elevation ?? 0) - 1, z1: (lv.at(-1)?.elevation ?? 0) + 1 };
+      }
+      case 'wire':
+        return { kind: 'wire', levelId: this.app.activeLevelId(), a, b, ticks: this.app.toolOptions('wire', { ticks: 2 }).ticks, circuit: '' };
+      case 'truss': {
+        const o = this.app.toolOptions('truss', { offset: 2800 });
+        return { kind: 'truss', typeId: this.app.currentType('truss')?.id, levelId: this.app.activeLevelId(), a, b, offset: o.offset };
+      }
+      case 'brace': {
+        const o = this.app.toolOptions('brace', { baseOffset: 0 });
+        const levelId = this.app.activeLevelId();
+        const top = o.topLevelId === undefined ? this.doc.levelAbove(levelId)?.id ?? null : o.topLevelId || null;
+        return { kind: 'brace', typeId: this.app.currentType('brace')?.id, levelId, a, b, baseOffset: o.baseOffset || 0, topLevelId: top, topOffset: 0, height: 3000 };
+      }
       default:
         return null;
     }
+  }
+
+  pick(ev) {
+    this.snap(ev);
+    const ref = this.snapRes?.ref;
+    const line = ref?.line || this.snapRes?.line;
+    if (!line) return this.app.setPrompt('Nothing to pick here. Click a wall face, line, grid or edge.');
+    this.app.commit(this.title, () => this.doc.add(this.make(line.a, line.b)));
   }
 
   lastGrid() {
@@ -656,6 +766,7 @@ export class LineTool extends Tool {
   }
 
   down(ev) {
+    if (this.pickMode) return this.pick(ev);
     const p = this.snap(ev, this.start);
     if (!p) return;
     if (!this.start) {
@@ -706,9 +817,14 @@ export class LineTool extends Tool {
   }
 
   drawOverlay(ctx, vc, vp) {
+    if (this.pickMode) {
+      const line = this.snapRes?.ref?.line || this.snapRes?.line;
+      if (line) strokeModel(ctx, [line.a, line.b], (p) => vc.modelToScreen(p), vp.theme.preview, 3);
+      return;
+    }
     if (this.start && this.cursor && dist(this.start, this.cursor) > 1) {
       const S = (p) => vc.modelToScreen(p);
-      if (this.kind === 'detailLine' || this.kind === 'roomSeparator') strokeModel(ctx, [this.start, this.cursor], S, vp.theme.preview, 1.6);
+      if (['detailLine', 'roomSeparator', 'modelLine', 'refPlane', 'areaBoundary'].includes(this.kind)) strokeModel(ctx, [this.start, this.cursor], S, vp.theme.preview, 1.6);
       else previewGraphics(this.app, vc, { id: 'preview', ...this.make(this.start, this.cursor) }, ctx, vp.theme.preview, 0.1);
       drawTempDim(ctx, S(this.start), S(this.cursor), this.fmt(dist(this.start, this.cursor)), vp.theme.preview, vp.theme, -20);
     }
@@ -720,11 +836,11 @@ export class LineTool extends Tool {
 
 export class SketchTool extends Tool {
   get placingKind() {
-    return this.kind === 'shaft' || this.kind === 'region' ? null : this.kind;
+    return ['shaft', 'region', 'vopening', 'revisionCloud', 'propertyLine', 'mass'].includes(this.kind) ? null : this.kind;
   }
 
   get viewKinds() {
-    return this.kind === 'region' ? ['plan', 'ceilingPlan', 'elevation', 'section', 'sheet'] : ['plan', 'ceilingPlan'];
+    return this.kind === 'region' || this.kind === 'revisionCloud' ? [...ANNOTATION_VIEWS, 'sheet'] : PLAN_VIEW_KINDS;
   }
 
   constructor(app, opts) {
@@ -735,20 +851,27 @@ export class SketchTool extends Tool {
     this.pts = el ? (el.boundary || el.path || []).slice() : [];
     this.closed = !!el && this.kind !== 'railing';
     this.cursor = null;
-    const defaults = { mode: this.kind === 'railing' || this.kind === 'region' ? 'polygon' : this.kind === 'shaft' ? 'rect' : this.kind === 'roof' ? 'pickWalls' : this.kind === 'ceiling' ? 'pickRoom' : 'pickWalls', slope: 30, overhang: app.doc.units.system === 'imperial' ? 24 * 25.4 : 600, offset: this.kind === 'ceiling' ? (app.doc.units.system === 'imperial' ? 8 * MM_PER_FOOT : 2700) : 0 };
+    const startMode = { railing: 'polygon', region: 'polygon', revisionCloud: 'polygon', propertyLine: 'polygon', shaft: 'rect', vopening: 'rect', mass: 'rect', ceiling: 'pickRoom' }[this.kind] || 'pickWalls';
+    const defaults = { mode: startMode, slope: 30, overhang: app.doc.units.system === 'imperial' ? 24 * 25.4 : 600, offset: this.kind === 'ceiling' ? (app.doc.units.system === 'imperial' ? 8 * MM_PER_FOOT : 2700) : 0 };
     this.o = app.toolOptions(`sketch-${this.kind}`, defaults);
     if (this.editId) this.o.mode = 'polygon';
+    this.hostId = opts.hostId || null;
   }
 
   get title() {
     if (this.kind === 'shaft') return 'Shaft Opening';
+    if (this.kind === 'vopening') return 'Opening in Floor, Roof or Ceiling';
     if (this.kind === 'region') return 'Filled Region';
+    if (this.kind === 'revisionCloud') return 'Revision Cloud';
+    if (this.kind === 'propertyLine') return 'Property Line';
+    if (this.kind === 'mass') return 'In-Place Mass';
     const n = { floor: 'Floor', ceiling: 'Ceiling', roof: 'Roof', railing: 'Railing' }[this.kind];
     return this.editId ? `Edit ${n} Boundary` : `Create ${n} ${this.kind === 'railing' ? 'Path' : 'Boundary'}`;
   }
 
   get prompt() {
     const m = this.o.mode;
+    if (this.kind === 'vopening' && !this.hostId) return 'Click the floor, roof or ceiling to cut';
     if (m === 'pickRoom') return 'Click inside an enclosed area to use its outline. Then click Finish.';
     if (m === 'pickWalls') return 'Click a wall of the building to use the building outline. Then click Finish.';
     if (m === 'rect') return 'Click two opposite corners. Then click Finish.';
@@ -762,7 +885,7 @@ export class SketchTool extends Tool {
     const modes = [{ value: 'polygon', label: 'Lines', icon: 'polygon' }];
     if (this.kind !== 'railing') modes.push({ value: 'rect', label: 'Rectangle', icon: 'rect' });
     if (this.kind === 'floor' || this.kind === 'ceiling' || this.kind === 'region') modes.push({ value: 'pickRoom', label: 'Pick room', icon: 'room' });
-    if (this.kind === 'floor' || this.kind === 'roof') modes.push({ value: 'pickWalls', label: 'Pick walls', icon: 'pickWalls' });
+    if (this.kind === 'floor' || this.kind === 'roof' || this.kind === 'mass') modes.push({ value: 'pickWalls', label: 'Pick walls', icon: 'pickWalls' });
     const out = [
       segmented(
         modes,
@@ -787,11 +910,20 @@ export class SketchTool extends Tool {
       out.push(lengthField(this, 'Overhang', o.overhang, (v) => (o.overhang = v)));
     }
     if (this.kind === 'ceiling') out.push(lengthField(this, 'Height offset', o.offset, (v) => (o.offset = v)));
+    if (this.kind === 'mass') out.push(lengthField(this, 'Height', o.height ?? (this.doc.units.system === 'imperial' ? 40 * MM_PER_FOOT : 12000), (v) => (o.height = Math.max(100, v))));
     if (this.kind === 'region') {
       const s = h('select.input.sm', { 'aria-label': 'Fill pattern' }, ...REGION_PATTERNS.map((p) => h('option', { value: p.value }, p.label)));
       s.value = o.pattern || 'diag';
       s.addEventListener('change', () => (o.pattern = s.value));
       out.push(h('div.ob-group', h('label', 'Pattern'), s));
+    }
+    if (this.kind === 'revisionCloud') {
+      const revs = this.doc.all('revision').sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+      const s = h('select.input.sm', { 'aria-label': 'Revision' }, ...(revs.length ? revs.map((r) => h('option', { value: r.id }, `${r.number ?? r.seq}: ${r.description || 'Revision'}`)) : [h('option', { value: '' }, 'New revision')]));
+      if (!revs.some((r) => r.id === o.revisionId)) o.revisionId = revs.at(-1)?.id || '';
+      s.value = o.revisionId || '';
+      s.addEventListener('change', () => (o.revisionId = s.value));
+      out.push(h('div.ob-group', h('label', 'Revision'), s), h('button.btn.sm', { type: 'button', onClick: () => this.app.run('revisions') }, 'Revisions...'));
     }
     out.push(finishCancel(this));
     return out;
@@ -799,6 +931,14 @@ export class SketchTool extends Tool {
 
   down(ev) {
     const m = this.o.mode;
+    if (this.kind === 'vopening' && !this.hostId) {
+      const host = this.vc.hitTest(ev.x, ev.y, 8).map((id) => this.doc.get(id)).find((el) => ['floor', 'roof', 'ceiling'].includes(el?.kind));
+      if (!host) return this.app.toast('Click the edge or inside of a floor, roof or ceiling.', { kind: 'error' });
+      this.hostId = host.id;
+      this.app.select([host.id]);
+      this.app.setPrompt(`Sketch the opening in the ${host.kind}. Then click Finish.`);
+      return;
+    }
     if (m === 'pickRoom') {
       const r = this.app.scene.rooms.regionAt(this.app.activeLevelId(), ev.p);
       if (!r) return this.app.toast('That point is not inside an enclosed area.', { kind: 'error' });
@@ -908,9 +1048,35 @@ export class SketchTool extends Tool {
     }
     if (pts.length < 3 || Math.abs(signedArea(pts)) < 1000) return this.app.toast('The boundary needs at least three points enclosing an area.', { kind: 'error' });
     if (this.kind === 'shaft') return this.finishShaft(pts);
+    if (this.kind === 'vopening') {
+      const host = this.doc.get(this.hostId);
+      if (!host) return this.app.toast('Pick the floor, roof or ceiling to cut first.', { kind: 'error' });
+      this.app.commit('Opening', () => this.doc.update(host.id, { holes: [...(host.holes || []), pts] }));
+      this.app.select([host.id]);
+      return this.app.cancelTool();
+    }
     if (this.kind === 'region') {
       const view = this.vc.view;
       this.app.commit('Filled region', () => this.doc.add({ kind: 'region', viewId: view.id, boundary: pts, holes: [], pattern: this.o.pattern || 'diag', outline: true }));
+      return this.app.cancelTool();
+    }
+    if (this.kind === 'propertyLine') {
+      this.app.commit('Property line', () => this.doc.add({ kind: 'propertyLine', boundary: pts }));
+      return this.app.cancelTool();
+    }
+    if (this.kind === 'mass') {
+      const height = this.o.height ?? (this.doc.units.system === 'imperial' ? 40 * MM_PER_FOOT : 12000);
+      this.app.commit('Mass', () => this.doc.add({ kind: 'mass', levelId: this.app.activeLevelId(), boundary: pts, holes: [], height, baseOffset: 0, name: `Mass ${this.doc.count('mass') + 1}` }));
+      return this.app.cancelTool();
+    }
+    if (this.kind === 'revisionCloud') {
+      const view = this.vc.view;
+      this.app.commit('Revision cloud', () => {
+        let rev = this.doc.get(this.o.revisionId);
+        if (rev?.kind !== 'revision') rev = this.doc.add(newRevision(this.doc));
+        this.o.revisionId = rev.id;
+        this.doc.add({ kind: 'revisionCloud', viewId: view.id, boundary: pts, revisionId: rev.id });
+      });
       return this.app.cancelTool();
     }
     const type = this.app.currentType(this.kind);
@@ -1008,6 +1174,7 @@ export class StairTool extends Tool {
   }
 
   get prompt() {
+    if (this.app.toolOptions('stair', { shape: 'straight' }).shape === 'spiral') return this.start ? 'Click to set where the bottom step points' : 'Click the centre of the spiral';
     return this.start ? 'Click to set the direction of the run' : 'Click the start of the run (the bottom step)';
   }
 
@@ -1096,6 +1263,218 @@ export class StairTool extends Tool {
   }
 }
 
+// Ramps -----------------------------------------------------------------------------------------------
+
+export class RampTool extends Tool {
+  get placingKind() {
+    return 'ramp';
+  }
+
+  get title() {
+    return 'Place Ramp';
+  }
+
+  get prompt() {
+    return this.start ? 'Click to set the direction of the run' : 'Click the bottom of the ramp';
+  }
+
+  options() {
+    const o = this.app.toolOptions('ramp', {});
+    const type = this.app.currentType('ramp');
+    return [
+      lengthField(this, 'Width', o.width ?? type?.width ?? 1200, (v) => (o.width = v)),
+      h('div.ob-group', h('label', 'Top'), levelSelect(this.app, o.topLevelId ?? this.doc.levelAbove(this.app.activeLevelId())?.id ?? '', (v) => (o.topLevelId = v), { none: 'Unconnected (600)' })),
+      h(
+        'label.ob-group',
+        (() => {
+          const c = h('input', { type: 'checkbox', checked: o.railings !== false });
+          c.addEventListener('change', () => (o.railings = c.checked));
+          return c;
+        })(),
+        h('span.ob-label', 'Handrails'),
+      ),
+    ];
+  }
+
+  make(a, b) {
+    const o = this.app.toolOptions('ramp', {});
+    const levelId = this.app.activeLevelId();
+    const type = this.app.currentType('ramp');
+    const topLevelId = o.topLevelId === undefined ? this.doc.levelAbove(levelId)?.id ?? null : o.topLevelId || null;
+    const el = { kind: 'ramp', typeId: type?.id, levelId, topLevelId, baseOffset: 0, topOffset: 0, height: 600, a, b, width: o.width ?? type?.width ?? 1200, railings: o.railings !== false };
+    const g = rampLayout(this.doc, el);
+    el.b = g.end;
+    return { el, g };
+  }
+
+  down(ev) {
+    const p = this.snap(ev, this.start);
+    if (!p) return;
+    if (!this.start) {
+      this.start = p;
+      this.app.setPrompt(this.prompt);
+      return;
+    }
+    if (dist(p, this.start) < 10) return;
+    const { el, g } = this.make(this.start, p);
+    if (g.run > 60000) return this.app.toast(`That ramp would be ${this.fmt(g.run)} long. Choose a closer top level or an unconnected height.`, { kind: 'error' });
+    this.app.commit('Ramp', () => this.doc.add({ ...el, mark: '', comments: '' }));
+    this.start = null;
+    this.app.setPrompt(this.prompt);
+  }
+
+  move(ev) {
+    this.cursor = this.snap(ev, this.start);
+    this.app.requestRender();
+  }
+
+  cancel() {
+    if (this.start) {
+      this.start = null;
+      this.app.requestRender();
+      return false;
+    }
+    return true;
+  }
+
+  drawOverlay(ctx, vc, vp) {
+    if (this.start && this.cursor && dist(this.start, this.cursor) > 10) {
+      const { el, g } = this.make(this.start, this.cursor);
+      previewGraphics(this.app, vc, el, ctx, vp.theme.preview, 0.1);
+      const s = vc.modelToScreen(this.cursor);
+      drawTag(ctx, s.x + 40, s.y + 24, `Run ${this.fmt(g.run)}, rise ${this.fmt(g.rise)} (1:${Math.round(g.ratio)})`, { bg: vp.theme.bgCss, fg: vp.theme.inkCss, border: vp.theme.preview });
+    }
+    this.drawSnap(ctx, vc, vp);
+  }
+}
+
+// Areas -----------------------------------------------------------------------------------------------
+
+export class AreaTool extends Tool {
+  get title() {
+    return 'Place Area';
+  }
+
+  get viewKinds() {
+    return ['areaPlan'];
+  }
+
+  get prompt() {
+    return this.region ? 'Click to place an area here' : 'Move into a region enclosed by area boundary lines';
+  }
+
+  move(ev) {
+    const view = this.vc.view;
+    this.at = ev.p;
+    this.region = ev.p ? this.app.scene.areas.regionAt(view.levelId, view.scheme || 'gross', ev.p) : null;
+    this.app.setPrompt(this.prompt);
+    this.app.requestRender();
+  }
+
+  down(ev) {
+    if (!ev.p) return;
+    const view = this.vc.view;
+    const scheme = view.scheme || 'gross';
+    const region = this.app.scene.areas.regionAt(view.levelId, scheme, ev.p);
+    if (region) {
+      const existing = this.doc.all('area').find((a) => a.levelId === view.levelId && (a.scheme || 'gross') === scheme && this.app.scene.areas.area(a)?.outer === region.outer);
+      if (existing) return this.app.toast(`This region already has an area (${existing.name}).`, { kind: 'error' });
+    }
+    const o = this.app.toolOptions('area', { name: 'Area' });
+    this.app.commit('Area', () => this.doc.add({ kind: 'area', levelId: view.levelId, scheme, at: ev.p, name: o.name || 'Area', number: String(this.doc.all('area').length + 1), areaType: 'floor' }));
+  }
+
+  options() {
+    const o = this.app.toolOptions('area', { name: 'Area' });
+    const inp = h('input.input.sm', { type: 'text', value: o.name, 'aria-label': 'Area name' });
+    inp.addEventListener('input', () => (o.name = inp.value));
+    inp.addEventListener('keydown', (e) => e.stopPropagation());
+    return [h('div.ob-group', h('label', 'Name'), inp)];
+  }
+
+  drawOverlay(ctx, vc, vp) {
+    if (!this.region) return;
+    const S = (p) => vc.modelToScreen(p);
+    fillModel(ctx, this.region.outer, S, vp.theme.preview, 0.12);
+    strokeModel(ctx, this.region.outer, S, vp.theme.preview, 1.5, [6, 4], true);
+    const s = S(this.at);
+    drawTag(ctx, s.x, s.y - 24, this.app.formatArea(this.region.area), { bg: vp.theme.bgCss, fg: vp.theme.inkCss, border: vp.theme.preview });
+  }
+}
+
+/**
+ * Area boundary lines along the outside faces of the building on a level,
+ * for a new gross area plan. Returns the number of lines added.
+ */
+export function boundaryFromExterior(app, levelId, scheme) {
+  const doc = app.doc;
+  const solved = app.scene.walls.level(levelId);
+  const faces = arrangementFaces(boundarySegments(doc, solved, levelId, (c) => columnOutline(doc, c)));
+  let n = 0;
+  for (const f of faces) {
+    // Outer cycles of connected wall groups wind clockwise.
+    if (f.area >= 0 || -f.area < 1e6) continue;
+    const loop = cleanPolygon(f.loop, 0.5);
+    for (let i = 0; i < loop.length; i++) {
+      doc.add({ kind: 'areaBoundary', levelId, scheme, a: loop[i], b: loop[(i + 1) % loop.length] });
+      n++;
+    }
+  }
+  return n;
+}
+
+/** Move the label of a room or area to a clicked point. */
+export class LabelTool extends Tool {
+  get title() {
+    return 'Tag Room';
+  }
+
+  get viewKinds() {
+    return PLAN_VIEW_KINDS;
+  }
+
+  get prompt() {
+    return this.target ? 'Click where the label goes' : 'Click a room (or area) to place its label';
+  }
+
+  down(ev) {
+    if (!ev.p) return;
+    if (this.target) {
+      const id = this.target.id;
+      this.app.commit('Place label', () => this.doc.update(id, { tagAt: ev.p }));
+      this.target = null;
+      this.app.setHover(null);
+      this.app.setPrompt(this.prompt);
+      return;
+    }
+    const hit = this.vc.hitTest(ev.x, ev.y).map((id) => this.doc.get(id)).find((el) => el?.kind === 'room' || el?.kind === 'area');
+    if (!hit) return;
+    this.target = hit;
+    this.app.setPrompt(this.prompt);
+  }
+
+  move(ev) {
+    this.cursor = ev.p;
+    if (!this.target) {
+      const hit = this.vc.hitTest(ev.x, ev.y).map((id) => this.doc.get(id)).find((el) => el?.kind === 'room' || el?.kind === 'area');
+      this.app.setHover(hit?.id ?? null);
+    }
+    this.app.requestRender();
+  }
+
+  cancel() {
+    if (this.target) {
+      this.target = null;
+      return false;
+    }
+    return true;
+  }
+
+  drawOverlay(ctx, vc, vp) {
+    if (this.target && this.cursor) previewGraphics(this.app, vc, { ...this.target, tagAt: this.cursor }, ctx, vp.theme.preview, 0);
+  }
+}
+
 // Rooms -------------------------------------------------------------------------------------------------
 
 export class RoomTool extends Tool {
@@ -1172,7 +1551,7 @@ export function placeRoomsAutomatically(app) {
   app.toast(n ? `Placed ${n} room${n === 1 ? '' : 's'}.` : 'Every enclosed area already has a room.');
 }
 
-function interiorPoint(loop) {
+export function interiorPoint(loop) {
   // Try the centroid, then midpoints between vertices.
   const pip = (p) => {
     let inside = false;
@@ -1209,17 +1588,56 @@ export class DimensionTool extends Tool {
   }
 
   get title() {
-    return 'Aligned Dimension';
+    return this.linear ? 'Linear Dimension' : 'Aligned Dimension';
   }
 
   get viewKinds() {
-    return ['plan', 'ceilingPlan', 'elevation', 'section'];
+    return ANNOTATION_VIEWS;
+  }
+
+  get linear() {
+    return this.app.toolOptions('dimension', { mode: this.opts.linear ? 'linear' : 'aligned' }).mode === 'linear';
   }
 
   get prompt() {
     if (!this.refs.length) return 'Click a wall face, centerline, grid or point to start the dimension';
     if (this.refs.length === 1) return 'Click the next reference';
-    return 'Click more references, or click an empty spot to place the dimension line';
+    return this.linear ? 'Click more references, or click where the dimension goes: above or below for horizontal, to the side for vertical' : 'Click more references, or click an empty spot to place the dimension line';
+  }
+
+  options() {
+    const o = this.app.toolOptions('dimension', { mode: this.opts.linear ? 'linear' : 'aligned' });
+    return [
+      segmented(
+        [
+          { value: 'aligned', label: 'Aligned', icon: 'dimAligned' },
+          { value: 'linear', label: 'Linear', icon: 'dimension' },
+        ],
+        o.mode,
+        (v) => {
+          o.mode = v;
+          this.refs = [];
+          this.dir = null;
+          this.app.renderOptions();
+          this.app.setPrompt(this.prompt);
+        },
+        'Dimension type',
+      ),
+    ];
+  }
+
+  /** Linear dimensions measure along x or y, whichever way the line is pulled. */
+  linearDir(p) {
+    const pts = this.refs.map((r) => r.at);
+    const x0 = Math.min(...pts.map((q) => q[0]));
+    const x1 = Math.max(...pts.map((q) => q[0]));
+    const y0 = Math.min(...pts.map((q) => q[1]));
+    const y1 = Math.max(...pts.map((q) => q[1]));
+    if (x1 - x0 < 1) return [0, 1];
+    if (y1 - y0 < 1) return [1, 0];
+    const ox = p[0] < x0 ? x0 - p[0] : p[0] > x1 ? p[0] - x1 : 0;
+    const oy = p[1] < y0 ? y0 - p[1] : p[1] > y1 ? p[1] - y1 : 0;
+    return oy >= ox ? [1, 0] : [0, 1];
   }
 
   refFromSnap(ev) {
@@ -1268,7 +1686,7 @@ export class DimensionTool extends Tool {
 
   place(p) {
     const refs = this.refs.map(({ at, id, ref }) => (id ? { at, id, ref } : { at }));
-    const dir = this.dir;
+    const dir = this.linear ? this.linearDir(p) : this.dir;
     this.app.commit('Dimension', () => this.doc.add({ kind: 'dimension', viewId: this.vc.view.id, refs, dir, line: p }));
     this.refs = [];
     this.dir = null;
@@ -1302,7 +1720,7 @@ export class DimensionTool extends Tool {
   drawOverlay(ctx, vc, vp) {
     if (this.refs.length >= 1 && this.cursor) {
       const refs = this.refs.map(({ at, id, ref }) => (id ? { at, id, ref } : { at }));
-      let dir = this.dir;
+      let dir = this.linear && refs.length >= 2 ? this.linearDir(this.cursor) : this.dir;
       if (!dir && this.snapRes?.point) {
         const d = sub(this.snapRes.point, refs[0].at);
         if (len(d) > 1) dir = norm(d);
@@ -1327,16 +1745,26 @@ export class TextTool extends Tool {
   }
 
   get viewKinds() {
-    return ['plan', 'ceilingPlan', 'elevation', 'section'];
+    return ANNOTATION_VIEWS;
   }
 
   get prompt() {
+    const o = this.app.toolOptions('text', { size: 2.5, leader: false });
+    if (o.leader) return this.tip ? 'Click where the text goes' : 'Click where the leader points';
     return 'Click to place text';
   }
 
   down(ev) {
     if (!ev.p) return;
+    const o = this.app.toolOptions('text', { size: 2.5, leader: false });
+    if (o.leader && !this.tip) {
+      this.tip = this.snap(ev) || ev.p;
+      this.app.setPrompt(this.prompt);
+      return;
+    }
     const at = ev.p;
+    const tip = this.tip;
+    this.tip = null;
     const viewId = this.vc.view.id;
     this.openInput(ev.x, ev.y, {
       label: 'Text',
@@ -1344,35 +1772,94 @@ export class TextTool extends Tool {
       onSubmit: (v) => {
         const text = v.trim();
         if (!text) return true;
-        const o = this.app.toolOptions('text', { size: 2.5 });
-        this.app.commit('Text', () => this.doc.add({ kind: 'text', viewId, at, text, size: o.size, rotation: 0, align: 'left' }));
+        this.app.commit('Text', () => this.doc.add({ kind: 'text', viewId, at, text, size: o.size, rotation: 0, align: 'left', leaders: tip ? [tip] : [] }));
+        this.app.setPrompt(this.prompt);
         return true;
       },
+      onCancel: () => this.app.setPrompt(this.prompt),
     });
   }
 
+  move(ev) {
+    this.cursor = ev.p;
+    if (this.tip) this.app.requestRender();
+  }
+
+  cancel() {
+    if (this.tip) {
+      this.tip = null;
+      this.app.setPrompt(this.prompt);
+      return false;
+    }
+    return true;
+  }
+
+  drawOverlay(ctx, vc, vp) {
+    if (this.tip && this.cursor) strokeModel(ctx, [this.tip, this.cursor], (p) => vc.modelToScreen(p), vp.theme.preview, 1.5);
+    this.drawSnap(ctx, vc, vp);
+  }
+
   options() {
-    const o = this.app.toolOptions('text', { size: 2.5 });
+    const o = this.app.toolOptions('text', { size: 2.5, leader: false });
     const s = h('select.input.sm', { 'aria-label': 'Text size' }, ...[1.8, 2.5, 3.5, 5, 7].map((v) => h('option', { value: v }, `${v} mm`)));
     s.value = String(o.size);
     s.addEventListener('change', () => (o.size = +s.value));
-    return [h('div.ob-group', h('label', 'Size on paper'), s)];
+    const lead = h('input', { type: 'checkbox', checked: !!o.leader });
+    lead.addEventListener('change', () => {
+      o.leader = lead.checked;
+      this.tip = null;
+      this.app.setPrompt(this.prompt);
+    });
+    return [h('div.ob-group', h('label', 'Size on paper'), s), h('label.ob-group', lead, h('span.ob-label', 'Leader with arrow'))];
   }
 }
 
+export const TAG_SHOW = [
+  { value: 'mark', label: 'Mark' },
+  { value: 'type', label: 'Type' },
+  { value: 'material', label: 'Material' },
+  { value: 'keynote', label: 'Keynote' },
+  { value: 'name', label: 'Name' },
+];
+
+const MODEL_CATS = new Set(CATEGORIES.filter((c) => c.model).map((c) => c.id));
+const TAGGABLE = ['door', 'window', 'wall', 'component', 'column', 'floor', 'roof', 'ceiling', 'beam', 'stair', 'ramp', 'railing', 'room', 'area'];
+
 export class TagTool extends Tool {
   get title() {
-    return 'Tag by Category';
+    return { material: 'Material Tag', keynote: 'Keynote', type: 'Type Tag' }[this.show] || 'Tag by Category';
+  }
+
+  get viewKinds() {
+    return [...PLAN_VIEW_KINDS, 'elevation', 'section'];
+  }
+
+  get o() {
+    return this.app.toolOptions(`tag-${this.opts.show || 'category'}`, { show: this.opts.show || 'mark', leader: this.opts.show === 'material' });
+  }
+
+  get show() {
+    return this.o.show;
   }
 
   get prompt() {
-    return 'Click a door, window, wall or room to tag it';
+    return this.show === 'material' ? 'Click a wall, floor, roof or other element to tag its material' : 'Click an element to tag it';
+  }
+
+  options() {
+    const o = this.o;
+    const s = h('select.input.sm', { 'aria-label': 'Tag shows' }, ...TAG_SHOW.map((v) => h('option', { value: v.value }, v.label)));
+    s.value = o.show;
+    s.addEventListener('change', () => (o.show = s.value));
+    const lead = h('input', { type: 'checkbox', checked: !!o.leader });
+    lead.addEventListener('change', () => (o.leader = lead.checked));
+    return [h('div.ob-group', h('label', 'Shows'), s), h('label.ob-group', lead, h('span.ob-label', 'Leader'))];
   }
 
   target(ev) {
     for (const id of this.vc.hitTest(ev.x, ev.y)) {
       const el = this.doc.get(id);
-      if (el && ['door', 'window', 'wall', 'room', 'component', 'column'].includes(el.kind)) return el;
+      if (el && (TAGGABLE.includes(el.kind) || (this.opts.any && MODEL_CATS.has(categoryOf(el, this.doc)) && !el.viewId))) return el;
     }
     return null;
   }
@@ -1385,16 +1872,22 @@ export class TagTool extends Tool {
   down(ev) {
     const t = this.target(ev);
     if (!t) return;
-    if (t.kind === 'room') {
-      this.app.toast('Rooms show their name, number and area automatically. Drag the room tag to move it.');
+    if ((t.kind === 'room' || t.kind === 'area') && this.show === 'mark') {
+      this.app.toast('Rooms and areas show their name, number and area automatically. Use Tag Room to move the label.');
       return;
     }
-    this.app.commit('Tag', () => addTag(this.app, t, this.vc.view));
+    const o = this.o;
+    const view = this.vc.view;
+    const s = +view.scale || 100;
+    // In elevations and sections the tag goes where it was clicked (with a leader when offset).
+    const flat = view.kind === 'elevation' || view.kind === 'section';
+    const at = o.show === 'material' || o.leader ? add(ev.p, [6 * s, 4 * s]) : flat ? ev.p : null;
+    this.app.commit(this.title, () => addTag(this.app, t, view, { show: o.show, leader: o.leader || (flat && o.show === 'material'), at }));
   }
 }
 
 /** Add a tag for an element in a view, offset from its anchor. */
-export function addTag(app, el, view) {
+export function addTag(app, el, view, { show = 'mark', leader = false, at: place = null } = {}) {
   const doc = app.doc;
   let at = tagAnchor(doc, el);
   if (!at) return null;
@@ -1408,16 +1901,16 @@ export function addTag(app, el, view) {
     const ax = wallAxis(doc, el);
     at = add(at, scale(ax.n, ax.half + 5 * (+view.scale || 100)));
   }
-  if (el.kind === 'door' || el.kind === 'window') {
+  if ((el.kind === 'door' || el.kind === 'window') && show === 'mark') {
     if (!el.mark) doc.update(el.id, { mark: nextMark(doc, el.kind) });
   }
-  return doc.add({ kind: 'tag', viewId: view.id, targetId: el.id, at, leader: false });
+  return doc.add({ kind: 'tag', viewId: view.id, targetId: el.id, at: place || at, leader: !!leader, show });
 }
 
 /** Tag every untagged door and window visible in the view. */
 export function tagAll(app, kinds = ['door', 'window']) {
   const view = app.vc?.view;
-  if (!view || (view.kind !== 'plan' && view.kind !== 'ceilingPlan')) return app.toast('Open a floor plan to tag elements.', { kind: 'error' });
+  if (!isPlanView(view)) return app.toast('Open a floor plan to tag elements.', { kind: 'error' });
   const doc = app.doc;
   const tagged = new Set(doc.all('tag').filter((t) => t.viewId === view.id).map((t) => t.targetId));
   const pc = planContext(doc, view, app.scene.walls, app.scene.rooms);
@@ -1492,6 +1985,66 @@ export class SectionTool extends Tool {
       const m = mid(this.start, this.cursor);
       strokeModel(ctx, [m, add(m, scale(look, 30 * vc.mmPerPx()))], S, vp.theme.preview, 2);
     }
+    this.drawSnap(ctx, vc, vp);
+  }
+}
+
+/** Callout: a cropped, larger-scale plan of an area of this plan. */
+export class CalloutTool extends Tool {
+  get title() {
+    return 'Callout';
+  }
+
+  get prompt() {
+    return this.start ? 'Click the opposite corner of the callout' : 'Click a corner of the area to call out';
+  }
+
+  down(ev) {
+    const p = this.snap(ev, this.start);
+    if (!p) return;
+    if (!this.start) {
+      this.start = p;
+      this.app.setPrompt(this.prompt);
+      return;
+    }
+    const r = { x0: Math.min(p[0], this.start[0]), y0: Math.min(p[1], this.start[1]), x1: Math.max(p[0], this.start[0]), y1: Math.max(p[1], this.start[1]) };
+    if (r.x1 - r.x0 < 200 || r.y1 - r.y0 < 200) return;
+    const parent = this.vc.view;
+    const names = this.doc.filter((x) => x.calloutOf).map((x) => x.name);
+    const imp = this.doc.units.system === 'imperial';
+    const view = {
+      ...structuredClone(parent),
+      id: newId('v'),
+      name: uniqueName(names, `Callout ${names.length + 1}`),
+      calloutOf: parent.id,
+      scale: Math.max(1, Math.min(+parent.scale || 100, imp ? 24 : 50)),
+      detail: 'fine',
+      crop: r,
+      cropOn: true,
+      cropShow: true,
+      templateId: null,
+    };
+    this.app.commit('Callout', () => this.doc.add(view));
+    this.start = null;
+    this.app.toast(`${view.name} created. Double-click its outline, or use the Project Browser, to open it.`);
+    this.app.setPrompt(this.prompt);
+  }
+
+  move(ev) {
+    this.cursor = this.snap(ev, this.start);
+    this.app.requestRender();
+  }
+
+  cancel() {
+    if (this.start) {
+      this.start = null;
+      return false;
+    }
+    return true;
+  }
+
+  drawOverlay(ctx, vc, vp) {
+    if (this.start && this.cursor) strokeModel(ctx, rectPolygon(this.start, this.cursor), (p) => vc.modelToScreen(p), vp.theme.preview, 1.5, [8, 4], true);
     this.drawSnap(ctx, vc, vp);
   }
 }

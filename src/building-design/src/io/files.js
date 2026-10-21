@@ -27,6 +27,7 @@ import {
 } from './storage.js';
 import { isSignedIn, puterAvailable, whenPuter } from '../platform.js';
 import { scheduleRows, scheduleColumns, toCSV } from '../core/schedule.js';
+import { PLAN_VIEW_KINDS } from '../core/doc.js';
 
 export const recentFiles = recent;
 
@@ -232,14 +233,26 @@ export async function save(app) {
 }
 
 async function writeCloud(app, path, name) {
+  // A project open from the cloud: merge in what others saved, then write.
+  if (app.sync.active && app.sync.path === path) {
+    const ok = await app.sync.sync({ quiet: true });
+    if (ok) {
+      app.updateTitle();
+      scheduleRecovery(app);
+      toast(`Saved ${name} to Puter.`, { kind: 'success' });
+    }
+    return ok;
+  }
   try {
     const doc = app.doc;
     const rev = doc.revision;
+    const snapshot = new Map(doc.items);
     const blob = await encodeProject(doc);
     await cloudWrite(path, blob, true);
     doc.markSaved(rev);
     if (doc !== app.doc) return true;
     app.file = { ...app.file, name, path, source: 'cloud' };
+    app.sync.attach(snapshot);
     addRecent({ name, path, source: 'cloud' });
     app.updateTitle();
     scheduleRecovery(app);
@@ -273,12 +286,14 @@ export async function saveAs(app) {
     try {
       const doc = app.doc;
       const rev = doc.revision;
+      const snapshot = new Map(doc.items);
       const blob = await encodeProject(doc);
       const r = await puterSavePicker(blob, `${safeFileName(name0)}${NATIVE_EXT}`);
       if (!r) return false;
       doc.markSaved(rev);
       if (doc !== app.doc) return true;
       app.file = { ...app.file, name: baseName(r.name), path: r.path, source: 'cloud', handle: null };
+      app.sync.attach(snapshot);
       addRecent({ name: app.file.name, path: r.path, source: 'cloud' });
       app.updateTitle();
       scheduleRecovery(app);
@@ -337,7 +352,7 @@ export function pickFile(accept) {
 /** Import a DXF drawing into the active view as detail lines and text. */
 export async function importDXF(app) {
   const view = app.activeView;
-  if (!view || !['plan', 'ceilingPlan', 'elevation', 'section', 'sheet'].includes(view.kind)) {
+  if (!view || ![...PLAN_VIEW_KINDS, 'elevation', 'section', 'sheet'].includes(view.kind)) {
     if (!app.requirePlan()) return;
   }
   const target = app.activeView;
