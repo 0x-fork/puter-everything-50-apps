@@ -312,16 +312,28 @@ function removeWidgetFromForm(doc, widget, widgetRef) {
   return fields;
 }
 
+/** The other widgets of the field a widget belongs to, as [ref, dict] pairs. */
+function otherWidgets(doc, widget) {
+  const field = widget.has(name('T')) ? widget : get(widget, 'Parent');
+  const kids = field instanceof PDFDict && field !== widget ? get(field, 'Kids') : null;
+  if (!(kids instanceof PDFArray)) return [];
+  return kids
+    .asArray()
+    .map((ref) => [ref, doc.context.lookup(ref)])
+    .filter(([, kid]) => kid instanceof PDFDict && kid !== widget && !kid.has(name('T')));
+}
+
 /** Drop structure references (OBJR) to removed annotations and their parent-tree entries. */
 export function removeStructReferences(doc, removed, keys) {
   const root = get(doc.catalog, 'StructTreeRoot');
   if (!(root instanceof PDFDict) || (!removed.size && !keys.size)) return;
   const seen = new Set();
-  const pending = [root];
+  const pending = [{ node: root, chain: [] }];
   while (pending.length) {
-    const node = pending.pop();
+    const { node, chain } = pending.pop();
     if (!(node instanceof PDFDict) || seen.has(node)) continue;
     seen.add(node);
+    const lineage = node === root ? chain : [...chain, node];
     const kids = node.lookup(name('K'));
     const list = kids instanceof PDFArray ? kids.asArray() : kids ? [node.get(name('K'))] : [];
     const kept = list.filter((kid) => {
@@ -330,12 +342,16 @@ export function removeStructReferences(doc, removed, keys) {
         const target = value.get(name('Obj'));
         return !(removed.has(target) || removed.has(doc.context.lookup(target)));
       }
-      if (value instanceof PDFDict) pending.push(value);
+      if (value instanceof PDFDict) pending.push({ node: value, chain: lineage });
       return true;
     });
     if (kept.length !== list.length) {
       if (!kept.length) node.delete(name('K'));
       else node.set(name('K'), doc.context.obj(kept));
+      // Alternate and replacement text described the removed annotation (a link's target, a
+      // field's value); it must not stay behind to be read out instead.
+      for (const element of lineage)
+        for (const key of ['ActualText', 'Alt', 'E']) element.delete(name(key));
     }
   }
   pruneParentTree(doc, root, keys);
@@ -482,6 +498,7 @@ function redactionPolicy(doc, areas, { codec } = {}) {
   };
   return {
     conservative: true,
+    softMasks: true,
     glyph: (quad) => hits(quad),
     path: (bounds) => areas.some(({ rect }) => rectInside(bounds, rect)),
     async image({ object, ctm, resources }) {
@@ -596,7 +613,7 @@ export async function applyRedactions(doc, { pages, codec } = {}) {
     // 2. Annotations under the areas, with their popups, replies, and form fields.
     const markRefs = new Set(marks.map((m) => m.ref));
     for (const ref of [...(annotationsOf(page)?.asArray() || [])]) {
-      if (markRefs.has(ref)) continue;
+      if (markRefs.has(ref) || removedAnnotations.has(ref)) continue;
       const dict = doc.context.lookup(ref);
       if (!(dict instanceof PDFDict)) continue;
       const subtype = get(dict, 'Subtype');
@@ -611,6 +628,19 @@ export async function applyRedactions(doc, { pages, codec } = {}) {
       ];
       if (!rects.some((area) => rectsOverlap(bounds, area))) continue;
       if (subtype === name('Widget')) {
+        // The field's value is what the widget showed, and the field keeps it (and shows it in
+        // its other widgets, hidden ones included). The whole field goes, wherever it shows.
+        for (const [otherRef, other] of otherWidgets(doc, dict)) {
+          for (const owner of doc.getPages())
+            if (annotationsOf(owner)?.asArray().includes(otherRef))
+              removeAnnotationThread(owner, otherRef.toString());
+          removeWidgetFromForm(doc, other, otherRef);
+          const otherKey = get(other, 'StructParent')?.asNumber?.();
+          if (Number.isInteger(otherKey)) structKeys.add(otherKey);
+          removedAnnotations.add(otherRef);
+          removedAnnotations.add(other);
+          report.annotations++;
+        }
         const fields = removeWidgetFromForm(doc, dict, ref);
         report.fields += fields;
         formRemoved = true;
@@ -667,6 +697,9 @@ export async function applyRedactions(doc, { pages, codec } = {}) {
       removeAnnotationThread(page, mark.ref.toString());
     }
     page.node.delete(name('Thumb'));
+    // Application data (an Illustrator or other editor's own copy of the page) still holds what
+    // was redacted.
+    page.node.delete(name('PieceInfo'));
     clearStructText(doc, page.ref, result.mcids);
   }
   if (!report.pages.length) return false;
@@ -679,7 +712,7 @@ export async function applyRedactions(doc, { pages, codec } = {}) {
   report.warnings = [...filtered.warnings];
   if (filtered.forms)
     report.warnings.push(
-      `${filtered.forms} unreadable drawing group(s) under the marks were removed.`,
+      `${filtered.forms} drawing group(s) under the marks could not be read and were removed entirely.`,
     );
   if (filtered.images.removed)
     report.warnings.push(

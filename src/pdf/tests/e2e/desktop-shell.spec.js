@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFNumber, PDFString, StandardFonts } from 'pdf-lib';
 import { readFile } from 'node:fs/promises';
 
 const PUTER_MOCK = `window.puter = { env: 'web', auth: { isSignedIn: () => true, getUser: async () => ({username:'test-user'}), signIn: async () => {}, signOut: async () => {} }, fs: { readdir: async () => [], write: async () => ({}) }, ui: { onLaunchedWithItems: () => {}, onItemsOpened: () => {} } };`;
@@ -156,6 +156,32 @@ test('pages scroll continuously and the page in view becomes the current page', 
   expect(top).toBeLessThan(40);
 });
 
+test('pages already in view are drawn again at a new zoom', async ({ page }) => {
+  await openPdf(page, await numberedPdf(6));
+  const zoom = page.getByLabel('Zoom', { exact: true });
+  await zoom.selectOption('0.5');
+  await settled(page);
+  // Neighbours stay near the view through the zoom; their pictures must not be left stretched.
+  await zoom.selectOption('0.75');
+  await settled(page);
+  const sharp = () =>
+    page.evaluate(() => {
+      const view = document.querySelector('.workspace').getBoundingClientRect();
+      return [...document.querySelectorAll('.page-slot:not(:has(.paper))')]
+        .filter((slot) => {
+          const box = slot.getBoundingClientRect();
+          return box.bottom > view.top && box.top < view.bottom;
+        })
+        .map((slot) => [
+          slot.dataset.page,
+          slot.querySelector('.page-image').width ===
+            Math.floor(slot.offsetWidth * window.devicePixelRatio),
+        ]);
+    });
+  await expect.poll(async () => (await sharp()).length).toBeGreaterThan(0);
+  await expect.poll(async () => (await sharp()).every(([, ok]) => ok)).toBe(true);
+});
+
 test('single page display shows one page at a time', async ({ page }) => {
   await openPdf(page, await numberedPdf(3));
   await page.getByRole('menuitem', { name: 'View', exact: true }).click();
@@ -166,6 +192,163 @@ test('single page display shows one page at a time', async ({ page }) => {
   await expect(page.locator('.page-caption')).toHaveText('Page 2 of 3');
   await expect(page.locator('.page-slot:visible')).toHaveAttribute('data-page', '1');
   await page.evaluate(() => localStorage.removeItem('pdf-editor:page-display'));
+});
+
+test('Space-drag panning ends when the window loses focus with Space held', async ({ page }) => {
+  await openPdf(page, await numberedPdf(3));
+  const workspace = page.locator('.workspace');
+  await workspace.focus();
+  await page.keyboard.down('Space');
+  await expect(page.locator('.editor')).toHaveClass(/space-pan/);
+  // Space comes up in another window, so this one only sees the blur.
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect(page.locator('.editor')).not.toHaveClass(/space-pan/);
+  // A drag on the page is the Select tool's again, not a pan.
+  await workspace.evaluate((node) => (node.scrollTop = 200));
+  const box = await page.locator('.page-slot[data-page="1"]').boundingBox();
+  await page.mouse.move(box.x + 100, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 100, box.y + 20, { steps: 4 });
+  await page.mouse.up();
+  expect(await workspace.evaluate((node) => node.scrollTop)).toBe(200);
+  await page.keyboard.up('Space');
+});
+
+for (const display of ['Two-page', 'Two-page scrolling'])
+  test(`${display} at fit width fits both pages without sideways scrolling`, async ({ page }) => {
+    await openPdf(page, await numberedPdf(4));
+    await page.getByRole('menuitem', { name: 'View', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Page display' }).click();
+    await page.getByRole('menuitemcheckbox', { name: display, exact: true }).click();
+    await expect(page.locator('.page-stack')).toHaveClass(/two-up/);
+    await settled(page);
+    await expect(page.getByLabel('Zoom', { exact: true })).toHaveValue('fit');
+    const workspace = page.locator('.workspace');
+    const [first, second] = await Promise.all(
+      [0, 1].map((i) => page.locator(`.page-slot[data-page="${i}"]`).boundingBox()),
+    );
+    expect(Math.abs(first.y - second.y)).toBeLessThan(1);
+    expect(await workspace.evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
+    // The pair still fills the width the quick tools leave free.
+    const room = (await workspace.evaluate((node) => node.clientWidth)) - 120;
+    expect(second.x + second.width - first.x).toBeGreaterThan(room - 3);
+    await page.evaluate(() => localStorage.removeItem('pdf-editor:page-display'));
+  });
+
+test('in two-page scrolling, the right-hand page stays current while its row is in view', async ({
+  page,
+}) => {
+  await openPdf(page, await numberedPdf(6));
+  await page.getByRole('menuitem', { name: 'View', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Page display' }).click();
+  await page.getByRole('menuitemcheckbox', { name: 'Two-page scrolling', exact: true }).click();
+  await expect(page.locator('.page-stack')).toHaveClass(/two-up/);
+  await settled(page);
+  const right = await page.locator('.page-slot[data-page="1"]').boundingBox();
+  await page.mouse.click(right.x + 50, right.y + 50);
+  await expect(page.locator('.page-caption')).toHaveText('Page 2 of 6');
+  await settled(page);
+  // A little scrolling to read on leaves the chosen page current.
+  await page.mouse.wheel(0, 40);
+  await expect
+    .poll(() => page.locator('.workspace').evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(600);
+  await expect(page.locator('.page-caption')).toHaveText('Page 2 of 6');
+  // The next row's left page becomes current once that row is reached.
+  await page.locator('.workspace').evaluate((node) => {
+    const slot = node.querySelector('.page-slot[data-page="2"]');
+    node.scrollTop += slot.getBoundingClientRect().top - node.getBoundingClientRect().top;
+  });
+  await expect(page.locator('.page-caption')).toHaveText('Page 3 of 6');
+  await page.evaluate(() => localStorage.removeItem('pdf-editor:page-display'));
+});
+
+for (const display of ['Two-page', 'Two-page scrolling'])
+  test(`${display} turns a pair of pages at a time`, async ({ page }) => {
+    await openPdf(page, await numberedPdf(5));
+    await page.getByRole('menuitem', { name: 'View', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Page display' }).click();
+    await page.getByRole('menuitemcheckbox', { name: display, exact: true }).click();
+    await expect(page.locator('.page-stack')).toHaveClass(/two-up/);
+    await settled(page);
+    const caption = page.locator('.page-caption');
+    const atTop = (index) =>
+      page.evaluate((index) => {
+        const slot = document.querySelector(`.page-slot[data-page="${index}"]`);
+        const top =
+          slot.getBoundingClientRect().top -
+          document.querySelector('.workspace').getBoundingClientRect().top;
+        return !slot.hidden && top >= 0 && top < 40;
+      }, index);
+    await page.getByRole('button', { name: 'Next page', exact: true }).click();
+    await expect(caption).toHaveText('Page 3 of 5');
+    await expect.poll(() => atTop(2)).toBe(true);
+    await page.keyboard.press('Alt+ArrowRight');
+    await expect(caption).toHaveText('Page 5 of 5');
+    await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled();
+    // From the right-hand page of a pair, back is the pair before.
+    await page.getByRole('button', { name: 'Previous page', exact: true }).click();
+    await expect(caption).toHaveText('Page 3 of 5');
+    const right = await page.locator('.page-slot[data-page="3"]').boundingBox();
+    await page.mouse.click(right.x + 50, right.y + 50);
+    await expect(caption).toHaveText('Page 4 of 5');
+    await settled(page);
+    await page.getByRole('button', { name: 'Previous page', exact: true }).click();
+    await expect(caption).toHaveText('Page 1 of 5');
+    await expect.poll(() => atTop(0)).toBe(true);
+    await page.evaluate(() => localStorage.removeItem('pdf-editor:page-display'));
+  });
+
+test('Read out loud speaks a long page in short pieces and says when a page has no text', async ({
+  page,
+}) => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const sheet = doc.addPage([600, 800]);
+  const lines = Array.from(
+    { length: 30 },
+    (_, i) => `Line ${i + 1} of the long page is read aloud.`,
+  );
+  lines.forEach((line, i) => sheet.drawText(line, { x: 40, y: 760 - i * 22, size: 14, font }));
+  doc.addPage([600, 800]);
+  await openPdf(page, doc);
+  // A recorder stands in for the browser's voices and finishes each utterance at once.
+  await page.evaluate(() => {
+    window.spoken = [];
+    window.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        this.text = text;
+      }
+    };
+    Object.defineProperty(window, 'speechSynthesis', {
+      configurable: true,
+      value: {
+        paused: false,
+        speak(utterance) {
+          window.spoken.push(utterance.text);
+          setTimeout(() => utterance.onend?.(), 0);
+        },
+        cancel() {},
+      },
+    });
+  });
+  const read = async () => {
+    await page.getByRole('menuitem', { name: 'View', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Read out loud' }).click();
+    await page.getByRole('menuitem', { name: 'Read this page', exact: true }).click();
+  };
+  await read();
+  await expect.poll(() => page.evaluate(() => window.spoken.length)).toBeGreaterThan(3);
+  const spoken = await page.evaluate(() => window.spoken);
+  expect(spoken.every((text) => text.length <= 200)).toBe(true);
+  expect(spoken.join(' ')).toBe(lines.join(' '));
+  await page.getByRole('button', { name: 'Next page', exact: true }).click();
+  await expect(page.locator('.page-caption')).toHaveText('Page 2 of 2');
+  await settled(page);
+  await read();
+  await expect(page.locator('#toast')).toContainText('This page has no text to read');
+  expect(await page.evaluate(() => window.spoken.length)).toBe(spoken.length);
 });
 
 test('Organize pages selects, turns, moves, and deletes several pages', async ({ page }) => {
@@ -203,6 +386,95 @@ test('Organize pages selects, turns, moves, and deletes several pages', async ({
   await toolbar.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.locator('.page-caption')).toHaveText(/of 2$/);
 });
+
+test('batch text recognition lets each PDF go before reading the next', async ({ page }) => {
+  // Count the documents PDF.js holds open: each GetDocRequest opens one, Terminate closes it.
+  await page.evaluate(() => {
+    const post = Worker.prototype.postMessage;
+    window.__pdfDocs = { open: 0, most: 0 };
+    Worker.prototype.postMessage = function (message, ...rest) {
+      const docs = window.__pdfDocs;
+      if (message?.action === 'GetDocRequest') docs.most = Math.max(docs.most, ++docs.open);
+      if (message?.action === 'Terminate') docs.open--;
+      return post.call(this, message, ...rest);
+    };
+  });
+  await openPdf(page, await numberedPdf(1));
+  await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Tools' });
+  await pane.getByRole('button', { name: 'View more' }).click();
+  await pane.getByRole('button', { name: 'Batch process', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Batch process' });
+  const files = [];
+  for (let i = 0; i < 4; i++) {
+    // Pages that already have text, so recognition reads them and skips them.
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    doc.addPage([400, 500]).drawText(`File ${i} has plenty of words on its page already`, {
+      x: 20,
+      y: 200,
+      size: 12,
+      font,
+    });
+    files.push({
+      name: `file ${i}.pdf`,
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(await doc.save()),
+    });
+  }
+  const chooser = page.waitForEvent('filechooser');
+  await dialog.getByRole('button', { name: 'Add PDFs…' }).click();
+  await (await chooser).setFiles(files);
+  await expect(dialog.getByText('file 3.pdf')).toBeVisible();
+  await page.evaluate(() => {
+    window.__pdfDocs.most = window.__pdfDocs.open;
+  });
+  const before = await page.evaluate(() => window.__pdfDocs.open);
+  await dialog.getByLabel('Recognize text (OCR)').check();
+  const pending = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: 'Run', exact: true }).click();
+  await pending;
+  await expect(dialog).toBeHidden();
+  const docs = await page.evaluate(() => window.__pdfDocs);
+  // At most one batch file is open beside what the editor already had open.
+  expect(docs.most - before).toBeLessThanOrEqual(1);
+  await expect.poll(() => page.evaluate(() => window.__pdfDocs.open)).toBe(before);
+});
+
+for (const [languages, expected] of [
+  [['de-DE', 'de-DE'], 'de-DE'],
+  [['de-DE', 'fr-FR'], null],
+])
+  test(`Combine files keeps a language all the files share (${languages})`, async ({ page }) => {
+    const pdfIn = async (lang, count) => {
+      const doc = await numberedPdf(count);
+      doc.catalog.set(PDFName.of('Lang'), PDFString.of(lang));
+      return doc;
+    };
+    await openPdf(page, await pdfIn(languages[0], 1));
+    await page.getByRole('button', { name: 'Tools', exact: true }).click();
+    await page
+      .getByRole('complementary', { name: 'Tools' })
+      .getByRole('button', { name: 'Combine files', exact: true })
+      .click();
+    const dialog = page.getByRole('dialog', { name: 'Combine files' });
+    const chooser = page.waitForEvent('filechooser');
+    await dialog.getByRole('button', { name: /Add files/ }).click();
+    const other = await pdfIn(languages[1], 2);
+    await (
+      await chooser
+    ).setFiles({
+      name: 'other.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(await other.save()),
+    });
+    await expect(dialog.getByText('other.pdf')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Combine', exact: true }).click();
+    await expect(page.locator('.page-caption')).toHaveText('Page 1 of 3');
+    await settled(page);
+    const combined = await PDFDocument.load(await downloaded(page));
+    expect(combined.catalog.lookup(PDFName.of('Lang'))?.decodeText() ?? null).toBe(expected);
+  });
 
 test('Bates numbering stamps padded numbers across the chosen pages', async ({ page }) => {
   await openPdf(page, await numberedPdf(3));
@@ -313,11 +585,15 @@ test('Find text and redact removes the matched words from the saved file', async
   await settled(page);
   await expect(pane.getByText('1 mark to apply')).toBeVisible();
   await pane.getByRole('button', { name: 'Apply redactions…' }).click();
-  await page
-    .getByRole('dialog', { name: 'Apply redactions' })
-    .getByRole('button', { name: 'Apply', exact: true })
-    .click();
+  const confirm = page.getByRole('dialog', { name: 'Apply redactions' });
+  await expect(confirm).toContainText(
+    'A form field under a mark is removed everywhere it appears.',
+  );
+  await confirm.getByRole('button', { name: 'Apply', exact: true }).click();
   await settled(page);
+  // Nothing unusual happened, so a brief message is enough.
+  await expect(page.locator('#toast')).toContainText('Redactions applied');
+  await expect(page.getByRole('dialog', { name: 'Check the redacted PDF' })).toHaveCount(0);
   const bytes = await downloaded(page);
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const pdf = await pdfjs.getDocument({ data: bytes.slice() }).promise;
@@ -327,6 +603,62 @@ test('Find text and redact removes the matched words from the saved file', async
   expect(text).not.toContain('6789');
   expect(text).toContain('Employee SSN');
   expect(text).toContain('Keep this line');
+});
+
+test('redaction lists what it could not handle before the file is shared', async ({ page }) => {
+  // A transparency effect under the mark whose drawing cannot be read stays as it was.
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const sheet = doc.addPage([500, 300]);
+  const group = doc.context.register(
+    doc.context.stream(new Uint8Array([1, 2, 3, 4]), {
+      Type: 'XObject',
+      Subtype: 'Form',
+      BBox: [0, 0, 500, 300],
+      Group: { S: 'Transparency', CS: 'DeviceGray' },
+      Filter: 'JBIG2Decode',
+    }),
+  );
+  sheet.node.set(
+    PDFName.of('Resources'),
+    doc.context.obj({
+      ExtGState: { Faded: { Type: 'ExtGState', SMask: { S: 'Luminosity', G: group } } },
+    }),
+  );
+  sheet.node.set(
+    PDFName.of('Contents'),
+    doc.context.register(doc.context.stream('q /Faded gs 30 180 400 50 re f Q')),
+  );
+  sheet.drawText('Employee SSN 123-45-6789 on file', { x: 40, y: 200, size: 16, font });
+  await openPdf(page, doc);
+  await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Tools' });
+  await pane.getByRole('button', { name: 'Redact a PDF', exact: true }).click();
+  await pane.getByRole('button', { name: 'Find text and redact…' }).click();
+  const finder = page.getByRole('dialog', { name: 'Find text and redact' });
+  await finder.getByLabel('US Social Security numbers').check();
+  await finder.getByRole('button', { name: 'Search' }).click();
+  await expect(finder.getByText('Page 1: 123-45-6789')).toBeVisible();
+  await finder.getByRole('button', { name: 'Mark selected' }).click();
+  await settled(page);
+  await pane.getByRole('button', { name: 'Apply redactions…' }).click();
+  await page
+    .getByRole('dialog', { name: 'Apply redactions' })
+    .getByRole('button', { name: 'Apply', exact: true })
+    .click();
+  // The notice stays until it is read and dismissed.
+  const notice = page.getByRole('dialog', { name: 'Check the redacted PDF' });
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText('Redactions applied');
+  await expect(notice.getByRole('listitem')).toHaveText([
+    /A transparency effect under a mark could not be read/,
+  ]);
+  await page.waitForTimeout(6000);
+  await expect(notice).toBeVisible();
+  await expect(notice.getByRole('button', { name: 'OK' })).toBeFocused();
+  await notice.getByRole('button', { name: 'OK' }).click();
+  await expect(notice).toHaveCount(0);
+  await settled(page);
 });
 
 test('Scan & OCR makes a scanned page searchable', async ({ page }) => {
@@ -368,6 +700,29 @@ test('Scan & OCR makes a scanned page searchable', async ({ page }) => {
     .join(' ');
   expect(text).toContain('Invoice');
   expect(text).toContain('4217');
+});
+
+test('Scan & OCR skips a page with text whatever its unit size', async ({ page }) => {
+  test.setTimeout(180000);
+  // A large-format page written in two-point units: a short heading still covers enough of
+  // the page to count as text, measured in the units the text is measured in.
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.HelveticaBold);
+  const sheet = doc.addPage([306, 396]);
+  sheet.node.set(PDFName.of('UserUnit'), PDFNumber.of(2));
+  sheet.drawText('PLAN', { x: 40, y: 200, size: 40, font });
+  await openPdf(page, doc);
+  await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Tools' });
+  await pane.getByRole('button', { name: 'Scan & OCR', exact: true }).click();
+  await pane.getByRole('button', { name: 'In this file…' }).click();
+  await page
+    .getByRole('dialog', { name: 'Recognize text' })
+    .getByRole('button', { name: 'Recognize text' })
+    .click();
+  await expect(page.getByText('These pages already have text', { exact: false })).toBeVisible({
+    timeout: 120000,
+  });
 });
 
 test('Batch process applies the same steps to several PDFs', async ({ page }) => {
@@ -496,6 +851,42 @@ test('a PDF opens the way it asks to: page, zoom, and panel', async ({ page }) =
   await expect(page.locator('.page-caption')).toHaveText('Page 3 of 3');
   await expect(page.getByLabel('Zoom', { exact: true })).toHaveValue('page');
 });
+
+test('Document details keeps a magnification it does not list', async ({ page }) => {
+  const doc = await numberedPdf(2);
+  const { readInitialView, writeInitialView } = await import('../../src/core/initial-view.js');
+  writeInitialView(doc, { zoom: 1.1 });
+  await openPdf(page, doc);
+  await page.keyboard.press('ControlOrMeta+d');
+  const dialog = page.getByRole('dialog', { name: 'Document details' });
+  await dialog.getByText('Initial view', { exact: true }).click();
+  const magnification = dialog.getByLabel('Magnification', { exact: true });
+  await expect(magnification).toHaveValue('1.1');
+  await expect(magnification.locator('option:checked')).toHaveText('110%');
+  // Changing only the title leaves how the PDF opens as it was.
+  await dialog.getByLabel('Title', { exact: true }).fill('Renamed');
+  await dialog.getByRole('button', { name: 'Save details' }).click();
+  await expect(dialog).toBeHidden();
+  const saved = await PDFDocument.load(await downloaded(page));
+  expect(saved.getTitle()).toBe('Renamed');
+  expect(readInitialView(saved).zoom).toBe(1.1);
+});
+
+for (const [asked, shown] of [
+  [20, '4'],
+  [0.05, '0.25'],
+])
+  test(`a PDF that asks to open at ${asked * 100}% opens within the zoom range`, async ({
+    page,
+  }) => {
+    const doc = await numberedPdf(2);
+    const { writeInitialView } = await import('../../src/core/initial-view.js');
+    writeInitialView(doc, { zoom: asked });
+    await openPdf(page, doc);
+    const zoom = page.getByLabel('Zoom', { exact: true });
+    await expect(zoom).toHaveValue(shown);
+    await expect(page.locator('.paper')).toHaveCSS('width', `${400 * Number(shown)}px`);
+  });
 
 test('the accessibility check finds problems and its fixes clear them', async ({ page }) => {
   await openPdf(page, await numberedPdf(2));
@@ -655,4 +1046,57 @@ test('PDF standards checks PDF/A and converts to it', async ({ page }) => {
   const bytes = await downloaded(page);
   const saved = await PDFDocument.load(bytes);
   expect(preflightPdfA(saved, { part: 2, conformance: 'b', bytes }).compliant).toBe(true);
+});
+
+test('View more and View less keep the keyboard focus in the tools pane', async ({ page }) => {
+  await openPdf(page, await numberedPdf(1));
+  const pane = page.getByRole('complementary', { name: 'Tools' });
+  await pane.getByRole('button', { name: 'View more' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(pane.getByRole('button', { name: 'Export a PDF', exact: true })).toBeFocused();
+  await pane.getByRole('button', { name: 'View less' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(pane.getByRole('button', { name: 'View more' })).toBeFocused();
+});
+
+test('an edit made by shortcut leaves the focus on View more', async ({ page }) => {
+  await openPdf(page, await numberedPdf(1));
+  const more = page
+    .getByRole('complementary', { name: 'Tools' })
+    .getByRole('button', { name: 'View more' });
+  await more.focus();
+  // The pane redraws for the edit; the button it held the focus on is drawn again too.
+  await page.keyboard.press('ControlOrMeta+Shift+R');
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled();
+  await settled(page);
+  await expect(more).toBeFocused();
+});
+
+test('removing an attachment hands the focus to the file that takes its place', async ({
+  page,
+}) => {
+  await openPdf(page, await numberedPdf(1));
+  await page.getByRole('tab', { name: 'Attachments' }).click();
+  const panel = page.getByRole('tabpanel', { name: 'Attachments' });
+  for (const name of ['first.txt', 'second.txt']) {
+    const chooser = page.waitForEvent('filechooser');
+    await panel.getByRole('button', { name: 'Attach a file…' }).click();
+    await (await chooser).setFiles({ name, mimeType: 'text/plain', buffer: Buffer.from(name) });
+    await expect(panel.getByText(name)).toBeVisible();
+    await settled(page);
+  }
+  await panel.getByRole('button', { name: 'Remove first.txt' }).focus();
+  await page.keyboard.press('Enter');
+  await page
+    .getByRole('dialog', { name: 'Remove attachment?' })
+    .getByRole('button', { name: 'Remove', exact: true })
+    .press('Enter');
+  await expect(panel.getByText('first.txt')).toBeHidden();
+  await expect(panel.getByRole('button', { name: 'Remove second.txt' })).toBeFocused();
+  // Any later change redraws the list too, and the focused button is drawn again.
+  await panel.getByRole('button', { name: 'Save second.txt' }).focus();
+  await page.keyboard.press('ControlOrMeta+Shift+R');
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled();
+  await settled(page);
+  await expect(panel.getByRole('button', { name: 'Save second.txt' })).toBeFocused();
 });

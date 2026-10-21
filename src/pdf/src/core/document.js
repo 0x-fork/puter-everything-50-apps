@@ -20,6 +20,7 @@ import {
   PDFArray,
   PDFDict,
   PDFRawStream,
+  PDFRef,
   NoSuchFieldError,
   PDFObjectCopier,
   PDFPage,
@@ -46,7 +47,7 @@ import { inheritPdfVersion, savePdf } from './version.js';
 import { sweepUnreferenced } from './compress.js';
 import { removePageStructure } from './struct-tree.js';
 import { shiftPageLabels } from './page-labels.js';
-import { retargetDeletedPage, stabilizeLocalDestinations } from './destinations.js';
+import { retargetDeletedPages, stabilizeLocalDestinations } from './destinations.js';
 import { addHighlight, rectQuad } from './highlight.js';
 import { checkedFontData } from './font-data.js';
 import { normalizeJpegPadding } from './jpeg.js';
@@ -64,9 +65,16 @@ import {
   textMaxLength,
   updateFieldAppearance,
 } from './form-appearance.js';
-import { choiceOptions, defaultFieldValue, textValue } from './form-values.js';
+import {
+  choiceKeys,
+  choiceOptions,
+  defaultFieldValue,
+  readChoiceKeys,
+  selectedChoices,
+  textValue,
+} from './form-values.js';
 export { choiceOptions } from './form-values.js';
-import { COPY_INDEX, inlineNamedDests, relinkCopiedPages } from './pages.js';
+import { COPY_INDEX, copyPageStandIns, inlineNamedDests, relinkCopiedPages } from './pages.js';
 import { copyPagesWithLayers } from './optional-content.js';
 import {
   DAMAGED_FORM,
@@ -302,11 +310,22 @@ function clearButtonSelection(field, widgets) {
   for (const widget of widgets) widget.setAppearanceState(PDFName.of('Off'));
 }
 export function deletePage(doc, index) {
-  if (doc.getPageCount() === 1) throw new Error('Keep at least one page in the PDF.');
-  const page = doc.getPage(index);
-  const annotations = new Set(annotationsOf(page)?.asArray() || []);
-  const form = doc.getForm();
-  // A field tree that cannot be walked leaves its widgets alone; the page still goes.
+  deletePages(doc, [index]);
+}
+/**
+ * Delete several pages (zero-based indices, in any order) in one step. Bookmarks and links to
+ * them are found once for all of them, so deleting many pages of a long PDF stays quick.
+ */
+export function deletePages(doc, indices) {
+  const list = [...new Set(indices)].sort((a, b) => b - a);
+  if (!list.length) return;
+  if (list.length >= doc.getPageCount()) throw new Error('Keep at least one page in the PDF.');
+  // A page that does not exist stops the deletion before anything changes.
+  const pages = list.map((index) => doc.getPage(index));
+  retargetDeletedPages(doc, list);
+  // A field tree that cannot be walked leaves its widgets alone; the pages still go. The fields
+  // are read once for all the pages: a field whose last widget goes is emptied and left with
+  // nothing to match on later pages.
   const fields = formFields(doc) || [];
   // Widgets that name no page are matched to the page's annotation references by identity.
   // pdf-lib's getObjectRef scans every object of the document per call, so one reverse
@@ -317,6 +336,14 @@ export function deletePage(doc, index) {
       refs = new Map(doc.context.enumerateIndirectObjects().map(([ref, value]) => [value, ref]));
     return refs.get(object);
   };
+  removePageStructure(doc, pages);
+  // From the last page back, so the indices still to go stay where they were.
+  for (const index of list) removeOnePage(doc, index, fields, refOf);
+}
+function removeOnePage(doc, index, fields, refOf) {
+  const page = doc.getPage(index);
+  const annotations = new Set(annotationsOf(page)?.asArray() || []);
+  const form = doc.getForm();
   for (const field of fields) {
     const { widgets, damaged } = deletionWidgets(field);
     if (damaged && !form.fieldIsDirty(field.ref)) preserveFieldAppearance(field, form);
@@ -409,13 +436,47 @@ export function deletePage(doc, index) {
         clearButtonSelection(field, remaining);
     }
   }
-  retargetDeletedPage(doc, index);
-  removePageStructure(doc, page);
+  removePageBeads(doc, page);
   shiftPageLabels(doc, index, -1);
   doc.removePage(index);
   // pdf-lib leaves its page list cached after removal; a second deletion in the same
   // transaction must resolve destinations and widgets against the new page order.
   doc.pageCache.invalidate();
+}
+/**
+ * Take a deleted page's article beads out of their threads (ISO 32000-1, 12.4.3). Each bead
+ * names its page, so a thread that ran across the page kept the page, with all its content,
+ * in the saved file. A thread left without beads goes as well.
+ */
+function removePageBeads(doc, page) {
+  const threads = doc.catalog.lookup(PDFName.of('Threads'));
+  if (!(threads instanceof PDFArray)) return;
+  const [F, N, V, P] = ['F', 'N', 'V', 'P'].map((key) => PDFName.of(key));
+  for (let t = threads.size() - 1; t >= 0; t--) {
+    const thread = threads.lookup(t);
+    if (!(thread instanceof PDFDict)) continue;
+    // The beads in reading order, once round the circle; a broken chain ends the list.
+    const beads = [];
+    const seen = new Set();
+    for (let ref = thread.get(F); ref instanceof PDFRef && !seen.has(ref);) {
+      seen.add(ref);
+      const bead = doc.context.lookup(ref);
+      if (!(bead instanceof PDFDict)) break;
+      beads.push({ ref, bead });
+      ref = bead.get(N);
+    }
+    const kept = beads.filter(({ bead }) => bead.get(P) !== page.ref);
+    if (kept.length === beads.length) continue;
+    if (!kept.length) {
+      threads.remove(t);
+      continue;
+    }
+    kept.forEach(({ bead }, i) => {
+      bead.set(N, kept[(i + 1) % kept.length].ref);
+      bead.set(V, kept[(i + kept.length - 1) % kept.length].ref);
+    });
+    thread.set(F, kept[0].ref);
+  }
 }
 /**
  * Write what a page inherits from the page tree (size, crop, rotation, resources) onto the page
@@ -445,11 +506,38 @@ export function ownGeometry(page) {
 }
 export function movePage(doc, index, target) {
   if (target < 0 || target >= doc.getPageCount()) return;
-  const page = doc.getPage(index);
+  doc.getPage(index);
   stabilizeLocalDestinations(doc);
+  placePage(doc, index, target);
+}
+function placePage(doc, index, target) {
+  const page = doc.getPage(index);
   settleInheritance(page);
   doc.removePage(index);
   doc.insertPage(target, page);
+}
+/**
+ * Put the pages in a new order: `order` lists every current page index once, in the order
+ * wanted. Bookmarks and links are prepared once for the whole move, not once per page.
+ */
+export function reorderPages(doc, order) {
+  const count = doc.getPageCount();
+  if (
+    order.length !== count ||
+    new Set(order).size !== count ||
+    order.some((i) => !Number.isInteger(i) || i < 0 || i >= count)
+  )
+    throw new Error('Choose a new order for every page.');
+  if (order.every((page, position) => page === position)) return;
+  stabilizeLocalDestinations(doc);
+  // Bring each page to its place in turn; earlier places are already settled.
+  const current = [...Array(count).keys()];
+  order.forEach((page, target) => {
+    const from = current.indexOf(page);
+    if (from === target) return;
+    placePage(doc, from, target);
+    current.splice(target, 0, ...current.splice(from, 1));
+  });
 }
 /** Insert an empty page after the given one with the same visible size, rotation, and unit. */
 export function insertBlankPage(doc, index) {
@@ -482,10 +570,15 @@ export function visibleBox(page) {
 /**
  * Insert pages of another PDF (`pages`: zero-based indices in the order wanted, all by
  * default) after page `after` of `doc` (-1 for the front, the last page by default).
- * Returns the indices the new pages took.
+ * `onSource` is shown the parsed source PDF. Returns the indices the new pages took.
  */
-export async function insertPdfPages(doc, bytes, { pages, after = doc.getPageCount() - 1 } = {}) {
+export async function insertPdfPages(
+  doc,
+  bytes,
+  { pages, after = doc.getPageCount() - 1, onSource } = {},
+) {
   const source = await validatePdf(bytes);
+  onSource?.(source);
   const indices = pages ?? source.getPageIndices();
   if (!indices.length) throw new Error('Choose at least one page to insert.');
   if (indices.some((i) => !Number.isInteger(i) || i < 0 || i >= source.getPageCount()))
@@ -506,7 +599,9 @@ export async function insertPdfPages(doc, bytes, { pages, after = doc.getPageCou
   inlineNamedDests(source, indices);
   const sourcePages = source.getPages();
   sourcePages.forEach((page, index) => page.node.set(COPY_INDEX, PDFNumber.of(index)));
-  const copied = await copyPagesWithLayers(doc, source, indices);
+  const copied = await copyPagesWithLayers(doc, source, indices, (copier) =>
+    copyPageStandIns(copier, source, doc),
+  );
   const position = Math.min(Math.max(after + 1, 0), doc.getPageCount());
   copied.forEach((page, k) => ownGeometry(doc.insertPage(position + k, page)));
   shiftPageLabels(doc, position, copied.length);
@@ -517,8 +612,19 @@ export async function insertPdfPages(doc, bytes, { pages, after = doc.getPageCou
 }
 /** Insert an independent copy of page `index` right after it. Returns the copy's index. */
 export async function duplicatePage(doc, index) {
-  if (doc.getPageCount() + 1 > MAX_PAGES)
+  await duplicatePages(doc, [index]);
+  return index + 1;
+}
+/**
+ * Insert an independent copy of each page in `indices` right after it. The pages share one
+ * flattened snapshot of the form and one search for links, however many there are.
+ */
+export async function duplicatePages(doc, indices) {
+  const list = [...new Set(indices)].sort((a, b) => b - a);
+  if (!list.length) return;
+  if (doc.getPageCount() + list.length > MAX_PAGES)
     throw new Error('Keep between 1 and 1,000 pages in the PDF.');
+  for (const index of list) doc.getPage(index);
   stabilizeLocalDestinations(doc);
   // Copy a page that has a form field through a flattened copy of the document. Copying such a
   // page directly leaves the copy's widgets owned by no field (pdf-lib does not carry the form
@@ -534,43 +640,48 @@ export async function duplicatePage(doc, index) {
       /* The check below rejects a page whose widgets remain. */
     }
   }
-  requireFlattenedPages(source, [index]);
+  requireFlattenedPages(source, list);
   // An internal link on the copied page should point at the existing page it targets, not at a
   // hidden copy the copier would otherwise drag in (see relinkCopiedPages). The links resolve
   // against the pages already in the document.
-  inlineNamedDests(source, [index]);
+  inlineNamedDests(source, list);
   const sourcePages = source.getPages();
   sourcePages.forEach((page, i) => page.node.set(COPY_INDEX, PDFNumber.of(i)));
   const existing = doc.getPages().map((page) => page.ref);
   try {
-    let copy;
     const layerKey = PDFName.of('OCProperties');
     const groupKey = PDFName.of('OCGs');
     const layers = source.catalog.lookup(layerKey);
     const groups = layers instanceof PDFDict && layers.lookup(groupKey);
-    if (groups instanceof PDFArray) {
-      await source.flush();
+    await source.flush();
+    const copies = [];
+    // From the last page back, so the pages still to copy keep their places.
+    for (const index of list) {
+      // Each copy gets a copier of its own, so copies share nothing with each other.
       const copier = PDFObjectCopier.for(source.context, doc.context);
-      const originals = doc.catalog.lookup(layerKey).lookup(groupKey);
-      // A duplicate belongs to the same layers as its original. Seed the copier's identity
-      // map so nested OCMDs, appearances and resources all reuse those groups. A flattened
-      // snapshot retains the catalog's group ordering even when its field objects change.
-      for (let i = 0; i < groups.size(); i++) {
-        const group = groups.get(i),
-          original = originals.get(i);
-        const dict = source.context.lookup(group),
-          originalDict = doc.context.lookup(original);
-        if (!(dict instanceof PDFDict) || !(originalDict instanceof PDFDict)) continue;
-        copier.traversedObjects.set(group, original);
-        copier.traversedObjects.set(dict, originalDict);
+      copyPageStandIns(copier, source, doc, sourcePages);
+      if (groups instanceof PDFArray) {
+        const originals = doc.catalog.lookup(layerKey).lookup(groupKey);
+        // A duplicate belongs to the same layers as its original. Seed the copier's identity
+        // map so nested OCMDs, appearances and resources all reuse those groups. A flattened
+        // snapshot retains the catalog's group ordering even when its field objects change.
+        for (let i = 0; i < groups.size(); i++) {
+          const group = groups.get(i),
+            original = originals.get(i);
+          const dict = source.context.lookup(group),
+            originalDict = doc.context.lookup(original);
+          if (!(dict instanceof PDFDict) || !(originalDict instanceof PDFDict)) continue;
+          copier.traversedObjects.set(group, original);
+          copier.traversedObjects.set(dict, originalDict);
+        }
       }
       const node = copier.copy(sourcePages[index].node);
-      copy = PDFPage.of(node, doc.context.register(node), doc);
-    } else [copy] = await doc.copyPages(source, [index]);
-    ownGeometry(doc.insertPage(index + 1, copy));
-    shiftPageLabels(doc, index + 1, 1);
-    relinkCopiedPages(doc, [copy], new Map(existing.map((ref, i) => [i, ref])));
-    return index + 1;
+      const copy = PDFPage.of(node, doc.context.register(node), doc);
+      ownGeometry(doc.insertPage(index + 1, copy));
+      shiftPageLabels(doc, index + 1, 1);
+      copies.push(copy);
+    }
+    relinkCopiedPages(doc, copies, new Map(existing.map((ref, i) => [i, ref])));
   } finally {
     if (source === doc) sourcePages.forEach((page) => page.node.delete(COPY_INDEX));
   }
@@ -1099,6 +1210,50 @@ function radioWidgetOptions(field) {
     return { on, value };
   });
 }
+const RADIOS_IN_UNISON = 1 << 25;
+/** Separates a shared export value from the appearance state that tells its buttons apart. */
+const CHOICE_STATE = '\uE000';
+const pdfjsId = (ref) =>
+  ref.generationNumber ? `${ref.objectNumber}R${ref.generationNumber}` : `${ref.objectNumber}R`;
+/**
+ * Radio buttons that share an export value but switch on one at a time (no RadiosInUnison,
+ * each with its own appearance state). Viewers report such a choice by its export value
+ * alone, so each of these buttons gets a choice naming its state too, which fillFields
+ * accepts. Returns, by field name: each widget's choice by PDF.js annotation id, and the
+ * choice that is on.
+ */
+export function radioButtonChoices(doc) {
+  const result = new Map();
+  for (const field of formFields(doc) || []) {
+    if (!(field instanceof PDFRadioGroup) || field.acroField.getFlags() & RADIOS_IN_UNISON)
+      continue;
+    // A group whose widgets cannot be read keeps being chosen by export value.
+    try {
+      const options = radioWidgetOptions(field);
+      const states = new Map();
+      for (const { on, value } of options)
+        if (on) states.set(value, new Set(states.get(value)).add(on));
+      if (![...states.values()].some((set) => set.size > 1)) continue;
+      const choiceOf = ({ on, value }) =>
+        states.get(value).size > 1 ? `${value}${CHOICE_STATE}${on.decodeText()}` : value;
+      const acro = field.acroField;
+      const kids = acro.dict.lookup(PDFName.of('Kids'));
+      const refs = kids instanceof PDFArray ? kids.asArray() : [];
+      const choices = new Map();
+      acro.getWidgets().forEach((widget, index) => {
+        if (!options[index].on) return;
+        const ref = refs.find((kid) => acro.dict.context.lookup(kid) === widget.dict) ?? field.ref;
+        if (ref instanceof PDFRef) choices.set(pdfjsId(ref), choiceOf(options[index]));
+      });
+      const state = buttonFieldValue(field);
+      const selected = options.find(({ on }) => on && on === state);
+      result.set(formFieldName(field), { choices, selected: selected ? choiceOf(selected) : null });
+    } catch {
+      continue;
+    }
+  }
+  return result;
+}
 function radioFieldOptions(field, widgets = field.acroField.getWidgets()) {
   const opt = radioExports(field);
   return widgets
@@ -1167,10 +1322,52 @@ export function formButtonSelections(doc, names) {
   }
   return selections;
 }
+/** Field tooltips (TU) by name. PDF.js reads a tooltip from a widget, not from its field. */
+export function formFieldTooltips(doc) {
+  const tooltips = new Map();
+  for (const field of formFields(doc) || []) {
+    const name = formFieldName(field);
+    const tooltip = fieldTooltip(field);
+    if (!tooltips.has(name) && tooltip) tooltips.set(name, tooltip);
+  }
+  return tooltips;
+}
+function fieldTooltip(field) {
+  const tooltip = field.acroField.dict.lookup(PDFName.of('TU'));
+  return tooltip instanceof PDFString || tooltip instanceof PDFHexString
+    ? tooltip.decodeText().trim()
+    : '';
+}
+/**
+ * The selections of lists whose options share export values, by field name, as keys
+ * (choiceKeys): PDF.js reports the values, while /I tells which of those options is chosen.
+ */
+export function sharedChoiceSelections(doc) {
+  const result = new Map();
+  for (const field of formFields(doc) || []) {
+    if (!(field instanceof PDFDropdown || field instanceof PDFOptionList)) continue;
+    // A list whose options cannot be read keeps being chosen by export value.
+    try {
+      const options = choiceOptions(field);
+      if (new Set(options.map(({ value }) => value)).size === options.length) continue;
+      result.set(
+        formFieldName(field),
+        selectedChoices(field, options).map(({ key }) => key),
+      );
+    } catch {
+      continue;
+    }
+  }
+  return result;
+}
+/** A list's options keyed for selection (choiceKeys), and typed values that are not options. */
 function choiceSelections(field) {
-  const choices = choiceOptions(field);
-  for (const value of fieldValue(field))
-    if (!choices.some((option) => option.value === value)) choices.push({ value, label: value });
+  const options = choiceOptions(field);
+  const keys = choiceKeys(options);
+  const choices = options.map(({ label }, index) => ({ value: keys[index], label }));
+  for (const { key, index } of selectedChoices(field, options))
+    if (index < 0 && !choices.some((option) => option.value === key))
+      choices.push({ value: key, label: key });
   return choices;
 }
 /** Match viewer names: an unnamed ancestor contributes no part, while an empty name does. */
@@ -1188,7 +1385,12 @@ export function listFields(doc) {
   const fields = formFields(doc);
   if (!fields) throw new Error(DAMAGED_FORM);
   return fields.map((field) => {
-    const base = { name: formFieldName(field), readOnly: field.isReadOnly() };
+    const tooltip = fieldTooltip(field);
+    const base = {
+      name: formFieldName(field),
+      readOnly: field.isReadOnly(),
+      ...(tooltip ? { tooltip } : {}),
+    };
     if (field instanceof PDFTextField) {
       const flags = field.acroField.getFlags();
       return {
@@ -1229,10 +1431,14 @@ export function listFields(doc) {
         type: 'select',
         options:
           field instanceof PDFRadioGroup
-            ? radioFieldOptions(field)
+            ? // Buttons that share an export value are one choice.
+              [...new Set(radioFieldOptions(field))]
             : choices.map((option) => option.value),
         choices,
-        value: fieldValue(field),
+        value:
+          field instanceof PDFRadioGroup
+            ? fieldValue(field)
+            : selectedChoices(field).map(({ key }) => key),
         multiple,
         editableChoice: field instanceof PDFDropdown && !multiple && field.isEditable(),
         spellcheck: field instanceof PDFDropdown && field.isSpellChecked(),
@@ -1297,7 +1503,10 @@ export async function fillFields(doc, values) {
       field instanceof PDFOptionList ||
       field instanceof PDFRadioGroup
     ) {
-      const selected = fieldValue(field);
+      const selected =
+        field instanceof PDFRadioGroup
+          ? fieldValue(field)
+          : selectedChoices(field).map(({ key }) => key);
       const previous = Array.isArray(selected) ? selected : selected == null ? [] : [selected];
       const next = Array.isArray(value) ? value : value ? [value] : [];
       if (previous.length === next.length && previous.every((option) => next.includes(option)))
@@ -1305,30 +1514,49 @@ export async function fillFields(doc, values) {
       if (field instanceof PDFRadioGroup) {
         if (next.length) {
           const options = radioWidgetOptions(field);
-          const option = options.findLast((option) => option.on && option.value === next[0]);
+          // A button sharing its export value with others is chosen by its state as well.
+          const [wanted, state] = String(next[0]).split(CHOICE_STATE);
+          const option = options.findLast(
+            (option) =>
+              option.on &&
+              option.value === wanted &&
+              (state === undefined || option.on.decodeText() === state),
+          );
           if (!option) {
-            if (options.some((option) => option.value === next[0]))
+            if (options.some((option) => option.value === wanted))
               throw new Error('This option is unavailable in this PDF. Choose another option.');
             throw new Error('Choose one of the available form options.');
           }
           ownRadioOptions(field);
           field.acroField.setValue(option.on);
+          // Buttons in unison that share the export value switch on together, whatever their states.
+          if (field.acroField.getFlags() & RADIOS_IN_UNISON)
+            field.acroField.getWidgets().forEach((widget, index) => {
+              const { on, value } = options[index];
+              if (on && value === wanted) widget.setAppearanceState(on);
+            });
           field.markAsDirty();
         } else field.clear();
       } else {
         const options = choiceOptions(field);
-        const custom = next.filter((value) => !options.some((option) => option.value === value));
+        // Options sharing an export value are chosen by position (choiceKeys).
+        const chosen = readChoiceKeys(next, options);
+        const custom = chosen.filter(({ index }) => index < 0);
         if (custom.length && (!(field instanceof PDFDropdown) || !field.isEditable()))
           throw new Error('Choose one of the available form options.');
         if (next.length > 1 && !field.isMultiselect())
           throw new Error('This form field accepts one selection.');
         // pdf-lib's select()/index helpers compare display labels, but PDF /V contains exports.
-        const values = next.map((value) => PDFHexString.fromText(value));
+        const values = chosen.map(({ value }) => PDFHexString.fromText(value));
         const dict = field.acroField.dict;
         if (!values.length) dict.set(PDFName.of('V'), doc.context.obj([]));
         else dict.set(PDFName.of('V'), values.length === 1 ? values[0] : doc.context.obj(values));
-        const indices = next.map((value) => options.findIndex((option) => option.value === value));
-        if (indices.length > 1 && indices.every((index) => index >= 0))
+        const indices = chosen.map(({ index }) => index);
+        // /I is needed for several selections, and to tell apart options that share a value.
+        const shared = chosen.some(
+          ({ value }) => options.filter((option) => option.value === value).length > 1,
+        );
+        if ((indices.length > 1 || shared) && indices.every((index) => index >= 0))
           dict.set(PDFName.of('I'), doc.context.obj(indices.sort((a, b) => a - b)));
         else dict.delete(PDFName.of('I'));
         // The previous list scroll position may hide the newly chosen option.
@@ -1338,7 +1566,7 @@ export async function fillFields(doc, values) {
         const labels =
           field instanceof PDFOptionList
             ? options.map((option) => option.label)
-            : next.map((value) => options.find((option) => option.value === value)?.label ?? value);
+            : chosen.map(({ value, index }) => options[index]?.label ?? value);
         changedText.push(...labels);
         changedChoices.push({ field, labels, options });
       }

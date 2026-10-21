@@ -1,9 +1,17 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { PDFName, PDFString } from 'pdf-lib';
-import { PdfSession, deletePage, fillFields, listFields } from '../src/core/document.js';
+import { PDFArray, PDFName, PDFString } from 'pdf-lib';
+import {
+  PdfSession,
+  deletePage,
+  deletePages,
+  fillFields,
+  listFields,
+  radioButtonChoices,
+} from '../src/core/document.js';
 import { flattenCounts, flattenFields } from '../src/core/flatten.js';
+import { damagedWidgetsPdf } from './fixtures/damaged-widgets.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -339,4 +347,199 @@ it('accepts an inline checkbox export value without creating redundant edits', a
   expect(await fillFields(doc, { Agree: [] })).toBeUndefined();
   expect(field.isChecked()).toBe(false);
   expect(await fillFields(doc, { Agree: false })).toBe(false);
+});
+
+it('lists a radio choice once when several buttons share its export value', async () => {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([600, 400]);
+  const size = doc.getForm().createRadioGroup('Size');
+  for (const [value, x] of [
+    ['Small', 40],
+    ['Small', 80],
+    ['Large', 120],
+  ])
+    size.addOptionToPage(value, page, { x, y: 340, width: 16, height: 16 });
+  const loaded = await PDFDocument.load(await doc.save());
+  expect(listFields(loaded)[0].options).toEqual(['Small', 'Large']);
+  await fillFields(loaded, { Size: ['Small'] });
+  expect(listFields(loaded)[0].value).toBe('Small');
+});
+
+it('deletes many pages of a form at once as one by one, reading the fields once', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(await readFile(new URL('../public/fonts/NotoSans-Regular.ttf', import.meta.url))),
+  );
+  const build = async () => {
+    const doc = await PDFDocument.create();
+    const pages = Array.from({ length: 6 }, () => doc.addPage([300, 300]));
+    const form = doc.getForm();
+    pages.forEach((page, i) => {
+      const field = form.createTextField(`name${i}`);
+      field.setText(`Name ${i}`);
+      field.addToPage(page, { x: 20, y: 20, width: 150, height: 24 });
+    });
+    // Fields with widgets on several pages, some of them deleted.
+    const shared = form.createTextField('shared');
+    shared.setText('Shared');
+    for (const i of [1, 2, 4]) shared.addToPage(pages[i], { x: 20, y: 60, width: 150, height: 24 });
+    const radio = form.createRadioGroup('choice');
+    ['A', 'B', 'C'].forEach((option, i) =>
+      radio.addOptionToPage(option, pages[i * 2], { x: 20, y: 100, width: 20, height: 20 }),
+    );
+    radio.select('C');
+    const box = form.createCheckBox('agree');
+    box.addToPage(pages[3], { x: 20, y: 140, width: 20, height: 20 });
+    box.check();
+    // Writers often leave out a widget's page, which deletion then matches by reference.
+    for (const field of form.getFields())
+      for (const widget of field.acroField.getWidgets()) widget.dict.delete(PDFName.of('P'));
+    return PDFDocument.load(await doc.save());
+  };
+  const summary = async (doc) => {
+    const saved = await PDFDocument.load(await doc.save());
+    return { pages: saved.getPageCount(), fields: listFields(saved) };
+  };
+  const oneByOne = await build();
+  for (const index of [5, 4, 2, 1]) deletePage(oneByOne, index);
+  const together = await build();
+  const fields = together.catalog.lookup(PDFName.of('AcroForm')).lookup(PDFName.of('Fields'));
+  const size = vi.spyOn(PDFArray.prototype, 'size');
+  deletePages(together, [1, 2, 4, 5]);
+  const walks = size.mock.contexts.filter((array) => array === fields).length;
+  size.mockRestore();
+  expect(await summary(together)).toEqual(await summary(oneByOne));
+  expect((await summary(together)).fields.map((field) => field.name)).toEqual([
+    'name0',
+    'name3',
+    'choice',
+    'agree',
+  ]);
+  // Reading every field once per deleted page made deleting many pages of a long form slow.
+  const single = await build();
+  const singleFields = single.catalog.lookup(PDFName.of('AcroForm')).lookup(PDFName.of('Fields'));
+  const sizeOne = vi.spyOn(PDFArray.prototype, 'size');
+  deletePages(single, [1]);
+  const one = sizeOne.mock.contexts.filter((array) => array === singleFields).length;
+  sizeOne.mockRestore();
+  expect(walks).toBeLessThan(2 * one);
+});
+
+it('keeps naming the field’s own font after filling, for viewers that redraw it', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(await readFile(new URL('../public/fonts/NotoSans-Regular.ttf', import.meta.url))),
+  );
+  const source = await PDFDocument.create();
+  const page = source.addPage();
+  const form = source.getForm();
+  const courier = source.context.register(
+    source.context.obj({ Type: 'Font', Subtype: 'Type1', BaseFont: 'Courier' }),
+  );
+  form.acroForm.dict.set(PDFName.of('DR'), source.context.obj({ Font: { Cour: courier } }));
+  const text = form.createTextField('Code');
+  text.addToPage(page, { x: 50, y: 600, width: 200, height: 24 });
+  text.acroField.setDefaultAppearance('/Cour 10 Tf 0 0 1 rg');
+  const choice = form.createDropdown('Pick');
+  choice.addOptions(['One', 'Two']);
+  choice.addToPage(page, { x: 50, y: 500, width: 200, height: 24 });
+  choice.acroField.setDefaultAppearance('/Cour 0 Tf 0 g');
+  const doc = await PDFDocument.load(await source.save());
+  await fillFields(doc, { Code: 'ABC-123', Pick: ['Two'] });
+  const saved = (await PDFDocument.load(await doc.save())).getForm();
+  expect(saved.getTextField('Code').acroField.getDefaultAppearance()).toBe('/Cour 10 Tf 0 0 1 rg');
+  expect(saved.getDropdown('Pick').acroField.getDefaultAppearance()).toBe('/Cour 0 Tf 0 g');
+  expect(saved.getTextField('Code').getText()).toBe('ABC-123');
+});
+
+it('tells apart radio buttons that share an export value, unless they are in unison', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(await readFile(new URL('../public/fonts/NotoSans-Regular.ttf', import.meta.url))),
+  );
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([600, 400]);
+  const form = doc.getForm();
+  const size = form.createRadioGroup('Size');
+  for (const [value, x] of [
+    ['Small', 40],
+    ['Small', 80],
+    ['Large', 120],
+  ])
+    size.addOptionToPage(value, page, { x, y: 340, width: 16, height: 16 });
+  const plain = form.createRadioGroup('Plain');
+  for (const [value, x] of [
+    ['Yes', 40],
+    ['No', 80],
+  ])
+    plain.addOptionToPage(value, page, { x, y: 300, width: 16, height: 16 });
+  const loaded = await PDFDocument.load(await doc.save());
+  const choices = radioButtonChoices(loaded);
+  // Only the field with a shared value needs choices; "Large" stays its export value.
+  expect([...choices.keys()]).toEqual(['Size']);
+  const { choices: byWidget, selected } = choices.get('Size');
+  const [first, second, large] = [...byWidget.values()];
+  expect(large).toBe('Large');
+  expect(first).not.toBe(second);
+  expect(selected).toBeNull();
+  await fillFields(loaded, { Size: [first] });
+  const states = () =>
+    loaded
+      .getForm()
+      .getRadioGroup('Size')
+      .acroField.getWidgets()
+      .map((widget) => widget.dict.lookup(PDFName.of('AS')).decodeText());
+  expect(states()).toEqual(['0', 'Off', 'Off']);
+  expect(radioButtonChoices(loaded).get('Size').selected).toBe(first);
+  // The export value alone still works, as the Fill forms dialog gives it.
+  await fillFields(loaded, { Size: ['Large'] });
+  expect(states()).toEqual(['Off', 'Off', '2']);
+  expect(listFields(loaded)[0].value).toBe('Large');
+  loaded
+    .getForm()
+    .getRadioGroup('Size')
+    .acroField.setFlagTo(1 << 25, true);
+  expect(radioButtonChoices(loaded).has('Size')).toBe(false);
+  await fillFields(loaded, { Size: ['Small'] });
+  expect(states()).toEqual(['0', '1', 'Off']);
+});
+
+it('leaves a radio group whose widgets cannot be read to its export values', async () => {
+  // A damaged widget entry must not stop the page's form controls from being drawn.
+  const doc = await PDFDocument.load(await damagedWidgetsPdf('radio'), { updateMetadata: false });
+  expect(() => radioButtonChoices(doc)).not.toThrow();
+});
+
+it('records and highlights the list option chosen among options sharing an export value', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(await readFile(new URL('../public/fonts/NotoSans-Regular.ttf', import.meta.url))),
+  );
+  const source = await PDFDocument.create();
+  const list = source.getForm().createOptionList('Fruit');
+  list.addToPage(source.addPage(), { x: 40, y: 500, width: 200, height: 90 });
+  list.acroField.dict.set(
+    PDFName.of('Opt'),
+    source.context.obj(
+      [
+        ['A', 'Apple'],
+        ['A', 'Avocado'],
+        ['B', 'Banana'],
+      ].map(([value, label]) => [PDFString.of(value), PDFString.of(label)]),
+    ),
+  );
+  const doc = await PDFDocument.load(await source.save());
+  const [listed] = listFields(doc);
+  expect(listed.choices.map(({ label }) => label)).toEqual(['Apple', 'Avocado', 'Banana']);
+  const avocado = listed.choices[1].value;
+  expect(new Set(listed.options).size).toBe(3);
+  await fillFields(doc, { Fruit: [avocado] });
+  const dict = doc.getForm().getOptionList('Fruit').acroField.dict;
+  expect(dict.lookup(PDFName.of('V')).decodeText()).toBe('A');
+  expect(dict.lookup(PDFName.of('I')).toString()).toBe('[ 1 ]');
+  expect(listFields(doc)[0].value).toEqual([avocado]);
+  // One highlighted row, the chosen one.
+  const widget = doc.getForm().getOptionList('Fruit').acroField.getWidgets()[0];
+  const ap = doc.context.lookup(widget.dict.lookup(PDFName.of('AP')).get(PDFName.of('N')));
+  const drawing = new TextDecoder().decode(ap.getUnencodedContents());
+  expect(drawing.match(/0\.6 0\.75\d* 0\.85\d* rg/g)).toHaveLength(1);
+  // A plain export value still picks its first option.
+  await fillFields(doc, { Fruit: ['B'] });
+  expect(dict.has(PDFName.of('I'))).toBe(false);
 });

@@ -1,5 +1,6 @@
 import {
   PDFArray,
+  PDFBool,
   PDFDict,
   PDFDocument,
   PDFHexString,
@@ -198,6 +199,26 @@ function sweepOrphans(context) {
 /** A key marking each source page with its index, copied into every copy the copier makes. */
 export const COPY_INDEX = PDFName.of('PuterCopyPageIndex');
 /**
+ * Make `copier` copy a small stand-in wherever a copied object names a page of `source` (a
+ * link's target, an annotation's page). Following the reference would copy that page with all
+ * its content, and every page it links to in turn (a contents page reaches the whole document),
+ * only for relinkCopiedPages to sweep the copies away again. A stand-in carries the page's
+ * COPY_INDEX just as such a copy would, and is made only for pages actually named.
+ */
+export function copyPageStandIns(copier, source, target, pages = source.getPages()) {
+  const indices = new Map(pages.map((page, index) => [page.ref, index]));
+  const copyReference = copier.copyPDFIndirectObject;
+  copier.copyPDFIndirectObject = (ref) => {
+    const index = indices.get(ref);
+    if (index !== undefined && !copier.traversedObjects.has(ref))
+      copier.traversedObjects.set(
+        ref,
+        target.context.register(target.context.obj({ [COPY_INDEX.decodeText()]: index })),
+      );
+    return copyReference(ref);
+  };
+}
+/**
  * The copier shares annotation objects when the same source page is selected more than once.
  * Each page must own its annotation dictionaries (ISO 32000-1, 12.5.2), including the popup
  * and reply relationships between them. Keep subsidiary resources shared, as the standard
@@ -272,6 +293,9 @@ export function relinkCopiedPages(doc, pages, indexToRef) {
     // of this document's tree (alternate text read out for the wrong content). The copied
     // page reads as untagged instead.
     page.node.delete(PDFName.of('StructParents'));
+    // Article threads (ISO 32000-1, 12.4.3) stay behind too. The copy's beads would run on
+    // to pages that were not copied, keeping the copier's stand-ins for them in the file.
+    page.node.delete(PDFName.of('B'));
     const annots = doc.context.lookup(page.node.get(PDFName.of('Annots')));
     if (!(annots instanceof PDFArray)) continue;
     for (const ref of annots.asArray()) {
@@ -311,6 +335,20 @@ export async function copyPagesFrom(source, indices, details) {
     }
     if (value) out.getInfoDict().set(PDFName.of(key), PDFHexString.fromText(String(value)));
   }
+  // The language of the text, and how readers should present it, still hold for its pages:
+  // screen readers pick their voice by /Lang, and a right-to-left book keeps its page order.
+  const lang = source.catalog.lookup(PDFName.of('Lang'));
+  if (isString(lang)) out.catalog.set(PDFName.of('Lang'), lang.clone());
+  const preferences = source.catalog.lookup(PDFName.of('ViewerPreferences'));
+  if (preferences instanceof PDFDict) {
+    const kept = out.context.obj({});
+    // Settings naming page numbers (PrintPageRange) would mean other pages here.
+    for (const key of ['DisplayDocTitle', 'Direction']) {
+      const value = preferences.lookup(PDFName.of(key));
+      if (value instanceof PDFBool || value instanceof PDFName) kept.set(PDFName.of(key), value);
+    }
+    if (kept.keys().length) out.catalog.set(PDFName.of('ViewerPreferences'), kept);
+  }
   // Make named destinations explicit before copying, then fix up the copied links and drop the
   // orphan page copies the copier pulls in for their targets. Each source page is marked with
   // its index so a copied link's target can be matched to the page that joined the tree.
@@ -318,7 +356,9 @@ export async function copyPagesFrom(source, indices, details) {
   const sourcePages = source.getPages();
   sourcePages.forEach((page, index) => page.node.set(COPY_INDEX, PDFNumber.of(index)));
   try {
-    const pages = await copyPagesWithLayers(out, source, indices);
+    const pages = await copyPagesWithLayers(out, source, indices, (copier) =>
+      copyPageStandIns(copier, source, out),
+    );
     pages.forEach((page) => out.addPage(page));
     const indexToRef = new Map(indices.map((index, position) => [index, pages[position].ref]));
     relinkCopiedPages(out, pages, indexToRef);

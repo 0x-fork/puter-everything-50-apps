@@ -86,3 +86,101 @@ test('selecting text keeps the page and its controls where they were', async ({ 
   expect(await target.boundingBox()).toEqual(before.text);
   expect(await zoom.boundingBox()).toEqual(before.zoom);
 });
+
+test('a message over the selection dock lets taps through to its controls', async ({ page }) => {
+  await openPdf(page, await pages(1));
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Insert', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Stamp…', exact: true }).click();
+  await page.getByRole('button', { name: 'Place stamp', exact: true }).click();
+  await expect(page.locator('#toast')).toHaveText(/^Stamp added/);
+  // The message shows over the dock for a few seconds; a field under it still takes a tap.
+  const covered = await page.evaluate(() => {
+    const box = document.querySelector('#toast').getBoundingClientRect();
+    const field = [...document.querySelectorAll('.properties-sidebar input[type="number"]')]
+      .map((input) => ({ input, r: input.getBoundingClientRect() }))
+      .find(
+        ({ r }) =>
+          r.width &&
+          r.x + r.width / 2 > box.left &&
+          r.x + r.width / 2 < box.right &&
+          r.y + r.height / 2 > box.top &&
+          r.y + r.height / 2 < box.bottom,
+      );
+    return (
+      field && {
+        label: field.input.getAttribute('aria-label'),
+        x: field.r.x + field.r.width / 2,
+        y: field.r.y + field.r.height / 2,
+      }
+    );
+  });
+  expect(covered).toBeTruthy();
+  await page.touchscreen.tap(covered.x, covered.y);
+  await expect(page.getByLabel(covered.label, { exact: true })).toBeFocused();
+  await expect(page.locator('#toast')).toHaveText(/^Stamp added/);
+});
+
+test('the accessibility report shows each problem in full in the narrow panel', async ({
+  page,
+}) => {
+  await openPdf(page, await pages(2));
+  const pane = page.getByRole('complementary', { name: 'Tools' });
+  await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  await pane.getByRole('button', { name: 'View more' }).click();
+  await pane.getByRole('button', { name: 'Prepare for accessibility', exact: true }).click();
+  const check = pane.getByRole('button', { name: 'Accessibility check', exact: true });
+  if (!(await check.isVisible()))
+    await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  await check.click();
+  const report = page.getByRole('tabpanel', { name: 'Accessibility check' });
+  const detail = report.getByText('MarkInfo does not mark the file as tagged', { exact: true });
+  await expect(detail).toBeVisible();
+  // The details wrap: none of them is cut short with an ellipsis.
+  const cut = await report
+    .locator('.a11y-details li > span')
+    .evaluateAll((spans) =>
+      spans.filter((span) => span.scrollWidth > span.clientWidth + 1).map((s) => s.textContent),
+    );
+  expect(cut).toEqual([]);
+});
+
+test('the hints speak of taps on a touch screen, and a double tap edits text', async ({ page }) => {
+  await openPdf(page, await pages(1));
+  await expect(page.locator('.tool-hint')).toHaveText(
+    'Tap to select, drag to move, or double-tap text to edit.',
+  );
+  const words = page.getByRole('button', { name: 'Edit text: Page 1 words', exact: true });
+  const box = await words.boundingBox();
+  const x = box.x + 8,
+    y = box.y + box.height / 2;
+  await page.touchscreen.tap(x, y);
+  await page.touchscreen.tap(x, y);
+  await expect(page.locator('.page-text-input, .text-line-input').first()).toBeVisible();
+});
+
+test('a stamp placed on a phone is brought into view above the selection dock', async ({
+  page,
+}) => {
+  // A Letter page: at the phone's width its middle is near the foot of the view.
+  const doc = await PDFDocument.create();
+  doc.addPage([612, 792]);
+  await openPdf(page, doc);
+  await page.getByRole('button', { name: 'Menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Insert', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Stamp…', exact: true }).click();
+  await page.getByRole('button', { name: 'Place stamp', exact: true }).click();
+  await expect(page.locator('#toast')).toHaveText(/^Stamp added/);
+  await expect(page.getByRole('complementary', { name: 'Selection properties' })).toBeVisible();
+  // The middle of the page sits under the dock once it opens; the view follows the stamp,
+  // its corner handles included.
+  const view = await page.getByRole('region', { name: 'PDF page view' }).boundingBox();
+  const handles = page.locator('.image-move, .image-resize');
+  await expect(handles).toHaveCount(5);
+  for (const box of await Promise.all(
+    (await handles.all()).map((handle) => handle.boundingBox()),
+  )) {
+    expect(box.y).toBeGreaterThanOrEqual(view.y);
+    expect(box.y + box.height).toBeLessThanOrEqual(view.y + view.height);
+  }
+});

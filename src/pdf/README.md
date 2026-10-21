@@ -32,7 +32,7 @@ GitHub Actions runs unit tests, a production build, and Chromium desktop/mobile,
 The workspace follows the layout of desktop PDF editors (Adobe Acrobat was the reference; all icons and artwork are original): a title bar with the menus and the document tab; tool sets (Tools, Edit, Comment, Export, Fill & Sign) with Find text or tools, undo/redo, Download, Print, and Save; a tools pane listing every tool and then holding the chosen tool's commands; floating quick tools beside the page and floating page and zoom controls; and navigation panels opened from a rail on the right (Pages, Outline, Comments, Attachments, Layers, Signatures, Accessibility check). Pages scroll continuously (or one page, or two side by side), and the page under the middle of the view becomes the page being edited.
 
 - **Organize pages:** a grid of every page with multi-select, drag to reorder, rotate, duplicate, extract, insert (blank, from a PDF, pictures), and delete. **Combine files** puts PDFs and pictures, in a chosen order, into a new PDF. **Batch process** applies the same steps (rotate, watermark, page numbers, Bates numbers that continue across files, flatten, remove hidden information, OCR, reduce size, password) to many PDFs and downloads the results in a ZIP.
-- **Redact a PDF:** mark selected text, dragged areas, whole pages, or Find text and redact (words, phone numbers, email addresses, card numbers, SSNs, dates), then apply: text, image pixels, drawings, links, comments, and fields under each mark are removed from the file, not covered; optionally remove hidden information (metadata, scripts, attachments, hidden text and layers, and more), also available on its own.
+- **Redact a PDF:** mark selected text, dragged areas, whole pages, or Find text and redact (words, phone numbers, email addresses, card numbers, SSNs, dates), then apply: text, image pixels, drawings, links, and comments under each mark are removed from the file, not covered, a form field under a mark is removed everywhere it appears, and anything that could not be handled as usual is listed to check; optionally remove hidden information (metadata, scripts, attachments, hidden text and layers, and more), also available on its own.
 - **Scan & OCR:** recognize English text on scanned pages on the device (Tesseract), adding an invisible text layer that makes them searchable and selectable; pages that already have text are skipped.
 - **Export a PDF:** Word (.docx), Excel (.xlsx), PowerPoint (.pptx), RTF, HTML, and plain text, with headings, lists, tables, columns, running headers and footers, and pictures; and pages as PNG or JPEG.
 - **Use a certificate:** sign or certify with a digital ID (a .pfx/.p12 file, or a new self-signed ID downloaded as .p12), appended as an incremental update so earlier signatures stay valid; validate every signature (integrity, certificate chain and validity, changes after signing, timestamps, certification level) in the Signatures panel, with a status bar above the pages and a warning before an edit would invalidate a signature.
@@ -145,7 +145,9 @@ regenerate the favicons, Apple touch icon, and 192/512 px app icons in `public/`
 | Find next / previous | Ctrl / Command G, with Shift; F3  |
 | Print                | Ctrl / Command P                  |
 | Zoom in / out        | Ctrl / Command + / -              |
-| Fit width            | Ctrl / Command 0                  |
+| Fit page             | Ctrl / Command 0                  |
+| Actual size          | Ctrl / Command 1                  |
+| Fit width            | Ctrl / Command 2                  |
 | Previous / next page | Alt Left / Right                  |
 
 The text/highlight/shape tools also offer a keyboard-accessible placement action. Freehand drawing requires a pointer. Use Tab to move through form fields on the page, or open Fill forms. Enter applies a single-line field; Ctrl / Command Enter applies multiline fields. Escape restores the current field’s value before the draft. Saving and navigation apply all pending field changes.
@@ -164,4 +166,4 @@ With an image, shape, or drawing selected, drag its body to move it or a corner 
 
 ## License
 
-This repository, including all its contents, sub-projects, modules, and components, is licensed under [MIT](../../LICENSE) unless explicitly stated otherwise. Third-party libraries included in this repository may be subject to their own licenses.
+This app, including all its contents, modules, and components, is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only). Third-party libraries included in this app may be subject to their own licenses.

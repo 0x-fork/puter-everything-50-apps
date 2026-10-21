@@ -106,6 +106,8 @@ export function createToolsPanel({ catalog, can = () => true, onClose, onChange,
           onclick: () => {
             expanded = false;
             renderList();
+            // The pressed button was replaced; its successor, View more, keeps the focus.
+            body.querySelector('.tools-more')?.focus();
           },
         },
         'View less',
@@ -215,13 +217,16 @@ export function createToolsPanel({ catalog, can = () => true, onClose, onChange,
     /** Redraw with fresh enabled and pressed states, keeping keyboard focus where it was. */
     refresh() {
       const focused = document.activeElement;
-      const key = body.contains(focused)
-        ? focused.querySelector?.('.tool-command-label, .tool-row-label')?.textContent
-        : null;
+      // View more and View less have no label of their own; the list has one such button.
+      const keyOf = (b) =>
+        b.classList?.contains('tools-more')
+          ? 'tools-more'
+          : b.querySelector?.('.tool-command-label, .tool-row-label')?.textContent;
+      const key = body.contains(focused) ? keyOf(focused) : null;
       render();
       if (key)
         [...body.querySelectorAll('button')]
-          .find((b) => b.querySelector('.tool-command-label, .tool-row-label')?.textContent === key)
+          .find((b) => keyOf(b) === key)
           ?.focus({ preventScroll: true });
     },
   };

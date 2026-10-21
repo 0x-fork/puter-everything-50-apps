@@ -11,7 +11,8 @@ export const COMMENT_KINDS = {
   Highlight: { label: 'Highlight', icon: 'Highlighter', reveal: 'highlight' },
   Underline: { label: 'Underline', icon: 'Underline', reveal: 'highlight' },
   StrikeOut: { label: 'Strikethrough', icon: 'Strikethrough', reveal: 'highlight' },
-  Squiggly: { label: 'Squiggly underline', icon: 'Underline', reveal: 'highlight' },
+  // Selected among the drawn comments: the highlight tools redraw only their own three kinds.
+  Squiggly: { label: 'Squiggly underline', icon: 'Underline', reveal: null },
   FreeText: { label: 'Text box', icon: 'Type', reveal: null },
   Ink: { label: 'Drawing', icon: 'Pencil', reveal: null },
   Square: { label: 'Rectangle', icon: 'Square', reveal: null },
@@ -33,9 +34,9 @@ const toHex = (color) =>
 
 /**
  * Every comment on every page, in page order: page index, PDF.js id, kind, text, author, date,
- * and color. One comment past MAX_COMMENTS is collected and no more, so a caller can tell a
- * full list from one that was cut rather than report a total that is short; `isCurrent` can
- * cancel a stale run between pages.
+ * color, and rectangle. One comment past MAX_COMMENTS is collected and no more, so a caller can
+ * tell a full list from one that was cut rather than report a total that is short; `isCurrent`
+ * can cancel a stale run between pages.
  */
 export async function collectComments(pdf, { isCurrent = () => true } = {}) {
   const limit = MAX_COMMENTS + 1;
@@ -66,6 +67,7 @@ export async function collectComments(pdf, { isCurrent = () => true } = {}) {
         author: String(a.titleObj?.str ?? a.title ?? '').trim(),
         date: parsePdfDate(a.modificationDate) || parsePdfDate(a.creationDate),
         hex: toHex(a.color),
+        rect: a.rect ? Array.from(a.rect) : null,
       });
       if (comments.length >= limit) break;
     }

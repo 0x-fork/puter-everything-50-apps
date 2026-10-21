@@ -1076,6 +1076,57 @@ test('the pages panel keeps the current page thumbnail in view', async ({ page }
   expect(await inView('Go to page 1')).toBe(true);
 });
 
+test('the pages panel is one tab stop that the arrow keys move through', async ({
+  page,
+  isMobile,
+}) => {
+  test.skip(isMobile, 'a phone closes the panel whenever a page is chosen');
+  await mockPuter(page);
+  await page.goto('/#library');
+  await openPdf(page, await multiPagePdf(20));
+  const panel = page.locator('#page-sidebar');
+  await expect(panel).toBeVisible();
+  const list = page.locator('.thumbnails');
+  const stops = () =>
+    list.evaluate(
+      (node) =>
+        [...node.querySelectorAll('button')].filter((button) => button.tabIndex >= 0).length,
+    );
+  await expect(page.locator('.thumbnail')).toHaveCount(20);
+  expect(await stops()).toBe(1);
+  const named = (name) => page.getByRole('button', { name, exact: true });
+  // Tab enters at the current page and leaves after it in one step.
+  await panel.getByRole('button', { name: 'Close pages panel', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  await expect(named('Go to page 1')).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(named('Go to page 2')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.page-caption')).toHaveText('Page 2 of 20');
+  await page.keyboard.press('End');
+  await expect(named('Go to page 20')).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(named('Page 20 actions')).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(named('Page 19 actions')).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(named('Go to page 19')).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(named('Go to page 1')).toBeFocused();
+  expect(await stops()).toBe(1);
+  await page.keyboard.press('Tab');
+  expect(await list.evaluate((node) => node.contains(document.activeElement))).toBe(false);
+  await page.keyboard.press('Shift+Tab');
+  await expect(named('Go to page 1')).toBeFocused();
+  // Away from the list, the tab stop follows the page on view.
+  const pageInput = page.getByLabel('Page number', { exact: true });
+  await pageInput.fill('7');
+  await pageInput.press('Enter');
+  await expect(page.locator('.page-caption')).toHaveText('Page 7 of 20');
+  await expect(named('Go to page 7')).toHaveAttribute('tabindex', '0');
+  expect(await stops()).toBe(1);
+});
+
 test('dropping text into a draft keeps its native insertion while file drops open PDFs', async ({
   page,
 }) => {
@@ -1512,6 +1563,46 @@ test('fit page shows the whole page inside the workspace and follows its height'
   await page.setViewportSize({ width: 1280, height: 500 });
   await expect.poll(fits).toBe(true);
   await expect(zoom).toHaveValue('page');
+});
+
+test('fit page keeps one zoom while scrolling through pages of different sizes', async ({
+  page,
+}) => {
+  await mockPuter(page);
+  await page.goto('/#library');
+  const doc = await PDFDocument.create();
+  for (const size of [
+    [400, 500],
+    [400, 500],
+    [900, 450],
+    [900, 450],
+    [400, 500],
+  ])
+    doc.addPage(size);
+  await openPdf(page, doc);
+  const workspace = page.locator('.workspace'),
+    third = page.locator('.page-slot[data-page="2"]');
+  await page.getByLabel('Zoom', { exact: true }).selectOption('page');
+  await expect(page.locator('.editor')).toHaveAttribute('aria-busy', 'false');
+  // Every page fits the view, the wide ones as well as the tall ones.
+  const view = await workspace.boundingBox();
+  for (const slot of await page.locator('.page-slot').all()) {
+    const box = await slot.boundingBox();
+    expect(box.width).toBeLessThanOrEqual(view.width);
+    expect(box.height).toBeLessThanOrEqual(view.height);
+  }
+  const width = (await third.boundingBox()).width;
+  // Scrolling the third page to the top makes it the current page without a new zoom
+  // moving it, or the pages after it, out from under the reader.
+  await workspace.evaluate((node) => {
+    const slot = node.querySelector('.page-slot[data-page="2"]');
+    node.scrollTop += slot.getBoundingClientRect().top - node.getBoundingClientRect().top - 12;
+  });
+  await expect(page.locator('.page-caption')).toHaveText('Page 3 of 5');
+  await expect(page.locator('.editor')).toHaveAttribute('aria-busy', 'false');
+  expect((await third.boundingBox()).width).toBeCloseTo(width, 0);
+  expect((await third.boundingBox()).y - view.y).toBeCloseTo(12, 0);
+  await expect(page.getByLabel('Zoom', { exact: true })).toHaveValue('page');
 });
 
 /** Choose a menu item by name from the menu bar, or from the folded phone menu. */
@@ -2188,4 +2279,48 @@ test.describe('at the narrow layout breakpoint', () => {
       'false',
     );
   });
+});
+
+test('choosing several PDFs opens the first and says what became of the others', async ({
+  page,
+}) => {
+  await mockPuter(page);
+  await page.goto('/#library');
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: /Open a PDF/ }).click();
+  await (
+    await chooser
+  ).setFiles([
+    {
+      name: 'first.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(await (await multiPagePdf(2)).save()),
+    },
+    {
+      name: 'second.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from(await (await multiPagePdf(5)).save()),
+    },
+  ]);
+  await expect(page.locator('.page-caption')).toHaveText('Page 1 of 2');
+  await expect(page.locator('#toast')).toHaveText(
+    'Opened first.pdf. One PDF opens at a time; to put several files into one PDF, use Combine files in Tools.',
+  );
+});
+
+test('an error message stays until the reader carries on', async ({ page }) => {
+  await mockPuter(page);
+  await page.goto('/#library');
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: /Open a PDF/ }).click();
+  await (
+    await chooser
+  ).setFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('not a PDF') });
+  const toast = page.locator('#toast');
+  await expect(toast).toHaveText('Choose a PDF, or PNG and JPEG pictures.');
+  // Longer than an ordinary message lasts: an error waits to be read.
+  await page.waitForTimeout(7000);
+  await expect(toast).toBeVisible();
+  await page.getByRole('searchbox', { name: 'Search PDFs' }).click();
+  await expect(toast).toBeHidden();
 });

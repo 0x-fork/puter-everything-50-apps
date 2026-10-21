@@ -31,11 +31,21 @@ export function createAttachmentsPanel({ onAdd, onSave, onRemove, canEdit }) {
       this.count = entries.length;
       empty.hidden = entries.length > 0;
       addButton.disabled = !canEdit();
+      // The rows are drawn again after every change to the PDF. A row button with the focus
+      // (Remove, just confirmed, above all) hands it to the same button of the same file, or
+      // of the file now in its place, rather than dropping it on the page.
+      const rows = () => [...list.children];
+      const focusedRow = rows().findIndex((row) => row.contains(document.activeElement));
+      const focusedKey = rows()[focusedRow]?.dataset.key;
+      const focusedButton =
+        focusedRow < 0
+          ? -1
+          : [...rows()[focusedRow].querySelectorAll('button')].indexOf(document.activeElement);
       list.replaceChildren(
         ...entries.map(([key, info]) =>
           el(
             'li',
-            { class: 'attachment-row' },
+            { class: 'attachment-row', 'data-key': key },
             el('span', { class: 'attachment-icon', 'aria-hidden': 'true' }, icon('FileText', 18)),
             el(
               'span',
@@ -61,6 +71,17 @@ export function createAttachmentsPanel({ onAdd, onSave, onRemove, canEdit }) {
           ),
         ),
       );
+      if (focusedRow >= 0 && document.activeElement === document.body) {
+        const row =
+          rows().find((next) => next.dataset.key === focusedKey) ||
+          rows()[Math.min(focusedRow, rows().length - 1)];
+        const same = row?.querySelectorAll('button')[focusedButton];
+        const target =
+          (same && !same.disabled && same) ||
+          row?.querySelector('button:not(:disabled)') ||
+          (!addButton.disabled && addButton);
+        target?.focus({ preventScroll: true });
+      }
       return entries.length;
     },
   };
@@ -84,6 +105,7 @@ export function createLayersPanel({ onToggle }) {
     if (!group) return null;
     const input = el('input', {
       type: 'checkbox',
+      'data-id': id,
       checked: group.visible !== false,
       onchange: () => onToggle(id, input.checked),
     });
@@ -109,6 +131,11 @@ export function createLayersPanel({ onToggle }) {
     el: root,
     /** Show the layers of a configuration; resolves with whether there are any. */
     show(next) {
+      // The list is drawn again after every change to the PDF (an Undo pressed on a switch,
+      // say); the focused switch is drawn again with the focus.
+      const focusedId = tree.contains(document.activeElement)
+        ? document.activeElement.dataset.id
+        : null;
       config = next;
       const groups = config ? [...config] : [];
       if (!groups.length) {
@@ -118,6 +145,10 @@ export function createLayersPanel({ onToggle }) {
       const order = config.getOrder?.();
       const rows = order?.length ? walk(order) : groups.map(([id]) => row(id, 0));
       tree.replaceChildren(...rows);
+      if (focusedId != null && document.activeElement === document.body)
+        [...tree.querySelectorAll('input')]
+          .find((input) => input.dataset.id === focusedId)
+          ?.focus({ preventScroll: true });
       return true;
     },
   };

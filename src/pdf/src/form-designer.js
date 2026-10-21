@@ -26,6 +26,11 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
   let fields = [];
   let selected = null; // `${name}#${widgetIndex}`
   let drag = null;
+  // The box to focus once the fields are redrawn after a keyboard action: the field nudged or
+  // edited, or after a deletion its neighbor, so the focus does not fall back to the page.
+  let refocus = null,
+    // The field whose action set it: the focus may come back there first (a dialog closing).
+    refocusFrom = null;
   const keyOf = (field) => `${field.name}#${field.widgetIndex}`;
 
   /** The field's box on screen, from its PDF rectangle. */
@@ -76,6 +81,7 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    refocus = null;
     select(field);
     const box = screenBox(field);
     drag = { field, node, mode, x: e.clientX, y: e.clientY, box, moved: false, id: e.pointerId };
@@ -110,15 +116,18 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
     viewport = nextViewport;
     root.replaceChildren(
       ...fields.map((field) => {
+        // The buttons of a radio group share its name; their export values tell them apart.
+        const option =
+          field.type === 'radio' && field.props?.exportValue ? `: ${field.props.exportValue}` : '';
         const node = el(
           'button',
           {
             type: 'button',
             class: `designer-field type-${field.type}`,
             'data-key': keyOf(field),
-            'aria-label': `${fieldTypeLabel(field.type)} ${field.name}`,
+            'aria-label': `${fieldTypeLabel(field.type)} ${field.name}${option}`,
             'aria-pressed': String(keyOf(field) === selected),
-            title: `${field.name} (${fieldTypeLabel(field.type)}). Double-click for properties.`,
+            title: `${field.name}${option} (${fieldTypeLabel(field.type)}). Double-click for properties.`,
             onpointerdown: (e) => startDrag(e, field, node, 'move'),
             onpointermove: moveDrag,
             onpointerup: endDrag,
@@ -127,21 +136,37 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
             onkeydown: (e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
+                refocus = refocusFrom = keyOf(field);
                 onOpen(field);
               } else if (e.key === 'Delete' || e.key === 'Backspace') {
                 e.preventDefault();
+                const index = fields.indexOf(field);
+                const neighbor = fields[index + 1] ?? fields[index - 1];
+                refocus = neighbor ? keyOf(neighbor) : null;
+                refocusFrom = keyOf(field);
                 onDelete(field);
               } else if (e.key.startsWith('Arrow')) {
-                // Arrow keys nudge a point at a time; Shift moves ten.
+                // Arrow keys nudge a point at a time in the direction they point on screen,
+                // also on turned pages; Shift moves ten.
                 e.preventDefault();
                 const step = e.shiftKey ? 10 : 1;
                 const { x, y, width, height } = field.rect;
-                const dx = { ArrowLeft: -step, ArrowRight: step }[e.key] || 0,
-                  dy = { ArrowDown: -step, ArrowUp: step }[e.key] || 0;
+                const sx = { ArrowLeft: -1, ArrowRight: 1 }[e.key] || 0,
+                  sy = { ArrowUp: -1, ArrowDown: 1 }[e.key] || 0;
+                const [ox, oy] = viewport.convertToPdfPoint(0, 0);
+                const [px, py] = viewport.convertToPdfPoint(sx, sy);
+                const length = Math.hypot(px - ox, py - oy) || 1;
+                const dx = Math.round(((px - ox) / length) * step * 1000) / 1000,
+                  dy = Math.round(((py - oy) / length) * step * 1000) / 1000;
+                refocus = refocusFrom = keyOf(field);
                 onMove(field, { x: x + dx, y: y + dy, width, height });
               }
             },
-            onfocus: () => select(field),
+            onfocus: () => {
+              // Moving on to another field drops a pending return of the focus elsewhere.
+              if (refocus && ![refocus, refocusFrom].includes(keyOf(field))) refocus = null;
+              select(field);
+            },
           },
           el('span', { class: 'designer-name' }, field.name),
           el('span', {
@@ -155,6 +180,11 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
         return node;
       }),
     );
+    const active = document.activeElement;
+    if (refocus && (active === document.body || !active || root.contains(active))) {
+      root.querySelector(`[data-key="${CSS.escape(refocus)}"]`)?.focus({ preventScroll: true });
+      refocus = null;
+    }
   }
 
   return {
@@ -166,6 +196,13 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
     },
     get selected() {
       return fields.find((field) => keyOf(field) === selected) || null;
+    },
+    /** A field took another name: its box keeps the selection and gets the pending focus. */
+    renamed(from, to) {
+      const swap = (key) =>
+        key?.startsWith(`${from}#`) ? `${to}#${key.slice(from.length + 1)}` : key;
+      refocus = swap(refocus);
+      selected = swap(selected);
     },
     focusField(name) {
       const field = fields.find((entry) => entry.name === name);

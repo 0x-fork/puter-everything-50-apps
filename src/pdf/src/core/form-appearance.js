@@ -11,6 +11,7 @@ import {
   PDFString,
   PDFStream,
   PDFTextField,
+  TextAlignment,
 } from 'pdf-lib';
 import {
   defaultTextFieldAppearanceProvider,
@@ -19,7 +20,7 @@ import {
   defaultRadioGroupAppearanceProvider,
   defaultButtonAppearanceProvider,
 } from './appearance-providers.js';
-import { choiceOptions, choiceValues, textValue } from './form-values.js';
+import { choiceOptions, selectedChoices, textValue } from './form-values.js';
 import { listAppearance } from './list-appearance.js';
 import { retainCryptFilter, withoutCryptFilter } from './stream-filters.js';
 
@@ -36,13 +37,13 @@ export function preserveFieldAppearance(field, form) {
 
 /** Appearance text uses display labels; the PDF's stored values remain export codes. */
 export function choiceAppearanceProvider(field, options = choiceOptions(field), labels) {
+  // Options sharing an export value are highlighted or shown by the one /I names.
+  const selected = selectedChoices(field, options);
   if (field instanceof PDFOptionList) {
-    const selected = choiceValues(field);
-    return (source, widget, font) => listAppearance(source, widget, font, options, selected);
+    const rows = new Set(selected.map(({ index }) => index));
+    return (source, widget, font) => listAppearance(source, widget, font, options, rows);
   }
-  labels ??= choiceValues(field).map(
-    (value) => options.find((option) => option.value === value)?.label ?? value,
-  );
+  labels ??= selected.map(({ key, index }) => options[index]?.label ?? key);
   return (source, widget, font) => {
     const display = Object.create(source);
     display.getSelected = () => labels;
@@ -54,7 +55,21 @@ export function choiceAppearanceProvider(field, options = choiceOptions(field), 
 function textAppearanceProvider(source, widget, font) {
   const display = Object.create(source);
   const value = textValue(source);
-  display.getText = () => (source.isPassword() ? '*'.repeat(Array.from(value).length) : value);
+  let text = source.isPassword() ? '*'.repeat(Array.from(value).length) : value;
+  if (source.isCombed()) {
+    // pdf-lib fills comb cells from the first one. Centered and right-aligned combs start
+    // further along by whole cells, as Acrobat and PDF.js draw them; blank cells stay empty.
+    const free = (source.getMaxLength() ?? 0) - text.length;
+    const alignment = source.getAlignment();
+    const skip =
+      alignment === TextAlignment.Right
+        ? free
+        : alignment === TextAlignment.Center
+          ? Math.floor(free / 2)
+          : 0;
+    if (skip > 0) text = ' '.repeat(skip) + text;
+  }
+  display.getText = () => text;
   return defaultTextFieldAppearanceProvider(display, widget, font);
 }
 
@@ -130,6 +145,13 @@ function appearanceStreams(widget) {
 /** All regeneration paths, including pdf-lib's implicit save, use the same form semantics. */
 export function updateFieldAppearance(field, form, font, provider) {
   preservedAppearances.get(form)?.delete(field.ref);
+  // pdf-lib's drawing code renames the default appearance's font after the font it drew with
+  // (an embedded face, or a placeholder for check boxes), which the form's resources do not
+  // list. Other viewers redraw edits from DA, so it keeps naming the field's own font.
+  const DA = PDFName.of('DA');
+  const defaults = [field.acroField.dict, ...field.acroField.getWidgets().map((w) => w.dict)].map(
+    (dict) => [dict, dict.get(DA)],
+  );
   prepareFieldAppearance(field, form);
   const protectedWidgets = field.acroField.getWidgets().flatMap((widget) => {
     const sources = appearanceStreams(widget);
@@ -147,6 +169,7 @@ export function updateFieldAppearance(field, form, font, provider) {
   else if (field instanceof PDFButton)
     field.updateAppearances(font, defaultButtonAppearanceProvider);
   else field.defaultUpdateAppearances(font);
+  for (const [dict, value] of defaults) value ? dict.set(DA, value) : dict.delete(DA);
   for (const { widget, sources } of protectedWidgets) {
     for (const { kind, state, stream } of appearanceStreams(widget)) {
       // Retained rollover/down drawings may still share the old stream with another field.

@@ -1,11 +1,11 @@
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'virtual:pdf-worker-url';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString } from 'pdf-lib';
 import { savePdf } from './core/version.js';
 import { indexPageText, searchQuery } from './core/search.js';
 import { inspectText, matrix, textColor } from './core/text-edit.js';
 import { groupTextRuns, replaceTextGroup } from './core/text-group.js';
-import { textLineInput } from './text-line-input.js';
+import { draftText, textLineInput } from './text-line-input.js';
 import { groupTextParagraphs } from './core/text-paragraph.js';
 import { textPositionControls } from './text-position.js';
 import { placeTextCaret } from './text-caret.js';
@@ -29,7 +29,8 @@ import { signatureDialog } from './signature-dialog.js';
 import { drawSignature } from './core/signature.js';
 import { enableThumbnailReorder } from './page-organizer.js';
 import { addNote, listNotes, editNote, NOTE_SIZE } from './core/notes.js';
-import { createOutlinePanel, destinationPage } from './outline.js';
+import { speechChunks } from './core/speech.js';
+import { createOutlinePanel, destinationPage, destinationTarget } from './outline.js';
 import { createCommentsPanel } from './comments.js';
 import { createAttachmentsPanel, createLayersPanel } from './side-panels.js';
 import { createSignaturesPanel, createSignatureBar } from './signatures-panel.js';
@@ -58,6 +59,7 @@ import {
   exportXfdf,
   importXfdf,
   exportCommentSummary,
+  annotationAccepts,
   REVIEW_STATES,
 } from './core/annotations.js';
 import { ensureStyledFontFaces, ensureKoreanFontFaces, koreanDraftFace } from './text-fonts.js';
@@ -121,10 +123,13 @@ import {
   rotatePage,
   rotateAllPages,
   deletePage,
+  deletePages as deleteDocumentPages,
   movePage,
+  reorderPages,
   insertBlankPage,
   insertPdfPages,
   duplicatePage,
+  duplicatePages,
   addText,
   textVariant,
   hasKoreanText,
@@ -134,6 +139,9 @@ import {
   normalizeRect,
   listFields,
   formButtonSelections,
+  formFieldTooltips,
+  radioButtonChoices,
+  sharedChoiceSelections,
   fillFields,
   MAX_FILE_SIZE,
   MAX_IMAGE_SIZE,
@@ -157,6 +165,14 @@ const pdfWorker = () => {
     });
   }
   return sharedWorker;
+};
+/**
+ * A PDF.js page's visible area in its own user units, which its text is measured in. Viewports
+ * are in points, a page's UserUnit times larger along each side.
+ */
+const userArea = (pdfPage) => {
+  const [x0, y0, x1, y1] = pdfPage.view;
+  return Math.abs((x1 - x0) * (y1 - y0));
 };
 const loadPdf = (bytes) =>
   pdfjs.getDocument({
@@ -300,6 +316,8 @@ export function createEditor({
   };
   // Comments drawn as annotations: text boxes, callouts, shapes, and the pencil.
   const COMMENT_TOOLS = ['textbox', 'callout', 'cshape', 'pencil', 'measure'];
+  // Freehand strokes, crops, and measurements have nothing to place at the page center.
+  const UNPLACEABLE = ['ink', 'crop', 'pencil', 'measure'];
   let commentSize = 12;
   const colorGroup = () =>
     tool === 'highlight'
@@ -533,20 +551,24 @@ export function createEditor({
   /** The zoom for the current scale mode, from the page's natural size and the workspace. */
   function computeZoom(natural, mode = scaleMode) {
     if (mode === 'fit' && (stack.continuous || stack.twoUp)) natural = stack.widest(natural);
+    else if (mode === 'page' && stack.continuous) natural = stack.largest(natural);
     else if (mode === 'page' && stack.twoUp)
-      natural = { width: natural.width * 2 + 12, height: natural.height };
+      natural = { width: natural.width * 2, height: natural.height };
     const width = workspace.clientWidth,
       height = workspace.clientHeight;
     // Room on both sides for the floating quick tools, so they never cover a fitted page; on
     // phones the tools sit in a row above the page instead.
     const gutter = window.matchMedia('(max-width: 760px)').matches || width < 400 ? 28 : 120;
-    if (mode === 'fit') return Math.min(1.5, Math.max(0.15, (width - gutter) / natural.width));
+    // Side by side, the 12px gap between the pages is not zoomed, and each page is sized in
+    // whole pixels: an even width keeps two rounded halves from overflowing it.
+    const room = stack.twoUp ? 2 * Math.floor((width - gutter - 12) / 2) : width - gutter;
+    if (mode === 'fit') return Math.min(1.5, Math.max(0.15, room / natural.width));
     if (mode === 'page') {
       // The sheet shares the workspace height with its padding and the caption beneath it.
       const vertical = width < 600 ? 70 : 92;
       return Math.max(
         0.15,
-        Math.min(3, (width - gutter) / natural.width, (height - vertical) / natural.height),
+        Math.min(3, room / natural.width, (height - vertical) / natural.height),
       );
     }
     return Number(mode);
@@ -632,9 +654,9 @@ export function createEditor({
   });
   // The outline (bookmarks) shares the panel with the pages when the PDF has one.
   const outline = createOutlinePanel({
-    onNavigate: (index) => {
+    onNavigate: (index, target) => {
       if (window.matchMedia('(max-width: 760px)').matches) hideSidebar();
-      navigate(index);
+      showDestination(target || { page: index, left: null, top: null });
     },
     onMenu: (entry, e) =>
       openMenu({
@@ -695,6 +717,7 @@ export function createEditor({
         // Text boxes, shapes, and other drawn comments are selected in their own layer.
         kind: comment.reveal || 'annotation',
         page: comment.page,
+        rect: comment.rect,
         focusFrom,
         noteOrdinal,
       });
@@ -748,8 +771,12 @@ export function createEditor({
   }
   // The PDF's layers; switching one changes the view of every page, not the file.
   let documentLayers = null;
+  // The reader's own switches, by layer, carried over to the configuration each reload
+  // of the PDF (after every edit) starts afresh from the file's defaults.
+  const layerChoices = new Map();
   const layers = createLayersPanel({
     onToggle: safe(async (id, visible) => {
+      layerChoices.set(id, visible);
       const config = await documentLayers;
       config?.setVisibility(id, visible);
       if (destroyed) return;
@@ -934,6 +961,9 @@ export function createEditor({
     sidebarTitle.textContent = title;
     // One landmark holds all three panels, so its name follows the tab that is open.
     sidebar.setAttribute('aria-label', `${title} panel`);
+    const close = `Close ${title.toLowerCase()} panel`;
+    sidebarClose.setAttribute('aria-label', close);
+    sidebarClose.title = close;
     sidebarTabs.querySelectorAll('[role="tab"]').forEach((tab) => {
       const on = tab.dataset.tab === id;
       tab.setAttribute('aria-selected', String(on));
@@ -952,6 +982,25 @@ export function createEditor({
     const pending = revealComment;
     revealComment = null;
     if (!pending || pending.page !== pageIndex || tool !== 'select') return;
+    await selectComment(pending);
+    // The page opens at its top, or stays where it was scrolled; the comment itself can be
+    // further down, or out to the side at a high zoom.
+    if (pending.rect && !destroyed && pageIndex === pending.page && viewport) {
+      const [x1, y1] = viewport.convertToViewportPoint(pending.rect[0], pending.rect[1]);
+      const [x2, y2] = viewport.convertToViewportPoint(pending.rect[2], pending.rect[3]);
+      const sheet = paper.getBoundingClientRect();
+      revealBox({
+        left: sheet.left + Math.min(x1, x2),
+        right: sheet.left + Math.max(x1, x2),
+        top: sheet.top + Math.min(y1, y2),
+        bottom: sheet.top + Math.max(y1, y2),
+        width: Math.abs(x2 - x1),
+        height: Math.abs(y2 - y1),
+      });
+      stack.quiet();
+    }
+  }
+  async function selectComment(pending) {
     const id = editorAnnotationId(pending.id);
     if (pending.kind === 'annotation') return annotationLayer.focus(id);
     const entry =
@@ -978,6 +1027,7 @@ export function createEditor({
       await openNoteEditor({ entry, canFocus });
     } else {
       pageImages.close();
+      annotationLayer.clear();
       selectedHighlight = entry;
       renderHighlightTargets();
       if (canFocus())
@@ -987,15 +1037,11 @@ export function createEditor({
     }
   }
   // The navigation panels open beside the right-hand rail, as in desktop PDF editors.
+  const sidebarClose = iconButton('Close pages panel', 'X', () => toggleSidebar(false));
   const sidebar = el(
     'aside',
     { id: 'page-sidebar', class: 'page-sidebar', 'aria-label': 'Pages panel' },
-    el(
-      'div',
-      { class: 'sidebar-head' },
-      sidebarTitle,
-      iconButton('Close pages panel', 'X', () => toggleSidebar(false)),
-    ),
+    el('div', { class: 'sidebar-head' }, sidebarTitle, sidebarClose),
     thumbnails,
     outline.el,
     comments.el,
@@ -1026,7 +1072,29 @@ export function createEditor({
   const properties = createPropertiesPanel();
   // Comments drawn as annotations, selectable in Select.
   const annotationLayer = createAnnotationLayer({
-    onSelect: (entry) => showAnnotationProperties(entry),
+    onSelect: (entry, { refresh = false } = {}) => {
+      if (!entry || refresh) return showAnnotationProperties(entry);
+      // Choosing a comment finishes drafts and lets go of a picture, shape, or markup, as
+      // choosing any other object does. A draft that cannot be saved keeps the selection.
+      safe(() =>
+        selectionProperties(async () => {
+          cancelTextSelection();
+          try {
+            await finishDrafts();
+          } catch (error) {
+            annotationLayer.clear();
+            throw error;
+          }
+          pageImages.close();
+          if (selectedHighlight) {
+            selectedHighlight = null;
+            renderHighlightTargets();
+          }
+          const chosen = annotationLayer.selected;
+          if (chosen) showAnnotationProperties(chosen);
+        }),
+      )();
+    },
     onMove: (entry, rect) =>
       safe(() =>
         mutate((doc) => editAnnotation(doc, pageIndex, entry.id, { rect }), null, 'annotate', {
@@ -1082,6 +1150,8 @@ export function createEditor({
       panel ? properties.show('object', title, panel) : properties.clear('object'),
     beforeSelect: async () => {
       cancelTextSelection();
+      // A chosen picture or shape lets go of a selected comment, as other objects do.
+      annotationLayer.clear();
       await finishDrafts(true);
       selectedHighlight = null;
       renderHighlightTargets();
@@ -1166,10 +1236,8 @@ export function createEditor({
     duplicate: (indices) =>
       mutate(
         async (doc) => {
-          for (const i of [...indices].sort((a, b) => b - a)) {
-            await duplicatePage(doc, i);
-            if (i < pageIndex) pageIndex++;
-          }
+          await duplicatePages(doc, indices);
+          for (const i of new Set(indices)) if (i < pageIndex) pageIndex++;
         },
         indices.length === 1 ? 'Page duplicated.' : `${indices.length} pages duplicated.`,
         'assemble',
@@ -1231,10 +1299,20 @@ export function createEditor({
     true,
   );
   const accessibleText = el('div', { class: 'sr-only', role: 'region', 'aria-label': 'Page text' });
+  // A touch screen is tapped, not clicked (a double tap edits text as a double click does), so
+  // the hints use its words there.
+  const touchScreen = window.matchMedia?.('(hover: none) and (pointer: coarse)');
+  const forPointer = (text) =>
+    touchScreen?.matches
+      ? text
+          .replace(/double-click/g, 'double-tap')
+          .replace(/\bClick\b/g, 'Tap')
+          .replace(/\bclick\b/g, 'tap')
+      : text;
   const hint = el(
     'span',
     { class: 'tool-hint' },
-    'Click to select, drag to move, or double-click text to edit.',
+    forPointer('Click to select, drag to move, or double-click text to edit.'),
   );
   const colorInput = el('input', {
     type: 'color',
@@ -1378,7 +1456,7 @@ export function createEditor({
         !textOptions;
     widthInput.hidden = !['shape', 'ink'].includes(tool);
     toolOptions.hidden = (tool === 'select' || tool === 'hand') && !edit;
-    centerButton.hidden = !!edit || tool === 'ink' || tool === 'crop';
+    centerButton.hidden = !!edit || UNPLACEABLE.includes(tool);
     if (tool === 'select') colorInput.hidden = !edit;
   }
   function toggleTextStyle(key) {
@@ -1427,8 +1505,10 @@ export function createEditor({
     ellipse: 'Drag to draw an ellipse. Hold Shift for a circle.',
     line: 'Drag to draw a line. Hold Shift to snap to 45 degrees.',
     arrow: 'Drag from the tail to the tip of the arrow. Hold Shift to snap to 45 degrees.',
-    check: 'Click to place a check mark, or drag to size it. Hold Shift for a square box.',
-    cross: 'Click to place a cross, or drag to size it. Hold Shift for a square box.',
+    check: forPointer(
+      'Click to place a check mark, or drag to size it. Hold Shift for a square box.',
+    ),
+    cross: forPointer('Click to place a cross, or drag to size it. Hold Shift for a square box.'),
   };
   /** Marks placed with a click, in points. */
   const MARK_SIZE = 14;
@@ -1544,7 +1624,9 @@ export function createEditor({
   const measureHint = () =>
     measureMode.value === 'distance'
       ? 'Drag to measure a distance.'
-      : `Click each corner of the ${measureMode.value === 'area' ? 'area' : 'path'}; double-click or press Enter to finish, Escape to start over.`;
+      : forPointer(
+          `Click each corner of the ${measureMode.value === 'area' ? 'area' : 'path'}; double-click or press Enter to finish, Escape to start over.`,
+        );
   // Text markup: a highlight, an underline, or a strikethrough, each with its usual color.
   const MARKUP_COLORS = { highlight: '#f2c438', underline: '#2d9d5c', strikeout: '#dc3c3c' };
   const markupKind = el(
@@ -2260,7 +2342,11 @@ export function createEditor({
       pdf = next;
       // One layer configuration per document, shared by every picture of its pages, so the
       // Layers panel's switches apply everywhere.
-      documentLayers = next.getOptionalContentConfig({ intent: 'display' });
+      documentLayers = next.getOptionalContentConfig({ intent: 'display' }).then((config) => {
+        for (const [id, visible] of layerChoices)
+          if (config.getGroup(id)) config.setVisibility(id, visible);
+        return config;
+      });
       // Keep the count available while the renderer is replaced after an edit, so
       // navigation requests can still be bounded against the displayed document.
       pageCount = pdf.numPages;
@@ -2465,12 +2551,51 @@ export function createEditor({
         editDocument = doc;
         buttonSelections = formButtonSelections(doc, ambiguousButtons);
       }
+      // A tooltip kept on a field above its widgets needs the document, when it is loaded.
+      const tooltips =
+        editDocument && annotations.some((a) => a.fieldName && !a.alternativeText)
+          ? formFieldTooltips(editDocument)
+          : undefined;
+      // Radio buttons that share an export value: PDF.js reports which value is on, not which
+      // button, so the document tells them apart. It is read for them, or when already loaded.
+      const radios = annotations.filter((a) => a.radioButton && a.fieldName);
+      const sharedRadio = radios.some((a, i) =>
+        radios.some(
+          (b, j) => j > i && b.fieldName === a.fieldName && b.buttonValue === a.buttonValue,
+        ),
+      );
+      let radioChoices;
+      if (radios.length && (editDocument || sharedRadio)) {
+        const doc =
+          editDocument || (await PDFDocument.load(session.bytes, { updateMetadata: false }));
+        if (token !== pageRenderGeneration || destroyed) return;
+        editDocument = doc;
+        radioChoices = radioButtonChoices(doc);
+      }
+      // Likewise lists whose options share an export value: /I tells which one is chosen.
+      let listSelections;
+      if (
+        annotations.some(
+          (a) =>
+            a.fieldType === 'Ch' &&
+            new Set(a.options?.map((o) => o.exportValue)).size < (a.options?.length ?? 0),
+        )
+      ) {
+        const doc =
+          editDocument || (await PDFDocument.load(session.bytes, { updateMetadata: false }));
+        if (token !== pageRenderGeneration || destroyed) return;
+        editDocument = doc;
+        listSelections = sharedChoiceSelections(doc);
+      }
       pageForms.render(
         annotations,
         viewport,
         `${session.revision}:${pageIndex}`,
         layerConfig,
         buttonSelections,
+        tooltips,
+        radioChoices,
+        listSelections,
       );
       pageForms.setBusy(busy || !pageReady || !access().fill);
       pageForms.setEnabled(tool === 'select' && !preparing);
@@ -2535,6 +2660,9 @@ export function createEditor({
         .forEach((node, i) =>
           node.setAttribute('aria-current', i === pageIndex ? 'page' : 'false'),
         );
+      // Tabbing into the pages lands on the current one, unless the list has the focus.
+      if (!thumbnails.contains(document.activeElement))
+        setThumbnailStop(thumbnails.children[pageIndex]?.querySelector('.thumbnail'));
       if (revealedThumbnail !== pageIndex) revealThumbnail();
       // Re-renders of the same page (zoom, edits) must not repeat the announcement.
       const announcer = document.querySelector('#announcer');
@@ -2629,6 +2757,9 @@ export function createEditor({
       : null;
     const canvases = [...thumbnails.querySelectorAll('.thumb-paper canvas')];
     thumbnails.replaceChildren();
+    const stop = Number.isInteger(restore?.index)
+      ? Math.min(restore.index, pdf.numPages - 1)
+      : pageIndex;
     const thisPdf = pdf;
     // Crisp previews on dense screens, within roughly the same memory budget as the page canvas.
     const ratio = Math.max(
@@ -2688,6 +2819,7 @@ export function createEditor({
           'data-index': i,
           'aria-label': `Go to page ${i + 1}`,
           'aria-current': i === pageIndex ? 'page' : 'false',
+          tabindex: i === stop && !restore?.menu ? 0 : -1,
           onclick: () => {
             // On narrow screens the panel overlays the page, so choosing a page dismisses it.
             if (window.matchMedia('(max-width: 760px)').matches) hideSidebar();
@@ -2713,7 +2845,12 @@ export function createEditor({
             minWidth: 230,
           });
         },
-        { class: 'icon-btn thumb-menu', 'aria-haspopup': 'menu', 'aria-expanded': 'false' },
+        {
+          class: 'icon-btn thumb-menu',
+          'aria-haspopup': 'menu',
+          'aria-expanded': 'false',
+          tabindex: i === stop && restore?.menu ? 0 : -1,
+        },
       );
       const item = el(
         'div',
@@ -2745,6 +2882,38 @@ export function createEditor({
         ?.focus({ preventScroll: true });
     }
   }
+  /**
+   * The pages are one tab stop, however many there are: Up and Down move between them, Home
+   * and End to the first and last, and Right and Left between a page and its menu button.
+   */
+  function setThumbnailStop(target) {
+    if (!target || target.tabIndex === 0) return;
+    for (const node of thumbnails.querySelectorAll('[tabindex="0"]')) node.tabIndex = -1;
+    target.tabIndex = 0;
+  }
+  thumbnails.addEventListener('focusin', (e) =>
+    setThumbnailStop(e.target.closest?.('.thumbnail, .thumb-menu')),
+  );
+  thumbnails.addEventListener('keydown', (e) => {
+    const target = e.target.closest?.('.thumbnail, .thumb-menu');
+    if (!target || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const item = target.closest('.thumb-item'),
+      items = thumbnails.children,
+      index = Number(item.dataset.index),
+      menu = target.classList.contains('thumb-menu');
+    let next;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp')
+      next = items[index + (e.key === 'ArrowDown' ? 1 : -1)]?.querySelector(
+        menu ? '.thumb-menu' : '.thumbnail',
+      );
+    else if (e.key === 'Home' || e.key === 'End')
+      next = items[e.key === 'Home' ? 0 : items.length - 1]?.querySelector('.thumbnail');
+    else if (e.key === 'ArrowRight' && !menu) next = item.querySelector('.thumb-menu');
+    else if (e.key === 'ArrowLeft' && menu) next = item.querySelector('.thumbnail');
+    else return;
+    e.preventDefault();
+    next?.focus();
+  });
   // Pages can be dragged into a new order with a mouse or pen.
   const reorder = enableThumbnailReorder(thumbnails, {
     canDrag: () => !busy && pageReady && access().assemble,
@@ -2754,7 +2923,11 @@ export function createEditor({
     return Math.max(0, Math.min(pageCount - 1, Number.isFinite(index) ? Math.floor(index) : 0));
   }
   function navigateBy(direction) {
-    return navigate(clampPageIndex(pendingNavigation?.index ?? pageIndex) + direction);
+    const from = clampPageIndex(pendingNavigation?.index ?? pageIndex);
+    // Side by side, the next or previous page is the first of the next or previous pair; the
+    // other page of the pair on view is already in sight.
+    if (stack.twoUp) return navigate(Math.max(0, (Math.floor(from / 2) + direction) * 2));
+    return navigate(from + direction);
   }
   async function navigate(index, comment = null, { scroll = true } = {}) {
     if (destroyed || !pageCount) return false;
@@ -2796,6 +2969,26 @@ export function createEditor({
         updateStatus();
       }
     }
+  }
+  /**
+   * Go to a destination's page and, when it names a place there, bring that place to the top
+   * left of the view, as PDF readers do for bookmarks and links.
+   */
+  async function showDestination(target) {
+    const placed = target.left != null || target.top != null;
+    if ((target.page !== pageIndex || !placed) && !(await navigate(target.page))) return;
+    if (!placed || destroyed || pageIndex !== target.page || !viewport) return;
+    const [x0, , , y1] = viewport.viewBox;
+    const [x, y] = viewport.convertToViewportPoint(target.left ?? x0, target.top ?? y1);
+    const sheet = paper.getBoundingClientRect(),
+      view = workspace.getBoundingClientRect();
+    // On a page turned a quarter, the PDF's left and top run down and across the view.
+    const turned = viewport.rotation % 180 !== 0;
+    if ((turned ? target.left : target.top) != null)
+      workspace.scrollTop += sheet.top + y - view.top;
+    if ((turned ? target.top : target.left) != null)
+      workspace.scrollLeft += sheet.left + x - view.left;
+    stack.quiet();
   }
   async function toggleSidebar(show = editorRoot.classList.contains('hide-pages')) {
     // A docked panel changes the page's width, so open drafts are finished first; on narrow
@@ -2904,8 +3097,14 @@ export function createEditor({
       editorRoot.classList.remove('space-pan');
     }
   };
+  // A Space released while another window has the focus never comes back as a keyup here.
+  const releaseSpace = () => {
+    spaceHeld = false;
+    editorRoot.classList.remove('space-pan');
+  };
   window.addEventListener('keydown', onSpace);
   window.addEventListener('keyup', onSpace);
+  window.addEventListener('blur', releaseSpace);
   workspace.addEventListener(
     'pointerdown',
     (e) => {
@@ -3100,7 +3299,7 @@ export function createEditor({
     sizeInput.value = String(['textbox', 'callout'].includes(tool) ? commentSize : textSize);
     boldButton.hidden = italicButton.hidden = tool !== 'text';
     syncStyleButtons();
-    centerButton.hidden = tool === 'ink' || tool === 'crop';
+    centerButton.hidden = UNPLACEABLE.includes(tool);
     colorInput.hidden = ['crop', 'link', 'certsign', 'field'].includes(tool);
     cropMarginsButton.hidden = cropDoneButton.hidden = tool !== 'crop';
     color = toolColors[colorGroup()];
@@ -3127,6 +3326,7 @@ export function createEditor({
       field:
         'Drag a box where the field goes. Drag fields to move them; double-click one for its properties.',
     }[tool];
+    hint.textContent = forPointer(hint.textContent);
     syncStyleButtons();
     if (redacting()) {
       hint.textContent =
@@ -3298,6 +3498,7 @@ export function createEditor({
               const ordinal = highlights.indexOf(entry);
               await finishDrafts();
               pageImages.close();
+              annotationLayer.clear();
               // Finishing a related note may detach this reply and assign it a new ID.
               selectedHighlight = highlights.find((h) => h.id === entry.id) || highlights[ordinal];
               renderHighlightTargets();
@@ -3446,6 +3647,20 @@ export function createEditor({
   const pdfPoint = (p) => {
     const [x, y] = viewport.convertToPdfPoint(p.x, p.y);
     return { x, y };
+  };
+  /** Screen units per PDF unit on the page as shown. */
+  const screenUnit = () => {
+    const [ax, ay] = viewport.convertToViewportPoint(0, 0),
+      [bx, by] = viewport.convertToViewportPoint(1, 0);
+    return Math.hypot(bx - ax, by - ay);
+  };
+  /**
+   * The PDF rectangle `width` by `height` units that runs right and down from screen point `p`
+   * as the page is shown, so a box keeps its shape on a turned page.
+   */
+  const readerRect = (p, width, height) => {
+    const unit = screenUnit();
+    return normalizeRect(pdfPoint(p), pdfPoint({ x: p.x + width * unit, y: p.y + height * unit }));
   };
   overlay.addEventListener('pointerdown', (e) => {
     if (busy || !pageReady || gesture || !e.isPrimary || tool === 'select' || e.button !== 0)
@@ -3618,7 +3833,7 @@ export function createEditor({
   }
   overlay.addEventListener('pointermove', updateDrawingGesture);
   function updateDrawingModifier(e) {
-    if (e.key !== 'Shift' || gesture?.type !== 'shape' || e.isComposing) return;
+    if (e.key !== 'Shift' || !['shape', 'cshape'].includes(gesture?.type) || e.isComposing) return;
     const { pointerId, clientX, clientY } = gesture.event;
     updateDrawingGesture({ pointerId, clientX, clientY, shiftKey: e.shiftKey });
   }
@@ -3644,7 +3859,12 @@ export function createEditor({
       gesture = null;
       if (COMMENT_TOOLS.includes(g.type)) {
         clearOverlay();
-        await placeComment(g, screenPoint(e));
+        // A comment shape keeps the Shift constraint its preview showed.
+        const end =
+          g.type === 'cshape'
+            ? constrainShape(g.start, screenPoint(e), g.shape, e.shiftKey)
+            : screenPoint(e);
+        await placeComment(g, end);
       } else if (g.type === 'field') {
         clearOverlay();
         const end = screenPoint(e);
@@ -3748,10 +3968,12 @@ export function createEditor({
     revealComment = null;
     updateStatus();
     try {
-      const index = await destinationPage(thisPdf, link.dest);
+      const target = await destinationTarget(thisPdf, link.dest);
       if (destroyed || pdf !== thisPdf || pendingNavigation !== request) return;
-      if (index == null) toast('This link points nowhere in the PDF.');
-      else if (index !== pageIndex) await navigate(index);
+      if (!target) toast('This link points nowhere in the PDF.');
+      // A link to a place on this page scrolls there; one to the page itself has arrived.
+      else if (target.page !== pageIndex || target.left != null || target.top != null)
+        await showDestination(target);
     } finally {
       if (pendingNavigation === request) {
         pendingNavigation = null;
@@ -4625,6 +4847,7 @@ export function createEditor({
     await finishDrafts();
     if (destroyed || version !== textSelectionVersion || !['select', 'text'].includes(tool)) return;
     pageImages.close();
+    annotationLayer.clear();
     selectedHighlight = null;
     renderHighlightTargets();
     // A preceding edit reloads the PDF, so use the freshly indexed target.
@@ -4657,7 +4880,16 @@ export function createEditor({
           spellcheck: true,
           wrap: 'off',
         });
-    if (!run?.parts) input.value = run?.text || '';
+    if (!run?.parts) {
+      input.value = run?.text || '';
+      // Tabs from a copied table have no glyph in the text fonts; they paste as spaces.
+      input.addEventListener('paste', (e) => {
+        const text = e.clipboardData?.getData('text/plain') ?? '';
+        if (!text.includes('\t')) return;
+        e.preventDefault();
+        document.execCommand('insertText', false, draftText(text));
+      });
+    }
     Object.assign(input.style, {
       left: `${box.x}px`,
       top: `${box.y}px`,
@@ -4988,35 +5220,59 @@ export function createEditor({
       edit.handles.style[key] = edit.input.style[key];
   }
   async function placeCentered() {
+    // A box of this size in the middle of the page as it is shown, turned or not.
+    const centered = (width, height) => {
+      const unit = screenUnit();
+      return readerRect(
+        {
+          x: viewport.width / 2 - (width / 2) * unit,
+          y: viewport.height / 2 - (height / 2) * unit,
+        },
+        width,
+        height,
+      );
+    };
     if (tool === 'field') {
       if (busy || !pageReady) return;
-      const center = pdfPoint({ x: viewport.width / 2, y: viewport.height / 2 });
       const size = ['checkbox', 'radio'].includes(fieldType) ? [14, 14] : [160, 22];
-      await createField(
-        { x: center.x - size[0] / 2, y: center.y - size[1] / 2, width: size[0], height: size[1] },
-        pageIndex,
-      );
+      await createField(centered(...size), pageIndex);
       return;
     }
     if (tool === 'certsign') {
       if (busy || !pageReady) return;
-      const center = pdfPoint({ x: viewport.width / 2, y: viewport.height / 2 });
-      await signWithCertificate({
-        rect: { x: center.x - 100, y: center.y - 30, width: 200, height: 60 },
-        page: pageIndex,
-      });
+      await signWithCertificate({ rect: centered(200, 60), page: pageIndex });
       return;
     }
     if (tool === 'link') {
       if (busy || !pageReady) return;
-      const center = pdfPoint({ x: viewport.width / 2, y: viewport.height / 2 });
-      await placeLink({ x: center.x - 80, y: center.y - 14, width: 160, height: 28 }, pageIndex);
+      await placeLink(centered(160, 28), pageIndex);
       return;
     }
     if (!pageReady || busy) return;
     if (tool === 'text') return textDialog({ x: viewport.width * 0.25, y: viewport.height / 2 });
     if (tool === 'note')
       return openNoteEditor({ point: { x: viewport.width * 0.45, y: viewport.height * 0.45 } });
+    if (['textbox', 'callout', 'cshape'].includes(tool)) {
+      // As if clicked (a text box or callout) or dragged (a shape) about the page's middle.
+      const unit = screenUnit();
+      const start =
+        tool === 'textbox'
+          ? { x: viewport.width / 2 - 90 * unit, y: viewport.height / 2 - 25 * unit }
+          : { x: viewport.width * (tool === 'callout' ? 0.3 : 0.35), y: viewport.height * 0.5 };
+      const end =
+        tool === 'cshape' ? { x: viewport.width * 0.65, y: viewport.height * 0.6 } : start;
+      return placeComment(
+        {
+          type: tool,
+          start,
+          page: pageIndex,
+          hex: color,
+          width: stroke / viewport.userUnit,
+          commentKind: commentShape.value,
+        },
+        end,
+      );
+    }
     if (['highlight', 'shape'].includes(tool)) {
       const a = pdfPoint({ x: viewport.width * 0.25, y: viewport.height * 0.48 });
       const b = pdfPoint({
@@ -5255,6 +5511,7 @@ export function createEditor({
     await finishDrafts();
     if (busy || !pageReady || destroyed || (!point && !entry)) return;
     pageImages.close();
+    annotationLayer.clear();
     selectedHighlight = null;
     renderHighlightTargets();
     const textarea = el('textarea', {
@@ -5331,9 +5588,11 @@ export function createEditor({
       }
     });
     textarea.addEventListener('input', updateStatus);
+    // A new icon hangs right and down from the click as the page is shown, turned or not.
+    const corner = entry ? null : readerRect(point, NOTE_SIZE, NOTE_SIZE);
     noteEdit = {
       entry,
-      point: entry ? { x: entry.x, y: entry.y } : pdfPoint(point),
+      point: entry ? { x: entry.x, y: entry.y } : { x: corner.x, y: corner.y + corner.height },
       panel,
       textarea,
       color: colorPick,
@@ -5450,6 +5709,26 @@ export function createEditor({
         entry.ordinal,
         document.activeElement === document.body || document.activeElement === priorFocus,
       );
+    revealPlaced();
+  }
+  /**
+   * A signature or stamp lands in the middle of the page, which on a phone can be below what
+   * is in view once the selection's properties dock opens; the view follows it there.
+   */
+  function revealPlaced() {
+    const frame = editorRoot.querySelector('.image-move');
+    if (!frame) return;
+    // Only the page view scrolls, and the corner handles that stand out past the edges show too.
+    const box = frame.getBoundingClientRect(),
+      margin = 16;
+    revealBox({
+      top: box.top - margin,
+      bottom: box.bottom + margin,
+      left: box.left - margin,
+      right: box.right + margin,
+      width: box.width + 2 * margin,
+      height: box.height + 2 * margin,
+    });
   }
   /** A stamp lands centered like a signature and is selected for moving and resizing. */
   async function insertStamp() {
@@ -5482,6 +5761,7 @@ export function createEditor({
         entry.ordinal,
         document.activeElement === document.body || document.activeElement === priorFocus,
       );
+    revealPlaced();
   }
   /**
    * The working copy for a dialog to read, or null when the editor closed or the document
@@ -5525,7 +5805,11 @@ export function createEditor({
     fields.forEach((field, i) => {
       if (field.type === 'unsupported') {
         form.append(
-          el('p', { class: 'muted' }, `${field.name}: this field type is not editable here.`),
+          el(
+            'p',
+            { class: 'muted' },
+            `${field.tooltip || field.name}: this field type is not editable here.`,
+          ),
         );
         return;
       }
@@ -5603,7 +5887,12 @@ export function createEditor({
         el(
           'div',
           { class: field.type === 'checkbox' ? 'checkbox-row' : 'field' },
-          el('label', { for: id }, field.name + (field.readOnly ? ' (read only)' : '')),
+          // A tooltip is the form author's label for people; field names are often codes.
+          el(
+            'label',
+            { for: id, title: field.tooltip ? field.name : null },
+            (field.tooltip || field.name) + (field.readOnly ? ' (read only)' : ''),
+          ),
           control,
         ),
       );
@@ -7683,10 +7972,8 @@ export function createEditor({
       return false;
     await mutate(
       (doc) => {
-        for (const index of list) {
-          deletePage(doc, index);
-          if (index < pageIndex) pageIndex--;
-        }
+        deleteDocumentPages(doc, list);
+        for (const index of list) if (index < pageIndex) pageIndex--;
         pageIndex = Math.min(pageIndex, doc.getPageCount() - 1);
       },
       `${list.length} pages deleted.`,
@@ -7702,14 +7989,7 @@ export function createEditor({
     if (order.every((i, k) => i === k)) return;
     return mutate(
       (doc) => {
-        // Bring each page to its place in turn; earlier places are already settled.
-        const current = [...Array(count).keys()];
-        order.forEach((page, target) => {
-          const from = current.indexOf(page);
-          if (from === target) return;
-          movePage(doc, from, target);
-          current.splice(target, 0, ...current.splice(from, 1));
-        });
+        reorderPages(doc, order);
         pageIndex = order.indexOf(pageIndex);
       },
       moving.length === 1 ? 'Page moved.' : `${moving.length} pages moved.`,
@@ -7970,14 +8250,15 @@ export function createEditor({
     const { sanitizeDocument, SANITIZE_DEFAULTS } = await loadSanitize();
     const sanitize = el('input', { type: 'checkbox', id: 'redact-sanitize', checked: true });
     const apply = safe(async () => {
-      let report = null;
-      await mutateDialog(
+      let report = null,
+        sanitized = null;
+      const committed = await mutateDialog(
         d,
         async (doc) => {
           report = await applyRedactions(doc, { codec: createImageCodec(loadPdf) });
           if (report === false) throw new Error('There are no redaction marks to apply.');
           if (sanitize.checked)
-            await sanitizeDocument(doc, {
+            sanitized = await sanitizeDocument(doc, {
               ...SANITIZE_DEFAULTS,
               comments: false,
               formFields: false,
@@ -7985,7 +8266,7 @@ export function createEditor({
         },
         null,
       );
-      if (!report || destroyed) return;
+      if (!committed || !report || destroyed) return;
       const removed = [
         report.text && `${report.text} characters`,
         report.images.redacted + report.images.removed &&
@@ -7993,8 +8274,21 @@ export function createEditor({
         report.paths && `${report.paths} drawings`,
         report.annotations && `${report.annotations} annotations`,
       ].filter(Boolean);
-      toast(
-        `Redactions applied${removed.length ? `: removed ${removed.join(', ')}` : ''}. Save or download to keep the redacted file.`,
+      const summary = `Redactions applied${removed.length ? `: removed ${removed.join(', ')}` : ''}. Save or download to keep the redacted file.`;
+      const warnings = [...new Set([...report.warnings, ...(sanitized?.warnings || [])])];
+      if (!warnings.length) return toast(summary);
+      // What could not be handled as usual must not pass by in a brief message: someone could
+      // share the file believing everything under the marks is gone.
+      const notice = modal(
+        'Check the redacted PDF',
+        el(
+          'div',
+          { class: 'stack' },
+          el('p', {}, summary),
+          el('p', {}, 'Not everything went as usual. Check these before you share the file:'),
+          el('ul', {}, ...warnings.map((warning) => el('li', {}, warning))),
+        ),
+        [button('OK', null, () => notice.close(), 'btn primary')],
       );
     });
     const d = modal(
@@ -8005,7 +8299,7 @@ export function createEditor({
         el(
           'p',
           {},
-          `${redactionMarks.length ? `${redactionMarks.length} ${redactionMarks.length === 1 ? 'mark' : 'marks'} will be applied. ` : ''}Text, pictures, drawings, links, comments, and form fields under each mark are removed from the PDF, not just covered.`,
+          `${redactionMarks.length ? `${redactionMarks.length} ${redactionMarks.length === 1 ? 'mark' : 'marks'} will be applied. ` : ''}Text, pictures, drawings, links, and comments under each mark are removed from the PDF, not just covered. A form field under a mark is removed everywhere it appears.`,
         ),
         el(
           'label',
@@ -8175,9 +8469,13 @@ export function createEditor({
       d.setAttribute('aria-busy', 'true');
       try {
         const doc = await PDFDocument.create();
+        // The language screen readers read the text in, when every PDF combined names the same.
+        const languages = new Set();
+        const languageOf = (source) =>
+          languages.add(source.catalog.lookup(PDFName.of('Lang'))?.decodeText?.() || null);
         for (const part of parts) {
           if (!d.open) return;
-          if (part.kind === 'pdf') await insertPdfPages(doc, part.bytes);
+          if (part.kind === 'pdf') await insertPdfPages(doc, part.bytes, { onSource: languageOf });
           else {
             const images = await normalizeImageFiles([part.file], {
               maxPages: MAX_PAGES - doc.getPageCount(),
@@ -8187,6 +8485,9 @@ export function createEditor({
             await addImagePages(doc, images, { paper: defaultPaper() });
           }
         }
+        const [language] = languages;
+        if (languages.size === 1 && language)
+          doc.catalog.set(PDFName.of('Lang'), PDFString.of(language));
         const bytes = await savePdf(doc);
         if (!d.open || destroyed) return;
         d.close();
@@ -8874,7 +9175,11 @@ export function createEditor({
         ['default', 'Default'],
         ['fit', 'Fit width'],
         ['page', 'Fit page'],
-        ...[0.5, 0.75, 1, 1.25, 1.5, 2].map((value) => [String(value), `${value * 100}%`]),
+        // A magnification the list lacks is offered as the file has it, so it is kept.
+        ...[0.5, 0.75, 1, 1.25, 1.5, 2, view.zoom]
+          .filter((value, i, all) => typeof value === 'number' && all.indexOf(value) === i)
+          .sort((a, b) => a - b)
+          .map((value) => [String(value), `${Math.round(value * 1000) / 10}%`]),
       ],
       String(view.zoom),
     );
@@ -9176,7 +9481,16 @@ export function createEditor({
             y: (Math.min(...ys) + Math.max(...ys)) / 2,
           };
     const fontSize = 9 / viewport.userUnit;
-    const labelWidth = label.length * fontSize * 0.6 + 8;
+    const labelWidth = label.length * fontSize * 0.6 + 8,
+      labelHeight = fontSize * 1.6;
+    // The label sits centered just above the middle, as the page reads, turned or not.
+    const [cx, cy] = viewport.convertToViewportPoint(center.x, center.y);
+    const unit = screenUnit();
+    const labelRect = readerRect(
+      { x: cx - (labelWidth / 2) * unit, y: cy - (2 + labelHeight) * unit },
+      labelWidth,
+      labelHeight,
+    );
     await mutate(
       async (doc) => {
         addShapeAnnotation(doc, page, {
@@ -9188,12 +9502,7 @@ export function createEditor({
           text: label,
         });
         await addTextBox(doc, page, {
-          rect: {
-            x: center.x - labelWidth / 2,
-            y: center.y + 2,
-            width: labelWidth,
-            height: fontSize * 1.6,
-          },
+          rect: labelRect,
           text: label,
           fontSize,
           color: toolColors.comment,
@@ -9214,6 +9523,9 @@ export function createEditor({
     const hex = g.hex;
     const width = Math.max(0.5, g.width);
     const moved = Math.hypot(end.x - g.start.x, end.y - g.start.y) >= 4;
+    // A drag along a line holds no box: a text box then takes its clicked size, and a box
+    // shape is not drawn, as for a click, instead of hiding its words or failing.
+    const boxed = Math.min(Math.abs(end.x - g.start.x), Math.abs(end.y - g.start.y)) >= 8;
     if (g.type === 'measure') {
       if (!moved) return;
       return addMeasurement(g.page, 'distance', [pdfPoint(g.start), pdfPoint(end)]);
@@ -9227,10 +9539,10 @@ export function createEditor({
       );
     }
     if (g.type === 'cshape') {
-      if (!moved) return;
+      const kind = g.commentKind;
+      if (!moved || (!boxed && kind !== 'line' && kind !== 'arrow')) return;
       const from = pdfPoint(g.start),
         to = pdfPoint(end);
-      const kind = g.commentKind;
       return commitDrawing(
         (doc) =>
           addShapeAnnotation(doc, g.page, {
@@ -9247,12 +9559,9 @@ export function createEditor({
     }
     const fontSize = commentSize / viewport.userUnit;
     if (g.type === 'textbox') {
-      const rect = moved
+      const rect = boxed
         ? normalizeRect(pdfPoint(g.start), pdfPoint(end))
-        : (() => {
-            const p = pdfPoint(g.start);
-            return { x: p.x, y: p.y - 50, width: 180, height: 50 };
-          })();
+        : readerRect(g.start, 180, 50);
       const text = await commentTextDialog('Text box');
       if (text == null || destroyed) return;
       return mutate(
@@ -9263,8 +9572,18 @@ export function createEditor({
     }
     if (g.type === 'callout') {
       const anchor = pdfPoint(g.start);
-      const corner = pdfPoint(moved ? end : { x: g.start.x + 60, y: g.start.y - 60 });
-      const rect = { x: corner.x, y: corner.y - 50, width: 180, height: 50 };
+      const corner = moved ? end : { x: g.start.x + 60, y: g.start.y - 60 };
+      // The box grows from the dragged-to corner away from its point, which it must not cover:
+      // leftwards when dragged to the left, upwards when dragged straight up.
+      const unit = screenUnit();
+      const rect = readerRect(
+        {
+          x: corner.x < g.start.x ? corner.x - 180 * unit : corner.x,
+          y: corner.x === g.start.x && corner.y < g.start.y ? corner.y - 50 * unit : corner.y,
+        },
+        180,
+        50,
+      );
       const text = await commentTextDialog('Callout');
       if (text == null || destroyed) return;
       return mutate(
@@ -9281,11 +9600,17 @@ export function createEditor({
       `${entry.kind} deleted.`,
       'annotate',
     );
+    // The deleted comment or its Delete button held the focus; keep it on the page, as
+    // deleting a markup does.
+    if (!destroyed && document.activeElement === document.body)
+      overlay.focus({ preventScroll: true });
   }
   /** The selected comment's text, look, replies, and review status in the properties panel. */
   function showAnnotationProperties(entry) {
     if (!entry) return properties.clear('annotation');
-    const editable = entry.editable && !entry.locked && access().annotate;
+    // A stamp keeps its own art and a read-only comment takes no change: offer only what applies.
+    const editable = entry.editable && !entry.locked && !entry.readOnly && access().annotate;
+    const accepts = (key) => editable && annotationAccepts(entry.subtype, key);
     const apply = (changes, message = null) =>
       safe(() =>
         mutate((doc) => editAnnotation(doc, pageIndex, entry.id, changes), message, 'annotate', {
@@ -9297,7 +9622,7 @@ export function createEditor({
       rows: 3,
       maxlength: 20000,
       'aria-label': entry.subtype === 'FreeText' ? 'Text' : 'Comment',
-      readOnly: !!entry.lockedContents || !access().annotate,
+      readOnly: !!entry.lockedContents || !!entry.readOnly || !access().annotate,
     });
     text.value = entry.contents || '';
     text.addEventListener('change', () => apply({ contents: text.value }));
@@ -9305,7 +9630,7 @@ export function createEditor({
       type: 'color',
       value: entry.color || '#e5322d',
       'aria-label': entry.subtype === 'FreeText' ? 'Text color' : 'Color',
-      disabled: !editable,
+      disabled: !accepts('color'),
       onchange: () => apply({ color: color.value }),
     });
     const fillable = ['Square', 'Circle', 'Polygon', 'FreeText'].includes(entry.subtype);
@@ -9313,21 +9638,21 @@ export function createEditor({
       type: 'color',
       value: entry.fill || '#ffffff',
       'aria-label': 'Fill color',
-      disabled: !editable,
+      disabled: !accepts('fill'),
       onchange: () => apply({ fill: fill.value }),
     });
     const noFill = el('input', {
       type: 'checkbox',
       checked: !entry.fill,
       'aria-label': 'No fill',
-      disabled: !editable,
+      disabled: !accepts('fill'),
       onchange: () => apply({ fill: noFill.checked ? null : fill.value }),
     });
     const width = el(
       'select',
       {
         'aria-label': 'Line width',
-        disabled: !editable,
+        disabled: !accepts('width'),
         onchange: () => apply({ width: Number(width.value) }),
       },
       ...[0.5, 1, 2, 3, 4, 6, 8].map((n) =>
@@ -9341,19 +9666,24 @@ export function createEditor({
       step: 5,
       value: Math.round((entry.opacity ?? 1) * 100),
       'aria-label': 'Opacity',
-      disabled: !editable,
+      disabled: !accepts('opacity'),
       onchange: () => apply({ opacity: Number(opacity.value) / 100 }),
     });
     const fontSize =
       entry.subtype === 'FreeText' &&
       el('input', {
         type: 'number',
-        min: 4,
-        max: 144,
+        // The sizes a text box takes; the field reports any other value itself.
+        min: 1,
+        max: 288,
+        step: 'any',
+        required: true,
         value: entry.fontSize || 12,
         'aria-label': 'Font size',
-        disabled: !editable,
-        onchange: () => apply({ fontSize: Number(fontSize.value) }),
+        disabled: !accepts('fontSize'),
+        onchange: () => {
+          if (fontSize.reportValidity()) apply({ fontSize: Number(fontSize.value) });
+        },
       });
     const status = el(
       'select',
@@ -9412,7 +9742,10 @@ export function createEditor({
         { class: 'annotation-style' },
         el('label', {}, el('span', {}, 'Color'), color),
         fillable && el('label', {}, el('span', {}, 'Fill'), fill, noFill),
-        entry.subtype !== 'Stamp' && el('label', {}, el('span', {}, 'Width'), width),
+        // A text box without a frame has no line for a width to change.
+        annotationAccepts(entry.subtype, 'width') &&
+          (entry.subtype !== 'FreeText' || entry.borderColor) &&
+          el('label', {}, el('span', {}, 'Width'), width),
         el('label', {}, el('span', {}, 'Opacity'), opacity),
         fontSize && el('label', {}, el('span', {}, 'Font size'), fontSize),
       ),
@@ -9443,7 +9776,7 @@ export function createEditor({
           { disabled: !access().annotate },
         ),
         button('Delete', 'Trash2', () => safe(() => removeAnnotation(entry))(), 'btn danger', {
-          disabled: entry.locked || !access().annotate,
+          disabled: entry.locked || entry.readOnly || !access().annotate,
         }),
       ),
     );
@@ -9647,11 +9980,16 @@ export function createEditor({
         field.type === 'dropdown' ? editable.row : multi.row,
       );
       Object.assign(read, {
+        // A listed label keeps its own export value; a new line exports its label.
         options: () =>
           options.value
             .split('\n')
             .map((line) => line.trim())
-            .filter(Boolean),
+            .filter(Boolean)
+            .map(
+              (line) =>
+                (props.options || []).find((option) => (option.label ?? option) === line) ?? line,
+            ),
         ...(field.type === 'dropdown'
           ? { editable: () => editable.box.checked }
           : { multiSelect: () => multi.box.checked }),
@@ -9661,18 +9999,36 @@ export function createEditor({
       specific.push(labeled('field-label', 'Label', label));
       read.label = () => label.value;
     }
+    const collect = () => ({
+      name: nameInput.value.trim() || field.name,
+      tooltip: tooltip.value,
+      required: required.box.checked,
+      readOnly: readOnly.box.checked,
+      borderColor: noBorder.box.checked ? null : border.value,
+      backgroundColor: noFill.box.checked ? null : fill.value,
+      fontSize: Number(fontSize.value) || 0,
+      ...Object.fromEntries(Object.entries(read).map(([key, value]) => [key, value()])),
+    });
+    // Only what was changed is written: an unchanged default value or "Checked by default"
+    // would otherwise reset what was filled in, and a widget is a target, not a change.
+    const initial = collect();
     const save = safe(async () => {
-      const next = {
-        name: nameInput.value.trim() || field.name,
-        tooltip: tooltip.value,
-        required: required.box.checked,
-        readOnly: readOnly.box.checked,
-        borderColor: noBorder.box.checked ? null : border.value,
-        backgroundColor: noFill.box.checked ? null : fill.value,
-        fontSize: Number(fontSize.value) || 0,
-        ...Object.fromEntries(Object.entries(read).map(([key, value]) => [key, value()])),
-      };
-      await mutateDialog(d, (doc) => updateFormField(doc, field.name, next), null, 'edit');
+      const next = Object.fromEntries(
+        Object.entries(collect()).filter(
+          ([key, value]) =>
+            key === 'widgetIndex' || JSON.stringify(value) !== JSON.stringify(initial[key]),
+        ),
+      );
+      await mutateDialog(
+        d,
+        async (doc) => {
+          const renamed = await updateFormField(doc, field.name, next);
+          if (renamed !== field.name) designer.renamed(field.name, renamed);
+          return renamed;
+        },
+        null,
+        'edit',
+      );
     });
     const remove = safe(async () => {
       d.close();
@@ -10380,12 +10736,17 @@ export function createEditor({
         },
         recognize: async (bytes, page, { pageNeedsOcr }) => {
           let task = opened.get(bytes);
-          if (!task) opened.set(bytes, (task = loadPdf(bytes.slice())));
+          if (!task) {
+            // Files are recognized one after another; let the last one go before reading the
+            // next, so a long batch does not hold every PDF in memory until it ends.
+            for (const old of opened.values()) old.destroy().catch(() => {});
+            opened.clear();
+            opened.set(bytes, (task = loadPdf(bytes.slice())));
+          }
           const doc = await task.promise;
           const pdfPage = await doc.getPage(page + 1);
-          const view = pdfPage.getViewport({ scale: 1 });
           const content = await pdfPage.getTextContent({ includeMarkedContent: true });
-          if (!pageNeedsOcr(content, view.width * view.height)) return null;
+          if (!pageNeedsOcr(content, userArea(pdfPage))) return null;
           const { createOcrEngine } = await import('./ocr-engine.js');
           ocrEngine ??= createOcrEngine();
           const picture = await pageImage(doc, page, {
@@ -10447,13 +10808,17 @@ export function createEditor({
     stopReading();
     const generation = Symbol('reading');
     reading = { generation, toEnd };
+    const lang = document.documentElement.lang || 'en';
+    let spoken = false;
     for (let index = pageIndex; index < pageCount; index++) {
       const text = await pageWords(index);
       if (reading?.generation !== generation || destroyed) return;
       if (index !== pageIndex) await navigate(index);
-      if (text) {
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = document.documentElement.lang || 'en';
+      for (const chunk of speechChunks(text, { lang })) {
+        if (reading?.generation !== generation || destroyed) return;
+        spoken = true;
+        const utterance = new SpeechSynthesisUtterance(chunk);
+        utterance.lang = lang;
         await new Promise((resolve) => {
           utterance.onend = utterance.onerror = resolve;
           speechSynthesis.speak(utterance);
@@ -10461,7 +10826,13 @@ export function createEditor({
       }
       if (!toEnd || reading?.generation !== generation) break;
     }
-    if (reading?.generation === generation) reading = null;
+    if (reading?.generation !== generation) return;
+    reading = null;
+    // Scanned pages are pictures of text; there is nothing to read until it is recognized.
+    if (!spoken)
+      toast(
+        `${toEnd ? 'The pages from here to the end have' : 'This page has'} no text to read. Scanned pages need Scan & OCR first.`,
+      );
   }
   function stopReading() {
     reading = null;
@@ -10567,9 +10938,8 @@ export function createEditor({
         controller.signal.throwIfAborted();
         const page = await thisPdf.getPage(index + 1);
         if (skipText) {
-          const view = page.getViewport({ scale: 1 });
           const content = await page.getTextContent({ includeMarkedContent: true });
-          if (!pageNeedsOcr(content, view.width * view.height)) {
+          if (!pageNeedsOcr(content, userArea(page))) {
             skipped++;
             continue;
           }
@@ -11265,9 +11635,13 @@ export function createEditor({
   function revealCurrentMatch() {
     const mark = textContainer.querySelector('.search-hit-current');
     if (!mark) return;
-    const box = mark.getBoundingClientRect(),
-      view = workspace.getBoundingClientRect();
+    const box = mark.getBoundingClientRect();
     if (!box.width && !box.height) return;
+    revealBox(box);
+  }
+  /** Scroll the workspace to center a box (client coordinates) that is not fully in view. */
+  function revealBox(box) {
+    const view = workspace.getBoundingClientRect();
     if (box.top < view.top || box.bottom > view.bottom)
       workspace.scrollTop += box.top - view.top - (view.height - box.height) / 2;
     if (box.left < view.left || box.right > view.right)
@@ -11531,6 +11905,7 @@ export function createEditor({
     document.removeEventListener('fullscreenchange', onFullscreen);
     window.removeEventListener('keydown', onSpace);
     window.removeEventListener('keyup', onSpace);
+    window.removeEventListener('blur', releaseSpace);
     saveController?.abort();
     cancelTextSelection();
     dialogController.abort();
@@ -11603,7 +11978,12 @@ export function createEditor({
       if (editorRoot.classList.contains('hide-pages')) await toggleSidebar(true);
     }
     if (view.page > 0 && view.page < pageCount) await navigate(view.page);
-    if (view.zoom !== 'default') await setZoom(String(view.zoom === 'fit' ? 'fit' : view.zoom));
+    // A magnification beyond the zoom controls' 25–400% opens at the nearest end of it.
+    const asked =
+      typeof view.zoom === 'number'
+        ? Math.min(ZOOM_LEVELS.at(-1), Math.max(ZOOM_LEVELS[0], view.zoom))
+        : view.zoom;
+    if (asked !== 'default') await setZoom(String(asked));
     updateStatus();
   }
   return {

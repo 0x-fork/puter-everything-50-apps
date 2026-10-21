@@ -31,6 +31,8 @@ import {
   objectBytes,
 } from '../src/core/pdf-incremental.js';
 import { protectPdf } from '../src/core/security.js';
+import { createSignedData } from '../src/core/cms.js';
+import { digest, signingHash } from '../src/core/pki-crypto.js';
 import { decodeDer, toPem } from '../src/core/asn1.js';
 
 const hasOpenssl = spawnSync('openssl', ['version']).status === 0;
@@ -477,6 +479,165 @@ describe('signing and validating', () => {
     const [annotatedP3] = await verifySignatures(await addSquareAnnotation(annotationsOk));
     expect(annotatedP3.status).toBe('valid-unknown-identity');
     await expect(signPdf(approved, rsa, { certify: 2 })).rejects.toThrow(/certified only before/);
+  });
+
+  it('tells filling a certified form from moving or hiding its fields', async () => {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([612, 792]);
+    for (const [fieldName, y] of [
+      ['Name', 600],
+      ['Amount', 500],
+    ])
+      doc
+        .getForm()
+        .createTextField(fieldName)
+        .addToPage(page, { x: 72, y, width: 200, height: 24 });
+    const certified = await signPdf(await doc.save({ useObjectStreams: false }), rsa, {
+      page: 0,
+      rect: RECT,
+      certify: 2,
+    });
+    const editWidget = (edit) =>
+      appendUpdate(certified, (doc, mark) => {
+        const widget = doc.getForm().getTextField('Amount').acroField.getWidgets()[0];
+        edit(widget.dict, doc);
+        mark(doc.context.getObjectRef(widget.dict), widget.dict);
+      });
+    const filled = await appendUpdate(certified, (doc, mark) => {
+      const field = doc.getForm().getTextField('Name');
+      field.acroField.dict.set(PDFName.of('V'), PDFString.of('Ada'));
+      mark(field.ref, field.acroField.dict);
+    });
+    const [fill] = await verifySignatures(filled);
+    expect(fill.status).toBe('valid-unknown-identity');
+    expect(fill.modifications.allowed).toEqual(['The form field "Name" was filled in.']);
+    // Hiding a field or moving it elsewhere changes what the signer saw.
+    for (const [edit, key] of [
+      [(widget) => widget.set(PDFName.of('F'), PDFNumber.of(2)), 'F'],
+      [
+        (widget, doc) => widget.set(PDFName.of('Rect'), doc.context.obj([300, 300, 500, 324])),
+        'Rect',
+      ],
+    ]) {
+      const [changed] = await verifySignatures(await editWidget(edit));
+      expect(changed.status).toBe('modified');
+      expect(changed.modifications.disallowed).toEqual([
+        `The form field "Amount" was changed (${key}).`,
+      ]);
+    }
+  });
+
+  it('rejects a byte range that leaves more than the signature value unsigned', async () => {
+    // A signature over three ranges: its value, and also the certification level, left out.
+    const prepared = await preparePdfSignature(await makePdf(), {
+      certificate: rsa.certificate,
+      page: 0,
+      rect: RECT,
+      certify: 1,
+    });
+    const { bytes } = prepared;
+    const text = new TextDecoder('latin1').decode(bytes);
+    const level = text.indexOf('/P 1 ') + 3;
+    const [, before, after] = prepared.byteRange;
+    const ranges = [0, before, after, level - after, level + 1, bytes.length - level - 1];
+    const at = text.indexOf('/ByteRange [') + 11;
+    const width = text.indexOf(']', at) + 1 - at;
+    const written = `[${ranges.join(' ')}`;
+    bytes.set(new TextEncoder().encode(`${written.padEnd(width - 1)}]`), at);
+    const parts = [
+      bytes.subarray(0, before),
+      bytes.subarray(after, level),
+      bytes.subarray(level + 1),
+    ];
+    const cms = await createSignedData({
+      privateKey: rsa.privateKey,
+      certificate: rsa.certificate,
+      chain: [],
+      contentDigest: await digest(signingHash(rsa.privateKey), parts),
+      signingTime: new Date('2026-06-01T00:00:00Z'),
+      cades: true,
+    });
+    const signed = embedPdfSignature(prepared, cms);
+    // "No changes" becomes "annotations allowed" without touching a signed byte.
+    signed.set(new TextEncoder().encode('3'), level);
+    const [result] = await verifySignatures(signed);
+    expect(result.status).toBe('invalid');
+    expect(result.errors).toEqual(['The signature byte range leaves part of the file unsigned.']);
+  });
+
+  it('reports changes to the form itself, and keeps filling it in allowed', async () => {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([612, 792]);
+    for (const [fieldName, y] of [
+      ['Name', 600],
+      ['Other', 500],
+    ])
+      doc
+        .getForm()
+        .createTextField(fieldName)
+        .addToPage(page, { x: 72, y, width: 200, height: 24 });
+    const helv = doc.context.register(
+      doc.context.obj({ Type: 'Font', Subtype: 'Type1', BaseFont: 'Helvetica' }),
+    );
+    doc
+      .getForm()
+      .acroForm.dict.set(
+        PDFName.of('DR'),
+        doc.context.register(doc.context.obj({ Font: { Helv: helv } })),
+      );
+    const base = await doc.save({ useObjectStreams: false });
+    const form = (doc) => doc.catalog.lookup(PDFName.of('AcroForm'));
+    const changeForm = (signed, edit) =>
+      appendUpdate(signed, (doc, mark) => {
+        edit(doc, mark);
+        mark(doc.catalog.get(PDFName.of('AcroForm')), form(doc));
+      });
+    const fonts = (doc) => form(doc).lookup(PDFName.of('DR')).lookup(PDFName.of('Font'));
+    const markFonts = (doc, mark) =>
+      mark(form(doc).get(PDFName.of('DR')), form(doc).lookup(PDFName.of('DR')));
+    const attacks = {
+      "The form's settings were changed (XFA).": (doc, mark) => {
+        const ref = doc.context.nextRef();
+        mark(ref, doc.context.stream('<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/"/>'));
+        form(doc).set(PDFName.of('XFA'), ref);
+      },
+      "The form's settings were changed (DA).": (doc) =>
+        form(doc).set(PDFName.of('DA'), PDFString.of('/Helv 0 Tf 1 1 1 rg')),
+      "The form's fonts or other resources were changed.": (doc, mark) => {
+        const ref = doc.context.nextRef();
+        mark(ref, doc.context.obj({ Type: 'Font', Subtype: 'Type1', BaseFont: 'ZapfDingbats' }));
+        fonts(doc).set(PDFName.of('Helv'), ref);
+        markFonts(doc, mark);
+      },
+      'A form field was removed.': (doc) => form(doc).lookup(PDFName.of('Fields')).remove(1),
+    };
+    // Filling in, as other tools do it: a value, a font for its text, a request to redraw.
+    const fill = (doc, mark) => {
+      const field = doc.getForm().getTextField('Other');
+      field.acroField.dict.set(PDFName.of('V'), PDFString.of('Filled'));
+      mark(field.ref, field.acroField.dict);
+      const ref = doc.context.nextRef();
+      mark(ref, doc.context.obj({ Type: 'Font', Subtype: 'Type1', BaseFont: 'Courier' }));
+      fonts(doc).set(PDFName.of('Cour'), ref);
+      markFonts(doc, mark);
+      form(doc).set(PDFName.of('NeedAppearances'), doc.context.obj(true));
+    };
+    for (const certify of [1, 2, 3, null]) {
+      const signed = await signPdf(base, rsa, { page: 0, rect: RECT, ...(certify && { certify }) });
+      for (const [message, attack] of Object.entries(attacks)) {
+        const [result] = await verifySignatures(await changeForm(signed, attack));
+        // Only a signature without restrictions of its own accepts them, listing each.
+        expect(result.status).toBe(certify ? 'modified' : 'valid-unknown-identity');
+        expect(result.modifications[certify ? 'disallowed' : 'allowed']).toContain(message);
+      }
+      const [filled] = await verifySignatures(await changeForm(signed, fill));
+      expect(filled.status).toBe(certify === 1 ? 'modified' : 'valid-unknown-identity');
+      expect(filled.modifications.disallowed).toEqual(
+        certify === 1
+          ? ['The form asks viewers to redraw its fields.', 'The form field "Other" was filled in.']
+          : [],
+      );
+    }
   });
 
   it('refuses password-protected files', async () => {

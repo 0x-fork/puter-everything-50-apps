@@ -1,5 +1,6 @@
 import { matrix } from './text-edit.js';
 import { annotationLayerVisible } from './optional-content.js';
+import { choiceKeys } from './form-values.js';
 
 const clone = (value) => (Array.isArray(value) ? [...value] : value);
 export const equalFieldValue = (a, b) => {
@@ -116,7 +117,14 @@ function checkBoxGroups(annotations) {
 }
 
 /** Only actual, visible form widgets are interactive. No document actions are executed. */
-export function formWidgets(annotations, layers, buttonSelections) {
+export function formWidgets(
+  annotations,
+  layers,
+  buttonSelections,
+  tooltips,
+  radioChoices,
+  listSelections,
+) {
   const groups = checkBoxGroups(annotations);
   return annotations.flatMap((a) => {
     if (
@@ -153,6 +161,12 @@ export function formWidgets(annotations, layers, buttonSelections) {
     } else return [];
     if (a.fieldType === 'Btn' && buttonSelections?.has(a.fieldName))
       value = buttonSelections.get(a.fieldName);
+    // Radio buttons sharing an export value are told apart by their own choices.
+    const radio = type === 'radio' ? radioChoices?.get(a.fieldName) : undefined;
+    if (radio?.choices.has(a.id)) {
+      buttonValue = radio.choices.get(a.id);
+      value = radio.selected == null ? [] : [radio.selected];
+    }
     if (type === 'text' && typeof value !== 'string') return [];
     const [x0, y0, x1, y1] = a.rect;
     if (x1 <= x0 || y1 <= y0) return [];
@@ -160,6 +174,14 @@ export function formWidgets(annotations, layers, buttonSelections) {
       value: option.exportValue,
       label: option.displayValue,
     }));
+    // Options sharing an export value are told apart by position, as the PDF's /I does.
+    const keys = choiceKeys(options);
+    if (type === 'choice' && keys.some((key, i) => key !== options[i].value)) {
+      value =
+        listSelections?.get(a.fieldName) ??
+        value.map((selected) => keys[options.findIndex((o) => o.value === selected)] ?? selected);
+      options.forEach((option, i) => (option.value = keys[i]));
+    }
     if (type === 'choice')
       for (const selected of value)
         if (!options.some((o) => o.value === selected))
@@ -170,6 +192,11 @@ export function formWidgets(annotations, layers, buttonSelections) {
       {
         id: a.id,
         name: a.fieldName,
+        // The tooltip (TU) is the field's description for people and assistive technology.
+        tooltip:
+          (typeof a.alternativeText === 'string' && a.alternativeText.trim()) ||
+          tooltips?.get(a.fieldName) ||
+          '',
         type,
         value,
         rect: a.rect,
@@ -185,6 +212,7 @@ export function formWidgets(annotations, layers, buttonSelections) {
         multiple: !!a.multiSelect,
         options: editableChoice ? choiceInputOptions(options) : options,
         buttonValue,
+        buttonLabel: type === 'radio' ? a.buttonValue : undefined,
         exportValue: a.checkBox ? a.exportValue : undefined,
         editableChoice,
         alignment: ['left', 'center', 'right'][a.textAlignment] || 'left',

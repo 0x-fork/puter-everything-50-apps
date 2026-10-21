@@ -464,6 +464,21 @@ it('updates properties and redraws the fields', async () => {
   );
 });
 
+it('refuses a character limit shorter than the value the field holds', async () => {
+  await mockTextFont();
+  const doc = await blank();
+  await addFormField(doc, 0, { type: 'text', name: 'Code', rect: rect(50, 700, 120, 22) });
+  await fillFields(doc, { Code: 'ABCDEFG' });
+  for (const props of [{ maxLength: 3 }, { maxLength: 3, comb: true }])
+    await expect(updateFormField(doc, 'Code', props)).rejects.toThrow(
+      'The field holds 7 characters. Choose a limit of at least 7, or shorten its value first.',
+    );
+  await updateFormField(doc, 'Code', { maxLength: 7, comb: true });
+  // A new default value replaces the old one, so it is checked on its own.
+  await updateFormField(doc, 'Code', { maxLength: 3, defaultValue: 'XYZ' });
+  expect(listFormFields(doc)[0].props).toMatchObject({ maxLength: 3, value: 'XYZ' });
+});
+
 it('moves widgets and deletes one widget or the whole field', async () => {
   const doc = await blank();
   for (const [i, value] of ['A', 'B', 'C'].entries())
@@ -566,6 +581,29 @@ it('sets the tab order of a page', async () => {
   const bytes = await doc.save();
   expect((await annotations(bytes)).map((a) => a.fieldName)).toEqual(['C', 'A', 'B']);
   expect(() => setFieldTabOrder(doc, 0, 'diagonal')).toThrow();
+});
+
+it('puts the widgets in row or column order, which viewers without /Tabs follow', async () => {
+  const doc = await blank();
+  // Added out of order: a two-by-two grid, bottom right first.
+  for (const [fieldName, x, y] of [
+    ['D', 300, 600],
+    ['B', 300, 700],
+    ['C', 50, 602],
+    ['A', 50, 698],
+  ])
+    await addFormField(doc, 0, { type: 'text', name: fieldName, rect: rect(x, y, 100, 20) });
+  const order = async () => (await annotations(await doc.save())).map((a) => a.fieldName);
+  setFieldTabOrder(doc, 0, 'row');
+  expect(await order()).toEqual(['A', 'B', 'C', 'D']);
+  expect(setFieldTabOrder(doc, 0, 'row')).toBe(false);
+  setFieldTabOrder(doc, 0, 'column');
+  expect(doc.getPage(0).node.lookup(name('Tabs'))).toBe(name('C'));
+  expect(await order()).toEqual(['A', 'C', 'B', 'D']);
+  // Rows run across the page as it is shown: turned a quarter, the left edge is the top.
+  doc.getPage(0).setRotation(degrees(90));
+  setFieldTabOrder(doc, 0, 'row');
+  expect(await order()).toEqual(['C', 'A', 'D', 'B']);
 });
 
 /** A printed form: underscore blanks, ruled lines, boxes, check squares and a table. */

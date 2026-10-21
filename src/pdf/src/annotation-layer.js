@@ -1,4 +1,5 @@
 import { el } from './lib/ui.js';
+import { annotationAccepts } from './core/annotations.js';
 
 /**
  * Comments drawn as annotations (text boxes, callouts, shapes, pencil drawings, stamps) as
@@ -6,7 +7,8 @@ import { el } from './lib/ui.js';
  * The editor shows the selected one's settings in the properties panel and turns the
  * gestures into edits.
  *
- * callbacks: { onSelect(entry | null), onMove(entry, rect), onDelete(entry) }
+ * callbacks: { onSelect(entry | null, { refresh }), onMove(entry, rect), onDelete(entry) }; a
+ * refresh is the selected comment redrawn after an edit rather than a new choice.
  */
 export const ANNOTATION_KINDS = new Set([
   'FreeText',
@@ -19,7 +21,11 @@ export const ANNOTATION_KINDS = new Set([
   'Stamp',
   'Caret',
   'FileAttachment',
+  'Squiggly',
 ]);
+/** Whether a comment can be dragged or nudged: a squiggly underline stays on its words. */
+const movable = (entry) =>
+  !entry.locked && !entry.readOnly && annotationAccepts(entry.subtype, 'rect');
 
 export function createAnnotationLayer({ onSelect, onMove, onDelete }) {
   const root = el('div', { class: 'annotation-targets' });
@@ -69,7 +75,10 @@ export function createAnnotationLayer({ onSelect, onMove, onDelete }) {
     const kept = selected && entries.find((entry) => entry.id === selected);
     if (selected && !kept) select(null);
     // An edited comment is redrawn: its settings follow the new version.
-    else if (kept) onSelect(kept);
+    else if (kept) onSelect(kept, { refresh: true });
+    // Redrawing replaces the targets; the selected one keeps the keyboard focus it had, so
+    // arrow keys and Delete go on working after a nudge or a move.
+    const refocus = kept && root.contains(document.activeElement);
     root.replaceChildren(
       ...entries.map((entry) => {
         const node = el('button', {
@@ -84,7 +93,10 @@ export function createAnnotationLayer({ onSelect, onMove, onDelete }) {
             e.preventDefault();
             e.stopPropagation();
             if (selected !== entry.id) select(entry);
-            if (entry.locked) return;
+            // Preventing the default also prevents focus; the selected comment takes it, as
+            // a desktop editor's does, for the arrow keys, Delete, and Escape.
+            node.focus({ preventScroll: true });
+            if (!movable(entry)) return;
             drag = { entry, node, id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
             node.setPointerCapture(e.pointerId);
           },
@@ -118,7 +130,7 @@ export function createAnnotationLayer({ onSelect, onMove, onDelete }) {
             } else if (e.key === 'Escape') {
               e.preventDefault();
               select(null);
-            } else if (e.key.startsWith('Arrow') && !entry.locked) {
+            } else if (e.key.startsWith('Arrow') && movable(entry)) {
               e.preventDefault();
               const step = e.shiftKey ? 10 : 1;
               const dx = { ArrowLeft: -step, ArrowRight: step }[e.key] || 0,
@@ -133,10 +145,16 @@ export function createAnnotationLayer({ onSelect, onMove, onDelete }) {
           },
         });
         place(node, screenBox(entry.rect));
+        // Only a comment that can move offers the move pointer.
+        if (!movable(entry)) node.style.cursor = 'pointer';
         if (entry.id === selected) node.classList.add('is-selected');
         return node;
       }),
     );
+    if (refocus)
+      [...root.children]
+        .find((node) => node.dataset.id === selected)
+        ?.focus({ preventScroll: true });
   }
 
   return {

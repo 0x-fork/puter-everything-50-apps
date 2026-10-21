@@ -104,8 +104,14 @@ export function createPageStack({
     }
   }
 
+  let laidOutZoom = null,
+    zoomChanged = false;
   function layout() {
     const zoom = getZoom();
+    if (zoom !== laidOutZoom) {
+      laidOutZoom = zoom;
+      zoomChanged = true;
+    }
     slots.forEach((slot, i) => {
       const { width, height } = slotSize(i);
       slot.style.width = `${width}px`;
@@ -240,11 +246,15 @@ export function createPageStack({
     if (!continuous || !slots.length) return currentIndex();
     const view = workspace.getBoundingClientRect();
     const middle = view.top + Math.min(view.height / 2, 160);
+    const under = (box) => box.top <= middle && box.bottom + GAP >= middle;
+    // Side by side, both pages of a row are under the middle; the current one stays current.
+    if (slots[currentIndex()] && under(slots[currentIndex()].getBoundingClientRect()))
+      return currentIndex();
     let best = currentIndex(),
       distance = Infinity;
     for (let i = 0; i < slots.length; i++) {
       const box = slots[i].getBoundingClientRect();
-      if (box.top <= middle && box.bottom + GAP >= middle) return i;
+      if (under(box)) return i;
       const d = Math.min(Math.abs(box.top - middle), Math.abs(box.bottom - middle));
       if (d < distance) {
         distance = d;
@@ -295,14 +305,22 @@ export function createPageStack({
     slot: (i) => slots[i] || null,
     /**
      * Fit-width zoom follows the widest page, so scrolling never changes the zoom; side by
-     * side, two of them and the gap between have to fit.
+     * side, two of them have to fit, beside the gap between them that the zoom leaves alone.
      */
     widest(natural) {
       const width = Math.max(
         natural.width,
         sizes.reduce((max, size) => Math.max(max, size?.width || 0), 0),
       );
-      return { width: twoUp ? width * 2 + GAP : width, height: natural.height };
+      return { width: twoUp ? width * 2 : width, height: natural.height };
+    },
+    /** Fit-page zoom fits every page, widest and tallest, for the same reason. */
+    largest(natural) {
+      const height = Math.max(
+        natural.height,
+        sizes.reduce((max, size) => Math.max(max, size?.height || 0), 0),
+      );
+      return { width: this.widest(natural).width, height };
     },
     get twoUp() {
       return twoUp;
@@ -348,6 +366,12 @@ export function createPageStack({
     quiet,
     /** Follow a scroll that arrived while the editor was busy. */
     recheck() {
+      // Pictures that stay near the view through a zoom never cross the observers' margins,
+      // so they are redrawn here, where the view has settled at the new zoom.
+      if (zoomChanged) {
+        zoomChanged = false;
+        refresh();
+      }
       if (pendingFollow && continuous) follow();
     },
     destroy() {

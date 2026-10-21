@@ -722,8 +722,16 @@ describe('vector graphics, annotations, and fields', () => {
     page.node.lookup(n('Annots')).push(link);
     page.node.lookup(n('Annots')).push(note);
     const objr = doc.context.obj({ Type: 'OBJR', Obj: link, Pg: page.ref });
+    // Its alternate text describes the link, and would be read out in its place.
     const element = doc.context.register(
-      doc.context.obj({ Type: 'StructElem', S: 'Link', K: [objr], Pg: page.ref }),
+      doc.context.obj({
+        Type: 'StructElem',
+        S: 'Link',
+        K: [objr],
+        Pg: page.ref,
+        Alt: PDFString.of('Link to the private page'),
+        ActualText: PDFString.of('example.com/private'),
+      }),
     );
     doc.catalog.set(
       n('StructTreeRoot'),
@@ -753,6 +761,7 @@ describe('vector graphics, annotations, and fields', () => {
     expectGone(corpus, '123-45-6789');
     expectGone(corpus, 'Private remark');
     expectGone(corpus, 'example.com/private');
+    expectGone(corpus, 'Link to the private page');
     expect(contains(corpus, 'Visible Person')).toBe(true);
   });
 
@@ -942,4 +951,100 @@ it('finds hyphenated patterns in text drawn with a standard font', async () => {
   const reopened = await PDFDocument.load(await doc.save());
   const [match] = await findTextRects(reopened, 0, REDACTION_PATTERNS.ssn);
   expect(match.text).toBe('123-45-6789');
+});
+
+it('removes text that shapes a soft mask under the area', async () => {
+  // Design tools draw effects such as knocked-out or faded lettering as a soft mask whose group
+  // holds the text; it shows on the page and is as readable from the file as page text.
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([400, 400]);
+  const font = doc.embedStandardFont(StandardFonts.Helvetica);
+  const group = doc.context.register(
+    doc.context.stream('BT /F1 24 Tf 1 g 60 300 Td (MASKSECRET) Tj ET', {
+      Type: 'XObject',
+      Subtype: 'Form',
+      BBox: [0, 0, 400, 400],
+      Group: { S: 'Transparency', CS: 'DeviceGray' },
+      Resources: { Font: { F1: font.ref } },
+    }),
+  );
+  const state = doc.context.obj({ Type: 'ExtGState', SMask: { S: 'Luminosity', G: group } });
+  page.node.set(
+    n('Resources'),
+    doc.context.obj({ ExtGState: { GS1: state }, Font: { F1: font.ref } }),
+  );
+  page.node.set(
+    n('Contents'),
+    doc.context.register(
+      doc.context.stream('q /GS1 gs 0 0 400 400 re f Q BT /F1 12 Tf 60 100 Td (Public) Tj ET'),
+    ),
+  );
+  const { bytes: out, report } = await redact(await doc.save(), [[0, [[50, 290, 300, 330]]]]);
+  expect(report.text).toBe(10);
+  const corpus = await recoverable(out);
+  expectGone(corpus, 'MASKSECRET');
+  expect(await pageText(out)).toContain('Public');
+  // The masked fill keeps a soft mask, now without the lettering.
+  const saved = await PDFDocument.load(out);
+  const states = saved.getPage(0).node.Resources().lookup(n('ExtGState'));
+  expect(states.keys().map(String)).toEqual(['/RedactedState1']);
+  expect(states.lookup(n('RedactedState1')).lookup(n('SMask')).lookup(n('S'))).toBe(
+    n('Luminosity'),
+  );
+});
+
+it('removes a field everywhere it shows when one of its widgets is under the area', async () => {
+  // A field repeated on another page (or kept in a hidden widget) holds one value; removing
+  // only the widget under the mark left the value in the file and on the other page.
+  for (const hidden of [false, true]) {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 400]);
+    const other = doc.addPage([400, 400]);
+    const form = doc.getForm();
+    const secret = form.createTextField('ssn');
+    secret.setText('123-45-6789');
+    secret.addToPage(page, { x: 50, y: 300, width: 120, height: 20 });
+    secret.addToPage(other, { x: 50, y: 300, width: 120, height: 20, hidden });
+    secret.addToPage(page, { x: 50, y: 50, width: 120, height: 20 });
+    const kept = form.createTextField('name');
+    kept.setText('Visible Person');
+    kept.addToPage(other, { x: 50, y: 100, width: 120, height: 20 });
+    const { bytes: out, report } = await redact(await doc.save(), [[0, [[40, 290, 200, 330]]]]);
+    expect(report).toMatchObject({ annotations: 3, fields: 1 });
+    const saved = await PDFDocument.load(out);
+    expect(
+      saved
+        .getForm()
+        .getFields()
+        .map((field) => field.getName()),
+    ).toEqual(['name']);
+    expect(saved.getPage(0).node.Annots()?.size() ?? 0).toBe(0);
+    expect(saved.getPage(1).node.Annots().size()).toBe(1);
+    const corpus = await recoverable(out);
+    expectGone(corpus, '123-45-6789');
+    expect(contains(corpus, 'Visible Person')).toBe(true);
+  }
+});
+
+it("removes the page's private application data, which holds a copy of what was redacted", async () => {
+  // Illustrator keeps its own copy of the artwork in the page's PieceInfo when saving PDFs
+  // that stay editable there.
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([400, 400]);
+  const font = doc.embedStandardFont(StandardFonts.Helvetica);
+  page.node.set(n('Resources'), doc.context.obj({ Font: { F1: font.ref } }));
+  page.node.set(
+    n('Contents'),
+    doc.context.register(doc.context.stream('BT /F1 12 Tf 60 300 Td (PAGESECRET) Tj ET')),
+  );
+  const copy = doc.context.register(doc.context.flateStream('%AI12 artwork: (PAGESECRET) Tx'));
+  page.node.set(
+    n('PieceInfo'),
+    doc.context.obj({
+      Illustrator: { LastModified: PDFString.of('D:20200101'), Private: { AIPrivateData1: copy } },
+    }),
+  );
+  const { bytes: out } = await redact(await doc.save(), [[0, [[50, 290, 300, 330]]]]);
+  expectGone(await recoverable(out), 'PAGESECRET');
+  expect((await PDFDocument.load(out)).getPage(0).node.has(n('PieceInfo'))).toBe(false);
 });

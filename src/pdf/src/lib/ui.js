@@ -287,10 +287,12 @@ export function iconButton(label, glyph, onClick, attrs = {}) {
   );
 }
 let toastTimer,
+  toastDismiss,
   toastSequence = 0;
 export function toast(message, { error = false } = {}) {
   const node = document.querySelector('#toast');
   clearTimeout(toastTimer);
+  toastDismiss?.abort();
   const sequence = ++toastSequence;
   if (error) {
     const dialog = [...document.querySelectorAll('dialog[open]')].at(-1);
@@ -303,6 +305,17 @@ export function toast(message, { error = false } = {}) {
       return;
     }
   }
+  // Full screen shows only its own element, so the message moves in there while it lasts.
+  const host = document.fullscreenElement;
+  if (host && node.parentElement !== host) {
+    host.append(node);
+    const back = () => {
+      if (document.fullscreenElement === host) return;
+      document.removeEventListener('fullscreenchange', back);
+      document.body.append(node);
+    };
+    document.addEventListener('fullscreenchange', back);
+  }
   // A live region is announced only for changes made while it is rendered, so the box shows
   // first (empty, hence transparent) and gets its text on the next frame.
   node.textContent = '';
@@ -311,7 +324,19 @@ export function toast(message, { error = false } = {}) {
     if (sequence === toastSequence && !node.hidden) node.textContent = message;
   });
   toastTimer = setTimeout(() => {
-    node.hidden = true;
+    if (!error) {
+      node.hidden = true;
+      return;
+    }
+    // An error is not timed out from under a slow reader: after the usual time it stays until
+    // the next press or key, the sign that the reader has moved on.
+    const dismiss = (toastDismiss = new AbortController());
+    const hide = () => {
+      dismiss.abort();
+      if (sequence === toastSequence) node.hidden = true;
+    };
+    for (const type of ['pointerdown', 'keydown'])
+      window.addEventListener(type, hide, { capture: true, signal: dismiss.signal });
   }, 5500);
 }
 let dialogSequence = 0,
@@ -349,9 +374,13 @@ export function modal(title, content, actions = [], { signal } = {}) {
   closeMenu();
   const previous = document.activeElement;
   const titleId = `dialog-title-${++dialogSequence}`;
+  // A question (Delete PDF?, Leave this PDF?) is one paragraph and its answers, and the focus
+  // lands on an answer: the paragraph is the dialog's description, so it is read out too.
+  const question = content instanceof HTMLParagraphElement;
+  if (question) content.id ||= `dialog-message-${dialogSequence}`;
   const dialog = el(
     'dialog',
-    { 'aria-labelledby': titleId },
+    { 'aria-labelledby': titleId, 'aria-describedby': question ? content.id : null },
     el(
       'div',
       { class: 'dialog-head' },
