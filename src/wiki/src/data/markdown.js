@@ -6,7 +6,7 @@ import { deltaToMarkdown, markdownToDelta, deltaText, domToDelta, deltaToHtml } 
 import { safeUrl, escapeHtml } from '../lib/sanitize.js';
 import { listNumber } from './page.js';
 
-const PREFIX = { h1: '# ', h2: '## ', h3: '### ', bulleted: '- ', quote: '> ', toggle: '- ' };
+const PREFIX = { h1: '# ', h2: '## ', h3: '### ', bulleted: '- ', toggle: '- ' };
 
 /** Blocks (from listBlocks) to Markdown. pageTitle(id) names linked pages. */
 export function blocksToMarkdown(blocks, { pageTitle = () => 'Untitled', assetName = null } = {}) {
@@ -31,6 +31,7 @@ export function blocksToMarkdown(blocks, { pageTitle = () => 'Untitled', assetNa
       case 'divider':
         lines.push(`${pad}---`);
         break;
+      case 'quote':
       case 'callout':
         lines.push(`${pad}> ${text.replace(/\n/g, `\n${pad}> `)}`);
         break;

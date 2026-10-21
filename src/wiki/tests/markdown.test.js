@@ -54,6 +54,13 @@ describe('Markdown', () => {
     expect(strip(markdownToBlocks(md))).toEqual(strip(blocks));
   });
 
+  it('keeps every line of a multi-line quote inside the quote', () => {
+    const blocks = [{ type: 'quote', delta: [{ insert: 'first\nsecond' }], indent: 1 }];
+    const md = blocksToMarkdown(blocks);
+    expect(md).toBe('  > first  \n  > second\n');
+    expect(strip(markdownToBlocks(md))).toEqual(strip(blocks));
+  });
+
   it('numbers list items after nested children like the editor does', () => {
     const md = blocksToMarkdown([
       { type: 'numbered', delta: [{ insert: 'one' }] },
