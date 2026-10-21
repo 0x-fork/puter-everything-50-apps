@@ -16433,6 +16433,22 @@ function write_ws_xml_protection(sp)/*:string*/ {
 	return writextag('sheetProtection', null, o);
 }
 
+/* Puter Spreadsheet local patch: the cells a sheet holds, counted, and those in a range given a link (see below). */
+function hlink_stored_count(s, dense) {
+	var n = 0;
+	if(dense) (s["!data"] || []).forEach(function(row) { if(row) row.forEach(function(cell) { if(cell) ++n; }); });
+	else for(var k in s) if(k.charAt(0) !== "!") ++n;
+	return n;
+}
+function hlink_stored_cells(s, dense, rng, val) {
+	if(dense) (s["!data"] || []).forEach(function(row, R) {
+		if(row && R >= rng.s.r && R <= rng.e.r) row.forEach(function(cell, C) { if(cell && C >= rng.s.c && C <= rng.e.c) cell.l = val; });
+	});
+	else for(var k in s) if(k.charAt(0) !== "!") {
+		var at = decode_cell(k);
+		if(at.r >= rng.s.r && at.r <= rng.e.r && at.c >= rng.s.c && at.c <= rng.e.c) s[k].l = val;
+	}
+}
 function parse_ws_xml_hlinks(s, data/*:Array<string>*/, rels, guess, opts) {
 	var dense = s["!data"] != null;
 	var fullrange = null;
@@ -16450,6 +16466,17 @@ function parse_ws_xml_hlinks(s, data/*:Array<string>*/, rels, guess, opts) {
 			val.Target = "#" + unescapexml(val.location);
 			rel = {Target: val.Target, TargetMode: 'Internal'};
 		} else continue;
+		if(val.tooltip) { val.Tooltip = val.tooltip; delete val.tooltip; }
+		/* Puter Spreadsheet local patch: a link over more than 65,536 coordinates, and more than the sheet has cells
+		 * (a file can stretch one over whole columns or the whole sheet), goes on the cells it holds there, rather than
+		 * a cell made for each coordinate: seventeen billion of them never finished. Smaller ranges link their empty
+		 * cells too. */
+		var area = (rng.e.r - rng.s.r + 1) * (rng.e.c - rng.s.c + 1);
+		if(area > 65536 && area > hlink_stored_count(s, dense)) {
+			val.Rel = rel;
+			hlink_stored_cells(s, dense, rng, val);
+			continue;
+		}
 		if(!fullrange) fullrange = dup(rng);
 		else {
 			fullrange.s.r = Math.min(fullrange.s.r, rng.s.r); fullrange.s.c = Math.min(fullrange.s.c, rng.s.c);
@@ -16461,7 +16488,6 @@ function parse_ws_xml_hlinks(s, data/*:Array<string>*/, rels, guess, opts) {
 		guess.s.r = Math.min(guess.s.r, rng.s.r); guess.s.c = Math.min(guess.s.c, rng.s.c);
 		guess.e.r = Math.max(guess.e.r, rng.e.r); guess.e.c = Math.max(guess.e.c, rng.e.c);
 		val.Rel = rel;
-		if(val.tooltip) { val.Tooltip = val.tooltip; delete val.tooltip; }
 		for(var R=rng.s.r;R<=rng.e.r;++R) for(var C=rng.s.c;C<=rng.e.c;++C) {
 			var addr = encode_col(C) + encode_row(R);
 			if(dense) {
@@ -23839,6 +23865,12 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 
 			case 'table': case '工作表': // 9.1.2 <table:table>
 				if(Rn[1]==='/') {
+					/* Puter Spreadsheet local patch: the cell style a column gives the cells that have none of their own
+					 * (table:default-cell-style-name, LibreOffice's whole-column format), other than the Default style. */
+					columnStyleNames.forEach(function(name, c) {
+						var props = name && name !== "Default" ? ods_cell_props(name) : null;
+						if(props) (ws['!odsColumnStyles'] || (ws['!odsColumnStyles'] = {}))[c] = { props: props, z: number_format_map[columnNumberFormats[c]] || null };
+					});
 					if(range.e.c >= range.s.c && range.e.r >= range.s.r) ws['!ref'] = encode_range(range);
 					else ws['!ref'] = "A1:A1";
 					if(opts.sheetRows > 0 && opts.sheetRows <= range.e.r) {
@@ -24929,15 +24961,19 @@ var write_content_ods/*:{(wb:any, opts:any):string}*/ = /* @__PURE__ */(function
 		/* ODF requires column declarations even when every column uses defaults.
 		 * Repeat identical declarations to cover large validation-only areas. */
 		var columnStyle = function(c) { return ws["!cols"] && ws["!cols"][c] && ws["!cols"][c].ods != null ? "co" + ws["!cols"][c].ods : null; };
+		/* Puter Spreadsheet local patch: a column's format (!cols[c].odsCell, a cell's style and number format) is the
+		 * cell style it gives the cells that have none of their own, as LibreOffice keeps a whole-column format. */
+		var columnDefault = function(c) { return ws["!cols"] && ws["!cols"][c] && ws["!cols"][c].odsCell ? ods_cell_style_name(ws["!cols"][c].odsCell, nfs) : null; };
 		/* Puter Spreadsheet local patch: a hidden column (!cols[c].hidden) is declared collapsed, and a run of
 		 * columns is repeated as one declaration only when its visibility matches as well as its style. */
 		var columnHidden = function(c) { return !!(ws["!cols"] && ws["!cols"][c] && ws["!cols"][c].hidden); };
 		for(C = 0; C <= lastCol;) {
-			var colStyle = columnStyle(C), colHidden = columnHidden(C), colCount = 1;
+			var colStyle = columnStyle(C), colHidden = columnHidden(C), colDefault = columnDefault(C), colCount = 1;
 			if(!ws["!cols"]) colCount = lastCol - C + 1;
-			else while(C + colCount <= lastCol && columnStyle(C + colCount) === colStyle && columnHidden(C + colCount) === colHidden) ++colCount;
+			else while(C + colCount <= lastCol && columnStyle(C + colCount) === colStyle && columnHidden(C + colCount) === colHidden && columnDefault(C + colCount) === colDefault) ++colCount;
 			var columnAttrs = {};
 			if(colStyle) columnAttrs['table:style-name'] = colStyle;
+			if(colDefault) columnAttrs['table:default-cell-style-name'] = colDefault;
 			if(colHidden) columnAttrs['table:visibility'] = 'collapse';
 			if(colCount > 1) columnAttrs['table:number-columns-repeated'] = colCount;
 			o.push('        ' + writextag('table:table-column', null, columnAttrs) + '\n');
@@ -25253,6 +25289,8 @@ var write_content_ods/*:{(wb:any, opts:any):string}*/ = /* @__PURE__ */(function
 				for(var ai = 0; ai < addrs.length; ++ai) noteFormat(ws[encode_cell(addrs[ai])]);
 				for(ai = 0; ai < addrs.length; ++ai) { noteCellStyle(ws[encode_cell(addrs[ai])]); noteRunStyles(ws[encode_cell(addrs[ai])]); }
 			}
+			/* Puter Spreadsheet local patch: the styles columns give their cells (see columnDefault). */
+			(ws["!cols"] || []).forEach(function(col) { if(col && col.odsCell) { noteFormat(col.odsCell); noteCellStyle(col.odsCell); } });
 		});
 		o.push('  <style:style style:name="ce1" style:family="table-cell" style:parent-style-name="Default" style:data-style-name="N37"/>\n');
 		keys(nfs).forEach(function(nf) {

@@ -1,4 +1,4 @@
-import { conditionalFontStyle } from '../core/style-values.js';
+import { conditionalFontStyle, conditionalNumberFormat } from '../core/style-values.js';
 import { nativeSparklineAt, nativeSparklineData } from '../core/native-sparkline-data.js';
 import { nativeSparklineNode } from './native-sparkline.js';
 import { createSlicerControl } from './slicer.js';
@@ -51,7 +51,7 @@ import { isComposing, el, clamp, isMod, IS_MAC } from './dom.js';
 import { cellName, cellKey, rangeName, normalizeRange, parseRange, parseCellRef, colIndex } from '../core/cell.js';
 import { splitAtCell, dropSplit } from '../core/split-panes.js';
 import { RTL_LEAD } from '../core/bidi.js';
-import { formatValue, formatGeneral, localeInfo, defaultAlign, editText, fontStack, borderCss, errorHelp, indentWidth, dateTimeKind } from '../core/format.js';
+import { formatValue, formatGeneral, localeInfo, defaultAlign, layoutAlign, editText, fontStack, borderCss, errorHelp, indentWidth, dateTimeKind } from '../core/format.js';
 import { extractRefs, refToText, quoteSheet, MAX_ROW, MAX_COL } from '../core/refs.js';
 import { tokenize } from '../core/formula/tokenizer.js';
 import { inString, signatureFor } from '../core/formula/hints.js';
@@ -60,7 +60,7 @@ import { codeColor } from '../core/numfmt.js';
 import * as S from '../core/selection.js';
 import { createFormulaHints } from './autocomplete.js';
 import { shrinkCellText } from '../core/shrink-text.js';
-import { maxLineWidth, cellLayoutText, CELL_TEXT_INSET, cellHorizontalPadding } from '../core/textfit.js';
+import { maxLineWidth, cellLayoutText, CELL_TEXT_INSET, cellHorizontalPadding, tabularDigits } from '../core/textfit.js';
 import { chartData, chartTitles, CHART_MIN_W, CHART_MIN_H, IMAGE_MIN, TEXT_MIN, textBoxStyle, textBoxText, imageTransform } from '../core/charts.js';
 import { renderChartSvg, renderSparklineSvg, chartCornerRadius, themeSeriesKey } from './chartsvg.js';
 import { equationBody } from './equation-view.js';
@@ -166,7 +166,7 @@ export function createGrid(opts) {
     }
     return measuredIndentUnit;
   }
-  const cellIndent = (value, style) => style?.indent && (style.align || defaultAlign(value)) !== 'center' ? indentWidth(value, style, indentUnit()) : 0;
+  const cellIndent = (value, style) => style?.indent && (layoutAlign(style.align) || defaultAlign(value)) !== 'center' ? indentWidth(value, style, indentUnit()) : 0;
 
   let sheetId = opts.sheetId;
   const perSheet = new Map(); // sheetId → { sel, extras, scrollLeft, scrollTop }
@@ -426,13 +426,10 @@ export function createGrid(opts) {
     // Only the lines that differ from the default are listed: a million rows cost what their resized and hidden ones do.
     const colSizes = [];
     for (const [c, w] of s.colWidths) colSizes.push([c, Math.round(w * zoom)]);
-    for (const c of s.hiddenCols) colSizes.push([c, 0]);
-    colOffsets.build(s.cols, Math.round(s.defaultColWidth * zoom), colSizes);
+    colOffsets.build(s.cols, Math.round(s.defaultColWidth * zoom), colSizes, [s.hiddenCols]);
     const rowSizes = [];
     for (const [r, h] of s.rowHeights) rowSizes.push([r, Math.round(h * zoom)]);
-    for (const r of s.hiddenRows) rowSizes.push([r, 0]);
-    for (const r of s.filterHidden) rowSizes.push([r, 0]);
-    rowOffsets.build(s.rows, Math.round(s.defaultRowHeight * zoom), rowSizes);
+    rowOffsets.build(s.rows, Math.round(s.defaultRowHeight * zoom), rowSizes, [s.hiddenRows, s.filterHidden]);
     // Frozen panes can begin at a saved row/column other than the first.
     // Keep absolute cell indexes, translating their coordinates so the first
     // frozen cell starts at zero; earlier cells remain present in the model.
@@ -872,9 +869,10 @@ export function createGrid(opts) {
    * cell is the window's top-left one), or remove the split when there is one. Splitting unfreezes panes.
    */
   function toggleSplit() {
+    // The entry goes in first: a formula showing another sheet to pick references on comes home with it.
+    if (edit && !commitEdit()) return;
     const s = sheet();
     if (!s || s.kind === 'chart') return;
-    if (edit && !commitEdit()) return;
     if (s.split && !s.frozenRows && !s.frozenCols) { wb.setSplit(sheetId, null); return; }
     ensureOffsets();
     const view = viewMetrics();
@@ -998,6 +996,15 @@ export function createGrid(opts) {
   const rowEnd = (r) => { ensureOffsets(); return rowOffsets.end(r); };
   // Commands and keys treat every sheet as Excel's whole grid (A1:XFD1048576); the canvas holds the part reached so far.
   const bounds = () => { const s = sheet(); return { rows: Math.max(s.rows, MAX_ROWS), cols: Math.max(s.cols, MAX_COLS) }; };
+  /**
+   * Does a range take whole columns (axis 'col') or whole rows: picked by their headings, or running the
+   * grid's whole height or width? A block that merely ends on the last line laid out so far does not.
+   */
+  const wholeLines = (rg, axis) => {
+    const b = bounds();
+    return axis === 'col' ? rg.scope === 'columns' || rg.scope === 'sheet' || (rg.r1 === 0 && rg.r2 >= b.rows - 1)
+      : rg.scope === 'rows' || rg.scope === 'sheet' || (rg.c1 === 0 && rg.c2 >= b.cols - 1);
+  };
 
   function cellAtPoint(clientX, clientY) {
     ensureOffsets();
@@ -1170,10 +1177,12 @@ export function createGrid(opts) {
     ensureOffsets();
     const s = sheet();
     const { st, sl, vh, vw } = view;
+    // A view reaching past the last line ends at the last line with a size: the lines after it are hidden, and rows
+    // hidden from under a list to the sheet's end were a million lines walked on every frame.
     const r0 = Math.max(0, rowOffsets.indexAt(st) - BUFFER);
-    const r1 = Math.min(s.rows - 1, rowOffsets.indexAt(st + vh) + BUFFER);
+    const r1 = Math.min(s.rows - 1, rowOffsets.indexAt(Math.min(st + vh, rowOffsets.total() - 1)) + BUFFER);
     const c0 = Math.max(0, colOffsets.indexAt(sl) - BUFFER);
-    const c1 = Math.min(s.cols - 1, colOffsets.indexAt(sl + vw) + BUFFER);
+    const c1 = Math.min(s.cols - 1, colOffsets.indexAt(Math.min(sl + vw, colOffsets.total() - 1)) + BUFFER);
     return { r0, r1, c0, c1 };
   }
 
@@ -1463,11 +1472,13 @@ export function createGrid(opts) {
     // Context order have it. The alignment classes name the box's start and end, so an alignment
     // that is set is mapped to the side it names.
     const rtl = !asFormula && typeof value === 'string' && RTL_LEAD.test(text);
-    const align = asFormula ? 'left' : st?.align || (rtl ? 'right' : defaultAlign(value));
+    const align = asFormula ? 'left' : layoutAlign(st?.align) || (rtl ? 'right' : defaultAlign(value));
     if (rtl) node.setAttribute('dir', 'rtl');
     node.classList.add((rtl ? align === 'left' : align === 'right') ? 'ar' : align === 'center' ? 'ac' : 'al');
     const cf = s.rules.length || s.tables.length ? wb.conditionalStyle(s.id, r, c, value) : null;
     st = conditionalFontStyle(st, cf);
+    // A rule's number format shows over the cell's own while the rule matches.
+    if (cf?.fmt != null && text) { st = conditionalNumberFormat(st, cf); text = cellLayoutText(formatValue(value, st), st?.wrap); }
     // A cell's own fill shows through the table's coat (its bands and header colours); a rule's fill paints over both.
     const coated = !!cf?.bg && nativeFillOverridesNormal(st, wb.nativeNormalFill) && cf.coat;
     if (cf) {
@@ -1496,7 +1507,8 @@ export function createGrid(opts) {
       picture = true;
     }
     if (picture || checkbox) text = '';
-    if (!spill && (cell?.f != null || typeof value === 'string')) {
+    // Text may be an address, a formula a HYPERLINK; any other value is a link only when one was put on it.
+    if (!spill && (cell?.f != null || typeof value === 'string' || cell?.hyperlink)) {
       const link = wb.linkAt(s.id, r, c);
       if (link) { node.classList.add('link'); node.title = link.url; }
     }
@@ -1524,6 +1536,7 @@ export function createGrid(opts) {
       if (st.italic) node.classList.add('i');
       if (st.underline) node.classList.add('u');
       if (st.underline === false || st.strike === false) node.style.textDecoration = [st.underline && 'underline', st.strike && 'line-through'].filter(Boolean).join(' ') || 'none';
+      if (/^double/.test(st.underline)) node.style.textDecorationStyle = 'double';
       if (st.strike) node.classList.add('s');
       if (st.wrap && !picture && !checkbox) node.classList.add('wrap'); // wrapping lays text out; a picture or box stays centred
       // A format code's numeric or text section color wins over the font color.
@@ -1539,7 +1552,11 @@ export function createGrid(opts) {
       text = `=${cell.f}`;
       node.classList.add('formula-text');
     }
-    if ((cf?.barOnly || cf?.iconOnly) && !showFormulas) text = '';
+    if ((cf?.barOnly || cf?.iconOnly) && !showFormulas) {
+      // The bar or icon stands in for the value on screen; a screen reader still reads the value.
+      if (text) node.setAttribute('aria-label', text);
+      text = '';
+    }
     if (cf?.icon && !showFormulas) {
       // Icon sets: a colored glyph before the value (or instead of it).
       node.classList.add('has-icon');
@@ -1737,7 +1754,7 @@ export function createGrid(opts) {
         const value = cell?.f != null ? wb.getValue(s.id, r, c) : cell?.v ?? wb.spillAt(s.id, r, c)?.value;
         if (typeof value !== 'string') return null;
         // Right of the window only text facing left runs into it: right-aligned or centred, or right-to-left text given no alignment.
-        if (dir > 0 && st?.align !== 'right' && st?.align !== 'center' && (st?.align || !RTL_LEAD.test(value))) return null;
+        if (dir > 0 && !['right', 'center'].includes(layoutAlign(st?.align)) && (st?.align || !RTL_LEAD.test(value))) return null;
         return { r, c };
       }
       return null;
@@ -2476,7 +2493,8 @@ export function createGrid(opts) {
         if (cell.f != null) formulas++;
         hashCell(r, c, cell.f != null ? wb.getValue(sheetId, r, c) : cell.v, cell.s);
       }
-      for (const sp of wb.spillEntries(sheetId)) if (inRange(sp.r, sp.c)) { formulas++; hashCell(sp.r, sp.c, sp.value, s.cells.get(cellKey(sp.r, sp.c))?.s); }
+      // Only the results spilled into the range: an array over the whole sheet spills more than any list holds.
+      for (const sp of wb.spillEntries(sheetId, { r1: n.r1, c1: n.c1, r2, c2 })) if (inRange(sp.r, sp.c)) { formulas++; hashCell(sp.r, sp.c, sp.value, s.cells.get(cellKey(sp.r, sp.c))?.s); }
     } else {
       for (let r = n.r1; r <= r2; r++) {
         for (let c = n.c1; c <= c2; c++) {
@@ -2725,13 +2743,16 @@ export function createGrid(opts) {
     hlLayer.replaceChildren();
     if (!highlights.cells.length) return;
     const frag = document.createDocumentFragment();
-    // A cell in view, or in a frozen band or a split window's top or left pane, which show wherever the sheet is scrolled.
-    const rowShown = (r) => (r >= vr.r0 && r <= vr.r1) || (r >= (frozen.r0 || 0) && r < frozen.rows) || (frozen.split && frozen.top && r >= paneRows[0] && r <= paneRows[1]);
-    const colShown = (c) => (c >= vr.c0 && c <= vr.c1) || (c >= (frozen.c0 || 0) && c < frozen.cols) || (frozen.split && frozen.left && c >= paneCols[0] && c <= paneCols[1]);
+    // Lines a..b reaching into the view, or into a frozen band or a split window's top or left pane, which show wherever the sheet is scrolled.
+    const rowsShown = (a, b) => (b >= vr.r0 && a <= vr.r1) || (b >= (frozen.r0 || 0) && a < frozen.rows) || (frozen.split && frozen.top && b >= paneRows[0] && a <= paneRows[1]);
+    const colsShown = (a, b) => (b >= vr.c0 && a <= vr.c1) || (b >= (frozen.c0 || 0) && a < frozen.cols) || (frozen.split && frozen.left && b >= paneCols[0] && a <= paneCols[1]);
+    const merges = sheet().merges.length > 0;
     highlights.cells.forEach((m, i) => {
-      if (!rowShown(m.r) || !colShown(m.c)) return;
+      // A match in a merged block is the block's: it is outlined whole, and while any of it is in view.
+      const area = (merges && mergeAt(m.r, m.c)) || { r1: m.r, c1: m.c, r2: m.r, c2: m.c };
+      if (!rowsShown(area.r1, area.r2) || !colsShown(area.c1, area.c2)) return;
       const node = el('div.find-hl', { className: `find-hl${i === highlights.current ? ' current' : ''}${m.kind === 'invalid' ? ' invalid-circle' : ''}` });
-      place(node, rangeBox({ r1: m.r, c1: m.c, r2: m.r, c2: m.c }));
+      place(node, rangeBox(area));
       frag.append(node);
     });
     hlLayer.append(frag);
@@ -2748,12 +2769,24 @@ export function createGrid(opts) {
     if (rowHeaderW !== before) invalidateOffsets();
   }
 
+  /**
+   * How a column's (axis 'col') or row's heading marks the selection: 'sel' when a range of it takes the line
+   * whole (one added with Ctrl/Cmd+click too), 'hl' when one only crosses it, null otherwise.
+   */
+  function headerMark(axis, i, range) {
+    let mark = null;
+    for (const rg of [...extras, range]) {
+      if (axis === 'col' ? i < rg.c1 || i > rg.c2 : i < rg.r1 || i > rg.r2) continue;
+      if (wholeLines(rg, axis)) return 'sel';
+      mark = 'hl';
+    }
+    return mark;
+  }
+
   function renderHeaders(vr, view = viewMetrics()) {
     fitRowDigits(vr.r1);
-    const range = S.selRange(sel);
+    const range = S.selRange(sel, true);
     const s = sheet();
-    const wholeCols = range.r1 === 0 && range.r2 >= s.rows - 1;
-    const wholeRows = range.c1 === 0 && range.c2 >= s.cols - 1;
     // Zoomed far out the lines are narrower than their letters and numbers (drawn no smaller than 6px,
     // chrome.css), which ran together into a smear: a label that does not fit its line shows on every
     // k-th line only, k the first of 1, 2, 5, 10, 20, 50… lines of the sheet's size that holds it.
@@ -2791,8 +2824,8 @@ export function createGrid(opts) {
       const h = el('div.hcell', { 'aria-hidden': 'true', dataset: { c } }, colLabel(c));
       h.style.left = `${colX(c)}px`;
       h.style.width = `${colW(c)}px`;
-      if (c >= range.c1 && c <= range.c2) h.classList.add(wholeCols ? 'sel' : 'hl');
-      else if (extras.some((x) => c >= x.c1 && c <= x.c2)) h.classList.add('hl');
+      const mark = headerMark('col', c, range);
+      if (mark) h.classList.add(mark);
       if (c > 0 && s.hiddenCols.has(c - 1)) h.classList.add('after-hidden');
       if (s.hiddenCols.has(c + 1)) h.classList.add('before-hidden');
       h.append(resizer('col', c, colW(c)));
@@ -2802,8 +2835,8 @@ export function createGrid(opts) {
       const h = el('div.hcell', { 'aria-hidden': 'true', dataset: { r } }, rowLabel(r));
       h.style.top = `${rowY(r)}px`;
       h.style.height = `${rowH(r)}px`;
-      if (r >= range.r1 && r <= range.r2) h.classList.add(wholeRows ? 'sel' : 'hl');
-      else if (extras.some((x) => r >= x.r1 && r <= x.r2)) h.classList.add('hl');
+      const mark = headerMark('row', r, range);
+      if (mark) h.classList.add(mark);
       if (r > 0 && s.hiddenRows.has(r - 1)) h.classList.add('after-hidden');
       if (s.hiddenRows.has(r + 1)) h.classList.add('before-hidden');
       if (wb.filtersForSheet(s.id).some(f => r > f.range.r1 && r <= f.range.r2 && Object.keys(f.criteria).length)) h.classList.add('filtered');
@@ -2907,26 +2940,15 @@ export function createGrid(opts) {
 
   /** The selection's marks on the row and column headers, set on the existing header cells. */
   function highlightHeaders() {
-    const s = sheet();
-    const range = S.selRange(sel);
-    const wholeCols = range.r1 === 0 && range.r2 >= s.rows - 1;
-    const wholeRows = range.c1 === 0 && range.c2 >= s.cols - 1;
-    for (const head of [colHead, colHeadFrozen]) {
-      for (const h of head.children) {
-        if (!h.classList.contains('hcell')) continue;
-        const c = Number(h.dataset.c);
-        const inSel = c >= range.c1 && c <= range.c2;
-        h.classList.toggle('sel', inSel && wholeCols);
-        h.classList.toggle('hl', (inSel && !wholeCols) || (!inSel && extras.some((x) => c >= x.c1 && c <= x.c2)));
-      }
-    }
-    for (const head of [rowHead, rowHeadFrozen]) {
-      for (const h of head.children) {
-        if (!h.classList.contains('hcell')) continue;
-        const r = Number(h.dataset.r);
-        const inSel = r >= range.r1 && r <= range.r2;
-        h.classList.toggle('sel', inSel && wholeRows);
-        h.classList.toggle('hl', (inSel && !wholeRows) || (!inSel && extras.some((x) => r >= x.r1 && r <= x.r2)));
+    const range = S.selRange(sel, true);
+    for (const [axis, heads] of [['col', [colHead, colHeadFrozen]], ['row', [rowHead, rowHeadFrozen]]]) {
+      for (const head of heads) {
+        for (const h of head.children) {
+          if (!h.classList.contains('hcell')) continue;
+          const mark = headerMark(axis, Number(axis === 'col' ? h.dataset.c : h.dataset.r), range);
+          h.classList.toggle('sel', mark === 'sel');
+          h.classList.toggle('hl', mark === 'hl');
+        }
       }
     }
   }
@@ -3082,6 +3104,31 @@ export function createGrid(opts) {
         const height = parseFloat(listButton.style.height);
         listButton.style.clipPath = `inset(${Math.max(0, topEdge - vy)}px 0 ${Math.max(0, vy + height - view.vh)}px 0)`;
       }
+      if (p.el === promptPop || p.el === linkPop || p.el === notePop) {
+        // An input message, a link's address and a note keep inside the window: under (or beside) a cell near its
+        // right edge (on a phone, most cells) they slide left. A note that does not fit beside the cell goes to its
+        // left, or with no room there either, under it (below an input message or link shown there), so it does
+        // not cover the cell. A cell scrolled out of sight takes them with it, rather than leaving them over others.
+        const left = frozenCell ? rowHeaderW : view.sl;
+        const right = left + view.vw - p.el.offsetWidth - 4;
+        const cellLeft = x - p.dx, cellTop = y - p.dy;
+        let under = p.el !== notePop;
+        if (cellLeft + p.box.width > left && cellLeft < left + view.vw) {
+          if (p.el === notePop && x > right) {
+            if (cellLeft - p.el.offsetWidth - 6 >= left) x = cellLeft - p.el.offsetWidth - 6;
+            else { y += p.box.height + 4 + [promptPop, linkPop].filter((pop) => !pop.hidden).reduce((h, pop) => h + pop.offsetHeight + 4, 0); under = true; }
+          }
+          x = Math.max(left, Math.min(x, right));
+        }
+        // At the window's foot they rise: a note beside the cell slides up, and one under it goes above the cell
+        // where there is room there.
+        const top = frozenCell ? colHeaderH : view.st;
+        const bottom = top + view.vh - p.el.offsetHeight - 4;
+        if (cellTop + p.box.height > top && cellTop < top + view.vh && y > bottom) {
+          const above = cellTop - p.el.offsetHeight - 4;
+          y = under && above >= top ? above : Math.max(top, bottom);
+        }
+      }
       p.el.classList.toggle('offscreen', off);
       p.el.style.transform = `translate(${x}px, ${y}px)`;
     }
@@ -3204,16 +3251,23 @@ export function createGrid(opts) {
     if (!opts.announce) return;
     const range = S.selRange(sel);
     const { r, c } = sel.active;
-    let text = wb.getDisplay(sheetId, r, c);
     // A very long text is read out in part, with its length: the whole of it would take minutes, or
     // choke the reader. The cut falls between characters as a reader sees them.
-    if (text.length > SPOKEN_MAX) {
+    const spoken = (text) => {
+      if (text.length <= SPOKEN_MAX) return text;
       const units = graphemes(text);
-      text = `${typeof units === 'string' ? units.slice(0, SPOKEN_MAX) : units.slice(0, SPOKEN_MAX).join('')}… ${text.length.toLocaleString()} characters`;
-    }
+      return `${typeof units === 'string' ? units.slice(0, SPOKEN_MAX) : units.slice(0, SPOKEN_MAX).join('')}… ${text.length.toLocaleString()} characters`;
+    };
+    const text = spoken(wb.getDisplay(sheetId, r, c));
     const cell = wb.getCell(sheetId, r, c);
     let msg = `${cellName(r, c)}${text ? `, ${text}` : ', empty'}`;
     if (cell?.f != null) msg += `, formula`;
+    // A validation rule's input message is read with the cell it is shown beside.
+    const rule = sheet().validations.length ? wb.validationAt(sheetId, r, c) : null;
+    if (rule?.showInputMessage !== false && (rule?.prompt || rule?.promptTitle)) msg += `. ${[rule.promptTitle, rule.prompt].filter(Boolean).join(': ')}`;
+    // So is a note, which shows beside it too (unless notes are set to show nothing).
+    const note = appOption('commentIndicators') === 'none' ? null : sheet().notes.get(cellKey(r, c));
+    if (note) msg += `. Note: ${spoken(note)}`;
     if (!S.isSingle(sel)) msg = `${rangeName(range)} selected. ${msg}`;
     if (extras.length) msg = `${extras.length + 1} ranges selected. ${msg}`;
     opts.announce(msg);
@@ -3368,7 +3422,7 @@ export function createGrid(opts) {
     editor.style.fontStyle = st?.italic ? 'italic' : '';
     // Text is typed in the direction its first letter gives (dir=auto), aligned to its end unless the cell says otherwise; a formula reads left to right.
     editor.setAttribute('dir', formula ? 'ltr' : 'auto');
-    const align = st?.align || (typeof cell?.v === 'number' && cell.f == null ? 'right' : 'start');
+    const align = layoutAlign(st?.align) || (typeof cell?.v === 'number' && cell.f == null ? 'right' : 'start');
     editor.style.textAlign = formula ? 'left' : align;
     const indent = !formula ? cellIndent(cell?.v, st) * zoom : 0;
     const inset = indent + CELL_TEXT_INSET * zoom;
@@ -3398,8 +3452,9 @@ export function createGrid(opts) {
       const screenLeft = colX(c) - bandSL(c, view);
       const roomLeft = Math.max(0, screenLeft - (leftBand(c) ? 0 : frozen.w) - 1);
       const roomRight = Math.max(0, view.vw - screenLeft - w - 2);
-      const toLeft = !formula && (st?.align === 'right' || (!st?.align && RTL_LEAD.test(text)));
-      const centred = !formula && st?.align === 'center';
+      // The alignment the box draws its text with decides, so a number given none, edited aligned right, grows left too.
+      const toLeft = !formula && (align === 'right' || (align === 'start' && RTL_LEAD.test(text)));
+      const centred = !formula && align === 'center';
       const maxW = w + (toLeft ? roomLeft : centred ? 2 * Math.min(roomLeft, roomRight) : roomRight);
       const width = clamp(needed, w, maxW);
       editor.style.width = `${width}px`;
@@ -3536,8 +3591,9 @@ export function createGrid(opts) {
     if (validationPending) return false;
     returnHome();
     const { r, c, preserveRichText } = edit;
-    // A whole number typed without a decimal point gets one, when the options fix the decimal places.
-    const text = appOption('fixedDecimal') && !edit.arrayRange && !arrayEntry
+    // A whole number typed without a decimal point gets one, when the options fix the decimal places; not in a
+    // Plain text cell, which keeps what was typed.
+    const text = appOption('fixedDecimal') && !edit.arrayRange && !arrayEntry && wb.styleAt(sheetId, r, c)?.fmt !== 'text'
       ? applyFixedDecimal(edit.text, appOption('fixedDecimalPlaces'), localeInfo().decimal) : edit.text;
     // The cell was protected while its entry was being typed: the workbook would refuse the write in
     // silence, so the entry stays open (the workbook's notice says why) rather than being dropped.
@@ -3777,8 +3833,48 @@ export function createGrid(opts) {
   // Sheets. A click or an arrow key ends the run (setSelection clears the origin).
   let tabOrigin = null;
 
+  /**
+   * On a protected sheet Tab and Shift+Tab move between the cells left unlocked for entry, as in Excel: the nearest one
+   * along the rows, round from the last to the first. Null when the sheet is not protected or leaves none open, or
+   * several cells are selected (Tab walks those).
+   */
+  function unlockedStep(back) {
+    const s = sheet();
+    if (!s?.protected || s.externalCache || !S.isSingle(sel) || extras.length) return null;
+    const covered = (r, c) => { const m = s.merges.length ? mergeAt(r, c) : null; return !!m && (m.r1 !== r || m.c1 !== c); };
+    const open = (r, c) => wb.styleAt(sheetId, r, c)?.locked === false && !rowHidden(s, r) && !s.hiddenCols.has(c) && !covered(r, c) && !wb.protectedRangeAt(sheetId, r, c);
+    // Cells unlocked one by one, and whole columns or rows unlocked: those as far as the sheet's content goes.
+    const unlocked = (styles) => [...styles].filter(([, st]) => st?.locked === false).map(([i]) => i);
+    const cols = unlocked(s.colStyles), rows = unlocked(s.rowStyles);
+    const used = wb.usedRange(sheetId);
+    const lastRow = Math.max(used?.r2 ?? 0, sel.active.r, ...rows), lastCol = Math.max(used?.c2 ?? 0, sel.active.c, ...cols);
+    const width = bounds().cols;
+    const here = sel.active.r * width + sel.active.c;
+    let next = null, round = null; // the nearest open cell past this one, and the first (Shift: the last) of them all
+    const better = (at, than) => than == null || (back ? at > than : at < than);
+    const consider = (r, c) => {
+      const at = r * width + c;
+      const ahead = (back ? at < here : at > here) && better(at, next);
+      if (!ahead && !better(at, round)) return; // nothing to gain: its style is not read
+      if (!open(r, c)) return;
+      if (ahead) next = at;
+      if (better(at, round)) round = at;
+    };
+    for (const [key, cell] of s.cells) {
+      if (cell.s?.locked !== false) continue;
+      const comma = key.indexOf(',');
+      consider(Number(key.slice(0, comma)), Number(key.slice(comma + 1)));
+    }
+    for (const c of cols) for (let r = 0; r <= lastRow; r++) consider(r, c);
+    for (const r of rows) for (let c = 0; c <= lastCol; c++) consider(r, c);
+    const to = next ?? round;
+    return to == null ? null : { r: Math.floor(to / width), c: to % width };
+  }
+
   /** Tab or Shift+Tab: one cell along. Only a run from a single cell has an origin; inside a range Enter walks the range. */
   function tabStep(back) {
+    const unlocked = unlockedStep(back);
+    if (unlocked) { tabOrigin = null; setSelection(S.single(unlocked.r, unlocked.c), { scrollActive: true }); return; }
     const { r, c } = sel.active;
     const origin = S.isSingle(sel) && !extras.length ? (tabOrigin?.r === r ? tabOrigin : { r, c }) : null;
     const walked = stepAreas('right', back);
@@ -4283,7 +4379,8 @@ export function createGrid(opts) {
     }
     if (edit && !commitEdit()) return;
     if (keyMode === 'add') { addRange(S.selRange(sel, true)); setSelection(S.single(r, c), { add: true }); drag = { kind: 'select' }; grab(viewport, e); viewport.focus({ preventScroll: true }); return; }
-    if (e.shiftKey || keyMode === 'extend') setSelection(S.extendTo(sel, r, c));
+    // Shift stretches the range last selected; the ranges added before it with Ctrl/Cmd+click stay, as in Excel.
+    if (e.shiftKey || keyMode === 'extend') setSelection(S.extendTo(sel, r, c), { add: true });
     else setSelection(S.single(r, c));
     // A checkbox cell toggles on click.
     if (!e.shiftKey && wb.validationAt(sheetId, r, c)?.type === 'checkbox') { toggleCheckbox(r, c); viewport.focus({ preventScroll: true }); return; }
@@ -4301,7 +4398,11 @@ export function createGrid(opts) {
     if (!isFilterHead && !isList) return null;
     const rect = cellRect(r, c);
     if (clientX < rect.right - 22 || clientX > rect.right) return null;
-    if (clientY < rect.top + 2 || clientY > rect.bottom - 8) return null;
+    // The button is drawn 16px tall in the middle of the cell at every zoom (grid.css), cut by a shorter
+    // cell: a press on it, or within a 24px target around it, opens it. The selection's fill handle, on the
+    // same corner when this cell ends the selection, keeps its own press.
+    if (clientY < rect.top || clientY > rect.bottom || Math.abs(clientY - (rect.top + rect.bottom) / 2) > 12) return null;
+    if (onFillHandle(clientX, clientY)) return null;
     return isFilterHead ? 'filter' : 'list';
   }
 
@@ -4736,10 +4837,9 @@ export function createGrid(opts) {
     // Pressing on a header inside a whole-row or whole-column selection
     // starts a reorder drag; a plain click on it still selects that line.
     // With Ctrl/Cmd held it is an addition to the selection, as below.
-    const range = S.selRange(sel);
-    const s = sheet();
-    const wholeCols = range.r1 === 0 && range.r2 >= s.rows - 1;
-    const wholeRows = range.c1 === 0 && range.c2 >= s.cols - 1;
+    const range = S.selRange(sel, true);
+    const wholeCols = wholeLines(range, 'col');
+    const wholeRows = wholeLines(range, 'row');
     const insideSel = axis === 'col' ? wholeCols && idx >= range.c1 && idx <= range.c2 : wholeRows && idx >= range.r1 && idx <= range.r2;
     if (insideSel && !e.shiftKey && !isMod(e) && e.pointerType !== 'touch') {
       drag = { kind: axis === 'col' ? 'colmove' : 'rowmove', idx, from: axis === 'col' ? range.c1 : range.r1, count: axis === 'col' ? range.c2 - range.c1 + 1 : range.r2 - range.r1 + 1, startPos: axis === 'col' ? e.clientX : e.clientY, to: null };
@@ -4751,8 +4851,9 @@ export function createGrid(opts) {
     const add = isMod(e) && !e.shiftKey && e.pointerType !== 'touch';
     if (add) addRange(S.selRange(sel, true));
     const was = { sel, extras: [...extras] };
-    if (axis === 'col') setSelection(e.shiftKey ? S.selectCols(sel.anchor.c, idx, b) : S.selectCols(idx, idx, b), { scroll: false, add });
-    else setSelection(e.shiftKey ? S.selectRows(sel.anchor.r, idx, b) : S.selectRows(idx, idx, b), { scroll: false, add });
+    // Shift stretches the lines last selected, keeping those added before them.
+    if (axis === 'col') setSelection(e.shiftKey ? S.selectCols(sel.anchor.c, idx, b) : S.selectCols(idx, idx, b), { scroll: false, add: add || e.shiftKey });
+    else setSelection(e.shiftKey ? S.selectRows(sel.anchor.r, idx, b) : S.selectRows(idx, idx, b), { scroll: false, add: add || e.shiftKey });
     drag = { kind: axis === 'col' ? 'colsel' : 'rowsel', start: e.shiftKey ? (axis === 'col' ? sel.anchor.c : sel.anchor.r) : idx };
     grab(axis === 'col' ? colClip : rowClip, e);
     viewport.focus({ preventScroll: true });
@@ -4871,9 +4972,7 @@ export function createGrid(opts) {
    * range and of any range added with Ctrl/Cmd+click. Null when the line is not one of several.
    */
   function selectedLines(axis, idx) {
-    const s = sheet();
-    const whole = (rg) => (axis === 'col' ? rg.r1 === 0 && rg.r2 >= s.rows - 1 : rg.c1 === 0 && rg.c2 >= s.cols - 1);
-    const runs = [...extras, S.selRange(sel)].filter(whole).map((rg) => (axis === 'col' ? [rg.c1, rg.c2] : [rg.r1, rg.r2])).sort((a, b) => a[0] - b[0]);
+    const runs = [...extras, S.selRange(sel, true)].filter((rg) => wholeLines(rg, axis)).map((rg) => (axis === 'col' ? [rg.c1, rg.c2] : [rg.r1, rg.r2])).sort((a, b) => a[0] - b[0]);
     if (!runs.some(([from, to]) => idx >= from && idx <= to)) return null;
     const merged = [];
     for (const run of runs) {
@@ -4929,7 +5028,8 @@ export function createGrid(opts) {
     const font = `${st?.italic ? 'italic ' : ''}${st?.bold ? '600 ' : ''}${size}px ${family}`;
     const indent = cellIndent(value, st);
     const parts = numberFormatParts(value, st);
-    const width = parts ? measureFormatParts(parts, line => textWidth(line, font)) : maxLineWidth(text, (line) => textWidth(line, font));
+    // Measured in the tabular figures the number is drawn in, as buildCell measures it to fit.
+    const width = parts ? measureFormatParts(parts, line => textWidth(line, font)) : maxLineWidth(text, (line) => textWidth(tabularDigits(line), font));
     const current = fitted ? s.colWidths.get(c) : s.defaultColWidth;
     const next = Math.min(500, Math.ceil(width + (14 + indent)));
     if (width + cellHorizontalPadding(indent) + 1 <= current || next <= current) return false;
@@ -4951,7 +5051,9 @@ export function createGrid(opts) {
       // The filter button, dropdown chevron, chip or icon drawn in the cell asks for its room too.
       const rule = s.validations.length ? wb.validationAt(sheetId, r, c) : null;
       const parts = numberFormatParts(value, style, wb.getCell(sheetId, r, c)?.richText);
-      let width = parts ? measureFormatParts(parts, richTextMeasure(font, textWidth)) : maxLineWidth(cellLayoutText(text, style?.wrap), (line) => textWidth(line, font));
+      // A number is drawn in tabular figures, every digit as wide as a 0, and measured so to fit (buildCell).
+      const plain = typeof value === 'number' ? (line) => textWidth(tabularDigits(line), font) : (line) => textWidth(line, font);
+      let width = parts ? measureFormatParts(parts, richTextMeasure(font, textWidth)) : maxLineWidth(cellLayoutText(text, style?.wrap), plain);
       if (style?.rot) {
         // Rotated text needs the width of its turned bounding box, as fitting the row needs its height.
         const rad = (Math.abs(style.rot) * Math.PI) / 180;
@@ -5139,10 +5241,10 @@ export function createGrid(opts) {
         const from = e.shiftKey ? { ...sel, active: sel.focus } : sel;
         const target = jumpFrom(from, dr, dc).active;
         setKeyMode(null);
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { grow: false });
+        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { grow: false, add: e.shiftKey });
       } else if (keyMode === 'extend') {
         const target = stepFrom(S.single(sel.focus.r, sel.focus.c), dr, dc).active;
-        setSelection(S.extendTo(sel, target.r, target.c));
+        setSelection(S.extendTo(sel, target.r, target.c), { add: true });
       } else {
         // Add to Selection: the range so far stays selected and the cursor moves on alone.
         addRange(S.selRange(sel, true));
@@ -5165,12 +5267,13 @@ export function createGrid(opts) {
       if (e.altKey && !e.shiftKey && !mod && !e.ctrlKey && (key === 'ArrowRight' || key === 'ArrowLeft')) { opts.onCommand?.('sheet', key === 'ArrowRight' ? 'next' : 'prev'); return; }
       if (e.altKey && !e.shiftKey && !mod && !e.ctrlKey && key === 'ArrowUp') return;
       const [dr, dc] = dir;
+      // Shift stretches the range last selected; the ranges added before it with Ctrl/Cmd+click stay, as in Excel.
       if (mod) {
         const target = jumpFrom(e.shiftKey ? { ...sel, active: sel.focus } : sel, dr, dc).active;
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { grow: false });
+        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { grow: false, add: e.shiftKey });
       } else if (e.shiftKey) {
         const target = stepFrom(S.single(sel.focus.r, sel.focus.c), dr, dc).active;
-        setSelection(S.extendTo(sel, target.r, target.c));
+        setSelection(S.extendTo(sel, target.r, target.c), { add: true });
       }
       else setSelection(stepFrom(sel, dr, dc));
       return;
@@ -5205,7 +5308,7 @@ export function createGrid(opts) {
           setKeyMode(null);
           const used = wb.usedRange(sheetId) || { r2: 0, c2: 0 };
           const last = visibleTarget({ r: used.r2, c: used.c2 }, -1, -1);
-          setSelection(e.shiftKey ? S.extendTo(sel, last.r, last.c) : S.single(last.r, last.c));
+          setSelection(e.shiftKey ? S.extendTo(sel, last.r, last.c) : S.single(last.r, last.c), { add: e.shiftKey });
           return;
         }
         // Ctrl+Home goes to the first cell below and right of frozen panes, Home to the row's first unfrozen column, as in Excel.
@@ -5218,7 +5321,7 @@ export function createGrid(opts) {
         const fc = s.frozenCols ? Math.min(s.frozenOrigin?.c || 0, s.cols - 1) + s.frozenCols : 0;
         const row = (e.shiftKey ? sel.focus : sel.active).r;
         const target = visibleTarget(mod ? { r: fr, c: fc } : { r: row, c: fc }, mod ? 1 : 0, 1);
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c));
+        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { add: e.shiftKey });
         return;
       }
       case 'End': {
@@ -5227,7 +5330,7 @@ export function createGrid(opts) {
         if (!mod) { setKeyMode(keyMode === 'end' ? null : 'end'); return; }
         const used = wb.usedRange(sheetId) || { r2: 0, c2: 0 };
         const target = visibleTarget(mod ? { r: used.r2, c: used.c2 } : { r: sel.active.r, c: used.c2 }, mod ? -1 : 0, -1);
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c));
+        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { add: e.shiftKey });
         return;
       }
       case 'PageDown':
@@ -5250,7 +5353,7 @@ export function createGrid(opts) {
           : visibleTarget({ r: clamp(origin.r + n, 0, b.rows - 1), c: origin.c }, Math.sign(n), 0);
         // The sheet scrolls by the page too, so the cell lands where the one it left was on screen.
         const onScreen = at(across ? origin.c : origin.r) - before;
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { scroll: false });
+        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { scroll: false, add: e.shiftKey });
         if (across) windowsFor(null, target.c); else windowsFor(target.r, null);
         const next = Math.max(across ? -shift.x : -shift.y, at(across ? target.c : target.r) - onScreen);
         // A page past the lines laid out so far reaches the blank ones it shows, as scrolling there does.
@@ -5524,10 +5627,14 @@ export function createGrid(opts) {
       const whole = a === b;
       const part = whole ? input.value.slice(1) : input.value.slice(a, b);
       if (!part.trim()) return;
-      const raw = wb.evaluateText(sheetId, edit.r, edit.c, part);
+      // On the formula's own sheet, which another sheet shown to pick references on is not.
+      const raw = wb.evaluateText(edit.sheetId, edit.r, edit.c, part);
       const value = raw && typeof raw === 'object' && raw.range ? raw.values?.[0]?.[0] ?? null : raw;
+      // A number goes in as a formula writes it, to its fifteen digits and with a full stop whatever the regional
+      // format: the cell's display (0,3333333333 in German) cut digits off and put a comma into the formula.
       const text = value && typeof value === 'object' && value.error ? value.error
-        : typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : typeof value === 'boolean' ? (value ? 'TRUE' : 'FALSE') : value == null ? '0' : formatGeneral(value);
+        : typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : typeof value === 'boolean' ? (value ? 'TRUE' : 'FALSE') : value == null ? '0'
+          : typeof value === 'number' ? String(Number(value.toPrecision(15))).replace('e', 'E') : formatGeneral(value);
       const next = whole ? `=${text}` : `${input.value.slice(0, a)}${text}${input.value.slice(b)}`;
       input.value = next;
       const caret = whole ? next.length : a + text.length;
@@ -5538,7 +5645,8 @@ export function createGrid(opts) {
     // Ctrl+A after a function's name opens Function Arguments for it; Ctrl+Shift+A writes its argument names in.
     if (isMod(e) && !e.altKey && key.toLowerCase() === 'a' && String(input.value).startsWith('=')) {
       const before = input.value.slice(0, input.selectionStart);
-      const name = /([A-Za-z][A-Za-z0-9._]*)\(?$/.exec(before)?.[1]?.toUpperCase();
+      const typed = /([A-Za-z][A-Za-z0-9._]*)\(?$/.exec(before);
+      const name = typed?.[1]?.toUpperCase();
       if (name && FUNCTIONS[name]) {
         e.preventDefault();
         if (e.shiftKey) {
@@ -5551,13 +5659,26 @@ export function createGrid(opts) {
           input.value = next;
           input.setSelectionRange(a + open.length, a + open.length + args.length);
           setEditText(next, { fromEditor: input === editor });
-        } else { cancelEdit({ discard: false }); opts.onCommand?.('functionArgs', name); }
+        } else {
+          // The entry stays open: the call the dialog builds takes the place of the name (and of a parenthesis typed
+          // after it, with its closing one), the rest of the formula kept around it.
+          const end = before.endsWith('(') && input.value[before.length] === ')' ? before.length + 1 : before.length;
+          opts.onCommand?.('functionArgs', { name, start: typed.index, end });
+        }
         return;
       }
     }
-    // F2 switches between Enter mode (the arrows leave the cell) and Edit mode (they move the caret), as in Excel.
+    // F2 switches between Enter mode (the arrows leave the cell) and Edit mode (they move the caret), as in Excel;
+    // from Point mode (a reference just picked) it goes to Edit mode, the reference left where it is.
     if (key === 'F2' && !e.shiftKey && !e.altKey && !isMod(e)) {
       e.preventDefault();
+      if (edit.refInsert) {
+        edit.refInsert = null;
+        edit.point = null;
+        edit.mode = 'inplace';
+        opts.onEdit?.({ editing: true, text: edit.text, r: edit.r, c: edit.c });
+        return;
+      }
       setEditMode(edit.mode === 'type' ? 'inplace' : 'type');
       return;
     }
@@ -5828,7 +5949,7 @@ export function createGrid(opts) {
     clip.addEventListener('click', e => {
       const outline = e.target.closest?.('.outline-btn');
       if (!outline || edit && !commitEdit()) return;
-      opts.onCommand?.('toggleGroup', { axis: outline.dataset.axis, from: Number(outline.dataset.from), to: Number(outline.dataset.to) });
+      opts.onCommand?.('toggleGroup', { axis: outline.dataset.axis, from: Number(outline.dataset.from), to: Number(outline.dataset.to), level: Number(outline.dataset.level) });
     });
     clip.addEventListener('pointermove', pointerMove);
     clip.addEventListener('pointerup', pointerUp);
@@ -5931,7 +6052,7 @@ export function createGrid(opts) {
         type: 'button', tabindex: -1,
         'aria-label': `${g.collapsed ? 'Expand' : 'Collapse'} ${axis === 'row' ? 'rows' : 'columns'} ${axis === 'row' ? `${g.from + 1} to ${g.to + 1}` : `${cellName(0, g.from).replace(/\d+$/, '')} to ${cellName(0, g.to).replace(/\d+$/, '')}`}`,
         title: g.collapsed ? 'Expand group' : 'Collapse group',
-        dataset: { axis, from: g.from, to: g.to },
+        dataset: { axis, from: g.from, to: g.to, level: g.level },
       }, g.collapsed ? '+' : '−');
       const center = pos(after) + Math.min(size(after), 26) / 2;
       if (axis === 'row') { btn.style.top = `${center - 7}px`; btn.style.left = `${offset}px`; }
@@ -6337,7 +6458,7 @@ export function createGrid(opts) {
     }
     // Whole columns (A:C) and whole rows (3:5), as the name box accepts in Excel and Sheets.
     const cols = /^\$?([A-Za-z]{1,3})\$?:\$?([A-Za-z]{1,3})$/.exec(t);
-    const lines = /^(\d+):(\d+)$/.exec(t);
+    const lines = /^\$?(\d+):\$?(\d+)$/.exec(t);
     if (cols || lines) {
       const s = sheet();
       const [a, b] = cols ? [colIndex(cols[1].toUpperCase()), colIndex(cols[2].toUpperCase())] : [Number(lines[1]) - 1, Number(lines[2]) - 1];
@@ -6509,19 +6630,20 @@ export function createGrid(opts) {
       input?.addEventListener('focus', () => { if (formulaInput === input) lastEditInput = input; });
     },
     handleEditKey: editorKeyDown,
+    setEditMode,
     /** The formula bar's caret moved: the same bookkeeping as for the cell editor's own caret. */
     updateEditHints: caretMoved,
     commitEdit,
     cancelEdit,
     insertRef,
     acceptsRef,
-    insertText(text) {
+    insertText(text, range = null) {
       // Insert at the caret of the current edit (in the cell or the formula bar, whichever is
-      // being typed in), or start one with the text.
+      // being typed in), or in place of its text from `range.start` to `range.end`, or start one with the text.
       if (!edit) { beginEdit({ text, mode: 'inplace' }); return; }
       const input = editInput();
-      const a = input.selectionStart ?? input.value.length;
-      const b = input.selectionEnd ?? a;
+      const a = range ? range.start : input.selectionStart ?? input.value.length;
+      const b = range ? range.end : input.selectionEnd ?? a;
       const next = `${input.value.slice(0, a)}${text}${input.value.slice(b)}`;
       input.value = next;
       input.setSelectionRange(a + text.length, a + text.length);
@@ -6559,10 +6681,14 @@ export function createGrid(opts) {
       schedule();
     },
     selectChart,
-    /** Ink: the canvas point (zoomed pixels, as objects are laid out) under a client point; a frozen pane has not scrolled. */
+    /**
+     * Ink: the canvas point (zoomed pixels, as objects are laid out) under a client point; a frozen pane has not
+     * scrolled, and a split window's panes each have their own scroll, as for cellAtPoint.
+     */
     canvasPoint(clientX, clientY) {
-      const vp = viewport.getBoundingClientRect(), vx = clientX - vp.left, vy = clientY - vp.top;
-      return { x: vx < frozen.w ? vx : vx + viewport.scrollLeft, y: vy < frozen.h ? vy : vy + viewport.scrollTop };
+      ensureOffsets();
+      const vp = viewport.getBoundingClientRect();
+      return { x: contentX(clientX - vp.left), y: contentY(clientY - vp.top) };
     },
     /** Ink: the cell an object with its top-left corner at canvas point (x, y) is anchored to, and its offset there at 100%. */
     placeAt(x, y) {

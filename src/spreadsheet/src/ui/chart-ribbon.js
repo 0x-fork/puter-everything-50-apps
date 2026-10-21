@@ -91,7 +91,7 @@ function addElementMenu(ctx) {
     sub('Data Labels', 'number', [
       radio('None', state.dataLabels === 'none', el2('dataLabels', 'none')),
       ...dataLabelPositions(chart).map(([value, label]) => radio(label, state.dataLabels === value || (value === 'show' && state.dataLabels !== 'none'), el2('dataLabels', value))),
-      { separator: true }, { label: 'More Data Label Options…', cmd: 'chart', arg: { action: 'formatPane', element: 'dataLabels:0' } }]),
+      { separator: true }, { label: 'More Data Label Options…', cmd: 'chart', arg: { action: 'formatPane', element: 'dataLabels:0' } }], !can('dataLabels', 'none')),
     sub('Data Table', 'table', axes && styled && can('dataTable', 'keys') ? [
       radio('None', state.dataTable === 'none', el2('dataTable', 'none')),
       radio('With Legend Keys', state.dataTable === 'keys', el2('dataTable', 'keys')),
@@ -107,9 +107,9 @@ function addElementMenu(ctx) {
       radio('Top', state.legend === 'top', el2('legend', 'top')),
       radio('Bottom', state.legend === 'bottom', el2('legend', 'bottom')),
       { separator: true }, { label: 'More Legend Options…', cmd: 'chart', arg: { action: 'formatPane', element: 'legend' } }]),
-    sub('Trendline', 'chartLine', !pie && !chart.stacked ? [
+    sub('Trendline', 'chartLine', can('trendline', 'linear') ? [
       radio('None', state.trendline === 'none', el2('trendline', 'none')),
-      radio('Linear', state.trendline === 'linear', el2('trendline', 'linear'))] : [], pie || !!chart.stacked),
+      radio('Linear', state.trendline === 'linear', el2('trendline', 'linear'))] : [], !can('trendline', 'linear')),
   ];
 }
 

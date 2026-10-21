@@ -6,7 +6,7 @@ import { normalizeFontColor, tintRgb, INDEXED_COLORS } from './font-color.js';
 import { normalizeFillColor } from './fill-color.js';
 import { readNativeFillResources } from './native-fill.js';
 /** Formatting the XLSX reader leaves in styles.xml: fills, borders and differential styles. */
-import { fontKeyFor, numFmtToStyle } from './format.js';
+import { fontKeyFor, numFmtToStyle, HORIZONTAL_ALIGNS, XLSX_BORDER_STYLES } from './format.js';
 import { normalizeCellStyles, edgesOfStyle, presetByLabel } from './custom-cell-styles.js';
 import { readFontTheme, resolveThemeFont } from './font-theme.js';
 import { normalizeNormalFont } from './normal-font.js';
@@ -59,7 +59,7 @@ function borders(xml, themes) {
     const tag = element(xml, side), style = attr(tag, 'style');
     if (!style || style === 'none') continue;
     out[key] = true;
-    out.bs = ['thin', 'medium', 'thick', 'dashed', 'dotted', 'double'].includes(style) ? style : 'thin';
+    out.bs = XLSX_BORDER_STYLES.includes(style) ? style : 'thin';
     const color = xlsxColor(element(tag, 'color'), themes);
     if (color) out.bc = color;
     edges[key] = { bs: out.bs, bc: color };
@@ -82,7 +82,7 @@ export function xlsxTextRotation(value) {
 export function xlsxAlignment(alignment) {
   if (!alignment) return null;
   const out = {};
-  if (['left', 'center', 'right'].includes(alignment.horizontal)) out.align = alignment.horizontal;
+  if (HORIZONTAL_ALIGNS.includes(alignment.horizontal)) out.align = alignment.horizontal;
   if (['top', 'center', 'bottom'].includes(alignment.vertical)) out.valign = alignment.vertical === 'center' ? 'middle' : alignment.vertical;
   else out.valign = 'bottom';
   if (alignment.wrapText) out.wrap = true;
@@ -92,6 +92,16 @@ export function xlsxAlignment(alignment) {
   const indent = Number(alignment.indent);
   if (Number.isInteger(indent) && indent > 0 && indent <= 250) out.indent = indent;
   return out;
+}
+
+/**
+ * A differential style's number format, which a conditional format shows the cells it matches in. Table styles
+ * hold none in Excel, so this is read apart from the paint below.
+ */
+export function xlsxDifferentialNumberFormat(dxf) {
+  const tag = element(dxf, 'numFmt'), code = tag && decodeXlsxString(attr(tag, 'formatCode') ?? '');
+  if (!code) return {};
+  return /^general$/i.test(code) ? { fmt: 'general' } : numFmtToStyle(code) || {};
 }
 
 /** Shared differential paint for styles.xml records and inline x14 rules. */
@@ -121,6 +131,8 @@ export function readXlsxDifferentialStyle(dxf, themes) {
   }
   const underline = element(font, 'u'), underlineType = attr(underline, 'val')?.trim() || 'single';
   if (underline && ['single', 'none'].includes(underlineType)) out.underline = underlineType !== 'none';
+  // A double or accounting underline keeps its name, as a cell's does.
+  else if (underline && ['double', 'singleAccounting', 'doubleAccounting'].includes(underlineType)) out.underline = underlineType;
   const scheme = attr(element(font, 'scheme'), 'val');
   const family = fontKeyFor(resolveThemeFont(attr(element(font, 'name'), 'val'), scheme, themes?.fontTheme), { literal: true });
   if (family) out.font = family;
@@ -216,6 +228,7 @@ export function readXlsxStyles(book, fillBaseline = null, fillDefinitions = null
   const borderStyles = borderRecords.map(b => borders(b, themes));
   const differential = elements(element(xml, 'dxfs'), 'dxf');
   const dxfs = differential.map(dxf => readXlsxDifferentialStyle(dxf, themes));
+  const dxfNumberFormats = differential.map(xlsxDifferentialNumberFormat);
   const tables = new Map();
   for (const table of elements(element(xml, 'tableStyles'), 'tableStyle')) {
     const name = attr(table, 'name');
@@ -245,7 +258,7 @@ export function readXlsxStyles(book, fillBaseline = null, fillDefinitions = null
     return { unlocked: ['0', 'false'].includes(attr(tag, 'locked')), hidden: ['1', 'true'].includes(attr(tag, 'hidden')) };
   });
   const { namedStyles, cellXfStyleNames } = readNamedStyles({ xml, fontRecords, fontNames, fontSchemes, fontColors, fills, borderStyles, formatCodes: book.SSF });
-  return { borders: borderStyles, fills, dxfs, tables, shrink, protection, fontColors, fontNames, fontSchemes, fontTheme, normalFont, normalFontId, namedStyles, cellXfStyleNames,
+  return { borders: borderStyles, fills, dxfs, dxfNumberFormats, tables, shrink, protection, fontColors, fontNames, fontSchemes, fontTheme, normalFont, normalFontId, namedStyles, cellXfStyleNames,
     nativeNormalStyle, nativeNormalFill: fillResources.normal, nativeDefaultCellFormat, formatCodes: book.SSF, colorPalette, themeInfo, colors: themes };
 }
 

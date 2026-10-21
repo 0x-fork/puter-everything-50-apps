@@ -15,6 +15,8 @@ import { seriesColor, seriesPaint, inkOn, svgEsc as esc, svgNum as f, chartTipTe
 
 export const SPECIAL_CHART_TYPES = new Set(['treemap', 'sunburst', 'boxWhisker', 'funnel', 'stock', 'surface']);
 
+const AXIS_TITLED = new Set(['boxWhisker', 'stock', 'surface']);
+
 const TYPE_NAMES = { treemap: 'Treemap', sunburst: 'Sunburst', boxWhisker: 'Box and whisker chart', funnel: 'Funnel chart', stock: 'Stock chart', surface: 'Surface chart' };
 
 /** Text styles: the appearance's, or the theme's ink for an app chart without one. */
@@ -69,6 +71,18 @@ function chartFrame(chart, width, height, entries, describe) {
   const right = legend && !manual && chart.legendPos === 'right' ? legend.x - 10 : W - 10;
   const plot = a?.plot ? { x: a.plot.x * W, y: a.plot.y * H, w: (a.plot.w ?? .8) * W, h: (a.plot.h ?? .7) * H }
     : { x: 10, y: top, w: Math.max(10, right - 10), h: Math.max(10, bottom - top) };
+  // Axis titles (Add Chart Element ▸ Axis Titles) of the types with axes: the horizontal one under the plot, below its
+  // category labels, and the vertical one up its left side, beside its value labels; each takes its room from the plot.
+  if (AXIS_TITLED.has(chart.type) && chart.xTitle) {
+    const room = st.axis.size * 1.6, y = a?.plot ? H - 6 : plot.y + plot.h - room * .2;
+    if (!a?.plot) plot.h = Math.max(10, plot.h - room);
+    parts.push(text(fitText(chart.xTitle, plot.w, st.axis), plot.x + plot.w / 2, y, st.axis, 'middle', 'data-el="xTitle"'));
+  }
+  if (AXIS_TITLED.has(chart.type) && chart.yTitle) {
+    const room = st.value.size * 1.6, x = a?.plot ? st.value.size : plot.x + st.value.size * .9, y = plot.y + plot.h / 2;
+    if (!a?.plot) { plot.x += room; plot.w = Math.max(10, plot.w - room); }
+    parts.push(text(fitText(chart.yTitle, plot.h, st.value), x, y, st.value, 'middle', `data-el="yTitle" transform="rotate(-90 ${f(x)} ${f(y)})"`));
+  }
   const drawLegend = () => {
     if (!legend) return '';
     const out = [`<g data-el="legend"${a ? effectAttr(a, 'legend') : ''}>`, a ? legendBoxRect(a.legendBox, legend, st.legend.size) : ''];
@@ -235,6 +249,18 @@ function valueAxis(fr, chart, scale, style, { side = 'left', grid = true, format
   } };
 }
 
+/** Vertical gridlines between `n` category slots across `plot` (Add Chart Element ▸ Gridlines ▸ Vertical), behind the marks. */
+function categoryGridlines(fr, n, plot) {
+  const { a } = fr;
+  if (!a?.xGridlines || !n) return '';
+  const style = a.gridlineStyles?.x, color = style?.color && style.color !== 'none' ? style.color : '#d9d9d9', out = [];
+  for (let i = 0; i <= n; i++) {
+    const x = plot.x + plot.w * i / n;
+    out.push(`<line class="chart-gridline chart-gridline-x" x1="${f(x)}" y1="${f(plot.y)}" x2="${f(x)}" y2="${f(plot.y + plot.h)}" stroke="${esc(color)}" stroke-width="${style?.width ?? 1}"/>`);
+  }
+  return out.join('');
+}
+
 /** Category labels under slots across `plot`, every k-th where they would collide. */
 function categoryAxis(fr, categories, plot, slot) {
   const { a, st } = fr;
@@ -273,6 +299,7 @@ function renderBoxWhisker(data, chart, width, height) {
   const y = v => plot.y + plot.h - (v - scale.min) / (scale.max - scale.min || 1) * plot.h;
   parts.push(axis.draw(plot, y));
   const n = grouped.categories.length, slot = plot.w / Math.max(1, n), count = grouped.series.length;
+  parts.push(categoryGridlines(fr, n, plot));
   const gap = Math.max(0, opts.gapWidth ?? 100) / 100, boxW = slot / (count + gap), clip = `box-${Math.random().toString(36).slice(2, 8)}`;
   parts.push(`<clipPath id="${clip}"><rect x="${f(plot.x)}" y="${f(plot.y - 2)}" width="${f(plot.w)}" height="${f(plot.h + 4)}"/></clipPath><g clip-path="url(#${clip})">`);
   const labels = [];
@@ -390,6 +417,7 @@ function renderStock(data, chart, width, height) {
   parts.push(left.draw(plot, volume ? yv : yp));
   if (right) parts.push(right.draw(plot, yp));
   const slot = plot.w / Math.max(1, n), budget = n <= MARK_BUDGET, labels = [];
+  parts.push(categoryGridlines(fr, n, plot));
   // Volume columns and up/down bars leave 150% of their width between periods.
   const barW = Math.max(1, slot / 2.5);
   for (let i = 0; i < n; i++) {
@@ -484,7 +512,8 @@ function drawContour(fr, chart, grid, bands, tris, bandOf, wire) {
   });
   // Series names up the side, every k-th where a line of text each would run them together.
   const colEvery = Math.max(1, Math.ceil(grid.cols * st.axis.size * 1.2 / Math.max(1, plot.h)));
-  grid.colNames.forEach((name, c) => { if (!(c % colEvery)) parts.push(text(short(name), plot.x - 6, Y(c) + st.axis.size * .35, st.axis, 'end', 'class="chart-axis-label"')); });
+  // The series names up the side are its vertical axis, deleted with Add Chart Element ▸ Axes ▸ Vertical.
+  if (!a?.hideYAxis) grid.colNames.forEach((name, c) => { if (!(c % colEvery)) parts.push(text(short(name), plot.x - 6, Y(c) + st.axis.size * .35, st.axis, 'end', 'class="chart-axis-label"')); });
 }
 
 function drawSurface3d(fr, chart, grid, bands, tris, bandOf, wire, style) {

@@ -1,8 +1,11 @@
 /**
  * Tab-separated text for the clipboard, and CSV parsing for pasted text.
- * Quoting follows the spreadsheet convention: a field containing the
- * delimiter, a quote, or a newline is wrapped in double quotes, with inner
- * quotes doubled.
+ * Quoting follows Excel's clipboard text: a field containing the delimiter or
+ * a line break is wrapped in double quotes, with inner quotes doubled, and so
+ * is one starting with a quote, which a reader would take for an opening one.
+ * A quote inside other text stays as it is, so a cell reading 12" pipe pastes
+ * into a message or a text editor as it shows; the parser below reads such a
+ * quote as part of the field.
  */
 
 import { getLocale, localeInfo, parseInput } from './format.js';
@@ -10,7 +13,7 @@ import { getLocale, localeInfo, parseInput } from './format.js';
 export function toDelimited(rows, delim = '\t') {
   return rows.map((row) => row.map((cell) => {
     const s = cell == null ? '' : String(cell);
-    return /["\r\n]/.test(s) || s.includes(delim) ? `"${s.replace(/"/g, '""')}"` : s;
+    return /[\r\n]/.test(s) || s.includes(delim) || s.startsWith('"') ? `"${s.replace(/"/g, '""')}"` : s;
   }).join(delim)).join('\n');
 }
 
@@ -41,8 +44,9 @@ export function parseDelimited(text, delim, { maxRows = Infinity, maxColumns = I
       i++;
       continue;
     }
+    // A quote inside an unquoted field is part of it, strict or not: Excel quotes only a cell holding a
+    // line break or a tab, so a cell reading 12" pipe comes as it is.
     if (ch === '"' && field === '') { quoted = true; i++; continue; }
-    if (strict && ch === '"') return null;
     if (ch === delim) { row.push(field); field = ''; i++; continue; }
     if (ch === '\n' || ch === '\r') {
       row.push(field); rows.push(row); row = []; field = '';

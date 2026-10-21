@@ -3,11 +3,11 @@
  * Edit, Merge and Summary, and Show to put a scenario's values into its changing cells.
  */
 import { el, fieldId } from './dom.js';
-import { openModal, fieldAlert } from './modal.js';
+import { openModal, fieldAlert, confirmDialog } from './modal.js';
 import { toast } from './toast.js';
 import { parseInput, editText } from '../core/format.js';
 import { cellsText, parseChangingCells, saveScenario, deleteScenario, showScenario, mergeScenarios, createScenarioSummary,
-  currentValues, scenarioProblem, MAX_CHANGING_CELLS } from '../core/scenarios.js';
+  currentValues, scenarioProblem, scenarioLocked, scenarioHidden, MAX_CHANGING_CELLS } from '../core/scenarios.js';
 
 const today = () => new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'numeric', day: 'numeric' });
 /** A stored value as the Values step shows it: as a cell opened for editing would, so it reads back as itself in
@@ -72,7 +72,7 @@ export function openScenarioEditor(ctx, existing, { onDone } = {}) {
   const prevent = el('input', { type: 'checkbox', id: fieldId('sm-lock'), checked: existing ? existing.locked : true });
   const hide = el('input', { type: 'checkbox', id: fieldId('sm-hide'), checked: !!existing?.hidden });
   const { alert, refuse } = fieldAlert('scenario-edit');
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     const list = parseChangingCells(cells.value);
     if (!list) return refuse(cells, 'Enter the changing cells as cell references, such as B1:B3 or B1,B4');
@@ -82,6 +82,9 @@ export function openScenarioEditor(ctx, existing, { onDone } = {}) {
       values: existing && JSON.stringify(existing.cells) === JSON.stringify(list) ? existing.values : null };
     const problem = scenarioProblem(wb, sheetId, { ...draft, values: [] }, existing?.name ?? null);
     if (problem) return refuse(problem.includes('cells') ? cells : name, problem);
+    // A scenario holds values: showing one writes them over a formula in a changing cell, so that is said first, as Excel says it.
+    if (list.some((p) => wb.getCell(sheetId, p.r, p.c)?.f != null) && !await confirmDialog({ title: existing ? 'Edit Scenario' : 'Add Scenario',
+      message: 'One or more of the changing cells hold a formula. Showing a scenario replaces those formulas with the scenario\'s values.', confirmLabel: 'OK', danger: false })) return;
     modal.close();
     openValues(ctx, draft, { replacing: existing?.name ?? null, onDone });
   };
@@ -171,7 +174,8 @@ export function openScenarioManager(ctx) {
   const cellsOut = el('output.sm-detail');
   const commentOut = el('output.sm-detail.sm-detail-comment');
   const empty = el('p.small.muted.sm-empty', {}, 'No Scenarios defined. Choose Add to add scenarios.');
-  const scenarios = () => wb.sheet(sheetId)?.scenarios?.list || [];
+  // On a protected sheet a hidden scenario is not listed, and one with Prevent changes cannot be edited or deleted.
+  const scenarios = () => (wb.sheet(sheetId)?.scenarios?.list || []).filter((s) => !scenarioHidden(wb, sheetId, s));
   const selected = () => scenarios().find((s) => s.name === listBox.value) || null;
   const buttons = {};
   const sync = (keep) => {
@@ -185,7 +189,7 @@ export function openScenarioManager(ctx) {
     const s = selected();
     cellsOut.textContent = s ? cellsText(s.cells) : '';
     commentOut.textContent = s ? s.comment : '';
-    for (const key of ['delete', 'edit', 'show']) buttons[key].disabled = !s;
+    for (const key of ['delete', 'edit', 'show']) buttons[key].disabled = !s || (key !== 'show' && scenarioLocked(wb, sheetId, s));
     buttons.summary.disabled = !list.length;
   };
   listBox.addEventListener('change', () => sync());

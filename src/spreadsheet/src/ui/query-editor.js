@@ -276,7 +276,8 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
       removeFirst: ['Remove Top Rows', 'Specify how many rows to remove from the top.'], removeLast: ['Remove Bottom Rows', 'Specify how many rows to remove from the bottom.'] }[type];
     const input = el('input.input', { type: 'number', min: 0, step: 1, value: '' , 'aria-label': 'Number of rows' });
     formDialog({ title: titles[0], fields: [el('p.field-hint', {}, titles[1]), field('Number of rows', input)], submit: () => {
-      const n = Number(input.value);
+      // An empty box is no count: read as 0, Keep Top Rows kept none of them.
+      const n = input.value.trim() === '' ? NaN : Number(input.value);
       if (!Number.isInteger(n) || n < 0) return { field: input, message: 'Enter a whole number' };
       addStep({ type, count: n });
       return null;
@@ -383,7 +384,9 @@ export function openQueryEditor(ctx, { queryId = null, draft = null } = {}) {
     const start = el('input.input', { type: 'number', value: '0', 'aria-label': 'Starting Index' });
     const inc = el('input.input', { type: 'number', value: '1', 'aria-label': 'Increment' });
     formDialog({ title: 'Add Index Column', fields: [field('Starting Index', start), field('Increment', inc)], submit: () => {
-      const s = Number(start.value), i = Number(inc.value);
+      // An emptied box is no number (Number('') is 0, which made every index the same).
+      const read = (input) => (input.value.trim() === '' ? NaN : Number(input.value));
+      const s = read(start), i = read(inc);
       if (!Number.isFinite(s)) return { field: start, message: 'Enter a number' };
       if (!Number.isFinite(i)) return { field: inc, message: 'Enter a number' };
       addIndex(s, i);

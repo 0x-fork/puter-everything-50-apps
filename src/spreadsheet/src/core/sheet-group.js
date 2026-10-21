@@ -9,11 +9,15 @@
  *
  * Edits reach the other sheets in one of two ways:
  *  - "repeat": structural and range-wide edits (insert or delete rows, column
- *    widths, styles applied to a range, borders, merges, clearing) are made
- *    again with the same arguments on each other sheet, so each sheet works
- *    out its own result (its own formulas move, its own cells keep their other
- *    formatting);
- *  - "replay": cell writes (typing, pasting, filling, changing case) are
+ *    widths, styles applied to a range, borders, merges, clearing, changing
+ *    case, a Paste Special operation, removing a link, replacing formulas with
+ *    their values, Fill Down, Right, Up or Left, Fill Series and the fill
+ *    handle) are made again with the same arguments on each other sheet, so
+ *    each sheet works out its own result (its own formulas move, its own cells
+ *    keep their other formatting, its own text changes case, its own numbers
+ *    are added to, its own link goes, its own formulas become its own values,
+ *    its own first cell is filled down or starts the series);
+ *  - "replay": cell writes (typing, pasting) are
  *    recorded as they land on the active sheet, and each changed cell is then
  *    written on the other sheets: new contents where the contents changed, the
  *    changed style properties where the style changed, both where both did.
@@ -26,13 +30,14 @@ import { cellKey, parseKey } from './cell.js';
 export const GROUP_REPEATED = [
   'insertRows', 'insertCols', 'deleteRows', 'deleteCols', 'deleteLines', 'insertCells', 'deleteCells',
   'setColWidth', 'setRowHeight', 'mergeCells', 'unmergeCells', 'setHidden', 'groupLines', 'ungroupLines',
-  'applyStyle', 'applyBorders', 'toggleStyle', 'clearRange',
+  'applyStyle', 'applyBorders', 'toggleStyle', 'clearRange', 'transformText', 'pasteOperation', 'removeLink', 'formulasToValues',
+  'fill', 'fillDirection', 'fillSeries',
 ];
 
 /** Cell writes recorded on the active sheet and written again on the others. */
 export const GROUP_REPLAYED = [
   'setInput', 'setCells', 'setCellsWithTableHeaders', 'pasteCells', 'pasteValues', 'pasteLiteralValues', 'pasteStyles',
-  'pasteOperation', 'pasteEntries', 'fill', 'fillInput', 'fillDirection', 'fillSeries', 'formulasToValues', 'transformText',
+  'pasteEntries', 'fillInput',
 ];
 
 /**
@@ -160,6 +165,11 @@ export function installSheetGroups(Workbook) {
     proto[name] = function (sheetId, ...rest) {
       const others = this._groupTargets(sheetId);
       if (!others) return original.call(this, sheetId, ...rest);
+      // A protected sheet in the group refuses the edit for every sheet, as it refuses it alone: made on the others
+      // only, it would leave the sheets out of line, a row inserted on one and not the next, and every later edit to
+      // the group landing on different data on each.
+      const locked = others.map((id) => this.sheet(id)).find((sheet) => sheet?.protected);
+      if (locked) { this._locked(locked); return false; }
       return this.transaction(groupLabel(name), () => this._withoutGroup(() => {
         const result = original.call(this, sheetId, ...rest);
         if (result === false) return result;
@@ -174,6 +184,22 @@ export function installSheetGroups(Workbook) {
       }));
     };
   }
+
+  // Merge Across and Merge Down merge many blocks in one step: each goes on to the other sheets where the active sheet
+  // merged it, as it did when every block was a mergeCells of its own.
+  const mergeBlocks = proto.mergeBlocks;
+  proto.mergeBlocks = function (sheetId, ranges) {
+    const others = this._groupTargets(sheetId);
+    if (!others) return mergeBlocks.call(this, sheetId, ranges);
+    const locked = others.map((id) => this.sheet(id)).find((sheet) => sheet?.protected);
+    if (locked) { this._locked(locked); return ranges.map(() => false); }
+    return this.transaction(groupLabel('mergeCells'), () => this._withoutGroup(() => {
+      const merged = mergeBlocks.call(this, sheetId, ranges);
+      const blocks = ranges.filter((_, i) => merged[i]);
+      if (blocks.length) for (const id of others) mergeBlocks.call(this, id, blocks);
+      return merged;
+    }));
+  };
 
   for (const name of GROUP_REPLAYED) {
     const original = proto[name];
@@ -191,6 +217,18 @@ export function installSheetGroups(Workbook) {
         if (writes.length) for (const id of others) this._replayWrites(id, writes, label);
         return result;
       }));
+    };
+  }
+
+  // Asked before a grouped edit (the editor checking a cell before it types or pastes there), a cell is locked when it
+  // is locked on any grouped sheet: the edit lands on the same cell of each, and a protected sheet refusing it alone
+  // would leave the sheets out of line. Inside the edit each sheet answers for itself.
+  for (const name of ['lockedAt', 'lockedIn']) {
+    const original = proto[name];
+    proto[name] = function (sheetId, ...rest) {
+      if (original.call(this, sheetId, ...rest)) return true;
+      const others = this._groupTargets(sheetId);
+      return !!others && others.some((id) => original.call(this, id, ...rest));
     };
   }
 
@@ -263,7 +301,7 @@ export function installSheetGroups(Workbook) {
 const LABELS = {
   insertRows: 'Insert rows', insertCols: 'Insert columns', deleteRows: 'Delete rows', deleteCols: 'Delete columns', deleteLines: 'Delete',
   insertCells: 'Insert cells', deleteCells: 'Delete cells', setColWidth: 'Resize columns', setRowHeight: 'Resize rows', mergeCells: 'Merge cells', unmergeCells: 'Unmerge cells',
-  setHidden: 'Hide', groupLines: 'Group', ungroupLines: 'Ungroup', applyStyle: 'Format', applyBorders: 'Borders', toggleStyle: 'Format', clearRange: 'Clear',
+  setHidden: 'Hide', groupLines: 'Group', ungroupLines: 'Ungroup', applyStyle: 'Format', applyBorders: 'Borders', toggleStyle: 'Format', clearRange: 'Clear', removeLink: 'Remove link',
   setInput: 'Edit cell', pasteCells: 'Paste', pasteValues: 'Paste', pasteLiteralValues: 'Paste', pasteStyles: 'Paste formatting', pasteOperation: 'Paste',
   pasteEntries: 'Paste', fill: 'Fill', fillInput: 'Fill', fillDirection: 'Fill', fillSeries: 'Fill series', formulasToValues: 'Formulas to values', transformText: 'Change text',
 };

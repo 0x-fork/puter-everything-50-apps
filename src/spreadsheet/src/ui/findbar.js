@@ -152,17 +152,30 @@ export function createFindBar(ctx) {
 
   let stopped = false; // the last search ran out of time, so the matches are only those found by then
 
-  /** Matches for the current query: one sheet, or every sheet tagged with its id. */
-  function collect() {
+  let last = null; // the last search that ran to the end: what it was for, the workbook's version then, what it found
+
+  /**
+   * Matches for the current query: one sheet, or every sheet tagged with its id. `since`, a workbook version the
+   * last search was run at or after, asks for what changed from then on: when that is cells written and nothing
+   * else, only what a write can change is looked at again (see findAll), not every cell of a large sheet on each
+   * Enter while the panel is open.
+   */
+  function collect(since = null) {
     const q = query.value;
     stopped = false;
+    const previous = last;
+    last = null;
     if (!q || patternProblem()) return [];
     // A regular expression is the user's own, and one that backtracks badly could hold the page for as
     // long as it likes on every keystroke: such a search gets a second, and shows what it found by then.
     // A plain-text search is bounded but not cheap — a large book takes seconds of it on every pause in
     // typing, with nothing on screen meanwhile — so it gets a budget too, a longer one.
     const budget = searchBudget(opts.regex ? 1000 : 3000);
-    const o = { ...searchOpts(), budget };
+    const searched = JSON.stringify([q, searchOpts(), scope?.sheetId ?? null, opts.allSheets ? homeSheet : ctx.sheetId()]);
+    const changes = since != null && previous?.searched === searched && previous.version >= since ? ctx.wb.changesSince(since) : null;
+    const written = changes?.every((ch) => ch.type === 'cells' && ch.box && ch.sheetId != null)
+      ? { previous: previous.found, boxes: changes.map((ch) => ({ sheetId: ch.sheetId, ...ch.box })) } : null;
+    const o = { ...searchOpts(), budget, ...(written ? { written } : {}) };
     let found = null;
     if (scope) {
       // A scope is one range on one sheet, whatever the other sheets hold.
@@ -175,6 +188,7 @@ export function createFindBar(ctx) {
       found = findAllSheets(ctx.wb, q, o, homeSheet);
     }
     stopped = !!budget?.exceeded;
+    if (!stopped) last = { searched, version: ctx.wb.version, found };
     return found;
   }
 
@@ -412,9 +426,9 @@ export function createFindBar(ctx) {
   });
 
   /** The list on screen is out of date: collect it again, keeping the place in it where that still exists. */
-  function refreshMatches() {
+  function refreshMatches(since = null) {
     const before = matches.length;
-    matches = collect();
+    matches = collect(since);
     if (matches.length !== before || current >= matches.length) current = Math.min(Math.max(current, 0), matches.length - 1);
     refreshStatus();
     paint(current);
@@ -424,9 +438,10 @@ export function createFindBar(ctx) {
   const unsubscribe = ctx.subscribe(() => {
     if (!open || !query.value) return;
     if (ctx.wb.version !== lastVersion || ctx.sheetId() !== lastSheet) {
+      const since = ctx.sheetId() === lastSheet ? lastVersion : null;
       lastVersion = ctx.wb.version;
       lastSheet = ctx.sheetId();
-      refreshMatches();
+      refreshMatches(since);
     }
   });
   let lastVersion = ctx.wb.version;
@@ -459,7 +474,24 @@ export function createFindBar(ctx) {
   /** Shift+F4: the next match of the last search, or the bar itself when nothing has been searched for. */
   function findNext() {
     if (!query.value) { openPanel({}); return; }
-    step(1);
+    if (open) { step(1); return; }
+    // With the panel closed, as Shift+F4 is used in Excel once its Find box is gone, the last search runs again
+    // from the active cell and the next match is selected, with nothing highlighted that only the panel's closing
+    // would clear (the search ran only while the panel was up, so the key did nothing). The range "Selection
+    // only" held was not followed while the panel was closed, so the sheet is searched.
+    const sheetId = ctx.sheetId();
+    scope = null;
+    homeSheet = sheetId; // every sheet in order from this one
+    const found = patternProblem() ? [] : collect();
+    if (!found.length) { toast(`No matches for “${query.value}”`, { icon: 'info' }); return; }
+    const a = ctx.grid.active;
+    const after = found.findIndex((m) => m.sheetId !== sheetId || m.r > a.r || (m.r === a.r && m.c > a.c));
+    const i = after < 0 ? 0 : after;
+    const m = found[i];
+    if (m.sheetId !== sheetId) ctx.wb.setActiveSheet(m.sheetId);
+    ctx.grid.setSelection(S.single(m.r, m.c), { scroll: true, announce: false });
+    const sheetName = ctx.wb.sheet(m.sheetId)?.name;
+    ctx.announce(`Match ${i + 1} of ${found.length}, ${opts.allSheets && sheetName ? `${sheetName} ` : ''}${cellName(m.r, m.c)}`);
   }
   return { el: root, open: openPanel, close, findNext, get isOpen() { return open; }, destroy };
 }

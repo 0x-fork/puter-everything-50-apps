@@ -185,6 +185,8 @@ const SHARED_FILE_MS = 15_000;
 export const SIGN_IN_TO_SAVE = 'Sign in to Puter to save this spreadsheet';
 /** Why a spreadsheet shared with the user only to view is not saved. */
 export const VIEW_ONLY = 'You can view this spreadsheet, but not change it. Use File > Save a copy to keep your changes';
+/** Why the owner's file of a shared workbook, opened while its room could not be reached, is not saved (see holdForRoom). */
+export const SHARED_FILE = 'This spreadsheet is shared for editing together, and the shared workbook could not be reached: it writes this file, and would write over changes saved here. Open the spreadsheet again once connected, or use File > Save a copy to keep your changes';
 
 /** A Puter FSItem's modified time in milliseconds (the API gives seconds), or null. */
 function modifiedMs(item) {
@@ -521,6 +523,9 @@ export class Doc extends EventTarget {
    * edits wait for Save.
    */
   reconnected() {
+    // A shared workbook's changes go to the room as the room comes back (see collab/client.js resume); the owner's
+    // file is written when a write of it is due, not the whole workbook uploaded each time the connection returns.
+    if (this.collab) return this._sharedFileDue ? this.save({ auto: true }) : Promise.resolve(false);
     const failed = this._timerIsRetry && (this.status === 'offline' || this.status === 'error');
     if (!autoSaveEnabled() && !failed) return Promise.resolve(false);
     return this.save({ auto: true });
@@ -543,7 +548,11 @@ export class Doc extends EventTarget {
   }
 
   async _doSave(auto, force = false) {
-    const version = this.wb.version;
+    if (this.roomFile) {
+      this._setStatus('error', SHARED_FILE);
+      if (!auto) throw new Error(SHARED_FILE);
+      return false;
+    }
     try {
       // A failed check cannot establish that overwriting is safe. Keep the
       // edits dirty and use the normal save-error/retry path in that case.
@@ -572,7 +581,10 @@ export class Doc extends EventTarget {
         // document's are a change made elsewhere; a read that will not answer leaves the save as it
         // was, rather than putting the question to the user on every save a flaky connection meets.
         const ambiguous = !newer && !resized && mod != null && mod === this.remoteModified && !!this._written && sizeOf(st) != null;
-        if (newer && !resized && await this._holdsLastWrite(st) === true) this.remoteModified = mod;
+        // A write of this document's whose answer was lost (see _landed) is no change made elsewhere: what it wrote is the baseline.
+        const lost = (newer || resized) && this._lostWrite?.target === this.path ? this._lostWrite : null;
+        if (lost && await this._landed(lost)) { this.remoteModified = mod; this.remoteSize = sizeOf(st); this._written = lost.blob; }
+        else if (newer && !resized && await this._holdsLastWrite(st) === true) this.remoteModified = mod;
         else if (newer || resized || (ambiguous && await this._holdsLastWrite(st) === false)) {
           // With no baseline (the look-up failed at open) nobody can say the file changed: the question is put as such.
           const unchecked = this.remoteModified === 0;
@@ -595,6 +607,10 @@ export class Doc extends EventTarget {
         // it, where whoever opened it looks for it; anything else gets one in the app folder.
         dir = besideDir(this.path) ?? P.FOLDER;
         target = dir === P.FOLDER ? `${P.FOLDER}/${await P.uniqueName(fileName)}` : `${dir}/${fileName}`;
+        // A first write whose answer was lost may have made its file all the same: that file is written again,
+        // rather than found taken and a second one made beside it.
+        const lost = this._lostWrite;
+        if (lost && await this._landed(lost)) ({ target, dir } = lost);
       }
       // The book is encoded once per version: a retry after a failed write, or a save forced after a
       // conflict, sends the bytes already built instead of building the whole book again on the main thread.
@@ -604,16 +620,22 @@ export class Doc extends EventTarget {
       // The name check is advisory: another tab can create that file before
       // this write reaches the server. Deduplicate there, then adopt its name.
       let written;
+      const reuse = fresh && target === this._lostWrite?.target;
+      // Kept until a write is answered, for the retry to recognize (see _landed).
+      const attempt = (at) => { this._lostWrite = blob.size <= COMPARE_MAX_BYTES ? { target: at, dir, blob } : null; };
       try {
-        written = await P.writeFile(target, blob, { dedupe: fresh });
+        attempt(target);
+        written = await P.writeFile(target, blob, { dedupe: fresh && !reuse });
       } catch (e) {
         // A folder this user may not write in (someone else's, shared with them) refuses the file beside the
         // source: the app folder takes it instead. Offline, neither would, and the retry tries beside it again.
         if (dir === P.FOLDER || globalThis.navigator?.onLine === false) throw e;
         dir = P.FOLDER;
         target = `${P.FOLDER}/${await P.uniqueName(P.displayName(target))}`;
+        attempt(target);
         written = await P.writeFile(target, blob, { dedupe: true });
       }
+      this._lostWrite = null;
       this.uid = written?.uid || written?.id || this.uid;
       if (fresh) {
         oldKey = this.draftKey;
@@ -631,8 +653,9 @@ export class Doc extends EventTarget {
       this.remoteModified = modifiedMs(written) ?? modifiedMs(await P.statFile(this.path).catch(() => null)) ?? Date.now();
       this.remoteSize = blob.size;
       this._written = blob.size <= COMPARE_MAX_BYTES ? blob : null;
-      // Edits that landed while the write was in flight keep the doc dirty.
-      if (this.wb.version === version) this.wb.markClean();
+      // Edits that landed while the book was encoded or the write was in flight keep the doc dirty; those made
+      // while the file was checked, before, are in the bytes written.
+      if (this.wb.version === exportedVersion) this.wb.markClean();
       this._setStatus(this.wb.dirty ? 'unsaved' : 'saved');
       if (this.wb.dirty) {
         this._changed('cells');
@@ -650,7 +673,9 @@ export class Doc extends EventTarget {
       console.error(e);
       // Shared with the user only to view (see viewOnly): Puter refuses the write, and asking again changes nothing.
       const refused = this.viewOnly && navigator.onLine;
-      this._setStatus(navigator.onLine ? 'error' : 'offline', refused ? VIEW_ONLY : e?.message || String(e));
+      // Puter refuses some writes with a plain object holding its reason under `error`, not an Error.
+      const reason = e?.message || e?.error?.message || String(e);
+      this._setStatus(navigator.onLine ? 'error' : 'offline', refused ? VIEW_ONLY : reason);
       // Try again later; a transient failure should not lose the edit. One that lasts (a full drive,
       // say) is not helped by encoding and sending the whole book every few seconds, so the pauses grow.
       // A save asked for by hand reports its failure to the caller, but leaves the edit in the autosave's
@@ -662,7 +687,7 @@ export class Doc extends EventTarget {
         this._timer = setTimeout(() => this.save({ auto: true, retry: true }).catch(() => {}), this._retryDelay);
         this._timerIsRetry = true;
       }
-      if (!auto) throw e;
+      if (!auto) throw e?.message ? e : new Error(reason, { cause: e });
       return false;
     }
   }
@@ -748,6 +773,8 @@ export class Doc extends EventTarget {
     const clean = P.sanitizeName(newName).replace(/\.xlsx$/i, '');
     if (!clean) return 'Enter a name';
     if (clean === this.name) return null;
+    // A shared workbook is its owner's file: renamed here alone, the name would change in this title bar and nowhere else.
+    if (this.collab && !this.path) return 'This shared workbook is its owner’s file: only its owner can rename it';
     if (!this.path) {
       const oldKey = this.draftKey;
       this.name = clean;
@@ -775,6 +802,9 @@ export class Doc extends EventTarget {
       return P.failureText(e, 'Could not rename the file');
     }
     await this._adoptPath(target, clean);
+    // The room writes a shared workbook's file where its owner's browser last said the file was, which saving says:
+    // until then, a save by anyone else would write a new file under the old name.
+    if (this.collab) await this._saveShared({ auto: true });
     return null;
   }
 
@@ -794,6 +824,17 @@ export class Doc extends EventTarget {
       const ours = new Uint8Array(await mine.arrayBuffer());
       return theirs.length === ours.length && theirs.every((byte, i) => byte === ours[i]);
     } catch { return null; }
+  }
+
+  /** Did a write whose answer was lost reach the drive? Only when the file it named holds exactly its bytes. */
+  async _landed({ target, blob }) {
+    try {
+      const st = await P.statFile(target);
+      if (!st || sizeOf(st) !== blob.size) return false;
+      const theirs = new Uint8Array(await P.readFile(target));
+      const ours = new Uint8Array(await blob.arrayBuffer());
+      return theirs.length === ours.length && theirs.every((byte, i) => byte === ours[i]);
+    } catch { return false; }
   }
 
   /**
@@ -880,6 +921,7 @@ export class Doc extends EventTarget {
     this.path = P.canonicalPath(target, written);
     this.uid = written?.uid || written?.id || null; // another file, with its own decision
     this.viewOnly = false; // the copy is the user's own
+    this.roomFile = false;
     this.name = clean;
     this._lastVersionAt = undefined;
     this._moveDraft(oldKey);
@@ -934,8 +976,11 @@ export class Doc extends EventTarget {
    */
   static forRoom(client, { path = null, uid = null } = {}) {
     const owner = client.user?.uuid === client.owner;
-    // The file as it was opened: the room names it as it was when sharing started, before any rename or move.
-    const doc = new Doc({ wb: client.wb, name: client.name || UNTITLED, path: path ?? client.file?.path ?? null, uid: uid ?? client.file?.uid ?? null, trusted: owner || !usesExternalContent(client.wb) });
+    // The file as it was opened: the room names it as it was when sharing started, before any rename or move, and the
+    // owner sees it under the file's name now.
+    const file = path ?? client.file?.path ?? null;
+    const name = (owner && file ? Doc.nameFor(file) : client.name) || UNTITLED;
+    const doc = new Doc({ wb: client.wb, name, path: file, uid: uid ?? client.file?.uid ?? null, trusted: owner || !usesExternalContent(client.wb) });
     doc.collab = client;
     doc._onRoomStatus = () => doc._sharedChanged('room');
     client.addEventListener('status', doc._onRoomStatus);
@@ -944,7 +989,21 @@ export class Doc extends EventTarget {
       client.replica.addEventListener('incoming', doc._onRoomIncoming);
     }
     doc._setStatus(client.status.pending ? 'saving' : 'saved');
+    // The owner's file was renamed or moved elsewhere since the room last heard where it is: the room is told at once
+    // (by saving), or a save by anyone else would write a new file at the old address.
+    if (owner && doc.path && client.file?.path && doc.path !== client.file.path) doc.save({ auto: true }).catch(() => {});
     return doc;
+  }
+
+  /**
+   * The owner's file of a shared workbook, opened on its own because the room could not be reached. The room writes
+   * the file as people work, and would write over whatever is saved into it here, so nothing is: it opens to view, as
+   * a file shared only to view does, and Save a copy keeps changes made meanwhile. Nor is it shared again from here,
+   * which would make a second room write the same file.
+   */
+  holdForRoom() {
+    this.roomFile = true;
+    this.viewOnly = true;
   }
 
   get isOwner() {
@@ -957,13 +1016,21 @@ export class Doc extends EventTarget {
     if (state === 'offline') this._setStatus('offline', this.collab.status.message);
     else if (state === 'error') this._setStatus('error', this.collab.status.message);
     else this._setStatus(pending ? 'saving' : 'saved');
-    if (type === 'room' || type === 'clean' || !this.wb.dirty) return;
-    // The owner's browser keeps the .xlsx current while it is open: a while after the last change, everyone's.
-    if (this.isOwner && autoSaveEnabled() && !session.signedOut) {
-      clearTimeout(this._timer);
-      this._timer = setTimeout(() => this.save({ auto: true }).catch(() => {}), SHARED_FILE_MS);
-      this._sharedFileDue = true;
+    // A write of the file that found this person's changes still on their way (offline) is made once the room has them.
+    if (type === 'room' && this._sharedFileWaiting && state === 'connected' && !pending) {
+      this._sharedFileWaiting = false;
+      this._sharedFileLater();
     }
+    if (type === 'room' || type === 'clean' || !this.wb.dirty) return;
+    this._sharedFileLater();
+  }
+
+  /** The owner's browser keeps the .xlsx current while it is open: a while after the last change, everyone's. */
+  _sharedFileLater() {
+    if (!this.isOwner || !autoSaveEnabled() || session.signedOut) return;
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this.save({ auto: true }).catch(() => {}), SHARED_FILE_MS);
+    this._sharedFileDue = true;
   }
 
   /** Deliver what is pending, then write a checkpoint and the .xlsx. */
@@ -976,25 +1043,45 @@ export class Doc extends EventTarget {
     await client.sync().catch(() => {});
     await client.settled();
     if (client.replica.pending.length) {
+      // The file is written once they reach the room.
+      this._sharedFileWaiting = true;
       this._sharedChanged('room');
       if (auto) return false;
       throw new Error(client.status.message || 'Your changes are waiting to be sent. They are kept on this device until the connection returns.');
     }
     if (!client.canEdit) { this.wb.markClean(); return true; }
+    // A save nobody asked for (a sign-in, AutoSave turned on) in a member's browser: what they changed is in the room, and
+    // the owner's browser keeps the file. Only a save asked for writes the whole workbook for it from here.
+    if (auto && !this.isOwner) return true;
     // Out of reach, with nothing changed here since the last save: nothing of this person's waits on the file.
     if (!this.wb.dirty && client.status.state === 'offline') { this._sharedChanged('room'); return true; }
     this._setStatus('saving');
     try {
       // The owner's browser tells the room where the file is now, so that it writes there, not where the file was when sharing started.
       const res = await client.checkpoint({ file: true, ...(this.isOwner && this.path && this.isXlsxPath ? { at: this.file } : {}) });
-      // The worker writes the owner's file when Puter lets it; the owner's own browser can always.
-      if (this.isOwner && this.path && this.isXlsxPath && !res?.wrote) await P.writeFile(this.path, await workbookToXlsx(this.wb), { overwrite: true });
+      if (this.isOwner && this.path && this.isXlsxPath) {
+        const blob = res?.blob ?? await workbookToXlsx(this.wb);
+        // The worker writes the owner's file when Puter lets it; the owner's own browser can always.
+        if (!res?.wrote) await P.writeFile(this.path, blob, { overwrite: true });
+        // The file's history keeps its snapshots as for any file's save, in the background (a rename waits for it).
+        const versioning = this._autoVersion(blob).catch(() => {}).finally(() => { if (this._versioning === versioning) this._versioning = null; });
+        this._versioning = versioning;
+      }
       this.lastSaved = Date.now();
+      this._retryDelay = 0;
       this.wb.markClean();
       this._setStatus('saved');
       return true;
     } catch (e) {
       this._setStatus(client.status.state === 'offline' ? 'offline' : 'error', e?.message || 'Could not save');
+      // The owner's file is still to be written: leaving writes it (or says it cannot), and it is tried again after a
+      // pause that grows while it keeps failing (a full drive, say), as a file's autosave is.
+      if (this.isOwner && autoSaveEnabled() && !session.signedOut && !client.halted && !client.closed) {
+        this._retryDelay = Math.min(this._retryDelay ? this._retryDelay * 2 : RETRY_MS, RETRY_MAX_MS);
+        clearTimeout(this._timer);
+        this._timer = setTimeout(() => this.save({ auto: true }).catch(() => {}), this._retryDelay);
+        this._sharedFileDue = true;
+      }
       if (auto) return false;
       throw e;
     }

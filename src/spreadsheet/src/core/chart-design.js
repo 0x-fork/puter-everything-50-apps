@@ -14,6 +14,7 @@ const BARS = new Set(['column', 'bar', 'combo', 'histogram', 'waterfall']);
 // Treemaps, sunbursts and funnels have no value axis; the other newer types draw their own kind of plot.
 const AXIS_FREE = new Set(['radar', 'treemap', 'sunburst', 'funnel']);
 const SPECIAL = new Set(['treemap', 'sunburst', 'boxWhisker', 'funnel', 'stock', 'surface']);
+const NO_TRENDLINE = new Set(['radar', 'histogram', 'waterfall']);
 const AXES = t => !PIE.has(t) && !AXIS_FREE.has(t);
 export const isPieChart = chart => PIE.has(chart?.type);
 export const hasAxes = chart => AXES(chart?.type);
@@ -78,6 +79,8 @@ export function chartElementPatch(chart, element, value, { seriesCount = 1 } = {
     case 'chartTitle':
       return value === 'none' ? done({ title: '', titleRef: undefined }) : done({ title: chart.title || 'Chart title' });
     case 'dataLabels': {
+      // As in Excel, a surface takes no data labels.
+      if (chart.type === 'surface') return null;
       if (PIE.has(chart.type)) {
         if (!styled || !a.pie) return done({ labels: value !== 'none' });
         const labels = { ...a.pie.labels, value: value !== 'none', hidden: false, position: value === 'none' || value === 'show' ? a.pie.labels.position : value };
@@ -97,18 +100,20 @@ export function chartElementPatch(chart, element, value, { seriesCount = 1 } = {
         style: labelStyle(a), fill: 'none', stroke: CHART_LINE_GREY, width: 1 } } });
     }
     case 'gridlines': {
-      if (!AXES(chart.type)) return null;
+      // A contour chart, a surface seen from above, has no gridlines; a 3-D surface has its levels along its walls only.
+      if (!AXES(chart.type) || chart.type === 'surface' && /contour/i.test(chart.surfaceView || '')) return null;
       // Value gridlines run across the value axis: horizontal ones on a column chart, vertical ones on a bar chart.
       const valueGrid = (value.axis === 'horizontal') !== horizontal;
       if (valueGrid) return done({ gridlines: !!value.on });
-      if (!styled) return null;
+      if (!styled || chart.type === 'surface') return null;
       return done({ appearance: { xGridlines: !!value.on, gridlineStyles: { ...(a.gridlineStyles || {}), ...(value.on && !a.gridlineStyles?.x ? { x: { color: CHART_LINE_GREY, width: 1 } } : {}) } } });
     }
     case 'legend':
       if (value === 'none') return done({ legend: false });
       return done({ legend: true, legendPos: value, appearance: { legendPos: value, legend: null } });
     case 'trendline':
-      if (PIE.has(chart.type) || chart.stacked || SPECIAL.has(chart.type)) return null;
+      // As in Excel, a radar chart, a histogram and a waterfall take no trendline, any more than a stack does.
+      if (PIE.has(chart.type) || chart.stacked || SPECIAL.has(chart.type) || NO_TRENDLINE.has(chart.type)) return null;
       return done({ trendline: value === 'linear' });
     default: return null;
   }
@@ -211,8 +216,10 @@ export function chartStylePatch(chart, id, { seriesCount = 1 } = {}) {
   const old = chart.appearance || {};
   const font = old.titleStyle?.font || 'calibri';
   const fresh = excelChartAppearance(subtype, { font });
-  // Elements the user added stay; only their look changes.
-  const keep = ['lines', 'lineDefault', 'dataTable', 'hideXAxis', 'hideYAxis', 'xGridlines', 'yFormat', 'xFormat', 'yStep', 'xStep', 'yUnits', 'blanks', 'plot', 'title', 'legend', 'legendPos', 'pointColors', 'seriesTypes', 'seriesGroups'];
+  // Elements the user added stay, and so do the axes' scales (Format Axis); only their look changes.
+  const keep = ['lines', 'lineDefault', 'dataTable', 'hideXAxis', 'hideYAxis', 'hideY2Axis', 'xGridlines', 'yFormat', 'xFormat', 'y2Format', 'yStep', 'xStep', 'y2Step',
+    'yUnits', 'xUnits', 'y2Units', 'yLogBase', 'xLogBase', 'xMin', 'xMax', 'y2Min', 'y2Max', 'reverseValues', 'reverseCategories', 'reverseSecondaryValues',
+    'axisCrossings', 'dateAxis', 'xBaseTimeUnit', 'xTimeUnit', 'blanks', 'plot', 'title', 'legend', 'legendPos', 'legendHidden', 'pointColors', 'seriesTypes', 'seriesGroups'];
   const a = { ...fresh, ...Object.fromEntries(keep.filter(k => old[k] !== undefined).map(k => [k, old[k]])) };
   if (a.pie && old.pie) a.pie = { ...a.pie, labels: { ...a.pie.labels, ...old.pie.labels, style: a.pie.labels.style } };
   const text = (color, scale = 1) => ['textStyle', 'titleStyle', 'legendStyle', 'xStyle', 'yStyle', 'y2Style'].forEach(k => { a[k] = { ...a[k], color, size: Math.round(a[k].size * scale * 100) / 100 }; });

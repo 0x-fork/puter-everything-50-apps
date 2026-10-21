@@ -14,7 +14,7 @@
  */
 
 import { CELL_STYLES } from './cellstyles.js';
-import { NUMBER_FORMAT_KEYS, AUTOMATIC_FORMAT, fontName } from './format.js';
+import { NUMBER_FORMAT_KEYS, AUTOMATIC_FORMAT, fontName, XLSX_BORDER_STYLES, BORDER_LINE_CHOICES } from './format.js';
 import { themedCellStyles } from './workbook-theme.js';
 
 export const STYLE_PARTS = [['number', 'Number'], ['alignment', 'Alignment'], ['font', 'Font'], ['border', 'Border'], ['fill', 'Fill'], ['protection', 'Protection']];
@@ -30,7 +30,6 @@ export const PART_KEYS = {
   border: [],
 };
 const SIDES = [['top', 'bt'], ['bottom', 'bb'], ['left', 'bl'], ['right', 'br']];
-const BORDER_STYLES = ['thin', 'medium', 'thick', 'dashed', 'dotted', 'double'];
 const MAX_STYLES = 500;
 const MAX_NAME = 255;
 
@@ -60,7 +59,7 @@ export function normalizeCustomStyle(raw) {
   if (parts.border) {
     for (const b of Array.isArray(raw.borders) ? raw.borders : []) {
       if (!b || !SIDES.some(([side]) => side === b.side) || borders.some((o) => o.side === b.side)) continue;
-      borders.push({ side: b.side, style: BORDER_STYLES.includes(b.style) ? b.style : 'thin', color: hexColor(b.color) });
+      borders.push({ side: b.side, style: XLSX_BORDER_STYLES.includes(b.style) ? b.style : 'thin', color: hexColor(b.color) });
     }
   }
   const builtin = typeof raw.builtin === 'string' && CELL_STYLES.some((s) => s.key === raw.builtin) ? raw.builtin : null;
@@ -99,7 +98,7 @@ export function edgesOfStyle(s = {}) {
   for (const [side, flag] of SIDES) {
     if (!s[flag]) continue;
     const pen = s[`${flag}Border`] || s;
-    out.push({ side, style: BORDER_STYLES.includes(pen.bs) ? pen.bs : 'thin', color: hexColor(pen.bc) });
+    out.push({ side, style: XLSX_BORDER_STYLES.includes(pen.bs) ? pen.bs : 'thin', color: hexColor(pen.bc) });
   }
   return out;
 }
@@ -202,6 +201,9 @@ export function foldFormat(s, { patch = {}, border = null, borders = null } = {}
 }
 
 const CAP = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+// Excel's names for an alignment and a line that are not the stored word ("centerContinuous", "mediumDashDot").
+const ALIGN_NAMES = { centerContinuous: 'Center across selection' };
+const LINE_NAMES = Object.fromEntries(BORDER_LINE_CHOICES.map(([key, name]) => [key, name.toLowerCase()]));
 const NUMBER_NAMES = { number: 'Number', currency: 'Currency', percent: 'Percentage', date: 'Date', time: 'Time', datetime: 'Date and time', scientific: 'Scientific', text: 'Text' };
 
 /** One line saying what a part of a definition holds, for the style dialog. */
@@ -215,7 +217,7 @@ export function partSummary(def, part) {
       return s.dec != null ? `${name}, ${s.dec} decimal place${s.dec === 1 ? '' : 's'}` : name;
     }
     case 'alignment': {
-      const bits = [`${CAP(s.align || 'automatic')} horizontally`, `${s.valign || 'middle'} vertically`];
+      const bits = [`${ALIGN_NAMES[s.align] || CAP(s.align || 'automatic')} horizontally`, `${s.valign || 'middle'} vertically`];
       if (s.wrap) bits.push('wrapped'); else if (s.clip) bits.push('clipped');
       if (s.shrink) bits.push('shrink to fit');
       if (s.indent) bits.push(`indent ${s.indent}`);
@@ -230,7 +232,7 @@ export function partSummary(def, part) {
     }
     case 'border': {
       if (!def.borders.length) return 'No borders';
-      return def.borders.map((b) => `${CAP(b.side)} ${b.style}${b.color ? ` ${b.color}` : ''}`).join('; ');
+      return def.borders.map((b) => `${CAP(b.side)} ${LINE_NAMES[b.style] || b.style}${b.color ? ` ${b.color}` : ''}`).join('; ');
     }
     case 'fill': return hexColor(s.bg) ? `Shaded ${hexColor(s.bg)}` : s.bg ? 'Shaded' : 'No shading';
     case 'protection': return `${s.locked === false ? 'Unlocked' : 'Locked'}${s.formulaHidden ? ', formula hidden' : ''}`;

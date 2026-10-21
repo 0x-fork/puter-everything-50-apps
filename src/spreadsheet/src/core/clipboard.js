@@ -26,7 +26,7 @@ import { numberFormatParts } from './format-layout.js';
 import { cellFromInput, safeLinkUrl, textUrl } from './workbook.js';
 import { cellLayoutText, CELL_TEXT_INSET } from './textfit.js';
 import { MAX_TEXT } from './cell.js';
-import { fontStack, fontKeyFor, numFmtToStyle, styleToNumFmt, formatValue, dateTimeKind, borderCss, defaultAlign, TYPED_ERRORS } from './format.js';
+import { fontStack, fontKeyFor, numFmtToStyle, styleToNumFmt, formatValue, dateTimeKind, borderCss, defaultAlign, layoutAlign, TYPED_ERRORS } from './format.js';
 import { MAX_FORMAT_CODE_LENGTH, codeColor, unformatTextWithCode, unformatTimeWithCode } from './numfmt.js';
 import { parseDelimited } from './tsv.js';
 import { htmlTableRows } from './html-table.js';
@@ -126,7 +126,10 @@ function cellCss(s, value, noWrap, clipboard, indentUnit) {
     out.push('mso-background-source:auto', 'mso-pattern:auto');
   }
   const indent = cssNumber(s.indent, 1, 250);
-  const align = ALIGNS.has(s.align) ? s.align : indent ? (typeof value === 'string' && RTL_LEAD.test(value) ? 'right' : defaultAlign(value)) : null;
+  // A web page shows Center Across Selection, Distributed, Justify and Fill at the side the grid draws them at. The
+  // clipboard leaves them out: another spreadsheet would read the side as an alignment setting of its own.
+  const shown = clipboard ? s.align : layoutAlign(s.align);
+  const align = ALIGNS.has(shown) ? shown : indent ? (typeof value === 'string' && RTL_LEAD.test(value) ? 'right' : defaultAlign(value)) : null;
   if (align) out.push(`text-align:${align}`);
   if (indent && align !== 'center') out.push(`padding-${align === 'right' ? 'right' : 'left'}:${indent * indentUnit + CELL_TEXT_INSET}px`, `mso-char-indent-count:${indent}`);
   if (s.wrap) out.push('white-space:pre-wrap');
@@ -139,8 +142,8 @@ function cellCss(s, value, noWrap, clipboard, indentUnit) {
     const edge = borderCss(descriptor);
     // Excel's HTML border weights are .5/1/1.5pt, not screen CSS widths.
     // In particular, its HTML paste reads 1px as medium (and 2px as thick).
-    const width = clipboard ? descriptor.bs === 'medium' ? '1pt'
-      : ['thick', 'double'].includes(descriptor.bs) ? '1.5pt' : '0.5pt' : edge.width;
+    const width = clipboard ? edge.width === '2px' ? '1pt'
+      : edge.width === '3px' ? '1.5pt' : '0.5pt' : edge.width;
     out.push(`border-${side}:${s[key] ? `${width} ${edge.style} ${HEX_COLOR.test(edge.color) ? edge.color : '#000000'}` : 'none'}`);
   }
   return out.join(';');

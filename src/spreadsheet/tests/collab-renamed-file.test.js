@@ -64,3 +64,67 @@ it("writes the file where its owner last saved it when someone else saves the sh
   mine.close();
   theirs.close();
 });
+
+// The room keeps the name the workbook had when sharing started: the owner opening the renamed file saw that old name
+// in the title bar, as if the rename had been undone, while saving went to the file under its new one.
+it("shows the owner a shared workbook under its file's name now, after the file was renamed", async () => {
+  const { join } = await renamedRoom();
+  const client = await join(owner);
+  const doc = Doc.forRoom(client, { path: after, uid: 'u1' });
+  expect(doc.name).toBe('Budget 2026');
+  client.close();
+});
+
+// The worker writes the owner's file where the owner's browser last said it was, which it says when it saves. Renamed in
+// the app, the file was not saved again until the owner next changed something: a save by anyone else in the meantime
+// wrote a new file at the old name, and the renamed one stopped getting the shared workbook's changes.
+it("writes the owner's file under its new name after the owner renames it, whoever saves next", async () => {
+  const env = environment();
+  const wb = new Workbook({ sheets: [{ name: 'Budget' }] });
+  env.files.set(before, new Uint8Array(await (await workbookToXlsx(wb)).arrayBuffer()));
+  const room = await RoomClient.create({ puter: env.sdk(owner), server: SERVER, wb, name: 'Budget', file: { path: before, uid: 'u1' } });
+  const sdk = env.sdk(owner);
+  // Puter says a file that is not there is not found.
+  globalThis.puter = { ...sdk, fs: { ...sdk.fs, stat: async (p) => { if (!env.files.has(p)) throw Object.assign(new Error('Not found'), { code: 'subject_does_not_exist' }); return { path: p, size: env.files.get(p).length }; } } };
+  const join = async (user, token) => {
+    const client = new RoomClient({ puter: env.sdk(user), server: SERVER, room, token, store: memoryOutbox(), poll: 50, noPeers: true, toXlsx: (w) => workbookToXlsx(w) });
+    await client.open();
+    return client;
+  };
+  const a1 = async (path) => {
+    const file = await workbookFromFile(env.files.get(path).buffer, 'Budget.xlsx');
+    return file.getValue(file.sheets[0].id, 0, 0);
+  };
+  const mine = await join(owner);
+  const doc = Doc.forRoom(mine, { path: before, uid: 'u1' });
+  expect(await doc.rename('Budget 2026')).toBe(null);
+  const renamed = '/alice/Spreadsheets/Budget 2026.xlsx';
+  expect(doc.path).toBe(renamed);
+  const token = (await call(env.sdk(owner), SERVER, { op: 'invite', room, role: 'editor' })).token;
+  const theirs = await join(editor, token);
+  theirs.wb.setInput(theirs.wb.sheets[0].id, 0, 0, 'from bob');
+  await until(() => !theirs.replica.pending.length, 4000, 'delivery');
+  expect((await theirs.checkpoint({ file: true })).wrote).toBe(true);
+  expect(await a1(renamed)).toBe('from bob');
+  expect(env.files.has(before)).toBe(false);
+  mine.close();
+  theirs.close();
+});
+
+// Renamed or moved on the desktop, the file is found by its id when its owner opens it again, but the room went on
+// writing at the old address until the owner's browser next saved: a save by anyone else meanwhile wrote a new file there.
+it("tells the room where the owner's file is as soon as the owner opens it after a rename elsewhere", async () => {
+  const { join, env, room, a1 } = await renamedRoom();
+  const mine = await join(owner);
+  Doc.forRoom(mine, { path: after, uid: 'u1' });
+  await until(() => env.calls.some((c) => c.op === 'checkpoint' && c.file?.path === after), 4000, 'the room to be told');
+  const token = (await call(env.sdk(owner), SERVER, { op: 'invite', room, role: 'editor' })).token;
+  const theirs = await join(editor, token);
+  theirs.wb.setInput(theirs.wb.sheets[0].id, 0, 0, 'from bob');
+  await until(() => !theirs.replica.pending.length, 4000, 'delivery');
+  expect((await theirs.checkpoint({ file: true })).wrote).toBe(true);
+  expect(await a1(after)).toBe('from bob');
+  expect(env.files.has(before)).toBe(false);
+  mine.close();
+  theirs.close();
+});

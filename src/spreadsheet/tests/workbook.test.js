@@ -574,7 +574,7 @@ describe('sheets', () => {
     wb.moveSheet(s2.id, 0);
     expect(wb.sheets[0].id).toBe(s2.id);
     const copy = wb.duplicateSheet(s2.id);
-    expect(copy.name).toBe('Q1 Data (copy)');
+    expect(copy.name).toBe('Q1 Data (2)');
     expect(wb.getValue(copy.id, 0, 0)).toBe(7);
     expect(wb.deleteSheet(copy.id)).toBe(true);
     expect(wb.sheets).toHaveLength(2);
@@ -1355,7 +1355,8 @@ describe('row and column groups', () => {
   it('groups, nests, collapses, expands, and ungroups', () => {
     const b = book();
     expect(b.wb.groupLines(b.id, 'row', 2, 6)).toBe(true);
-    expect(b.wb.groupLines(b.id, 'row', 2, 6)).toBe(false); // already there
+    expect(b.wb.groupLines(b.id, 'row', 2, 6)).toBe(true); // grouped again: one level deeper, as in Excel
+    expect(b.wb.ungroupLines(b.id, 'row', 2, 6)).toBe(1); // and ungrouped: that level comes off
     expect(b.wb.groupLines(b.id, 'row', 5, 9)).toBe(false); // partial overlap
     expect(b.wb.groupLines(b.id, 'row', 3, 4)).toBe(true);  // nested
     expect(b.wb.outlineDepth(b.id, 'row')).toBe(2);

@@ -281,12 +281,22 @@ const worksheetSum = (values) => values.reduce((total, value) => total + value, 
  */
 const RANGE_PARENTS = new WeakMap(); // values array → the array whose leading rows it repeats
 const RANGE_TOTALS = new WeakMap(); // values array → { sums, errorRow, error }: sums[k] is the total of rows 0..k-1
-export function noteRangeRows(values, parent) { RANGE_PARENTS.set(values, parent); }
+// Each array is noted against the first of its family, not the one it was built from: a column of running totals
+// builds one array per row, each from the one before, and a chain of them held every array alive while its last
+// was, the rows of 10,000 running totals taking 600 MB (and 20,000 more than a browser tab has).
+export function noteRangeRows(values, parent) { RANGE_PARENTS.set(values, RANGE_PARENTS.get(parent) ?? parent); }
 function rangeTotal(values) {
   let run = RANGE_TOTALS.get(values);
   if (!run) {
     const parent = RANGE_PARENTS.get(values);
-    run = (parent && RANGE_TOTALS.get(parent)) || { sums: [0], errorRow: Infinity, error: null };
+    run = parent && RANGE_TOTALS.get(parent);
+    if (!run) {
+      run = { sums: [0], errorRow: Infinity, error: null };
+      // Kept with the array these rows repeat as well: a range read again is cut afresh from a longer one read before
+      // it (SUM($B$1:$B$9999) in every row beside a COUNTA(B:B)), and each cut then carries on from the one total
+      // rather than adding its rows up anew, which made the column quadratic once anything read the whole of B.
+      if (parent) RANGE_TOTALS.set(parent, run);
+    }
     RANGE_TOTALS.set(values, run);
   }
   const { sums } = run;
@@ -304,10 +314,30 @@ function rangeTotal(values) {
 }
 const worksheetMean = (values) => worksheetSum(values) / values.length;
 
-const num = (f) => (args) => {
+/**
+ * A function of the cells it is given that keeps the number it answers for a single range. A column measured against
+ * one range, =B2-AVERAGE($B$2:$B$20000), a z-score's STDEV or =B2/COUNTA($B:$B) filled down, reads that range in
+ * every row: the array read is shared within a calculation (and replaced by any change), so the answer for it is kept
+ * with it, and every row after the first looks it up rather than going over the 20,000 cells again, as SUM's running
+ * totals and LARGE's sorted lists already do.
+ */
+function alone(f) {
+  const answers = new WeakMap(); // values array → the number answered for that range alone
+  return (args, ctx) => {
+    const one = args.length === 1 && isRange(args[0]) ? args[0].values : null;
+    if (one) { const known = answers.get(one); if (known !== undefined) return known; }
+    const answer = f(args, ctx);
+    if (one && typeof answer === 'number') answers.set(one, answer);
+    return answer;
+  };
+}
+
+/** An aggregate of the numbers of its arguments, kept for a single range (see alone). */
+const num = (f) => alone((args) => {
   const list = numbers(args);
   return isError(list) ? list : f(list);
-};
+});
+const sumOf = num(worksheetSum);
 
 /**
  * The numbers of a range in ascending order, or an error: what LARGE, RANK, PERCENTILE and their
@@ -388,6 +418,7 @@ const MAX_PERIODS = 1e6;
 
 /** A cell whose formula reads as another SUBTOTAL or AGGREGATE, which those two leave out. */
 const NESTED_TOTAL = /^\s*(?:_xlfn\.)?(?:SUBTOTAL|AGGREGATE)\s*\(/i;
+export const isNestedTotal = (formula) => NESTED_TOTAL.test(formula);
 
 /**
  * The context to read a range's own sheet through, and the sheet name still to pass with each
@@ -409,8 +440,18 @@ function sheetScope(ctx, ref) {
  */
 function totalRows(rg, ctx, { skipNested, manual }) {
   const { scope, sheet } = sheetScope(ctx, rg.ref);
-  const getFormula = skipNested && rg.ref ? scope?.getFormula : null;
-  const isRowHidden = manual !== null && rg.ref ? scope?.isRowHidden : null;
+  // The nested totals inside the range come from the sheet's index of them, made once per calculation: a
+  // running count down a filtered list, =SUBTOTAL(3,$B$2:B2) filled down, otherwise read the formula of
+  // every cell of every prefix, seconds for a few thousand rows. A context without the index reads each cell's.
+  const index = skipNested && rg.ref ? scope?.nestedTotals?.(sheet) : null;
+  // Over the cells read, which for an emptied table's T[Amt] (r2 above r1) are those of the row it starts on.
+  let width = 0;
+  if (index) for (const row of rg.values) width = Math.max(width, row.length);
+  const nested = index ? nestedTotalsIn(index, { r1: rg.ref.r1, c1: rg.ref.c1, r2: rg.ref.r1 + rg.values.length - 1, c2: rg.ref.c1 + width - 1 }) : null;
+  const getFormula = skipNested && rg.ref && !index ? scope?.getFormula : null;
+  const isRowHidden = manual !== null && rg.ref && scope?.hasHiddenRows?.(sheet, manual) !== false ? scope?.isRowHidden : null;
+  // Nothing to leave out: the range's own array, which SUM's running totals know (see rangeTotal).
+  if (!isRowHidden && !getFormula && !nested?.size) return rg.values;
   const rows = [];
   for (let i = 0; i < rg.values.length; i++) {
     if (isRowHidden && isRowHidden(sheet, rg.ref.r1 + i, manual)) continue;
@@ -424,10 +465,34 @@ function totalRows(rg, ctx, { skipNested, manual }) {
           kept[j] = null;
         }
       }
+    } else if (nested) {
+      for (const c of nested.get(rg.ref.r1 + i) || []) {
+        const j = c - rg.ref.c1;
+        if (j >= row.length) continue;
+        if (kept === row) kept = row.slice();
+        kept[j] = null;
+      }
     }
     rows.push(kept);
   }
   return rows;
+}
+
+/**
+ * The cells of `ref` holding a nested total, as row → columns, from a sheet's index of them: `cols` maps a
+ * column to the ascending rows of its own nested totals, and `areas` lists the array formulas that are one.
+ */
+function nestedTotalsIn(index, ref) {
+  const out = new Map();
+  const add = (r, c) => { const cols = out.get(r); if (cols) cols.push(c); else out.set(r, [c]); };
+  const scan = (c, rows) => { for (let i = lowerBound(rows, ref.r1); i < rows.length && rows[i] <= ref.r2; i++) add(rows[i], c); };
+  if (ref.c2 - ref.c1 < index.cols.size) { for (let c = ref.c1; c <= ref.c2; c++) { const rows = index.cols.get(c); if (rows) scan(c, rows); } }
+  else for (const [c, rows] of index.cols) if (c >= ref.c1 && c <= ref.c2) scan(c, rows);
+  for (const a of index.areas) {
+    const r1 = Math.max(a.r1, ref.r1), r2 = Math.min(a.r2, ref.r2), c1 = Math.max(a.c1, ref.c1), c2 = Math.min(a.c2, ref.c2);
+    for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) add(r, c);
+  }
+  return out;
 }
 
 /* ---------- Criteria (SUMIF, COUNTIF, ...) ---------- */
@@ -1606,19 +1671,22 @@ export const FUNCTIONS = {
   GTE: { localeContext: false, fn: relation((c) => c >= 0) },
   LT: { localeContext: false, fn: relation((c) => c < 0) },
   LTE: { localeContext: false, fn: relation((c) => c <= 0) },
-  SUM: { refArgs: true, fn: (args) => (args.length === 1 && isRange(args[0]) && args[0].ref && !args[0].areas ? rangeTotal(args[0].values) : num(worksheetSum)(args)) },
+  SUM: { refArgs: true, fn: (args) => (args.length === 1 && isRange(args[0]) && args[0].ref && !args[0].areas ? rangeTotal(args[0].values) : sumOf(args)) },
   AVERAGE: { refArgs: true, fn: num((l) => (l.length ? worksheetMean(l) : err('#DIV/0!'))) },
   MIN: { refArgs: true, fn: num((l) => (l.length ? minimum(l) : 0)) },
   MAX: { refArgs: true, fn: num((l) => (l.length ? maximum(l) : 0)) },
   PRODUCT: { refArgs: true, fn: num(product) }, // nothing to multiply is 0
   MEDIAN: {
     refArgs: true, // a referenced text or boolean cell is skipped, whether the reference is one cell or a range
-    fn: num((l) => {
-      if (!l.length) return err('#NUM!');
-      const s = [...l].sort((a, b) => a - b);
+    fn: (args) => {
+      // A column measured against its median, =B2-MEDIAN($B$2:$B$5000) filled down, sorts the range once
+      // for every row, as LARGE and RANK do, rather than once per row.
+      const s = args.length === 1 ? sortedNumbers(args[0]) : num((l) => l.sort((a, b) => a - b))(args);
+      if (isError(s)) return s;
+      if (!s.length) return err('#NUM!');
       const mid = s.length >> 1;
       return s.length % 2 ? s[mid] : midpoint(s[mid - 1], s[mid]);
-    }),
+    },
   },
   STDEV: {
     refArgs: true, // a referenced text or boolean cell is skipped, whether the reference is one cell or a range
@@ -1637,7 +1705,7 @@ export const FUNCTIONS = {
   COUNT: {
     refArgs: true, // a referenced text or boolean cell is skipped, whether the reference is one cell or a range
     tolerant: true, // an error given directly is a value that is not a number, as one in a range is, not the answer
-    fn: (args) => {
+    fn: alone((args) => {
       let n = 0;
       for (const v of args) {
         if (isRange(v)) {
@@ -1652,12 +1720,12 @@ export const FUNCTIONS = {
         else if (typeof v === 'boolean') n++;
       }
       return n;
-    },
+    }),
   },
   // COUNTA counts every non-empty cell, including a formula's "" result.
   COUNTA: {
     tolerant: true, // an error given directly is counted as a value, as one in a range is, rather than answered
-    fn: (args) => {
+    fn: alone((args) => {
       let n = 0;
       for (const v of args) {
         if (isRange(v)) {
@@ -1669,7 +1737,7 @@ export const FUNCTIONS = {
         } else if (v != null) n++;
       }
       return n;
-    },
+    }),
   },
   COUNTBLANK: {
     tolerant: true, // a cell holding an error is not blank, given alone as in a range, rather than the answer
@@ -3305,9 +3373,10 @@ export const FUNCTIONS = {
   },
   ACCRINT: {
     fn: ([issue, firstInterest, settlement, rate, par, frequency, basis, calcMethod]) => {
-      const i = toNumber(issue); if (isError(i)) return i;
-      const fi = toNumber(firstInterest); if (isError(fi)) return fi;
-      const s = toNumber(settlement); if (isError(s)) return s;
+      // Dates of the calendar: a settlement of 1E8 laid out quasi-coupon periods for seconds to answer nonsense.
+      const i = dateSerial(issue); if (isError(i)) return i;
+      const fi = dateSerial(firstInterest); if (isError(fi)) return fi;
+      const s = dateSerial(settlement); if (isError(s)) return s;
       const f = toNumber(frequency); if (isError(f)) return f;
       const nums = bondNumbers([[rate, true], [par === undefined ? 1000 : par, true]]); if (isError(nums)) return nums;
       const b = basis === undefined ? 0 : toNumber(basis); if (isError(b)) return b;
@@ -6630,9 +6699,25 @@ function regression(ys, xs, constant) {
     }
   }
   for (let i = 0; i < k; i++) for (let j = 0; j < i; j++) A[i][j] = A[j][i];
-  const inv = invertMatrix(A);
-  if (!inv) return err('#DIV/0!'); // a constant or collinear variable has no unique fit
-  const coef = k === 1 ? [r[0] / A[0][0]] : inv.map((line) => line.reduce((s, v, j) => s + v * r[j], 0));
+  let inv = invertMatrix(A);
+  let used = k;
+  let coef;
+  if (inv) coef = k === 1 ? [r[0] / A[0][0]] : inv.map((line) => line.reduce((s, v, j) => s + v * r[j], 0));
+  else {
+    // A variable that is constant, or a combination of the ones before it, adds nothing to the fit: as Excel does,
+    // it is left out, its coefficient and standard error 0, and the fit made with the others (only an intercept,
+    // the mean, when none is left), where this answered #DIV/0! for a whole regression with one redundant column.
+    const keep = independentColumns(A, kept);
+    const sub = keep.length ? invertMatrix(keep.map((i) => keep.map((j) => A[i][j]))) : null;
+    if (keep.length && !sub) return err('#DIV/0!');
+    used = keep.length;
+    inv = range0(k).map(() => new Array(k).fill(0));
+    coef = new Array(k).fill(0);
+    keep.forEach((i, a) => {
+      keep.forEach((j, b) => { inv[i][j] = sub[a][b]; });
+      coef[i] = keep.reduce((s, j, b) => s + sub[a][b] * r[j], 0);
+    });
+  }
   const b = constant ? my - coef.reduce((s, c, j) => s + c * mx[j], 0) : 0;
   let ssreg = 0;
   let ssresid = 0;
@@ -6643,7 +6728,35 @@ function regression(ys, xs, constant) {
     ssresid += (yv - fitted) ** 2;
     sstotal += (yv - my) ** 2;
   }
-  return { coef, b, k, n: m, df: m - p, constant, column, row, rows, inv, mx, ssreg, ssresid, sstotal };
+  return { coef, b, k, used, n: m, df: m - used - (constant ? 1 : 0), constant, column, row, rows, inv, mx, ssreg, ssresid, sstotal };
+}
+
+/**
+ * The variables of a fit that are not constant and not a combination of the ones before them, in order: a column whose
+ * spread left after the earlier kept ones (its pivot in an incremental Cholesky factor of XᵀX) is negligible beside
+ * its own size is redundant. `A` is XᵀX of the x, centred when the fit has an intercept; `kept` the observations.
+ */
+function independentColumns(A, kept) {
+  const k = A.length;
+  const keep = [];
+  const L = []; // rows of the Cholesky factor of the kept columns
+  for (let j = 0; j < k; j++) {
+    // The column's own size, uncentred, so that a constant column of 1E+6 reads as constant rather than as a large spread.
+    let size = 0;
+    for (const [xr] of kept) size += xr[j] * xr[j];
+    // Its row of the factor, by forward substitution against the kept columns, and the spread left over.
+    const w = [];
+    for (let a = 0; a < keep.length; a++) {
+      let s = A[keep[a]][j];
+      for (let b = 0; b < a; b++) s -= L[a][b] * w[b];
+      w.push(s / L[a][a]);
+    }
+    const rest = A[j][j] - w.reduce((s, x) => s + x * x, 0);
+    if (!(rest > size * 1e-13) || !(rest > A[j][j] * 1e-12)) continue;
+    L.push([...w, Math.sqrt(rest)]);
+    keep.push(j);
+  }
+  return keep;
 }
 
 /** The fit of LOGEST and GROWTH: a line through ln(y), so y = b·m^x; a y that is not positive is #NUM!. */
@@ -6666,7 +6779,7 @@ function logRegression(ys, xs, constant) {
  * maps the coefficients, exp for LOGEST, whose errors and sums stay those of the fit on ln(y).
  */
 function regressionStats(fit, transform) {
-  const { coef, b, k, n, df, constant, inv, mx, ssreg, ssresid, sstotal } = fit;
+  const { coef, b, k, used, n, df, constant, inv, mx, ssreg, ssresid, sstotal } = fit;
   const na = () => err('#N/A');
   const finite = (v) => (Number.isFinite(v) ? v : err('#NUM!'));
   const seY = Math.sqrt(ssresid / df);
@@ -6676,7 +6789,7 @@ function regressionStats(fit, transform) {
     [...coef.map(transform).reverse(), transform(b)],
     [...coef.map((_, j) => finite(seY * Math.sqrt(inv[j][j]))).reverse(), constant ? finite(seY * Math.sqrt(1 / n + meanTerm)) : na()],
     pad([finite(ssreg / sstotal), finite(seY)]),
-    pad([finite((ssreg / k) / (ssresid / df)), df]),
+    pad([finite((ssreg / used) / (ssresid / df)), df]),
     pad([ssreg, ssresid]),
   ];
 }
@@ -7046,7 +7159,10 @@ function incompleteBeta(x, a, b, xc = 1 - x, preserveSubnormal = false) {
       c = 1 + num / c; if (Math.abs(c) < 1e-300) c = 1e-300;
       d = 1 / d;
       h *= d * c;
-      num = (-(aa + m) * (aa + bb + m) * xx) / ((aa + m2) * (aa + m2 + 1));
+      const den = (aa + m2) * (aa + m2 + 1);
+      // Past a shape of 1E+154 both products overflow, and Infinity / Infinity left every later term NaN, which
+      // never converged: =BETA.DIST(0.5,1E+160,0.5,TRUE) ran on towards a limit of 1E+55 terms. Taken as two ratios there.
+      num = Number.isFinite(den) ? (-(aa + m) * (aa + bb + m) * xx) / den : -((aa + m) / (aa + m2)) * ((aa + bb + m) / (aa + m2 + 1)) * xx;
       d = 1 + num * d; if (Math.abs(d) < 1e-300) d = 1e-300;
       c = 1 + num / c; if (Math.abs(c) < 1e-300) c = 1e-300;
       d = 1 / d;
@@ -7247,6 +7363,9 @@ function tTailByQuadrature(t, df) {
   const upper = Math.min(Math.sqrt(df / 99), 45);
   const logDensity = (u) => -((df + 1) / 2) * Math.log1p((u * u) / df);
   const beyond = 0.5 * incompleteBeta(df / (df + upper * upper), df / 2, 0.5, (upper * upper) / (df + upper * upper)).p;
+  // From 45 deviations out the tail is below the doubles; integrating up to a far t, as T.DIST(3000000,1E15)
+  // asked, took steps by the square of the distance and never finished.
+  if (t >= upper) return beyond;
   const body = integrateBell(logDensity, 0, 1, 0, t);
   const rest = integrateBell(logDensity, 0, 1, t, Math.min(upper, Math.max(10, t + 10)));
   // Half the mass lies above zero: scale (body + rest) + beyond = 1/2.
@@ -7651,8 +7770,9 @@ function basisDays(a, b, basis) {
  * coupon dates and how many coupons remain — or an error.
  */
 function couponArgs(settlement, maturity, frequency, basis) {
-  const s = toNumber(settlement); if (isError(s)) return s;
-  const m = toNumber(maturity); if (isError(m)) return m;
+  // Both are dates of the calendar: a maturity of 1E8 walked the schedule back for hundreds of thousands of years.
+  const s = dateSerial(settlement); if (isError(s)) return s;
+  const m = dateSerial(maturity); if (isError(m)) return m;
   const f = toNumber(frequency); if (isError(f)) return f;
   const b = basis === undefined ? 0 : toNumber(basis); if (isError(b)) return b;
   const freq = Math.trunc(f);
@@ -7809,7 +7929,12 @@ function besselISeries(n, x) {
     term *= h2 / (k * (n + k));
     sum += term;
     if (term <= sum * 1e-17) break;
-    if (sum > 1e250) { sum *= 1e-250; term *= 1e-250; offset += 250 * Math.LN10; }
+    if (sum > 1e250) {
+      sum *= 1e-250; term *= 1e-250; offset += 250 * Math.LN10;
+      // The terms only add up: once the sum is past the doubles it stays there, and the half a
+      // billion terms of BESSELI(1E10,0) would only confirm it, for half a minute.
+      if (offset + Math.log(sum) > 710) return Infinity;
+    }
   }
   return offset ? Math.exp(offset + Math.log(sum)) : sum;
 }
@@ -7928,6 +8053,8 @@ function besselK01(nu, x) {
     }
     return Math.sqrt(Math.PI / (2 * x)) * Math.exp(-x) * sum;
   }
+  // Below 1E-300 the cut 42 / x overflows and the rule would never reach it; there the leading terms are the values to rounding.
+  if (x < 1e-300) return nu ? 1 / x : -(Math.log(x / 2) + EULER);
   const h = (Math.PI * Math.PI) / (2 * x + 40);
   const end = Math.acosh(1 + 42 / x);
   let sum = 0.5 * Math.exp(-x);
@@ -8460,8 +8587,11 @@ Object.assign(FUNCTIONS, {
       let lo = 0;
       let hi = trials;
       while (lo < hi) {
-        const mid = Math.floor((lo + hi) / 2);
+        // Halved as a distance: lo + hi rounds up past 2^53, and BINOM.INV(2^53,1,1) bisected for ever.
+        const mid = lo + Math.floor((hi - lo) / 2);
+        const width = hi - lo;
         if (binomialCdf(trials, mid, a[1]).p >= a[2] - 1e-12) hi = mid; else lo = mid + 1;
+        if (hi - lo >= width) break; // past 2^53 the counts lie further apart than one: none between to try
       }
       return lo;
     },
@@ -8827,6 +8957,8 @@ Object.assign(FUNCTIONS, {
     fn: ([value]) => {
       const n = toNumber(value); if (isError(n)) return n;
       const satangs = Math.floor(Math.abs(n) * 100 + 0.5);
+      // Past 1.8E+306 the count of satangs overflows, and dividing Infinity into millions never ended.
+      if (!Number.isFinite(satangs)) return err('#NUM!');
       let baht = Math.floor(satangs / 100);
       const satang = satangs % 100;
       let text = '';

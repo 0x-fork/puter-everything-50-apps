@@ -8,8 +8,9 @@ import { sheetFilters } from '../core/sheet-filters.js';
 import { el } from './dom.js';
 import { icon } from './icons.js';
 import { openMenu } from './menu.js';
-import { rangeName, cellName, cellKey } from '../core/cell.js';
+import { cellName, cellKey } from '../core/cell.js';
 import { isSingle } from '../core/selection.js';
+import { selectionName } from '../core/refs.js';
 import { formatGeneral, formatValue, errorHelp } from '../core/format.js';
 import { isError } from '../core/formula/functions.js';
 import { meanFromSum, sumFromTotal } from '../core/numeric.js';
@@ -60,7 +61,6 @@ function* selectedNumbers(wb, sheetId, ranges) {
   const sheet = wb.sheet(sheetId);
   if (!sheet) return;
   const hidden = sheet.filterHidden || null;
-  const spills = wb.spillEntries(sheetId);
   for (const range of ranges) {
     const values = [];
     eachStored(sheet, range, (r, c, cell) => {
@@ -70,7 +70,7 @@ function* selectedNumbers(wb, sheetId, ranges) {
       if (typeof v === 'number') values.push(v);
     });
     yield* values;
-    for (const { r, c, value: v } of spills) {
+    for (const { r, c, value: v } of wb.spillEntries(sheetId, range)) {
       if (r < range.r1 || r > range.r2 || c < range.c1 || c > range.c2 || hidden?.has(r)) continue;
       if (typeof v === 'number') yield v;
     }
@@ -84,9 +84,11 @@ function rawSummary(wb, sheetId, range) {
   if (!sheet) return null;
   // The scan walks the selection cell by cell, or the sheet's cells (and spilled
   // values) when there are fewer of those: selecting the whole sheet costs what
-  // the sheet holds, not its area, so Ctrl+A still gets its Sum and Count.
-  const spills = wb.spillEntries(sheetId);
-  if (Math.min(total, sheet.cells.size + spills.length) > MAX_SUMMARY_CELLS) return null;
+  // the sheet holds, not its area, so Ctrl+A still gets its Sum and Count. Only the
+  // values spilled into the selection are listed, once they are known to be few: an
+  // array over the whole sheet spills more than any list holds.
+  if (Math.min(total, sheet.cells.size + wb.spillCount(sheetId, range)) > MAX_SUMMARY_CELLS) return null;
+  const spills = wb.spillEntries(sheetId, range);
   let sum = 0;
   let nums = 0;
   let count = 0;
@@ -309,7 +311,7 @@ export function createStatusBar(ctx) {
     const out = {
       mode: cellMode(ctx.grid.editState),
       a11y: a11yEl.querySelector('.status-a11y-text').textContent.replace(/^Accessibility: /, ''),
-      address: ranges.length === 1 ? (isSingle(ctx.grid.selection) ? cellName(ctx.grid.selection.active.r, ctx.grid.selection.active.c) : rangeName(ctx.grid.range)) : `${ranges.length} ranges`,
+      address: ranges.length === 1 ? (isSingle(ctx.grid.selection) ? cellName(ctx.grid.selection.active.r, ctx.grid.selection.active.c) : selectionName(ctx.grid.range)) : `${ranges.length} ranges`,
       size: sheet && sheet.kind !== 'chart' ? `${sheet.rows.toLocaleString()} × ${sheet.cols.toLocaleString()}` : '',
       zoom: `${Math.round(ctx.grid.zoom * 100)}%`,
     };
@@ -389,7 +391,8 @@ export function createStatusBar(ctx) {
       right.replaceChildren(el('span.status-item.muted.status-size', {}, `${sheet.rows.toLocaleString()} rows, ${sheet.cols.toLocaleString()} columns`));
       return;
     }
-    const items = [el('span.status-item.status-address', {}, ranges.length === 1 ? rangeName(range) : ranges.length <= 3 ? ranges.map(rangeName).join(', ') : `${ranges.length} ranges`)];
+    // Whole columns read C:C and whole rows 3:5, as the Name Box reads them, rather than C1:C1048576.
+    const items = [el('span.status-item.status-address', {}, ranges.length === 1 ? selectionName(range) : ranges.length <= 3 ? ranges.map(selectionName).join(', ') : `${ranges.length} ranges`)];
     // The statistics stand at the right, in this order: Average, Count, Numerical Count, Minimum, Maximum, Sum.
     const stats = [];
     const stat = (label, value, extra = '') => el(`span.status-item.status-stat${extra}`, {}, el('span.muted', {}, `${label}: `), value);
@@ -404,6 +407,8 @@ export function createStatusBar(ctx) {
       if (s.nums && prefs.sum) stats.push(stat('Sum', fmt(s.sum)));
     }
     if (filterNote) items.push(filterNote);
+    // Laid out from the Sum leftward (editor.css), so a narrow bar leaves out the first ones rather than cutting one off.
+    stats.forEach((item, i) => { item.style.order = String(stats.length - i); });
     left.replaceChildren(...items);
     right.replaceChildren(...stats);
   }

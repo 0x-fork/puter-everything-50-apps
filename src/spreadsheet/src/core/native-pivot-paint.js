@@ -1,8 +1,10 @@
 import { decodeXlsxString } from './xlsx-string.js';
+import { HORIZONTAL_ALIGNS, XLSX_BORDER_STYLES } from './format.js';
 import { parseModelXml, modelChildren, standaloneModelXml } from './data-model-metadata.js';
 import { readXlsxDifferentialStyle, xlsxColor, xlsxTextRotation } from './xlsx-styles.js';
 import { forEachRangeRecordAt } from './range-records.js';
 import { layerDifferentialStyle, cloneStyle } from './style-values.js';
+const UNDERLINE_KINDS = ['double', 'singleAccounting', 'doubleAccounting'];
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const sides = { left: 'bl', right: 'br', top: 'bt', bottom: 'bb', horizontal: 'bh', vertical: 'bv' };
 const fail = message => { throw new Error(`Invalid pivot paint: ${message}`); };
@@ -25,8 +27,8 @@ export function readNativePivotPaint(xml, themes, { numberFormats = {} } = {}) {
   for (const name of ['b', 'i', 'strike', 'u', 'name', 'color', 'sz', 'scheme']) allowed(one(font, name), []);
   const scheme = one(font, 'scheme');
   if (scheme && !['major', 'minor', 'none'].includes(scheme.getAttribute('val'))) fail('font scheme');
-  const underline = one(font, 'u');
-  if (underline && !['single', 'none'].includes(underline.getAttribute('val')?.trim() || 'single')) throw new Error('Pivot extended underline paint is not implemented');
+  const underline = one(font, 'u'), underlineKind = underline?.getAttribute('val')?.trim() || 'single';
+  if (underline && !['single', 'none', ...UNDERLINE_KINDS].includes(underlineKind)) throw new Error('Pivot extended underline paint is not implemented');
   const fill = one(root, 'fill'); allowed(fill, ['patternFill']);
   const pattern = one(fill, 'patternFill'); allowed(pattern, ['fgColor', 'bgColor']);
   if (pattern && !['', 'none', 'solid'].includes(pattern.getAttribute('patternType') || '')) throw new Error('Pivot pattern-fill paint is not implemented');
@@ -73,7 +75,7 @@ export function readNativePivotPaint(xml, themes, { numberFormats = {} } = {}) {
   // wrapping and zero indentation must reset an earlier layer's value.
   if (alignment?.hasAttribute('horizontal')) {
     const value = alignment.getAttribute('horizontal').trim();
-    if (!['general', 'left', 'center', 'right'].includes(value)) throw new Error('Pivot extended horizontal alignment paint is not implemented');
+    if (value !== 'general' && !HORIZONTAL_ALIGNS.includes(value)) throw new Error('Pivot extended horizontal alignment paint is not implemented');
     out.align = value === 'general' ? null : value;
   }
   if (alignment?.hasAttribute('vertical')) {
@@ -111,7 +113,7 @@ export function readNativePivotPaint(xml, themes, { numberFormats = {} } = {}) {
     const edge = one(border, side); if (!edge) continue;
     allowed(edge, ['color']);
     const style = edge.getAttribute('style') || 'none';
-    if (!['none', 'thin', 'medium', 'thick', 'dashed', 'dotted', 'double'].includes(style)) throw new Error(`Pivot border ${style} paint is not implemented`);
+    if (style !== 'none' && !XLSX_BORDER_STYLES.includes(style)) throw new Error(`Pivot border ${style} paint is not implemented`);
     const color = one(edge, 'color'); allowed(color, []);
     const bc = color ? xlsxColor(standaloneModelXml(color), themes) : null;
     if (style !== 'none' && color && !bc && !['1', 'true'].includes(color.getAttribute('auto'))) fail('unresolved border color');

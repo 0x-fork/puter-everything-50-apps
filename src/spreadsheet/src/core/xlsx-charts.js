@@ -84,7 +84,17 @@ function anchoredShape(node, geometry) {
 }
 const children = (node, name) => node?.children.filter(n => n.name === name) || [];
 const path = (node, ...names) => names.reduce(child, node);
-const descendants = (node, name) => (node?.children || []).flatMap(n => n.name === name ? [n] : descendants(n, name));
+// The elements named `name` below a node, in document order, not looking inside one found. The walk keeps its
+// own stack: a part nesting thousands of elements deep must not overflow the call stack and stop the file opening.
+const descendants = (node, name) => {
+  const out = [], pending = [...(node?.children || [])].reverse();
+  while (pending.length) {
+    const n = pending.pop();
+    if (n.name === name) out.push(n);
+    else for (let i = n.children.length - 1; i >= 0; i--) pending.push(n.children[i]);
+  }
+  return out;
+};
 /**
  * A picture's Picture Format from DrawingML: a:lum (brightness and contrast), a:grayscl and
  * a:alphaModFix on its blip; a rounded or oval preset outline, an RGB frame and an outer shadow on
@@ -498,7 +508,9 @@ export async function readXlsxCharts(book, sheets = [], inventory = new Map(), {
       const num = children(data, 'numDim').find(d => ['val', 'size'].includes(d.attrs.type));
       // Cached levels stand in for references a file left out: the innermost level names the points.
       const cached = dim => children(child(dim, 'lvl'), 'pt').reduce((out, pt) => { const i = Number(pt.attrs.idx); if (Number.isInteger(i) && i >= 0 && i < 5000) out[i] = text(pt); return out; }, []);
-      const levelCount = Number(child(num, 'lvl')?.attrs.ptCount) || 0;
+      // The file's own point count, held to the 5,000 points a cache is read to: a count of billions
+      // ran the tab out of memory filling the empty points.
+      const levelCount = Math.min(5000, Number(child(num, 'lvl')?.attrs.ptCount) || 0);
       const literal = {};
       if (!text(child(cat, 'f')) && cat) literal.categories = Array.from({ length: Math.max(levelCount, cached(cat).length) }, (_, i) => cached(cat)[i] ?? '');
       if (!text(child(num, 'f')) && num) literal.values = Array.from({ length: Math.max(levelCount, cached(num).length) }, (_, i) => (cached(num)[i] != null && Number.isFinite(Number(cached(num)[i])) ? Number(cached(num)[i]) : null));
@@ -751,6 +763,8 @@ export async function readXlsxCharts(book, sheets = [], inventory = new Map(), {
       sourceRefs, colors: series.map((s, i) => radarOnly ? shapeFill(val(radar, 'radarStyle') === 'filled' ? child(s, 'spPr') : path(s, 'spPr', 'ln')) : fill(bubbleOnly || (mixed ? ['area', 'column'].includes(seriesTypes[i]) : i < columnCount) ? child(s, 'spPr') : path(s, 'spPr', 'ln'))),
       legend: !!legend, legendPos, gridlines: grids.y.visible,
       smooth: series.some(s => val(s, 'smooth') === '1'), includeHidden: val(chart, 'plotVisOnly') === '0',
+      // The app draws one straight trendline through every series: a curved one, or one on only some series, stays off.
+      trendline: series.every(s => children(s, 'trendline').some(t => (val(t, 'trendlineType') || 'linear') === 'linear')),
       labels: bubbleOnly ? series.some(s => { const l = bubbleLabels(s); return l.value || l.size || l.category || l.series; })
         : series.some(s => (chartBoolean(child(s, 'dLbls'), 'showVal').showVal ?? chartBoolean(child(groups.find(g => g.children.includes(s)), 'dLbls'), 'showVal').showVal) === true
           || children(child(s, 'dLbls'), 'dLbl').some(p => chartBoolean(p, 'showVal').showVal === true)),

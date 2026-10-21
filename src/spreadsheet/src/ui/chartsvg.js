@@ -457,6 +457,16 @@ function renderChartContent(data, chart, width, height) {
   if (SPECIAL_CHART_TYPES.has(chart.type)) return renderSpecialChart(data, chart, width, height);
   if (chart.type === 'radar' && chart.appearance?.radar) return renderNativeRadar(data, chart, width, height);
   if (['pie', 'donut'].includes(chart.type) && chart.appearance?.pie) return renderStyledPie(data, chart, width, height);
+  // A histogram in the default style is a column chart of its bins' counts, and is drawn as one in that style, so its
+  // fonts, axes, number formats and colours (Format pane, Chart Styles) show as they do on the other charts.
+  if (chart.type === 'histogram' && chart.appearance) {
+    const binned = histogramBins(data.series.flatMap((s) => s.values), chart.bins, data.valueStyle || null);
+    if (binned.counts.length) {
+      return renderStyledCartesian({ ...data, categories: binned.categories, series: [{ name: 'Count', values: binned.counts, style: null }], valueStyle: null, x: null },
+        // Its bins nearly touch, as they always have (Format Data Series offers a histogram no gap width of its own).
+        { ...chart, type: 'column', stacked: false, stack100: false, secondaryAxis: false, appearance: { ...chart.appearance, gapWidth: 6, overlap: 0 } }, width, height);
+    }
+  }
   if (['line', 'area', 'column', 'bar', 'combo', 'scatter', 'bubble'].includes(chart.type) && chart.appearance
     && (chart.type !== 'line' || (!chart.stacked && !chart.stack100) || chart.appearance.excelLayout)) return renderStyledCartesian(data, chart, width, height);
   const W = Math.max(120, width);
@@ -652,7 +662,9 @@ function renderChartContent(data, chart, width, height) {
   }
 
   const valueLabels = scaleTicks(yScale);
-  const valueLabelW = maxOf(valueLabels.map((v) => textW(axisLabel(v, vs, yScale.step), 11))) + 10;
+  // A chart in the default style drawn here (a histogram, a waterfall) may have an axis deleted (Add Chart Element ▸ Axes).
+  const hideValues = !!chart.appearance?.hideYAxis, hideCategories = !!chart.appearance?.hideXAxis;
+  const valueLabelW = hideValues ? 4 : maxOf(valueLabels.map((v) => textW(axisLabel(v, vs, yScale.step), 11))) + 10;
   const y2Scale = secondary ? chartAxisScale(lo2, hi2, { ticks: 5 }) : null;
   const value2Labels = secondary ? scaleTicks(y2Scale) : [];
   const value2LabelW = secondary ? maxOf(value2Labels.map((v) => textW(axisLabel(v, vs2, y2Scale.step), 11))) + 10 : 0;
@@ -722,11 +734,11 @@ function renderChartContent(data, chart, width, height) {
     if (horizontal) {
       const x = vx(v);
       if (grid) parts.push(`<line x1="${f(x)}" y1="${f(plot.y)}" x2="${f(x)}" y2="${f(plot.y + plot.h)}" stroke="var(--grid)" stroke-width="1"/>`);
-      parts.push(`<text x="${f(x)}" y="${f(plot.y + plot.h + 15)}" text-anchor="middle" font-size="11" fill="var(--ink-3)">${esc(gridText(v))}</text>`);
+      if (!hideValues) parts.push(`<text x="${f(x)}" y="${f(plot.y + plot.h + 15)}" text-anchor="middle" font-size="11" fill="var(--ink-3)">${esc(gridText(v))}</text>`);
     } else {
       const y = vy(v);
       if (grid) parts.push(`<line x1="${f(plot.x)}" y1="${f(y)}" x2="${f(plot.x + plot.w)}" y2="${f(y)}" stroke="var(--grid)" stroke-width="1"/>`);
-      parts.push(`<text x="${f(plot.x - 6)}" y="${f(y + 4)}" text-anchor="end" font-size="11" fill="var(--ink-3)">${esc(gridText(v))}</text>`);
+      if (!hideValues) parts.push(`<text x="${f(plot.x - 6)}" y="${f(y + 4)}" text-anchor="end" font-size="11" fill="var(--ink-3)">${esc(gridText(v))}</text>`);
     }
   }
   if (!grid) parts.push(horizontal
@@ -829,12 +841,21 @@ function renderChartContent(data, chart, width, height) {
   const catPos = (i) => (horizontal ? plot.y + slot * i : plot.x + slot * i);
   const labelEvery = Math.max(1, Math.ceil((horizontal ? 14 : maxOf(categories.map((c) => textW(shortCategory(c), 11))) + 8) / slot));
   categories.forEach((c, i) => {
-    if (table && !horizontal) return;
+    if ((table && !horizontal) || hideCategories) return;
     if (i % labelEvery) return;
     const label = esc(shortCategory(c));
     if (horizontal) categoryLabels.push(`<text x="${f(categoryLabelX - 6)}" y="${f(catPos(i) + slot / 2 + 4)}" text-anchor="end" font-size="11" fill="var(--ink-2)">${label}</text>`);
     else categoryLabels.push(`<text x="${f(catPos(i) + slot / 2)}" y="${f(categoryLabelY + 15)}" text-anchor="middle" font-size="11" fill="var(--ink-2)">${label}</text>`);
   });
+  // Category gridlines (Add Chart Element ▸ Gridlines), between the categories, behind the marks.
+  if (chart.appearance?.xGridlines) {
+    const ink = chart.appearance.gridlineStyles?.x?.color;
+    for (let i = 0; i <= n; i++) {
+      const at = catPos(i);
+      parts.push(horizontal ? `<line x1="${f(plot.x)}" y1="${f(at)}" x2="${f(plot.x + plot.w)}" y2="${f(at)}" stroke="${esc(ink && ink !== 'none' ? ink : 'var(--grid)')}" stroke-width="1" class="chart-gridline-x"/>`
+        : `<line x1="${f(at)}" y1="${f(plot.y)}" x2="${f(at)}" y2="${f(plot.y + plot.h)}" stroke="${esc(ink && ink !== 'none' ? ink : 'var(--grid)')}" stroke-width="1" class="chart-gridline-x"/>`);
+    }
+  }
 
   openMarks();
   if (wf) {
@@ -1651,11 +1672,25 @@ function renderStyledCartesian(data, chart, width, height) {
   const outsideLabels = [];
   const pointLabel = (...args) => { label(...args); outsideLabels.push(parts.pop()); };
   parts.push(`<g clip-path="url(#${clipId})">`);
+  // A linear trendline through a series' points, from its first category to its last: across a column or
+  // line chart, and down a bar chart, whose categories run up its side and whose values run across it.
+  const trendline = (s, color, valueY) => {
+    const points = s.values.map((v, i) => [xValue(i, s), v]).filter(p => p.every(Number.isFinite)
+      && (!dates || Number.isFinite(dates.fraction(p[0])))), fit = linearFit(points);
+    if (!fit) return;
+    const first = minOf(points.map(p => p[0])), last = maxOf(points.map(p => p[0]));
+    const at = x => (horizontal ? [valueX(fit.intercept + fit.slope * x), dates ? datePosition(x) : categoryY(x)] : [sx(x), valueY(fit.intercept + fit.slope * x)]);
+    const [x1, y1] = at(first), [x2, y2] = at(last);
+    parts.push(`<line x1="${f(x1)}" y1="${f(y1)}" x2="${f(x2)}" y2="${f(y2)}" stroke="${color}" stroke-width="1.5" stroke-dasharray="5 4"/>`);
+  };
   series.forEach((s, j) => {
     const color = seriesColor(chart, j), line = lineStyle(j), runs = [];
     const valueY = secondary && j === series.length - 1 ? sy2 : sy;
     if (bubble) {
-      const st = bubble.series[j], labels = st?.labels;
+      // Labels turned on here (Add Chart Element ▸ Data Labels) rather than read from a file name each bubble's
+      // y value in its centre, as the file then saves them.
+      const st = bubble.series[j], labels = st?.labels
+        || { value: true, size: false, category: false, series: false, style: a.valueLabels?.[j]?.style || a.yStyle, position: 'ctr', points: [] };
       const hidden = new Set(labels?.points.filter(p => p.hidden).map(p => p.index));
       const every = Math.max(1, Math.ceil(n * series.length / MARK_BUDGET));
       bubbles[j].forEach(({ x, y, size, i }) => {
@@ -1664,7 +1699,7 @@ function renderStyledCartesian(data, chart, width, height) {
         parts.push(`<circle class="chart-bubble" cx="${f(sx(x))}" cy="${f(sy(y))}" r="${f(r)}" fill="${bubblePaint[j]}" stroke="${st?.stroke || 'none'}" stroke-width="${st?.strokeWidth ?? 1}" data-el="series" data-series="${j}" data-point="${i}"${effectAttr(a, `series:${j}`)}><title>${esc(`${s.name}: (${tipText(x, data.xStyle)}, ${tipText(y, chartPointStyle(s, i))}), size ${tipText(s.sizes[i], chartPointStyle(s, i, null, 'sizePointStyles'))}`)}</title></circle>`);
         if (chart.labels && labels && !hidden.has(i)) {
           const values = [labels.series && s.name, labels.category && tipText(x, data.xStyle), labels.value && formatValue(y, chartPointStyle(s, i)), labels.size && formatValue(s.sizes[i], chartPointStyle(s, i, null, 'sizePointStyles'))].filter(v => v !== false);
-          if (values.length && x >= xMin && x <= xMax && y >= scale.min && y <= scale.max) bubbleLabels.push({ value: values.join(', '), x: sx(x), y: sy(y), r, labels });
+          if (values.length && x >= xMin && x <= xMax && y >= scale.min && y <= scale.max) bubbleLabels.push({ value: values.join(', '), x: sx(x), y: sy(y), r, labels, ...(st?.labels ? {} : { ink: inkOn(color) }) });
         }
       });
       for (const e of errors[j]) {
@@ -1675,6 +1710,7 @@ function renderStyledCartesian(data, chart, width, height) {
           : ` M ${f(x1 - 3)} ${f(y1)} H ${f(x1 + 3)} M ${f(x2 - 3)} ${f(y2)} H ${f(x2 + 3)}`;
         parts.push(`<path class="chart-error-bar" data-axis="${e.axis}" d="M ${f(x1)} ${f(y1)} L ${f(x2)} ${f(y2)}${caps}" fill="none" stroke="${e.color}" stroke-width="${e.width}"/>`);
       }
+      if (chart.trendline) trendline(s, color, sy);
       return;
     }
     const columnIndex = layered ? columnIndices.indexOf(j) : j < columnCount ? j : -1;
@@ -1757,6 +1793,7 @@ function renderStyledCartesian(data, chart, width, height) {
           }
         }
       });
+      if (chart.trendline && !stacked) trendline(s, color, valueY);
       return;
     }
     let run = [];
@@ -1795,20 +1832,15 @@ function renderStyledCartesian(data, chart, width, height) {
         }
       }
     }
-    if (chart.trendline) {
-      const points = s.values.map((v, i) => [xValue(i, s), v]).filter(p => p.every(Number.isFinite)
-        && (!dates || Number.isFinite(dates.fraction(p[0])))), fit = linearFit(points);
-      if (fit) {
-        const first = minOf(points.map(p => p[0])), last = maxOf(points.map(p => p[0]));
-        parts.push(`<line x1="${f(sx(first))}" y1="${f(valueY(fit.intercept + fit.slope * first))}" x2="${f(sx(last))}" y2="${f(valueY(fit.intercept + fit.slope * last))}" stroke="${color}" stroke-width="1.5" stroke-dasharray="5 4"/>`);
-      }
-    }
+    if (chart.trendline) trendline(s, color, valueY);
   });
   parts.push('</g>');
   // Interior tick labels remain readable over bars, areas and other marks.
   parts.push(axisLabels.join(''), outsideLabels.join(''));
   for (const l of bubbleLabels) {
-    const st = l.labels.style, pos = l.labels.position;
+    // A label of the app's own that fits in its bubble takes the ink that reads on the bubble's colour.
+    const base = l.labels.style, pos = l.labels.position;
+    const st = l.ink && axisTextWidth(l.value, base) + 4 <= 2 * l.r ? { ...base, color: l.ink } : base;
     label(l.value, l.x + (pos === 'l' ? -l.r - 4 : pos === 'r' ? l.r + 4 : 0), l.y + (pos === 't' ? -l.r - 4 : pos === 'b' ? l.r + st.size : st.size * .35),
       st, pos === 'l' ? 'end' : pos === 'r' ? 'start' : 'middle', 'class="chart-data-label"');
   }
@@ -1864,7 +1896,11 @@ function renderStyledCartesian(data, chart, width, height) {
       const key = placed ? keyWidth : 26, keyH = placed ? style.size * .65 : 10;
       const color = seriesColor(chart, i), line = lineStyle(i);
       if (more) { /* the count of the series not named has no key */ } else if (bubble) parts.push(`<circle cx="${f(x + (placed ? key / 2 : 4))}" cy="${f(y)}" r="${placed ? key / 2 : 4}" fill="${bubblePaint[i]}"/>`);
-      else if (pureArea || (layered ? ['area', 'column'].includes(a.seriesTypes[i]) : i < columnCount)) parts.push(`<rect x="${f(x)}" y="${f(y - keyH / 2)}" width="${f(key)}" height="${f(keyH)}" fill="${color}"/>`);
+      else if (pureArea || (layered ? ['area', 'column'].includes(a.seriesTypes[i]) : i < columnCount)) {
+        // A column's or an area's key is the square the legend's other placements draw, set in the line keys' slot.
+        const side = placed ? keyH : Math.min(key, style.size * .65);
+        parts.push(`<rect x="${f(placed ? x : x + (key - side) / 2)}" y="${f(y - side / 2)}" width="${f(placed ? key : side)}" height="${f(side)}" fill="${color}"/>`);
+      }
       else {
         if (line.visible !== false) parts.push(`<line x1="${f(x)}" y1="${f(y)}" x2="${f(x + key)}" y2="${f(y)}" stroke="${color}" stroke-width="${line.width}" stroke-linecap="round"/>`);
         if (line.marker) parts.push(chartMarker(line.markerSymbol, x + key / 2, y, Math.min(markerPixels(line), style.size), line.markerFill || color, line.markerStroke || color, '', 'chart-legend-marker'));
@@ -2165,7 +2201,7 @@ function renderNativeRadar(data, chart, width, height) {
         `${s.name} · ${categories[i]}: ${tipText(s.values[i], chartPointStyle(s, i, data.valueStyle))}`, 'chart-radar-marker');
     });
     if (chart.labels && n * series.length <= MARK_BUDGET) points.forEach((p,i) => {
-      const labels = a.valueLabels[si], override = labels?.points?.find(v=>v.index===i);
+      const labels = a.valueLabels?.[si], override = labels?.points?.find(v=>v.index===i);
       if (!p || !Number.isFinite(s.values[i]) || s.values[i] < scale.min || s.values[i] > scale.max || override?.hidden || labels?.hidden.includes(i) || (override?.show ?? labels?.show) === false) return;
       const style = override?.style ? { ...labels.style, ...override.style } : labels?.style || a.yStyle;
       const code = override?.numberFormat ?? labels?.numberFormat;
@@ -2449,7 +2485,8 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
     other = { count: 0, value: 0 };
     for (const i of bySize.slice(budget - 1)) { other.count++; other.value += values[i]; values[i] = 0; }
   }
-  const out = [], labelOut = [], pie = bounds ? chart.appearance.pie : null;
+  const out = [], labelOut = [], outsideLabels = [], pie = bounds ? chart.appearance.pie : null;
+  const pieLabel = ({ x, y, lines, st, anchor, leader, rim }) => `${leader ? `<path d="M ${f(rim[0])} ${f(rim[1])} L ${f(x)} ${f(y)}" fill="none" stroke="${esc(st.color)}"/>` : ''}<text class="chart-data-label" x="${f(x)}" y="${f(y)}" text-anchor="${anchor}" font-family="${esc(fontStack(st.font))}" font-size="${st.size}"${st.bold ? ' font-weight="700"' : ''}${st.italic ? ' font-style="italic"' : ''} fill="${esc(st.color)}" data-el="dataLabels" data-series="0">${lines.map((line, j) => `<tspan x="${f(x)}" dy="${f(j ? st.size * 1.2 : st.size * .35 - (lines.length - 1) * st.size * .6)}">${esc(line)}</tspan>`).join('')}</text>`;
   const colors = new Map((chart.appearance?.pointColors?.[0] || []).map(p => [p.index, p.color]));
   const pointLabels = new Map((pie?.labels.points || []).map(p => [p.index, p]));
   const pointBorders = new Map((pie?.points || []).map(p => [p.index, p]));
@@ -2491,12 +2528,17 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
       const value = l.content ? l.content.map(c => c.kind === 'text' ? c.text : fields[c.kind]).join('')
         : ['series', 'category', 'value', 'percent'].filter(k => l[k]).map(k => fields[k]).join(l.separator);
       if (!l.hidden && value) {
-        const mid = (angle + a2) / 2, outside = l.position === 'outEnd';
-        const lr = outside ? r + st.size : l.position === 'inEnd' ? r - st.size : inner ? (r + inner) / 2 : r * .68;
+        const mid = (angle + a2) / 2, lines = value.split(/\r?\n/);
+        // Best Fit sets a label in its slice where it fits there, and outside it, on a leader line, where it does not.
+        const centre = inner ? (r + inner) / 2 : r * .68, width = maxOf(lines.map(line => axisTextWidth(line, st))), height = lines.length * st.size * 1.2;
+        const fits = (a2 - angle) * centre >= width + 4 && (inner ? r - inner : r) >= height + 2;
+        const outside = l.position === 'outEnd' || l.position === 'bestFit' && !fits;
+        const lr = outside ? r + st.size : l.position === 'inEnd' ? r - st.size : centre;
         const x = cx + dxe + lr * Math.cos(mid) + (l.dx || 0) * bounds.W, y = cy + dye + lr * Math.sin(mid) + (l.dy || 0) * bounds.H;
-        const lines = value.split(/\r?\n/), anchor = outside ? Math.cos(mid) >= 0 ? 'start' : 'end' : 'middle';
-        if (outside && l.leaderLines) labelOut.push(`<path d="M ${f(cx + r * Math.cos(mid))} ${f(cy + r * Math.sin(mid))} L ${f(x)} ${f(y)}" fill="none" stroke="${esc(st.color)}"/>`);
-        labelOut.push(`<text class="chart-data-label" x="${f(x)}" y="${f(y)}" text-anchor="${anchor}" font-family="${esc(fontStack(st.font))}" font-size="${st.size}"${st.bold ? ' font-weight="700"' : ''}${st.italic ? ' font-style="italic"' : ''} fill="${esc(st.color)}" data-el="dataLabels" data-series="0">${lines.map((line, j) => `<tspan x="${f(x)}" dy="${f(j ? st.size * 1.2 : st.size * .35 - (lines.length - 1) * st.size * .6)}">${esc(line)}</tspan>`).join('')}</text>`);
+        const label = { x, y, mid, lines, st, height, anchor: outside ? Math.cos(mid) >= 0 ? 'start' : 'end' : 'middle', leader: outside && l.leaderLines,
+          rim: [cx + dxe + r * Math.cos(mid), cy + dye + r * Math.sin(mid)] };
+        // Labels outside the pie are spaced apart below; one placed by hand stays where it was put.
+        if (outside && !l.dx && !l.dy) outsideLabels.push(label); else labelOut.push(pieLabel(label));
       }
     } else if (!pie && frac >= 0.06) {
       const mid = (angle + a2) / 2;
@@ -2509,6 +2551,23 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
   // The Other slice of a pie of pie takes the next colour after the slices of the main pie.
   values.forEach((v, i) => { if (v) slice(v, pie ? piePaint(chart, at(i), colors) : seriesPaint(chart, at(i)), () => `${data.categories[i]}: ${tipText(s.values[i], chartPointStyle(s, i, style))}`, i); });
   if (other) slice(other.value, 'var(--ink-3)', (v) => `Other (${other.count.toLocaleString('en-US')} slices)${Number.isFinite(v * scale) ? `: ${(v * scale).toLocaleString('en-US')}` : ''}`);
+  // Labels outside the pie stand in a column down each side: each moved down past the one above it where they
+  // would overlap (the first kept below the top of the plot), the column moved back up where it runs past the
+  // foot, and each set just clear of the pie at the height it ends at, its leader line running to it.
+  const head = bounds ? bounds.y : top, foot = bounds ? bounds.y + bounds.h : bottom;
+  for (const side of [1, -1]) {
+    const column = outsideLabels.filter(l => (Math.cos(l.mid) >= 0 ? 1 : -1) === side).sort((p, q) => p.y - q.y);
+    column.forEach((l, k) => { l.y = Math.max(l.y, k ? column[k - 1].y + (column[k - 1].height + l.height) / 2 : head + l.height / 2); });
+    for (let k = column.length - 1; k >= 0; k--) {
+      const limit = k === column.length - 1 ? foot - column[k].height / 2 : column[k + 1].y - (column[k].height + column[k + 1].height) / 2;
+      if (column[k].y > limit) column[k].y = limit;
+    }
+    for (const l of column) {
+      const reach = r + l.st.size, rise = l.y - (l.rim[1] - r * Math.sin(l.mid));
+      l.x = l.rim[0] - r * Math.cos(l.mid) + side * (Math.sqrt(Math.max(0, reach * reach - rise * rise)) + 2);
+      labelOut.push(pieLabel(l));
+    }
+  }
   return out.join('') + labelOut.join('');
 }
 

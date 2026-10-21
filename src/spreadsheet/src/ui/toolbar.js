@@ -14,7 +14,7 @@ import { effectiveShortcut } from './custom-shortcuts.js';
 import { MOD_KEY } from './dom.js';
 import { cellName } from '../core/cell.js';
 import { RTL_LEAD } from '../core/bidi.js';
-import { CURRENCIES, FONTS, fontName, fontStack, formatValue, currencyDecimals, BORDER_STYLES, borderCss, ELAPSED_TIME_CODE, defaultAlign, AUTOMATIC_FORMAT, cellCurrency, currencyFormatLabel, hasDecimalPlaces, MAX_DECIMAL_PLACES } from '../core/format.js';
+import { CURRENCIES, FONTS, fontName, fontStack, formatValue, currencyDecimals, BORDER_LINE_CHOICES, borderCss, ELAPSED_TIME_CODE, defaultAlign, AUTOMATIC_FORMAT, cellCurrency, currencyFormatLabel, hasDecimalPlaces, MAX_DECIMAL_PLACES } from '../core/format.js';
 import { openCustomFormatDialog } from './numfmtdialog.js';
 import { customColorRows, colorLabel } from './colorpicker.js';
 import { themeColorBlock } from './themes.js';
@@ -224,19 +224,20 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
   const fillApply = applyColorBtn('bg');
 
   // The border "pen": the color and style the next border command draws with.
+  // Picking a colour or a line also restyles the selection's lines in that alone: a colour keeps each line's style.
   const pen = { color: null, style: 'thin' };
   const borderArg = (kind) => ({ kind, color: pen.color, style: pen.style });
   function borderColorMenu(anchor) {
     const swatches = el('div.swatches', { role: 'group', 'aria-label': 'Border colors', 'data-cols': 6 },
       el('button.swatch.none', {
         type: 'button', role: 'menuitemradio', 'aria-checked': String(!pen.color), 'aria-label': 'Default color', title: 'Default',
-        onclick: () => { menu.close(); pen.color = null; ctx.run('borders', borderArg('restyle')); },
+        onclick: () => { menu.close(); pen.color = null; ctx.run('borders', { kind: 'restyle', color: null }); },
       }),
       ...TEXT_COLORS.map((hex) => el('button.swatch', {
         type: 'button', role: 'menuitemradio', 'aria-checked': String(pen.color === hex), 'aria-label': colorLabel(hex), title: colorLabel(hex),
-        style: { background: hex }, onclick: () => { menu.close(); pen.color = hex; ctx.run('borders', borderArg('restyle')); },
+        style: { background: hex }, onclick: () => { menu.close(); pen.color = hex; ctx.run('borders', { kind: 'restyle', color: hex }); },
       })));
-    const extra = customColorRows({ current: pen.color, label: 'border color', onPick: (hex) => { menu.close(); pen.color = hex; ctx.run('borders', borderArg('restyle')); } });
+    const extra = customColorRows({ current: pen.color, label: 'border color', onPick: (hex) => { menu.close(); pen.color = hex; ctx.run('borders', { kind: 'restyle', color: hex }); } });
     const menu = openMenu({ anchor, label: 'Border color', items: [{ custom: swatches }, ...extra.map((custom) => ({ custom }))] });
     (swatches.querySelector('[aria-checked="true"]') || swatches.querySelector('button'))?.focus();
   }
@@ -247,7 +248,9 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
       const st = ctx.style();
       // The pen picks up the active cell's border color and style.
       // In lower case, as the swatches are spelt: a colour from a file may be in upper case, and is the same colour.
-      if (st.bt || st.bb || st.bl || st.br) { pen.color = st.bc ? String(st.bc).toLowerCase() : null; pen.style = st.bs || 'thin'; }
+      // A side drawn with a pen of its own (by Format Cells or the pens below) is read in that pen.
+      const side = ['bt', 'bb', 'bl', 'br'].find((key) => st[key]);
+      if (side) { const edge = st[`${side}Border`] || st; pen.color = edge.bc ? String(edge.bc).toLowerCase() : null; pen.style = edge.bs || 'thin'; }
       openMenu({
         anchor, label: 'Borders', minWidth: 220,
         items: [
@@ -268,11 +271,12 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
           { label: 'Thick bottom border', icon: 'borderBottom', onSelect: () => ctx.run('borders', { kind: 'bottom', style: 'thick', color: pen.color }) },
           { separator: true },
           { label: 'Border color…', icon: 'textColor', shortcut: pen.color || 'Default', onSelect: () => borderColorMenu(anchor) },
-          { label: 'Border style…', icon: 'borderBottom', shortcut: BORDER_STYLES.find(([k]) => k === pen.style)?.[1] || 'Thin', onSelect: () => openMenu({
+          { label: 'Border style…', icon: 'borderBottom', shortcut: BORDER_LINE_CHOICES.find(([k]) => k === pen.style)?.[1] || 'Thin', onSelect: () => openMenu({
             anchor, label: 'Border style', minWidth: 180, focusChecked: true,
-            items: BORDER_STYLES.map(([key, label]) => ({
+            // Excel's thirteen lines, as Format Cells lists them: the pen may have taken up a hairline from a file.
+            items: BORDER_LINE_CHOICES.map(([key, label]) => ({
               label, checked: pen.style === key, radio: true, style: { borderBottom: `${borderCss({ bs: key }).width} ${borderCss({ bs: key }).style} currentColor`, paddingBottom: '2px' },
-              onSelect: () => { pen.style = key; ctx.run('borders', borderArg('restyle')); },
+              onSelect: () => { pen.style = key; ctx.run('borders', { kind: 'restyle', style: key }); },
             })),
           }) },
           { separator: true },
@@ -602,6 +606,7 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
   const compactButtons = new Set([undoBtn, redoBtn, fmtBtn, boldBtn, italicBtn, fillBtn]);
   let narrow = false;
   let expanded = false;
+  let toolsScrolled = false; // whether the tools were laid out as a scrolling area at the last refresh
   const expandBtn = el('button.tb-btn.tb-expand', {
     type: 'button', tabindex: -1, 'aria-expanded': 'false', 'aria-controls': toolContent.id,
     onclick: () => {
@@ -762,7 +767,11 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
     if (chartSheet) { if (chartTools.parentNode !== root) root.append(chartTools); } else chartTools.remove();
     root.classList.toggle('toolbar-narrow', narrow);
     root.classList.toggle('toolbar-expanded', expanded && !chartSheet);
-    if (!narrow || !expanded || chartSheet) tools.scrollTop = 0;
+    // The tools scroll only while expanded in a narrow window; leaving that, they start from the top the next time.
+    // Writing scrollTop lays the whole page out, so it is written on that change alone, not on every edit and move.
+    const scrolling = narrow && expanded && !chartSheet;
+    if (toolsScrolled && !scrolling) tools.scrollTop = 0;
+    toolsScrolled = scrolling;
     if (narrow && !chartSheet) {
       if (expandBtn.parentNode !== tools) tools.append(expandBtn);
       expandBtn.setAttribute('aria-expanded', String(expanded));
@@ -777,7 +786,9 @@ export function createToolbar(ctx, { ribbon = false, ribbonExtras = {} } = {}) {
     if (focused && !available.includes(focused)) next?.focus({ preventScroll: true });
   }
 
-  const unsubscribe = ctx.subscribe(refresh);
+  // On the ribbon's Home tab the ribbon refreshes the toolbar with the rest of itself: subscribed too, every edit
+  // refreshed it twice.
+  const unsubscribe = ribbon ? () => {} : ctx.subscribe(refresh);
   // Measure the toolbar itself, so a narrow editor in a split window or embedded view gets the
   // same treatment. A detached/hidden toolbar has no width yet and keeps its last layout.
   const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {

@@ -24,7 +24,7 @@ import { normalizeFontColor } from './font-color.js';
 import { tokenize } from './formula/tokenizer.js';
 import { freeNameTokens, tableReferenceTokens } from './formula/names.js';
 import { colName } from './cell.js';
-import { fontStack } from './format.js';
+import { fontStack, XLSX_BORDER_STYLES } from './format.js';
 
 // The default looks are medium-weight styles in the default theme's accents (header in the accent, rows banded in its tint).
 export const TABLE_STYLES = [
@@ -74,13 +74,13 @@ export function normalizeCustomTableStyle(raw) {
     if (fill) st.bg = fill;
     if (source.bg === 'transparent') st.bg = 'transparent';
     for (const key of ['bold', 'italic', 'underline', 'strike', 'bt', 'bb', 'bl', 'br', 'bh', 'bv']) if (typeof source[key] === 'boolean') st[key] = source[key];
-    if (['thin', 'medium', 'thick', 'dashed', 'dotted', 'double'].includes(source.bs)) st.bs = source.bs;
+    if (XLSX_BORDER_STYLES.includes(source.bs)) st.bs = source.bs;
     for (const key of ['bt', 'bb', 'bl', 'br', 'bh', 'bv']) {
       const edge = source[`${key}Border`];
       if (edge === null) st[`${key}Border`] = null;
       else if (edge && typeof edge === 'object') {
         st[`${key}Border`] = {
-          bs: ['thin', 'medium', 'thick', 'dashed', 'dotted', 'double'].includes(edge.bs) ? edge.bs : st.bs || 'thin',
+          bs: XLSX_BORDER_STYLES.includes(edge.bs) ? edge.bs : st.bs || 'thin',
           bc: /^#[0-9a-f]{6}$/i.test(edge.bc) ? edge.bc : null,
         };
       }
@@ -121,7 +121,8 @@ export function customTableStyleAt(table, r, c, ordinal) {
   return out;
 }
 
-const NAME_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+// Letters of any script, as Excel's table names (テーブル1, Données) and this app's defined names take them.
+export const TABLE_NAME_RE = /^[\p{L}_][\p{L}\p{M}\p{N}_.]*$/u;
 const CELL_LIKE = /^[A-Za-z]{1,3}\d{1,7}$/;
 
 export const MAX_TABLE_NAME_LENGTH = 255;
@@ -130,8 +131,8 @@ export const MAX_TABLE_NAME_LENGTH = 255;
 export function validateTableName(name, taken = []) {
   const t = String(name ?? '').trim();
   if (!t) return 'Enter a name';
-  if (!NAME_RE.test(t)) return 'Names start with a letter or underscore and use only letters, digits, underscores, and periods';
-  if (CELL_LIKE.test(t) || /^R\d*C\d*$/i.test(t)) return 'That looks like a cell reference';
+  if (!TABLE_NAME_RE.test(t)) return 'Names start with a letter or underscore and use only letters, digits, underscores, and periods';
+  if (CELL_LIKE.test(t) || /^R\d*C\d*$/i.test(t) || /^[RC]$/i.test(t)) return 'That looks like a cell reference';
   if (t.length > MAX_TABLE_NAME_LENGTH) return 'That name is too long';
   if (taken.some((n) => n.toLowerCase() === t.toLowerCase())) return 'That name is already used';
   return null;

@@ -8,7 +8,7 @@ import { RoomClient } from './client.js';
 import { collabPuter, deploy, call } from './api.js';
 import { browserOutbox } from './outbox.js';
 import { shareLink } from './protocol.js';
-import { Doc } from '../lib/doc.js';
+import { Doc, SHARED_FILE } from '../lib/doc.js';
 import { workbookToXlsx } from '../core/io.js';
 
 const fileKey = (file) => `spreadsheet-collab-file-v1:${file.uid || file.path}`;
@@ -28,6 +28,7 @@ export async function roomForFile(file) {
 
 /** Share the open workbook for editing together: deploy the worker, create the room, remember it for the file. */
 export async function startSharing(doc, progress = () => {}) {
+  if (doc.roomFile) throw new Error(SHARED_FILE);
   const puter = collabPuter();
   const server = await deploy(puter, progress);
   progress('Sharing the workbook…');
@@ -64,6 +65,9 @@ export async function stopSharing(doc) {
   const client = doc.collab;
   await doc.save();
   await client.request({ op: 'stop' });
+  // The room is closed now, by this person: this browser stops asking it, rather than learn of it as of a room
+  // someone else closed on it while the workbook opens again as the file.
+  client.halt();
   if (doc.path) await globalThis.puter?.kv?.del?.(fileKey({ path: doc.path, uid: doc.uid })).catch?.(() => {});
 }
 

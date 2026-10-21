@@ -11,6 +11,7 @@ import { toast } from './toast.js';
 import { confirmDialog, promptDialog } from './modal.js';
 import { colorFor, colorsFor, initials, roleLabel } from '../collab/protocol.js';
 import { invitationLink, startSharing, stopSharing } from '../collab/session.js';
+import { UNREACHABLE } from '../collab/api.js';
 import { rangeName } from '../core/cell.js';
 
 /** The people in the room, one entry per person (their most recently active session), never this one. */
@@ -81,12 +82,14 @@ export function createPeopleBar({ client, wb, jump }) {
 export function roomStatus(client) {
   const { state, pending, message } = client.status;
   const waiting = pending === 1 ? '1 change waiting' : `${pending} changes waiting`;
-  if (state === 'offline') return ['cloudOff', pending ? `Offline · ${waiting}` : 'Offline', `${message || 'Offline'}. Your changes are kept on this device and sent when the connection returns`];
+  // The connection's own explanation says the changes are kept already; any other reason is told it in full.
+  if (state === 'offline') return ['cloudOff', pending ? `Offline · ${waiting}` : 'Offline', message === UNREACHABLE ? message : `${(message || 'Offline').replace(/\.$/, '')}. Your changes are kept on this device and sent when the connection returns`];
   if (state === 'error') return ['alert', 'Not connected', message || 'The shared workbook is not reachable'];
   if (state === 'syncing' || pending) return ['spinner', 'Syncing…', 'Sending your changes to everyone'];
   if (state === 'connecting') return ['spinner', 'Connecting…', 'Joining the shared workbook'];
-  if (!client.canEdit) return ['eye', 'View only', 'You can view this shared workbook. Ask its owner for edit access'];
-  return ['people', 'Live · Saved', 'Everyone sees your changes as you make them'];
+  const full = client.full ? '. This shared workbook has reached its participant limit, so others do not see where you are' : '';
+  if (!client.canEdit) return ['eye', 'View only', `You can view this shared workbook. Ask its owner for edit access${full}`];
+  return ['people', 'Live · Saved', `Everyone sees your changes as you make them${full}`];
 }
 
 /**

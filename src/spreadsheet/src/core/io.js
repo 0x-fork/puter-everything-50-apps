@@ -4,7 +4,10 @@ import { createExternalFormulaLinks } from './external-formula-links.js';
 import { savedExternalResult, externalFormulaHasCaches, externalFormulaHasLinks, rebaseExternalWorkbooks } from './external-workbooks.js';
 import { readXlsxExternalWorkbooks } from './xlsx-external-workbooks.js';
 import { bindNativePivotRules } from './native-pivot-rule-bindings.js';
-import { decodeXlsxString } from './xlsx-string.js';
+import { decodeXlsxString, encodeXlsxAttribute } from './xlsx-string.js';
+import { xmlText } from './xlsx-export-styles.js';
+import { conditionalNumberFormat } from './style-values.js';
+import { readDocumentProperties, writeDocumentProperties } from './document-properties.js';
 import { readNativeSparklineGroups } from './xlsx-sparklines.js';
 import { importXlsxSlicers } from './xlsx-import-slicers.js';
 import { importNativePivotSlicerCaches } from './native-pivot-slicer-storage.js';
@@ -36,8 +39,8 @@ import { legacyCommentText } from './comments.js';
 
 import { Workbook, DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, MAX_STORED_COL_WIDTH, MAX_STORED_ROW_HEIGHT, safeSheetName, MAX_ROWS, MAX_COLS } from './workbook.js';
 import { cellKey, cellName, parseKey, MAX_TEXT, parseCellRef, parseRange } from './cell.js';
-import { styleToNumFmt, numFmtToStyle, formatValue, dateTimeKind, fontKeyFor, ymdToSerial, NUMBER_FORMAT_KEYS } from './format.js';
-import { readXlsxStyles, xlsxAlignment, xlsxColumnPixels, xlsxColor, xlsxAttr, xlsxLayoutDigitWidth, xlsxWidthFromPixels } from './xlsx-styles.js';
+import { styleToNumFmt, numFmtToStyle, formatValue, dateTimeKind, fontKeyFor, ymdToSerial, NUMBER_FORMAT_KEYS, HORIZONTAL_ALIGNS } from './format.js';
+import { readXlsxStyles, xlsxAlignment, xlsxColumnPixels, xlsxColor, xlsxAttr, xlsxText, xlsxLayoutDigitWidth, xlsxWidthFromPixels } from './xlsx-styles.js';
 import { importXlsxScrollControls } from './xlsx-scroll-controls.js';
 import { readXlsxCharts } from './xlsx-charts.js';
 import { reconcileDrawings } from './xlsx-drawing-reconcile.js';
@@ -69,6 +72,7 @@ import { xlsxRowStyleBase, xlsxLineIntersectionCells } from './xlsx-line-interse
 import { MAX_ROW, MAX_COL, shiftFormula, mapFormulaRefs } from './refs.js';
 import { tokenize, isExternalFormulaToken, isWorkbookNameScope } from './formula/tokenizer.js';
 import { parseFormula } from './formula/parser.js';
+import { ARRAY_BUDGET } from './formula/evaluator.js';
 import { normalizeCalculationCompatibility } from './calculation-compatibility.js';
 import { readXlsxCalculationCompatibility } from './xlsx-calculation-compatibility.js';
 import { normalizeIteration } from './iteration.js';
@@ -176,7 +180,8 @@ export function stripExtension(name) {
 
 /* ---------- Export ---------- */
 
-const META_ENUMS = { scheme: ['major', 'minor', 'none'], align: ['left', 'center', 'right'], valign: ['top', 'middle', 'bottom'] };
+const UNDERLINE_KINDS = { 2: 'double', 0x21: 'singleAccounting', 0x22: 'doubleAccounting' };
+const META_ENUMS = { scheme: ['major', 'minor', 'none'], align: HORIZONTAL_ALIGNS, valign: ['top', 'middle', 'bottom'] };
 const META_NUMBERS = ['size', 'indent', 'dec', 'rot'];
 /** Metadata colors are hex or validated native references; alignments, sizes
  * and format codes retain their existing limits. */
@@ -370,6 +375,12 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
       const runs = normalizeRichText(cell.richText, value);
       if (runs) out.odsRuns = runs;
     }
+    // The writer marks a space at the ends of the text as one (text:s), where a reader would drop a bare
+    // one, but not a space beside a line break, which it writes bare at a paragraph's edge. Written as
+    // runs split at the line breaks, each such space stands at a run's edge and is marked.
+    if (ods && out.t === 's' && !out.odsRuns && /[ ]\n|\n[ ]/.test(out.v)) {
+      out.odsRuns = out.v.split(/(\n)/).filter(Boolean).map((part) => ({ text: part }));
+    }
     if (cell.f != null && !unparsed && !deferredForOds) {
       // Native XLSX tables own these references: keeping them live preserves
       // resizing and keeps calculated cells consistent with their template.
@@ -397,7 +408,9 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
     if (r > maxR) maxR = r;
     if (c > maxC) maxC = c;
   }
-  for (const { r, c, value } of unlessTooDeep(() => wb.spillEntries(sheet.id), [])) {
+  // An array past the cells any array may hold (a CSE array or a data table over the whole sheet) keeps its anchor
+  // and declared extent, and readers work its results out again: listing each of them never finished saving.
+  for (const { r, c, value } of unlessTooDeep(() => wb.spillEntries(sheet.id, null, { maxCells: ARRAY_BUDGET }), [])) {
     const addr = X.utils.encode_cell({ r, c });
     const style = { ...(lineFormats ? wb._lineStyle(sheet, r, c) : null), ...wb.spillAt(sheet.id, r, c)?.style, ...wb.getCell(sheet.id, r, c)?.s };
     const numFmt = numFmtOf(style);
@@ -499,11 +512,13 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
   // Only a column or row with its own width, height, or hidden state gets an
   // entry. The writers skip the holes, whereas filling every index up to one
   // far-off row would put a million row records into each save.
-  if (sheet.colWidths.size || sheet.hiddenCols.size || (!ods && sheet.colStyles.size)) {
+  if (sheet.colWidths.size || sheet.hiddenCols.size || sheet.colStyles.size) {
     const cols = [];
     for (const [c, wpx] of sheet.colWidths) cols[c] = { wpx };
     for (const c of sheet.hiddenCols) (cols[c] ??= { wpx: sheet.defaultColWidth }).hidden = true;
     if (!ods) for (const c of sheet.colStyles.keys()) cols[c] ??= { wpx: sheet.defaultColWidth };
+    // An .ods column's format is the cell style it gives the cells without one of their own.
+    else for (const [c, style] of sheet.colStyles) (cols[c] ??= { wpx: sheet.defaultColWidth }).odsCell = { odsStyle: style, z: numFmtOf(style) };
     ws['!cols'] = cols;
   }
   if (sheet.rowHeights.size || sheet.rowHeightModes.size || sheet.hiddenRows.size || sheet.filterHidden.size || (!ods && sheet.rowStyles.size)) {
@@ -716,6 +731,25 @@ function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null,
       meta.sheets[sheet.name].groups = sheet.groups;
       any = true;
     }
+    // What-If scenarios: an .xlsx keeps them in the worksheet's <scenarios> (scenarios.js); an .ods writer has no place for them.
+    if (ods && sheet.scenarios) {
+      meta.sheets[sheet.name].scenarios = sheet.scenarios;
+      any = true;
+    }
+    // Outline Settings likewise: an .xlsx keeps them in the worksheet's <outlinePr> (xlsx-outline.js).
+    if (ods && sheet.outlineSettings) {
+      meta.sheets[sheet.name].outlineSettings = sheet.outlineSettings;
+      any = true;
+    }
+    // An Advanced Filter run in place, for Data ▸ Clear and Reapply once the file is opened again (a file keeps
+    // only the rows it hid). Criteria on another sheet name it, as the ids of a book are its own.
+    if (sheet.advancedFilter) {
+      const { criteria } = sheet.advancedFilter;
+      const other = criteria?.sheetId ? wb.sheet(criteria.sheetId)?.name : null;
+      meta.sheets[sheet.name].advancedFilter = { ...sheet.advancedFilter,
+        criteria: !criteria ? criteria : criteria.sheetId && !other ? false : { sheetId: other, range: criteria.range } };
+      any = true;
+    }
     if (sheet.zeros === false) {
       meta.sheets[sheet.name].zeros = false;
       any = true;
@@ -809,7 +843,9 @@ function buildBook(X, wb, { meta = true, odsSettings = false, ods = false, histo
       // Native prefixes and spill syntax decode without metadata. Only table
       // conversion and unsupported ODS name scopes need the original expression saved.
       if (dynamicRef !== n.ref) structuredNames.push({ name: n.name, ref: n.ref, fileRef: ref, ...(n.sheet ? { sheet: n.sheet } : {}) });
-      return { Name: n.name, Ref: ref, ...(n.hidden ? { Hidden: true } : {}), ...(n.sheet ? { Sheet: wb.sheets.findIndex((s) => s.name === n.sheet) } : {}) };
+      // The writer copies a comment into its attribute as it is given: escape it here.
+      return { Name: n.name, Ref: ref, ...(n.hidden ? { Hidden: true } : {}), ...(n.sheet ? { Sheet: wb.sheets.findIndex((s) => s.name === n.sheet) } : {}),
+        ...(n.comment && !ods ? { Comment: xmlText(encodeXlsxAttribute(n.comment)) } : {}) };
     });
   }
   for (const [i, sheet] of wb.sheets.entries()) {
@@ -887,6 +923,7 @@ export async function workbookToXlsx(wb, { sourceWorkbook = null, history = true
   const { completeXlsx } = await import('./xlsx-export.js');
   const X = await XLSX();
   const book = buildBook(X, wb, { history });
+  writeDocumentProperties(book, wb.documentProperties);
   const data = await completeXlsx(X, wb, book, X.write(book, { bookType: 'xlsx', type: 'array' }), { sourceWorkbook });
   return new Blob([data], { type: XLSX_MIME });
 }
@@ -1015,7 +1052,11 @@ function lastContentColumns(wb, sheet) {
   const last = new Map();
   const note = (r, c) => { if ((last.get(r) ?? -1) < c) last.set(r, c); };
   for (const key of sheet.cells.keys()) { const { r, c } = parseKey(key); note(r, c); }
-  for (const { r, c } of wb.spillEntries(sheet.id)) note(r, c);
+  // An array's rows end at its last column, read off its extent: listing its results one by one never finished
+  // for an array over the whole sheet (seventeen billion of them).
+  for (const a of wb._ensureSpills(sheet).anchors.values()) {
+    for (let i = 0; i < a.rows; i++) if (i || a.cols > 1) note(a.r + i, a.c + a.cols - 1);
+  }
   return last;
 }
 
@@ -1060,12 +1101,14 @@ export function sheetToHtml(wb, sheetId, { title = '' } = {}) {
     return n;
   });
   const shown = (i) => cols.slice(0, widths[i]);
-  const texts = rows.map((r, i) => shown(i).map((c) => wb.getDisplay(sheetId, r, c)));
   const cells = rows.map((r, i) => shown(i).map((c) => wb.getCell(sheetId, r, c) || null));
   const values = rows.map((r, i) => shown(i).map((c) => wb.getValue(sheetId, r, c)));
   const styles = rows.map((r, i) => shown(i).map((c) => wb.displayStyleAt(sheetId, r, c)));
   const decorated = sheet.rules.length || sheet.tables?.length;
   const looks = decorated ? rows.map((r, i) => shown(i).map((c) => wb.conditionalStyle(sheetId, r, c, wb.getValue(sheetId, r, c)) || null)) : null;
+  // A rule's number format shows over the cell's own while it matches, as on screen.
+  const texts = rows.map((r, i) => shown(i).map((c, j) => looks?.[i][j]?.fmt != null && values[i][j] != null
+    ? formatValue(values[i][j], conditionalNumberFormat(styles[i][j], looks[i][j])) : wb.getDisplay(sheetId, r, c)));
   let row = 0;
   const table = cellsToHtml(texts, cells, looks, values, null, { clipboard: false, styles, mergeLayout, colorPalette: wb.colorPalette, normalFill: wb.nativeNormalFill, indentUnit: normalIndentUnit(wb.normalFont) })
     .replace(/ data-spreadsheet-[\w-]+="[^"]*"/g, '')
@@ -1441,7 +1484,7 @@ function sheetPartState(xml) {
   const viewMode = { pageLayout: 'pageLayout', pageBreakPreview: 'pageBreak' }[xmlAttr(view, 'view') || ''] || 'normal';
   // CT_SheetView/CT_ChartsheetView default zoomScale to 100. An omitted
   // attribute does not mean the previous sheet's or device's saved zoom.
-  return { frozen, color, gridlines, headers: !['0', 'false'].includes(xmlAttr(view, 'showRowColHeaders') || ''), rightToLeft: ['1', 'true'].includes(xmlAttr(view, 'rightToLeft')), protected: locked, ...(!chart ? { viewSelection: readSheetSelection(viewXml), viewOrigin, frozenOrigin, ...(split ? { split } : {}) } : {}), ...(chart ? { zoomToFit: ['1', 'true'].includes(xmlAttr(view, 'zoomToFit')) } : { viewMode }), viewZoom: zoom >= 10 && zoom <= 400 ? zoom / 100 : 1 };
+  return { frozen, color, gridlines, headers: !['0', 'false'].includes(xmlAttr(view, 'showRowColHeaders') || ''), zeros: !['0', 'false'].includes(xmlAttr(view, 'showZeros') || ''), rightToLeft: ['1', 'true'].includes(xmlAttr(view, 'rightToLeft')), protected: locked, ...(!chart ? { viewSelection: readSheetSelection(viewXml), viewOrigin, frozenOrigin, ...(split ? { split } : {}) } : {}), ...(chart ? { zoomToFit: ['1', 'true'].includes(xmlAttr(view, 'zoomToFit')) } : { viewMode }), viewZoom: zoom >= 10 && zoom <= 400 ? zoom / 100 : 1 };
 }
 
 /**
@@ -1525,6 +1568,8 @@ function fileCellStyles(styles, native, includeDefaults = true) {
     // Another font record is complete, not a patch on Normal. Its absent
     // flags must suppress a bold/italic/etc. workbook default.
     for (const key of ['bold', 'italic', 'underline', 'strike']) if (font[key] || base[key]) s[key] = !!font[key];
+    // The reader numbers <u val>: a double or accounting underline keeps its name, as a rich-text run's does.
+    if (UNDERLINE_KINDS[font.underline]) s.underline = UNDERLINE_KINDS[font.underline];
     if (typeof font.sz === 'number' && font.sz > 0 && font.sz !== base.sz) s.size = font.sz * 4 / 3;
     const color = colorOf(font, i);
     if (color && !sameFontColor(color, baseColor) && (color !== '#000000' || baseColor)) s.color = color;
@@ -1610,6 +1655,9 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
   const formatOf = (fonts || lineFormats) && partXml ? cellFormatIndices(partXml) : null;
   const ownResets = own?.nativeStyles ? readStyleResets(own.styleResets) : [];
   const colStyles = metaLineStyles(own?.colStyles, MAX_COL), rowStyles = metaLineStyles(own?.rowStyles, MAX_ROW);
+  // An .ods column's own cell style, LibreOffice's whole-column format; this app's own files carry theirs in the settings.
+  const odsColumns = !own && !partXml && ws?.['!odsColumnStyles'] ? Object.fromEntries(Object.entries(ws['!odsColumnStyles'])
+    .map(([c, { props, z }]) => [c, { ...odsCellStyle(props), ...numFmtToStyle(z) }]).filter(([c, style]) => Object.keys(style).length && Number(c) <= MAX_COL)) : null;
   // XF zero governs unallocated cells, independently of named Normal. Only
   // sheets using the saved global default follow native edits to that XF;
   // differing sheet defaults were exported as explicit column formats.
@@ -1809,12 +1857,14 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     // An .ods cell style's font, fill, borders and alignment; this app's own files carry their styles in the sidecar.
     const odsLook = !own && !partXml && src.odsProps ? odsCellStyle(src.odsProps) : null;
     if (odsLook) cell.s = { ...(cell.s || {}), ...odsLook };
+    // A cell style is complete in ODF: a cell with one of its own takes nothing from its column's.
+    if (cell.s && odsColumns?.[c]) cell.s = replaceInheritedStyle(cell.s, odsColumns[c]);
     // Normal text formatting alone must not create a cell for a missing
     // shared string, an uncached external formula, or a blank spill result.
     if (font && (reconcileStyle || cell.v != null || cell.f != null || fontIndex || src.l?.Target || font.nativeFill)) cell.s = { ...(cell.s || {}), ...font };
     // An imported hyperlink keeps the workbook's text styling rather than
     // acquiring the grid's default underlined link appearance.
-    if (!own && font && (src.l || /^HYPERLINK\s*\(/i.test(src.f || ''))) cell.s.underline = !!font.underline;
+    if (!own && font && (src.l || /^HYPERLINK\s*\(/i.test(src.f || ''))) cell.s.underline = font.underline || false;
     if (asText) cell.s = { ...(cell.s || {}), fmt: 'text' };
     if (fontIndex != null && lines && (lines.cols[c] || lines.rows[r])) {
       // Even a stored cell without s has XF 0. It must not acquire the
@@ -1832,12 +1882,19 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     if (c > usedC) usedC = c;
   }
   // What-If data tables: Excel keeps {=TABLE(row input, column input)} as a dataTable formula naming its input cells.
+  let stored;
   for (const { range, formula } of partXml ? readDataTables(partXml) : []) {
     const anchor = cellKey(range.r1, range.c1);
-    for (let r = range.r1; r <= range.r2; r++) for (let c = range.c1; c <= range.c2; c++) {
-      const key = cellKey(r, c), cell = cells[key];
-      if (key === anchor) cells[key] = { ...(cell || {}), v: null, f: formula, array: { rows: range.r2 - range.r1 + 1, cols: range.c2 - range.c1 + 1 } };
-      else if (cell) { cell.v = null; cell.f = null; }
+    cells[anchor] = { ...(cells[anchor] || {}), v: null, f: formula, array: { rows: range.r2 - range.r1 + 1, cols: range.c2 - range.c1 + 1 } };
+    // The other results are the table's: the cells stored there lose their own contents. Whichever is fewer is
+    // walked, the table's cells or the sheet's, so a table a file stretches over the whole sheet does not visit
+    // its seventeen billion coordinates.
+    const clear = (key) => { const cell = cells[key]; if (key !== anchor && cell) { cell.v = null; cell.f = null; } };
+    stored ??= Object.keys(cells);
+    if ((range.r2 - range.r1 + 1) * (range.c2 - range.c1 + 1) <= stored.length) {
+      for (let r = range.r1; r <= range.r2; r++) for (let c = range.c1; c <= range.c2; c++) clear(cellKey(r, c));
+    } else {
+      for (const key of stored) { const { r, c } = parseKey(key); if (r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2) clear(key); }
     }
     usedR = Math.max(usedR, range.r2); usedC = Math.max(usedC, range.c2);
   }
@@ -2067,12 +2124,13 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     rules: !partXml && !own && ws?.['!odsConditionalFormats'] ? readXlsxConditionalFormats(ws['!odsConditionalFormats'].xml, { dxfs: ws['!odsConditionalFormats'].dxfs }, null, definedNames, { dateTargets })
       : readXlsxConditionalFormats(partXml, nativeStyles, nativeStyles?.colors || themes, definedNames, { priorities: pivotPriorities, dateTargets }),
     protectedRanges: meta?.sheets?.[name]?.protectedRanges || [],
-    scenarios: parseScenariosXml(partXml),
+    scenarios: partXml ? parseScenariosXml(partXml) : own?.scenarios,
     validations: meta?.sheets?.[name]?.validations || (ws?.['!validations'] || []).map(({ _odsName, ...rule }) => rule),
     color: own?.color || part?.color || (!own && partXml ? xlsxColor(partXml.match(/<(?:\w+:)?tabColor\b[^>]*>/)?.[0], nativeStyles?.colors || themes) : null),
     protected: own ? !!own.protected : !!part?.protected,
     groups: own ? own.groups || null : fileGroups(ws, filtered),
-    outlineSettings: readXlsxOutlineSettings(partXml),
+    advancedFilter: own?.advancedFilter,
+    outlineSettings: partXml ? readXlsxOutlineSettings(partXml) : own?.outlineSettings,
     gridlines: own ? own.gridlines !== false : part?.gridlines !== false,
     headers: nativePart?.headers ?? own?.headers ?? true,
     rightToLeft: nativePart?.rightToLeft ?? own?.rightToLeft ?? false,
@@ -2086,7 +2144,7 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     frozenOrigin: partXml ? nativePart?.frozenOrigin : own?.frozenOrigin,
     split: partXml ? nativePart?.split : own?.split,
     ...(own?.zoomToFit != null || part?.zoomToFit != null ? { zoomToFit: own?.zoomToFit ?? part?.zoomToFit } : {}),
-    zeros: meta?.sheets?.[name]?.zeros !== false,
+    zeros: nativePart?.zeros ?? meta?.sheets?.[name]?.zeros !== false,
     sparklineGroups: readNativeSparklineGroups(partXml),
     charts: meta?.sheets?.[name]?.charts || [],
     tables,
@@ -2108,7 +2166,7 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     ...(nativeDefaultHeight ? { nativeDefaultHeight } : {}),
     ...(nativeWidths ? { nativeWidths } : {}),
     // The format a whole column or row carries; the cells in it store none of their own.
-    colStyles: lines?.cols || colStyles,
+    colStyles: odsColumns || lines?.cols || colStyles,
     rowStyles: lines?.rows || rowStyles,
     styleResets: meta?.sheets?.[name]?.styleResets,
     cells,
@@ -2602,7 +2660,9 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
         return parsed;
       });
       else relative = relativeNames.get(nameKey(n.Name, scope)) === formula;
-      return { name: n.Name, ref: formula, ...(n.Hidden ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(relative ? { relative: true } : {}) };
+      // The reader leaves a name's comment as the attribute spells it.
+      const comment = typeof n.Comment === 'string' ? decodeXlsxString(xlsxText(n.Comment)) : '';
+      return { name: n.Name, ref: formula, ...(n.Hidden ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(relative ? { relative: true } : {}), ...(comment ? { comment } : {}) };
     });
   const externalLinks = createExternalFormulaLinks(names, externalWorkbooks);
   const sheets = book.SheetNames
@@ -2751,6 +2811,7 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
     scripts: book.bookType === 'xlsx' ? readXlsxScripts(book.files) : meta?.scripts,
     // The app's own record of its named styles, else the file's (another program's custom styles).
     cellStyles: Array.isArray(meta?.cellStyles) ? meta.cellStyles : nativeStyles?.namedStyles,
+    documentProperties: readDocumentProperties(book),
     fontTheme: themePart ? readFontTheme(new TextDecoder().decode(themePart)) : normalizeFontTheme(meta?.fontTheme),
     themeInfo: importedThemeInfo(themePart ? readThemeInfo(new TextDecoder().decode(themePart)) : null, meta?.themeInfo, normalFont) });
   if (modelRels && /\/pivotCacheDefinition["']/.test(new TextDecoder().decode(modelRels)))
@@ -2808,6 +2869,13 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
     wb.renameSheet(sheet.id, fixed);
   }
   if (renamed.size) wb.clearHistory();
+  // An Advanced Filter's criteria on another sheet came by that sheet's name (see collectMeta): it now takes its id.
+  for (const sheet of wb.sheets) {
+    const criteria = sheet.advancedFilter?.criteria;
+    if (!criteria?.sheetId) continue;
+    const id = wb.sheetByName(renamed.get(criteria.sheetId) || criteria.sheetId)?.id;
+    sheet.advancedFilter = { ...sheet.advancedFilter, criteria: id ? { ...criteria, sheetId: id } : false };
+  }
   // SheetJS CE does not carry the workbook's active tab through a write, so
   // the sidecar remembers which sheet was open. Treat this optional hint as
   // a name only; coercing malformed objects can abort an otherwise valid import.

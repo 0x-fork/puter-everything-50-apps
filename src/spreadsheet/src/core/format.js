@@ -30,9 +30,23 @@ export const BORDER_STYLES = [
   ['double', 'Double'],
 ];
 
+/**
+ * Excel's other border lines, which a file brings and the app keeps, each with the line it is drawn as: a hairline
+ * dotted, its dash-dot patterns dashed, at two pixels for the medium weights.
+ */
+const BORDER_LINES = { hair: ['1px', 'dotted'], dashDot: ['1px', 'dashed'], dashDotDot: ['1px', 'dashed'], mediumDashed: ['2px', 'dashed'],
+  mediumDashDot: ['2px', 'dashed'], mediumDashDotDot: ['2px', 'dashed'], slantDashDot: ['2px', 'dashed'] };
+export const XLSX_BORDER_STYLES = [...BORDER_STYLES.map(([value]) => value), ...Object.keys(BORDER_LINES)];
+/** Every line a border can be drawn with, as Format Cells lists them: the light lines, then the medium and heavy ones. */
+export const BORDER_LINE_CHOICES = [
+  ['thin', 'Thin'], ['hair', 'Hair'], ['dotted', 'Dotted'], ['dashed', 'Dashed'], ['dashDot', 'Dash-dot'], ['dashDotDot', 'Dash-dot-dot'], ['double', 'Double'],
+  ['medium', 'Medium'], ['mediumDashed', 'Medium dashed'], ['mediumDashDot', 'Medium dash-dot'], ['mediumDashDotDot', 'Medium dash-dot-dot'], ['slantDashDot', 'Slanted dash-dot'], ['thick', 'Thick'],
+];
+
 /** CSS pieces for a cell's border style: { width, style, color }; color is null for the default ink. */
 export function borderCss(st) {
   const bs = st?.bs || 'thin';
+  if (Object.hasOwn(BORDER_LINES, bs)) return { width: BORDER_LINES[bs][0], style: BORDER_LINES[bs][1], color: st?.bc || null };
   const width = bs === 'medium' ? '2px' : bs === 'thick' || bs === 'double' ? '3px' : '1px';
   const style = bs === 'dashed' || bs === 'dotted' || bs === 'double' ? bs : 'solid';
   return { width, style, color: st?.bc || null };
@@ -1128,13 +1142,17 @@ export function formatValue(value, style) {
 
   // A currency without a minor unit (the yen, the won) is written without decimals unless the style asks for some.
   const dec = decimalPlaces(style?.dec ?? (fmt === 'currency' ? currencyDecimals(style?.cur) : undefined));
+  // Intl writes every digit of the binary value (0.30000000000000004, 2^60 as 1,152,921,504,606,846,976); a named
+  // format shows fifteen significant digits, then zeros, as a custom code does. The largest doubles keep their own.
+  const sig = ['number', 'currency', 'percent'].includes(fmt) ? Number(value.toPrecision(15)) : value;
+  const digits = Number.isFinite(sig) ? sig : value;
   switch (fmt) {
     case 'number':
-      return numberFormatter({ minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: style?.group !== false }).format(value);
+      return numberFormatter({ minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: style?.group !== false }).format(digits);
     case 'currency':
-      return numberFormatter({ style: 'currency', currency: currencyCode(style?.cur), minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: style?.group !== false }).format(value);
+      return numberFormatter({ style: 'currency', currency: currencyCode(style?.cur), minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: style?.group !== false }).format(digits);
     case 'percent':
-      return numberFormatter({ style: 'percent', minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: style?.group !== false }).format(value);
+      return numberFormatter({ style: 'percent', minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: style?.group !== false }).format(digits);
     case 'date':
       return formatDate(value, style?.dateStyle);
     case 'time':
@@ -1221,6 +1239,15 @@ export function hasDecimalPlaces(style) {
   if (['date', 'time', 'datetime', 'text'].includes(fmt)) return false;
   return fmt !== 'custom' || stepCodeDecimals(style.code, 1) != null;
 }
+
+/**
+ * Excel's horizontal alignments past left, center and right, each with the side it is laid out against here:
+ * Center Across Selection and Distributed centre a line in its cell, Justify and Fill set it from the left.
+ */
+const ALIGN_LAYOUT = { centerContinuous: 'center', distributed: 'center', justify: 'left', fill: 'left' };
+export const HORIZONTAL_ALIGNS = ['left', 'center', 'right', ...Object.keys(ALIGN_LAYOUT)];
+/** The side a cell's horizontal alignment sets its text against on screen and on paper. */
+export const layoutAlign = (align) => ALIGN_LAYOUT[align] || align;
 
 /** Alignment a value gets when the style does not force one. */
 export function defaultAlign(value) {

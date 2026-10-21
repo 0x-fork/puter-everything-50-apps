@@ -8,9 +8,10 @@ import { isComposing, el } from './dom.js';
 import { icon } from './icons.js';
 import { openMenu } from './menu.js';
 import { toast } from './toast.js';
-import { cellName, rangeName, parseRange } from '../core/cell.js';
+import { cellName, parseRange } from '../core/cell.js';
 import { editText } from '../core/format.js';
 import { isSingle } from '../core/selection.js';
+import { selectionName } from '../core/refs.js';
 
 export function createFormulaBar(ctx, { fixedActions = false } = {}) {
   // Both fields follow their text's own direction, as the cell and its in-cell editor do: a named range or
@@ -142,7 +143,8 @@ export function createFormulaBar(ctx, { fixedActions = false } = {}) {
     const range = ctx.grid.range;
     const table = (ctx.wb.tablesOn?.(ctx.sheetId()) || []).find((t) => t.range.r1 === range.r1 && t.range.c1 === range.c1 && t.range.r2 === range.r2 && t.range.c2 === range.c2);
     const named = nameOf(range) || table?.name;
-    if (document.activeElement !== nameBox) nameBox.value = named || (isSingle(sel) ? cellName(sel.active.r, sel.active.c) : rangeName(range));
+    // Whole columns read C:C and whole rows 3:5, as Excel writes them: C1:C1048576 did not fit in the box.
+    if (document.activeElement !== nameBox) nameBox.value = named || (isSingle(sel) ? cellName(sel.active.r, sel.active.c) : selectionName(range));
     const state = ctx.grid.editState;
     input.classList.remove('spilled');
     editActions.hidden = !fixedActions && !state;
@@ -210,6 +212,11 @@ export function createFormulaBar(ctx, { fixedActions = false } = {}) {
     }
   });
   nameBox.addEventListener('focus', () => nameBox.select());
+  // Left without Enter, the box names the selection again rather than keeping what was typed, as in Excel; the
+  // names menu opened from it keeps the typing, for Escape to give back.
+  nameBox.addEventListener('blur', () => setTimeout(() => {
+    if (document.activeElement !== nameBox && !document.activeElement?.closest?.('.menu')) refresh();
+  }, 0));
   nameBox.addEventListener('keydown', (e) => { if (isComposing(e)) return; if (e.key === 'ArrowDown' && e.altKey) { e.preventDefault(); openNamesMenu(nameMenuBtn); } });
 
   /**
@@ -276,6 +283,9 @@ export function createFormulaBar(ctx, { fixedActions = false } = {}) {
   input.addEventListener('keyup', (e) => {
     if (!isComposing(e) && /^Arrow|^Home$|^End$/.test(e.key)) ctx.grid.updateEditHints();
   });
+  // Clicking into the text of an entry begun in the cell puts the caret there to edit it, as a click in the cell's
+  // own editor does (Edit mode): the arrows then move that caret rather than picking a cell into the formula.
+  input.addEventListener('pointerdown', () => { if (ctx.grid.editing) ctx.grid.setEditMode?.('inplace'); });
   input.addEventListener('click', () => ctx.grid.updateEditHints());
   input.addEventListener('blur', () => {
     // A reference typed but not entered is let go, as an unentered cell edit would be cancelled.

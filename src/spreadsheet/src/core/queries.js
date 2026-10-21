@@ -1102,6 +1102,8 @@ function occupied(wb, sheetId, range) {
   return false;
 }
 
+const PROTECTED = 'Part of the place the data goes is protected. Choose another location, or unprotect it first.';
+
 const blockedMessage = (direction) => (direction === 'left'
   ? 'A column the query no longer gives could not be taken out of the table (a PivotTable, a protected sheet, merged cells or an array formula is in the way).'
   : `The refreshed data needs more ${direction === 'down' ? 'rows' : 'columns'}, but the cells ${direction === 'down' ? 'below' : 'beside'} the table could not be moved (a PivotTable, a protected sheet, merged cells or an array formula is in the way).`);
@@ -1128,6 +1130,25 @@ function tableHeaderNames(columns) {
   });
 }
 
+/** What a query records of the table it loads to: where it is, the columns it loaded (which tell them from columns added by hand), its rows. */
+const loadRecord = (q) => ({ load: { ...q.load }, rowCount: q.rowCount, errorCount: q.errorCount });
+
+/**
+ * Make the query's load record go back and forth with the step being recorded (`before`, and `after()` once the step
+ * is done), so an undone load, refresh or unload leaves no record of a table, or of columns, that is not there. It goes
+ * first among the step's entries: those after a structural one are not replayed (see Workbook.transaction).
+ */
+function loadStep(wb, id, label, before, after) {
+  const restore = (state) => {
+    const live = queryById(wb, id);
+    if (!live) return;
+    live.load = { ...state.load };
+    for (const key of ['rowCount', 'errorCount']) if (state[key] === undefined) delete live[key]; else live[key] = state[key];
+    wb._announce?.('queries', null);
+  };
+  wb._group.unshift({ label, undo: () => restore(before), redo: () => restore(after()) });
+}
+
 export function loadResult(wb, query, table, { at = null } = {}) {
   if (!table.columns.length) return { error: 'The query returned no columns to load.' };
   // The result is laid out under the names its columns take in the table, so a refresh finds each column again
@@ -1138,7 +1159,9 @@ export function loadResult(wb, query, table, { at = null } = {}) {
   const existing = loadedTable(wb, query);
   let result = null;
   const label = existing ? 'Refresh' : 'Load query';
-  wb.transaction(label, () => {
+  const before = loadRecord(query);
+  let after = before;
+  const write = () => {
     if (existing) {
       const { sheet } = existing;
       let t = existing.table;
@@ -1165,7 +1188,10 @@ export function loadResult(wb, query, table, { at = null } = {}) {
       const layout = keep ? [...names, ...table.columns.filter((n) => !names.includes(n))] : table.columns;
       const at = keep ? table.columns.map((n) => layout.indexOf(n)) : null;
       const old = { ...t.range };
-      const next = { r1, c1, r2: r1 + Math.max(1, height), c2: c1 + layout.length - 1 };
+      // A totals row stays the table's last row, under the fresh data: the resize below carries it (and its formulas) along.
+      const foot = t.totalsRow ? 1 : 0;
+      const next = { r1, c1, r2: r1 + Math.max(1, height) + foot, c2: c1 + layout.length - 1 };
+      if (wb.lockedIn(sheet.id, { r1, c1, r2: Math.max(old.r2, next.r2), c2: Math.max(old.c2, next.c2) })) { result = { error: PROTECTED }; return; }
       // A table that grows makes room for its new rows and columns, as Excel's refresh inserts cells for new
       // data: what stands beside or below it (a note, a total, another table) moves along instead of being
       // written over. Nothing has changed yet when the cells cannot move, so the refresh stops there.
@@ -1177,15 +1203,22 @@ export function loadResult(wb, query, table, { at = null } = {}) {
         let problem = null;
         if (!wb.resizeTable(sheet.id, t.id, next, { onInvalid: (m) => { problem = m; } })) { result = { error: problem || 'The table could not be resized for the new data.' }; return; }
       }
+      // The rows that held the old data: up to the old last row, less the totals row now at the new last row.
+      const clearData = (cols) => {
+        wb.clearRange(sheet.id, { r1: r1 + 1, r2: Math.min(old.r2, next.r2 - foot), ...cols });
+        if (old.r2 > next.r2) wb.clearRange(sheet.id, { r1: next.r2 + 1, r2: old.r2, ...cols });
+      };
       if (keep) {
         // The query's columns are written afresh; the table's own keep their cells, but for the rows it no longer has.
-        for (const p of at) if (p < names.length) wb.clearRange(sheet.id, { r1: r1 + 1, c1: c1 + p, r2: old.r2, c2: c1 + p });
+        for (const p of at) if (p < names.length) clearData({ c1: c1 + p, c2: c1 + p });
         if (old.r2 > next.r2) own.forEach((mine, p) => { if (mine) wb.clearRange(sheet.id, { r1: next.r2 + 1, c1: c1 + p, r2: old.r2, c2: c1 + p }); });
         // Rows the table gained take its calculated columns' formulas, as rows typed under a table do.
-        for (let r = old.r2 + 1; r <= next.r2; r++) wb._fillCalculatedRow(sheet, wb.tableById(sheet.id, t.id), r);
+        for (let r = old.r2 - foot + 1; r <= next.r2 - foot; r++) wb._fillCalculatedRow(sheet, wb.tableById(sheet.id, t.id), r);
       } else {
-        wb.clearRange(sheet.id, { r1: r1 + 1, c1: old.c1, r2: old.r2, c2: old.c2 });
+        clearData({ c1: old.c1, c2: old.c2 });
         if (next.c2 < old.c2) wb.clearRange(sheet.id, { r1, c1: next.c2 + 1, r2: r1, c2: old.c2 });
+        // Columns the table no longer has did not move with its totals row: their cell on that row's new place is cleared too.
+        if (foot && next.c2 < old.c2 && next.r2 <= old.r2) wb.clearRange(sheet.id, { r1: next.r2, c1: next.c2 + 1, r2: next.r2, c2: old.c2 });
       }
       const { entries, errors } = resultCells(table, r1, c1, at);
       // The cells keep the formatting given to them (a currency, bold, a date format), as Excel's refresh preserves
@@ -1200,10 +1233,10 @@ export function loadResult(wb, query, table, { at = null } = {}) {
         if (!formatted.has(c)) formatted.set(c, []);
         formatted.get(c)[r - r1] = cell.s;
       }
-      const lastRow = old.r2 > r1 ? old.r2 - r1 : null;
+      const lastRow = old.r2 - foot > r1 ? old.r2 - foot - r1 : null;
       if (formatted.size) for (const e of entries) {
         const column = formatted.get(e.c);
-        const kept = column && (column[e.r - r1] || (e.r > old.r2 && lastRow != null ? column[lastRow] : null));
+        const kept = column && (column[e.r - r1] || (e.r > old.r2 - foot && lastRow != null ? column[lastRow] : null));
         if (kept) e.cell.s = e.cell.s && !kept.fmt ? { ...kept, ...e.cell.s } : kept;
       }
       wb.setCells(sheet.id, entries, label);
@@ -1225,6 +1258,8 @@ export function loadResult(wb, query, table, { at = null } = {}) {
     if (wb.sheet(sheetId).tables.some((t) => !(range.r2 < t.range.r1 || range.r1 > t.range.r2 || range.c2 < t.range.c1 || range.c1 > t.range.c2))) {
       result = { error: 'The data would overlap another table. Choose another location.' }; return;
     }
+    // A protected cell there refuses the data, which left an empty table behind reported as loaded.
+    if (at && wb.lockedIn(sheetId, range)) { result = { error: PROTECTED }; return; }
     // Loading over cells that hold something would write over them without a word: the location must be empty.
     if (at && occupied(wb, sheetId, range)) { result = { error: 'There is data where the table would go. Choose an empty location, or a new worksheet.' }; return; }
     const { entries, errors } = resultCells(table, r0, c0);
@@ -1234,11 +1269,15 @@ export function loadResult(wb, query, table, { at = null } = {}) {
     if (!tableId) { result = { error: 'A table could not be created there.' }; return; }
     query.load = { kind: 'table', table: name, sheet: wb.sheet(sheetId).name, tableId, columns: [...table.columns] };
     result = { sheetId, tableId, rows: height, errors };
+  };
+  wb.transaction(label, () => {
+    write();
+    if (result && !result.error) loadStep(wb, query.id, label, before, () => after);
   });
   if (result && !result.error) {
     query.refreshed = Date.now(); query.rowCount = height;
     if (result.errors) query.errorCount = result.errors; else delete query.errorCount;
-    saveQuery(wb, query);
+    after = loadRecord(saveQuery(wb, query));
   }
   return result || { error: 'Nothing was loaded.' };
 }
@@ -1271,13 +1310,16 @@ export async function refreshAll(wb, io = {}) {
 /** Stop loading a query to a sheet (Load To ▸ Only Create Connection): its table goes. */
 export function unloadQuery(wb, query) {
   const hit = loadedTable(wb, query);
+  const before = loadRecord(query);
+  let after = before;
   if (hit) {
     wb.transaction('Load query', () => {
       const range = { ...hit.table.range };
       wb.deleteTable(hit.sheet.id, hit.table.id);
       wb.clearRange(hit.sheet.id, range, { styles: true });
+      loadStep(wb, query.id, 'Load query', before, () => after);
     });
   }
   query.load = { kind: 'connection' };
-  saveQuery(wb, query);
+  after = loadRecord(saveQuery(wb, query));
 }

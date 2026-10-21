@@ -5,7 +5,7 @@ import { fontColorInPalette } from './font-color.js';
 import { fillColorInPalette } from './fill-color.js';
 import { normalizeNativeFill, nativeFillXml, nativeFillMatchesPaint, nativeFillRecordXml, nativeFillPalette, nativeFillIsNone, nativeFillXmlIdentity } from './native-fill.js';
 /** Native SpreadsheetML styles, shared by cells and whole-row/column defaults. */
-import { styleToNumFmt } from './format.js';
+import { styleToNumFmt, HORIZONTAL_ALIGNS, XLSX_BORDER_STYLES } from './format.js';
 import { xlsxAttr, xlsxElements } from './xlsx-styles.js';
 import { normalFontStyle } from './normal-font.js';
 import { writeNativeNormalStyle } from './native-normal-style.js';
@@ -31,6 +31,7 @@ export const WORKSHEET_EXTLST = String.raw`<extLst\b(?=(?:(?!<extLst\b)[^])*<\/e
 export const worksheetExtension = (xml, ext) => (/<\/extLst>\s*<\/worksheet>/.test(xml)
   ? xml.replace(/<\/extLst>(\s*<\/worksheet>)/, (_, end) => `${ext}</extLst>${end}`)
   : xml.replace('</worksheet>', () => `<extLst>${ext}</extLst></worksheet>`));
+const UNDERLINE_KINDS = ['double', 'singleAccounting', 'doubleAccounting'];
 const rgb = value => xlsxSolidColor(value) ? `FF${value.slice(1).toUpperCase()}` : null;
 const color = value => rgb(value) ? xmlTag('color', { rgb: rgb(value) }) : '';
 const table = (name, entries) => xmlTag(name, { count: entries.length }, entries.join(''));
@@ -60,7 +61,8 @@ function fontXml(s, differential = false, defaultColor = '', palette = null, fon
   // permits a choice. This applies to ordinary and differential fonts alike.
   // https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/5b4f9876-7379-4354-819c-8c169e5d37ae
   for (const [key, tag] of [['bold', 'b'], ['italic', 'i'], ['strike', 'strike'], ['underline', 'u']]) {
-    if (s[key]) body += xmlTag(tag);
+    // A double or accounting underline is named; a single one is the bare element.
+    if (s[key]) body += xmlTag(tag, key === 'underline' && UNDERLINE_KINDS.includes(s[key]) ? { val: s[key] } : {});
     else if (differential && s[key] === false) body += xmlTag(tag, { val: tag === 'u' ? 'none' : 0 });
   }
   if (!differential || s.size) body += xmlTag('sz', { val: xlsxFontSize(s.size) });
@@ -103,7 +105,7 @@ function borderXml(s, differential = false) {
     if (differential && !Object.hasOwn(s, key)) continue;
     if (!differential && ['bh', 'bv'].includes(key) && !s[key]) continue;
     const edge = s[`${key}Border`] || s;
-    const style = ['thin', 'medium', 'thick', 'dashed', 'dotted', 'double'].includes(edge.bs) ? edge.bs : 'thin';
+    const style = XLSX_BORDER_STYLES.includes(edge.bs) ? edge.bs : 'thin';
     body += s[key] ? xmlTag(side, { style }, color(edge.bc) || xmlTag('color', { auto: 1 })) : xmlTag(side);
   }
   return xmlTag('border', {}, body);
@@ -111,7 +113,7 @@ function borderXml(s, differential = false) {
 
 function alignmentXml(s) {
   const attrs = {};
-  if (['left', 'center', 'right'].includes(s.align)) attrs.horizontal = s.align;
+  if (HORIZONTAL_ALIGNS.includes(s.align)) attrs.horizontal = s.align;
   // The grid centers unformatted content vertically; Excel's default is bottom.
   attrs.vertical = { top: 'top', middle: 'center', bottom: 'bottom' }[s.valign] || 'center';
   if (s.wrap) attrs.wrapText = 1;
@@ -192,8 +194,14 @@ export function exportStyles(source, normalFont = null, palette = null, defaultV
     }
     return formats.get(code);
   };
+  // A conditional format's own number format (fmt) goes between its font and its fill, as CT_Dxf orders them.
+  const differentialFormat = s => {
+    if (s.fmt == null) return '';
+    const code = s.fmt === 'general' ? 'General' : styleToNumFmt(s);
+    return xmlTag('numFmt', { numFmtId: code === 'General' ? 0 : numberFormatCode(code, true), formatCode: encodeXlsxAttribute(code) });
+  };
   const differential = (s = {}) => intern(dxfs, xmlTag('dxf', {},
-    fontXml(s, true, '', palette, fontTheme) + (Object.hasOwn(s, 'bg') ? fillXml(s, true, palette) : '') + borderXml(s, true)));
+    fontXml(s, true, '', palette, fontTheme) + differentialFormat(s) + (Object.hasOwn(s, 'bg') ? fillXml(s, true, palette) : '') + borderXml(s, true)));
   // Whole-column defaults often repeat one XF across thousands of columns.
   // Avoid rebuilding identical font/fill/border XML before interning it.
   const cellFormats = new Map();

@@ -26,6 +26,7 @@ import { copyConditionalFormats, mapPastedConditionalFormats, replaceConditional
 import { BAR_FORMULAS, SCALE_FORMULAS, ICON_FORMULAS, conditionalThresholdIsFormula, conditionalThresholdFormula, conditionalFormulaFields, mapConditionalFormulas, conditionalPredicateField } from './conditional-scale.js';
 import { NativeDuplicateCounts, duplicateAreaStats, duplicateSourceAreas, duplicateSourceFormula } from './conditional-duplicates.js';
 import { cloneStyle, replaceInheritedStyle } from './style-values.js';
+import { normalizeDocumentProperties } from './document-properties.js';
 import { normalizeNativeNormalStyle } from './native-normal-style.js';
 import { normalizeNativeDefaultCellFormat } from './native-default-cell-format.js';
 import { nativePivotDisplayStyle, hasNativePivotDisplay, nativePivotDisplayIssues } from './native-pivot-display.js';
@@ -81,12 +82,12 @@ import { normalizeBackground } from './sheet-background.js';
 import { normalizeCustomViews, captureCustomView, MAX_CUSTOM_VIEWS, CUSTOM_VIEW_NAME_MAX } from './custom-views.js';
 import { parseFormula } from './formula/parser.js';
 import { ARRAY_BUDGET, evaluate, evaluateFormula, isVolatile, paramSpec, resetArrayBudget, withArrayBudget } from './formula/evaluator.js';
-import { FUNCTIONS, err, isError, isRange, scalar, compareStoredValues, toText, noteRangeRows } from './formula/functions.js';
+import { FUNCTIONS, err, isError, isRange, scalar, compareStoredValues, toText, noteRangeRows, isNestedTotal } from './formula/functions.js';
 import { parseDelimited } from './tsv.js';
 import { splitPieces, detectDelimiter, DEFAULT_SPLIT } from './text-split.js';
 import { adjustFormula, adjustRefForInsert, adjustRefForInsertedLines, insertMap, adjustRefForDelete, adjustRefForDeletedLines, deleteMap, renameSheetInFormula, shiftFormula, resolveRelativeName, mapRelativeNameRef, isAbsoluteRef, mapFormulaRefs, parseRefText, refToText, MAX_ROW, MAX_COL, quoteSheet, sheetKey, sameSheetName } from './refs.js';
 import { headerlessTableColumns, normalizeTableHeaderState, headerlessInsertColumns, headerlessDeleteColumns, headerlessJoinColumns, headerlessResizeNames } from './table-header-row.js';
-import { tableStyle, tableRows, normalizeCustomTableStyle, customTableStyleAt, validateTableName, MAX_TABLE_NAME_LENGTH, parseTableSpec, resolveTableSpec, renderTableSpec, renameTableInFormula, tableColumnRenames, renameColumnsInFormula, tableRefsToA1, hasTableRefs, mapTableRefs, shiftTableColumns } from './tables.js';
+import { tableStyle, tableRows, normalizeCustomTableStyle, customTableStyleAt, validateTableName, TABLE_NAME_RE, MAX_TABLE_NAME_LENGTH, parseTableSpec, resolveTableSpec, renderTableSpec, renameTableInFormula, tableColumnRenames, renameColumnsInFormula, tableRefsToA1, hasTableRefs, mapTableRefs, shiftTableColumns } from './tables.js';
 import { tokenize, upperName, isWorkbookNameScope, isExternalFormulaToken } from './formula/tokenizer.js';
 import { adjustLineRules, adjustBlockRules } from './rule-refs.js';
 import { adjustFilterForEdit, filterFormulaReader, filterFormulaRules, compileFilterFormula, mapFilterFormula } from './filter-formulas.js';
@@ -106,6 +107,7 @@ import { normalizeQueries, serializeQueries } from './queries.js';
 import { normalizeScripts, serializeScripts } from './scripts.js';
 import { installSheetGroups } from './sheet-group.js';
 import { normalizeChangeHistory, recordCellWrites, recordStep } from './change-history.js';
+import { eachStoredCell } from './sparse-range.js';
 
 /** What a floating object is called in undo labels: chart, image, or text box. */
 function objectNoun(obj) {
@@ -139,6 +141,60 @@ export const MAX_STORED_ROW_HEIGHT = 546;
 const HISTORY_LIMIT = 200;
 // A structural undo step holds snapshots of the sheets it changed; the oldest steps go once those hold more cells than this in all.
 const SNAPSHOT_CELLS = 1_000_000;
+// A snapshot lists each hidden row and column by number, about an eighth of what a cell weighs: rows hidden from under
+// a list to the sheet's end (a million of them) went into every structural step at 8 MB a time, unweighed, so two
+// hundred steps of history could hold gigabytes.
+const hiddenLinesWeight = (n) => Math.ceil(n / 8);
+
+/**
+ * Renumber a set of hidden lines in place as `move` renumbers the sheet's lines (an insertMap's or a deleteMap's move:
+ * null for a line deleted), dropping those that land past `limit`. The move keeps the order of the lines it keeps, so
+ * each run of neighbouring lines lands as a few runs of neighbours and only the lines at their ends change: rows
+ * hidden from under a list to the sheet's end (a million of them) were a new set of a million on every row inserted.
+ */
+export function remapLines(set, move, limit) {
+  if (!set.size) return set;
+  const sorted = Array.from(set);
+  for (let k = 1; k < sorted.length; k++) if (sorted[k] < sorted[k - 1]) { sorted.sort((a, b) => a - b); break; }
+  const before = [];
+  for (const i of sorted) {
+    const run = before[before.length - 1];
+    if (run && i === run[1] + 1) run[1] = i; else before.push([i, i]);
+  }
+  // Where each run lands: whole, when its ends moved apart by its own length (nothing went in or out inside it).
+  const after = [];
+  const place = (a, b) => {
+    const ma = move(a), mb = move(b);
+    if (ma != null && mb != null && mb - ma === b - a) {
+      if (ma > limit) return;
+      const run = after[after.length - 1];
+      if (run && ma === run[1] + 1) run[1] = Math.min(mb, limit); else after.push([ma, Math.min(mb, limit)]);
+      return;
+    }
+    if (a === b) return;
+    const mid = Math.floor((a + b) / 2);
+    place(a, mid);
+    place(mid + 1, b);
+  };
+  for (const [a, b] of before) place(a, b);
+  // The lines in one list and not the other, found by walking both in order.
+  const changes = (from, to, apply) => {
+    let k = 0;
+    for (const [a, b] of from) {
+      let i = a;
+      while (i <= b) {
+        while (k < to.length && to[k][1] < i) k++;
+        if (k < to.length && to[k][0] <= i) { i = to[k][1] + 1; continue; }
+        const end = k < to.length ? Math.min(b, to[k][0] - 1) : b;
+        for (let j = i; j <= end; j++) apply(j);
+        i = end + 1;
+      }
+    }
+  };
+  changes(before, after, (i) => set.delete(i));
+  changes(after, before, (i) => set.add(i));
+  return set;
+}
 // The changes kept on record, newest last, for a listener asking what changed since a version it knows (see changesSince).
 const CHANGE_LOG = 256;
 // Formulas that read other files or the web; a file from elsewhere may not run them until the user allows it.
@@ -158,6 +214,12 @@ const RANGE_CACHE_CELLS = 2_000_000;
 // so far is remembered, so that a longer one of the family carries on from it (see getRangeValues).
 const RANGE_CACHE_RUNS = 4000;
 const SMALL_RANGE_CELLS = 16;
+/**
+ * The last range cut from the first rows of a longer one read before it (see getRangeValues), kept with the longer
+ * array: such a cut is not cached, since a column of running totals read from the bottom cuts a different one per
+ * row, but the same range read in every row (SUM($B$1:$B$9999) beside a COUNTA(B:B)) was copied afresh each time.
+ */
+const LAST_CUT = new WeakMap(); // longer values array → { rows, values }
 function rangeCost(values) { return values.length * ((values[0]?.length || 0) + 8); }
 // Formatting a range formats its empty cells too, so what is typed there later takes the format. Over a range
 // of more cells than this (a whole sheet of 20,000 rows) that would store a cell per empty coordinate, 320,000
@@ -361,6 +423,30 @@ export function outlineSettingsOf(sheet) {
   const s = sheet?.outlineSettings || {};
   return { summaryBelow: s.summaryBelow !== false, summaryRight: s.summaryRight !== false, autoStyles: s.autoStyles === true };
 }
+
+/**
+ * Each group's nesting level (1 = outermost): how many groups hold it, counting, of groups over the same lines
+ * (grouped twice), those listed before it. Groups in sheet order (by first line, the longer first) are walked with
+ * a stack of the groups holding the current one, so an outline of thousands of groups (a Subtotal's) is not compared
+ * pair by pair on every redraw; a list out of that order, or with groups crossing (only a damaged file has them),
+ * is counted pair by pair.
+ */
+function outlineLevels(list) {
+  const levels = [], stack = [];
+  for (let i = 0; i < list.length; i++) {
+    const g = list[i], prev = list[i - 1];
+    if (prev && (prev.from > g.from || (prev.from === g.from && prev.to < g.to))) return pairwiseLevels(list);
+    while (stack.length && stack.at(-1).to < g.to) {
+      if (stack.at(-1).to >= g.from) return pairwiseLevels(list);
+      stack.pop();
+    }
+    levels.push(stack.length + 1);
+    stack.push(g);
+  }
+  return levels;
+}
+
+const pairwiseLevels = (list) => list.map((g, i) => list.filter((o, j) => o.from <= g.from && o.to >= g.to && (j <= i || o.from !== g.from || o.to !== g.to)).length);
 
 /** Outline groups: { rows: [{ from, to, collapsed }], cols: [...] }, sorted, sane. */
 function normalizeGroups(raw) {
@@ -582,6 +668,27 @@ function rectCandidates(list, r, rectOf) {
   return out;
 }
 const ownRect = (item) => item;
+/**
+ * Which of a list of ranges overlap a given one, found through bands of rows rather than by testing every one
+ * (merging across thousands of rows asks once per row). Indexes into the list, in order.
+ */
+function rectFinder(list) {
+  const bands = new Map();
+  const tall = []; // ranges over many bands are tested every time
+  list.forEach((g, i) => {
+    const b1 = Math.floor(g.r1 / RECT_BAND), b2 = Math.floor(g.r2 / RECT_BAND);
+    if (b2 - b1 > 64) { tall.push(i); return; }
+    for (let b = b1; b <= b2; b++) { const at = bands.get(b); if (at) at.push(i); else bands.set(b, [i]); }
+  });
+  const overlaps = (g, n) => !(g.r2 < n.r1 || g.r1 > n.r2 || g.c2 < n.c1 || g.c1 > n.c2);
+  return (n) => {
+    const b1 = Math.floor(n.r1 / RECT_BAND), b2 = Math.floor(n.r2 / RECT_BAND);
+    if (b2 - b1 > 64) return list.flatMap((g, i) => (overlaps(g, n) ? [i] : []));
+    const found = new Set(tall.filter((i) => overlaps(list[i], n)));
+    for (let b = b1; b <= b2; b++) for (const i of bands.get(b) || []) if (overlaps(list[i], n)) found.add(i);
+    return [...found].sort((a, b) => a - b);
+  };
+}
 const itemRange = (item) => item.range;
 
 /** The rows and columns a sheet's cells may occupy: the grid's limits, or the sheet's own size when a file brought a larger one. */
@@ -872,7 +979,8 @@ export function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, r
   for (const [k, h] of Object.entries(rowHeights || {})) if (/^\d+$/.test(k) && Number(k) <= MAX_ROW && Number.isFinite(Number(h))) sheet.rowHeights.set(Number(k), Number(h) > 0 ? Math.max(1, Math.min(MAX_STORED_ROW_HEIGHT, Number(h))) : 18);
   for (const [k, s] of Object.entries(colStyles || {})) { const st = /^\d+$/.test(k) && Number(k) <= MAX_COL ? lineStyle(s) : null; if (st) sheet.colStyles.set(Number(k), st); }
   for (const [k, s] of Object.entries(rowStyles || {})) { const st = /^\d+$/.test(k) && Number(k) <= MAX_ROW ? lineStyle(s) : null; if (st) sheet.rowStyles.set(Number(k), st); }
-  for (const [k, cell] of Object.entries(cells || {})) {
+  // An undo snapshot holds its cells as a map (see Workbook._settle), a file as an object.
+  for (const [k, cell] of cells instanceof Map ? cells : Object.entries(cells || {})) {
     const c = cloneCell(cell);
     if (!isEmptyCell(c)) sheet.cells.set(k, c);
   }
@@ -1084,6 +1192,12 @@ function sameRule(stored, next, defaults) {
   return true;
 }
 
+/**
+ * A function left uncalled has no value a cell can show: =HSTACK(SUM,MAX) spills #CALC! in each of its cells,
+ * as the anchor shows (see _compute), rather than handing the function itself to whatever reads the cell.
+ */
+const uncalled = (v) => (v !== null && typeof v === 'object' && v.lambda ? err('#CALC!') : v);
+
 /** The calculation's working state, set aside while a data table calculates with substituted inputs. */
 const SUBSTITUTE_STATE = ['_iterationReady', '_cache', '_rangeCache', '_rangeCacheCells', '_rangeRuns', '_usedCache', '_cellBoundsCache', '_statsCache',
   '_volatile', '_spills', '_spillBuilds', '_hasDeferredSpills', '_spillComputed', '_evaluating', '_evalOrder', '_evalLast', '_cyclic', '_provisional', '_blankProvisional',
@@ -1237,6 +1351,8 @@ export class Workbook extends EventTarget {
     this.linkStartup = LINK_STARTUP_MODES.includes(json.linkStartup) ? json.linkStartup : 'ask';
     // Named cell styles this workbook defines, and built-in ones it modified (see custom-cell-styles.js).
     this.cellStyles = normalizeCellStyles(json.cellStyles);
+    // The document properties of the file it was opened from (see document-properties.js), written back with it.
+    this.documentProperties = normalizeDocumentProperties(json.documentProperties);
     this.watches = Array.isArray(json.watches) ? json.watches.filter((w) => w && Number.isInteger(w.r) && Number.isInteger(w.c) && w.sheetId != null).slice(0, 500).map(({ sheetId, r, c }) => ({ sheetId, r, c })) : [];
     this.calcPending = false;
     this.calculationCompatibility = normalizeCalculationCompatibility(json.calculationCompatibility);
@@ -1260,7 +1376,7 @@ export class Workbook extends EventTarget {
       // through editing APIs without silently discarding stored definitions.
       const scope = n?.sheet == null ? null : this.sheetByName(n.sheet)?.name;
       if (n?.sheet != null && !scope) continue;
-      if (n?.name && n?.ref && !this.validateName(n.name, null, { allowTableName: true, sheet: scope })) this.names.push({ name: n.name, ref: String(n.ref), ...(n.hidden === true ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(n.relative === true ? { relative: true } : {}) });
+      if (n?.name && n?.ref && !this.validateName(n.name, null, { allowTableName: true, sheet: scope })) this.names.push({ name: n.name, ref: String(n.ref), ...(n.hidden === true ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(n.relative === true ? { relative: true } : {}), ...(typeof n.comment === 'string' && n.comment ? { comment: n.comment } : {}) });
     }
   }
 
@@ -1326,6 +1442,7 @@ export class Workbook extends EventTarget {
       ...(this.queries.length ? { queries: serializeQueries(this) } : {}),
       ...(this.scripts.length ? { scripts: serializeScripts(this) } : {}),
       ...(this.cellStyles.length ? { cellStyles: normalizeCellStyles(this.cellStyles) } : {}),
+      ...(this.documentProperties ? { documentProperties: normalizeDocumentProperties(this.documentProperties) } : {}),
       ...(this.watches.length ? { watches: this.watches.filter((w) => this.sheet(w.sheetId)).map((w) => ({ ...w })) } : {}),
       calculationCompatibility: { ...this.calculationCompatibility },
       ...(this.colorPalette ? { colorPalette: normalizeColorPalette(this.colorPalette) } : {}),
@@ -1351,9 +1468,10 @@ export class Workbook extends EventTarget {
     let cells = 0;
     for (const s of this.sheets) {
       if (!touched.has(s.id)) continue;
-      const json = { ...sheetShapeJSON(s, { live: true }), cells: Object.fromEntries([...s.cells].map(([k, c]) => [k, cloneCell(c)])) };
-      sheets.set(s.id, json);
-      cells += s.cells.size + s.styleResets.length + s.ignoredErrors.length + nativeSparklineSize(s.sparklineGroups);
+      const cellMap = new Map();
+      for (const [k, c] of s.cells) cellMap.set(k, cloneCell(c));
+      sheets.set(s.id, { ...sheetShapeJSON(s, { live: true }), cells: cellMap });
+      cells += s.cells.size + s.styleResets.length + s.ignoredErrors.length + nativeSparklineSize(s.sparklineGroups) + hiddenLinesWeight(s.hiddenRows.size + s.hiddenCols.size);
     }
     return { externalWorkbooks: this.externalWorkbooks, dataModel: this.dataModel, nativePivots: this.nativePivots, order: this.sheets.map(sheetListEntry), activeSheetId: this.activeSheetId, names: this.names.map((n) => ({ ...n })), customViews: this.customViews, sheets, touched, cells };
   }
@@ -1414,16 +1532,19 @@ export class Workbook extends EventTarget {
     for (const id of touched) {
       const cap = capture.sheets.get(id);
       if (!cap) continue;
-      const cellsJSON = {};
+      // Kept as a map, which makeSheet reads back as it reads a file's object of cells, without listing a hundred
+      // thousand keys afresh on every undo and redo.
+      const cellMap = new Map();
       let p = 0;
       for (let i = 0; i < cap.cells.length; i++) {
         const f = cap.fAt[p] === i ? cap.fText[p++] : null;
         const cell = cloneCell(cap.cells[i].externalResult ? { ...cap.cells[i], f } : cap.cells[i]);
         cell.f = f;
-        cellsJSON[cap.keys[i]] = cell;
+        cellMap.set(cap.keys[i], cell);
       }
-      sheets.set(id, { ...cap.shape, cells: cellsJSON });
-      cells += cap.cells.length + (cap.shape.styleResets?.length || 0) + (cap.shape.ignoredErrors?.length || 0) + nativeSparklineSize(cap.shape.sparklineGroups);
+      sheets.set(id, { ...cap.shape, cells: cellMap });
+      cells += cap.cells.length + (cap.shape.styleResets?.length || 0) + (cap.shape.ignoredErrors?.length || 0) + nativeSparklineSize(cap.shape.sparklineGroups)
+        + hiddenLinesWeight(cap.shape.hiddenRows.length + cap.shape.hiddenCols.length);
     }
     return { externalWorkbooks: capture.externalWorkbooks, dataModel: capture.dataModel, nativePivots: capture.nativePivots, order: capture.order, activeSheetId: capture.activeSheetId, names: capture.names, customViews: capture.customViews, sheets, touched, cells };
   }
@@ -1722,9 +1843,12 @@ export class Workbook extends EventTarget {
       // click take a second on a book of a sheet per month, for a copy that reads nothing from the others.
       // The copy shows what this person sees, and becomes everyone's: it is in no sheet view of its own.
       const { personalView: _personal, ...json } = { ...sheetShapeJSON(src, { live: true }), cells: Object.fromEntries([...src.cells].map(([k, c]) => [k, cloneCell(c)])) };
-      let name = suffixedSheetName(src.name, ' (copy)');
-      let n = 2;
-      while (this.sheetByName(name)) name = suffixedSheetName(src.name, ` (copy ${n++})`);
+      // Named as Excel names a copy: Sales (2), then Sales (3); a copy of Sales (2) is the next free Sales (n).
+      const numbered = / \((\d{1,9})\)$/.exec(src.name);
+      const base = numbered ? src.name.slice(0, numbered.index) : src.name;
+      let n = numbered ? Number(numbered[1]) + 1 : 2;
+      let name = suffixedSheetName(base, ` (${n})`);
+      while (this.sheetByName(name)) name = suffixedSheetName(base, ` (${++n})`);
       const copy = makeSheet({ ...json, id: null, name, hidden: false, freshIds: true });
       // References to the original sheet inside the copy now point at itself; a 3D span ending at it still
       // runs between the sheets it named, as in Excel, or the copy's totals would take in other sheets.
@@ -3020,12 +3144,11 @@ export class Workbook extends EventTarget {
     const beforeAt = (r, c) => this._lineStyle(before, r, c);
     const paint = (st, r, c) => paintedBorder(st, area, r, c, kind, options, { wholeCols, wholeRows });
     const candidates = [];
-    for (const [key, cell] of sheet.cells) {
-      const { r, c } = parseKey(key);
-      if (r < area.r1 || r > area.r2 || c < area.c1 || c > area.c2) continue;
+    // A few cells framed on a sheet of thousands visit those cells, not every cell the sheet holds.
+    eachStoredCell(sheet, area, (r, c, cell) => {
       const border = paint({ ...beforeAt(r, c), ...cell.s }, r, c);
       if (border) candidates.push({ r, c, cell: { ...cell, s: { ...cell.s, ...border } }, border });
-    }
+    });
     this.transaction('Borders', () => {
       for (const axis of wholeSheet ? ['col', 'row'] : lines ? [lines.axis] : []) {
         // Group equal patches so a sheet-wide pen creates one undoable line
@@ -3886,8 +4009,9 @@ export class Workbook extends EventTarget {
         : planPasteMerges(remainingPasteMerges(sheet.merges, checkOnly ? clearMerges : []), merges);
       if (plan.error) { this._emit('merge-paste', sheetId, { reason: plan.error }); return false; }
       // Keep destination merges that survive the paste, but let source styles
-      // reach cells under merges replaced by the incoming geometry.
-      const writable = e => !plan.retainedBody(e.r, e.c) && !plan.remaining.some(m => e.r >= m.r1 && e.r <= m.r2 && e.c >= m.c1 && e.c <= m.c2
+      // reach cells under merges replaced by the incoming geometry. The merges near each cell's row are the only
+      // ones asked: a block of thousands of merged rows pasted beside thousands more asked every one per cell.
+      const writable = e => !plan.retainedBody(e.r, e.c) && !rectCandidates(plan.remaining, e.r, ownRect).some(m => e.r >= m.r1 && e.r <= m.r2 && e.c >= m.c1 && e.c <= m.c2
         && (e.r !== m.r1 || e.c !== m.c1));
       let mergeLosses = 0;
       if (!formatRange) {
@@ -4433,6 +4557,10 @@ export class Workbook extends EventTarget {
   }
 
   placeMoved(sheetId, r0, c0, cells, from) {
+    // Moving cells takes them out of their place and puts them in another, on the sheets named: with sheets grouped, the
+    // clearing and writing were carried to the others as typing is, erasing their own cells there and writing this
+    // sheet's in their place.
+    if (this._groupTargets(sheetId) || this._groupTargets(from?.sheetId)) return this._withoutGroup(() => this.placeMoved(sheetId, r0, c0, cells, from));
     const sheet = this.sheet(sheetId);
     const source = this.sheet(from?.sheetId);
     if (!sheet || !source || !cells.length || !cells[0].length) return null;
@@ -5320,8 +5448,12 @@ export class Workbook extends EventTarget {
       if (c2 >= MAX_COL) c2 = Math.min(c2, bounds.c2);
     }
     if (r2 <= r1 || c2 < c1) return 0;
+    // A row hidden by hand or under a collapsed outline stays where it is, as a sort leaves it: the shown rows
+    // change places among themselves. Shuffled in, a hidden row's record came into view and a shown one vanished.
+    const places = [];
+    for (let r = r1; r <= r2; r++) if (!sheet.hiddenRows.has(r)) places.push(r);
     const rows = [];
-    for (let r = r1; r <= r2; r++) {
+    for (const r of places) {
       const cells = [];
       for (let c = c1; c <= c2; c++) cells.push(cloneCell(sheet.cells.get(cellKey(r, c))));
       rows.push({ r, cells });
@@ -5334,7 +5466,7 @@ export class Workbook extends EventTarget {
     const notes = [];
     let moved = 0;
     rows.forEach((row, i) => {
-      const r = r1 + i;
+      const r = places[i];
       if (row.r !== r) moved++;
       row.cells.forEach((cell, j) => {
         const c = c1 + j;
@@ -5347,13 +5479,13 @@ export class Workbook extends EventTarget {
     });
     if (moved) {
       this.transaction('Randomize range', () => {
+        const movedRows = new Map(rows.map((row, i) => [row.r, places[i]]));
         if (sheet.styleResets.length) {
-          const movedRows = new Map(rows.map((row, i) => [row.r, r1 + i]));
-          this._setStyleResets(sheet, permuteStyleResets(sheet.styleResets, trimmed, 'row', (r) => movedRows.get(r)), 'Randomize range');
+          this._setStyleResets(sheet, permuteStyleResets(sheet.styleResets, trimmed, 'row', (r) => movedRows.get(r) ?? r), 'Randomize range');
         }
         this.setCells(sheetId, entries, 'Randomize range');
         this._moveNotes(sheetId, notes);
-        permuteComments(this, sheetId, trimmed, 'row', new Map(rows.map((row, i) => [row.r, r1 + i])));
+        permuteComments(this, sheetId, trimmed, 'row', (r) => movedRows.get(r) ?? r);
         this._refilterRearranged(sheet, { r1, r2 }, 'Randomize range');
       });
     }
@@ -5717,21 +5849,33 @@ export class Workbook extends EventTarget {
       const used = this.usedRange(sheetId);
       if (!used) return [];
       rg = { r1: Math.max(rg.r1, used.r1), c1: Math.max(rg.c1, used.c1), r2: Math.min(rg.r2, used.r2), c2: Math.min(rg.c2, used.c2) };
-      if (rg.r1 > rg.r2 || rg.c1 > rg.c2 || (rg.r2 - rg.r1 + 1) * (rg.c2 - rg.c1 + 1) > 400000) return [];
+      if (rg.r1 > rg.r2 || rg.c1 > rg.c2) return [];
+      // A column's blanks are the gaps between the rows something fills, worked out from what the sheet holds rather
+      // than by visiting every cell of the range: one entry far off makes the used range millions of cells, which
+      // was given up on, so a long list with a label off to its side had "no blank cells".
+      const filled = new Map(); // column → [first, last] runs of rows that are no blanks
+      const fill = (m) => {
+        const cut = intersection(m, rg);
+        if (cut) for (let c = cut.c1; c <= cut.c2; c++) { if (!filled.has(c)) filled.set(c, []); filled.get(c).push([cut.r1, cut.r2]); }
+      };
+      for (const [key, cell] of sheet.cells) if (cell.v != null || cell.f != null) { const { r, c } = parseKey(key); fill({ r1: r, c1: c, r2: r, c2: c }); }
+      // What an array formula spills over is filled by its results.
+      for (const a of this._ensureSpills(sheet).anchors.values()) fill({ r1: a.r, c1: a.c, r2: a.r + a.rows - 1, c2: a.c + a.cols - 1 });
       // A merged block is one cell, its top-left: the cells it covers are no blanks of their own, or filling the
       // blanks (Ctrl+Enter) would write values nobody can see under the merge.
-      const covered = new Set();
-      for (const m of sheet.merges) {
-        const cut = intersection(m, rg);
-        if (cut) for (let r = cut.r1; r <= cut.r2; r++) for (let c = cut.c1; c <= cut.c2; c++) if (r !== m.r1 || c !== m.c1) covered.add(cellKey(r, c));
-      }
+      for (const m of sheet.merges) { fill({ ...m, c1: m.c1 + 1 }); fill({ ...m, r1: m.r1 + 1, c2: m.c1 }); }
+      const out = [];
       for (let c = rg.c1; c <= rg.c2; c++) {
-        for (let r = rg.r1; r <= rg.r2; r++) {
-          const key = cellKey(r, c);
-          const cell = sheet.cells.get(key);
-          if ((!cell || (cell.v == null && cell.f == null)) && !this.spillAt(sheetId, r, c) && !covered.has(key)) found.push({ r, c });
+        let r = rg.r1;
+        for (const [r1, r2] of [...(filled.get(c) || []).sort((a, b) => a[0] - b[0]), [rg.r2 + 1, rg.r2 + 1]]) {
+          if (r1 > r) {
+            if (out.length >= limit) { out.truncated = true; return out; }
+            out.push({ r1: r, c1: c, r2: r1 - 1, c2: c });
+          }
+          r = Math.max(r, r2 + 1);
         }
       }
+      return out;
     } else if (kind === 'notes') {
       for (const key of sheet.notes.keys()) { const p = parseKey(key); if (inside(p.r, p.c)) found.push(p); }
     } else {
@@ -5974,7 +6118,8 @@ export class Workbook extends EventTarget {
       const live = this.sheet(sheetId);
       const show = Array.from({ length: n }, (_, i) => at + i);
       for (const table of tables) {
-        const filter = sheetFilters(live).find(f => f.range.r1 === table.range.r1 && f.range.c1 === table.range.c1 && f.range.c2 === table.range.c2);
+        // The table's own filter, which the insertion took down to the new rows; not a worksheet filter over its top rows.
+        const filter = sheetFilters(live).find(f => f.range.r1 === table.range.r1 && f.range.c1 === table.range.c1 && f.range.c2 === table.range.c2 && f.range.r2 === at - 1 + n);
         if (filter) this._setFilter(live, { ...filter, range: { ...filter.range, r2: at - 1 + n } }, 'Insert rows', { show, target: filter });
         this._growTableDependents(live, table, at - 1, at - 1 + n, 'Insert rows');
       }
@@ -6185,6 +6330,18 @@ export class Workbook extends EventTarget {
       }), label, true);
       const band = axis === 'row' ? { ...GRID_RANGE, c1: b1, c2: b2 } : { ...GRID_RANGE, r1: b1, r2: b2 };
       sheet.styleResets = shiftStyleResets(sheet.styleResets, axis, at, n, remove, band);
+      // Formatting cleared from the cells before the inserted ones is cleared from them too, as their own formatting is
+      // lent below (the cells of a merged block or a table's header row lend none).
+      if (!remove && !paste && at > 0) {
+        let inherited = sheet.styleResets.flatMap((record) => {
+          const range = intersection(record.range, axis === 'row' ? { r1: at - 1, r2: at - 1, c1: b1, c2: b2 } : { r1: b1, r2: b2, c1: at - 1, c2: at - 1 });
+          return range ? [{ ...record, range }] : [];
+        });
+        for (const m of sheet.merges) inherited = removeStyleResets(inherited, m);
+        if (axis === 'row') for (const t of sheet.tables) if (t.headerRow !== false) inherited = removeStyleResets(inherited, { ...t.range, r2: t.range.r1 });
+        if (inherited.length) sheet.styleResets = compactStyleResets([...sheet.styleResets,
+          ...inherited.map((record) => ({ ...record, range: { ...record.range, [lo]: at, [hi]: Math.min(at + n - 1, limit) } }))]);
+      }
       sheet.ignoredErrors = shiftRangeFlags(sheet.ignoredErrors, axis, at, n, remove, band);
       this._mapCustomViews(sheet.id, axis, { filter: (f) => adjustFilterForEdit(f, { ownerSheet: sheet.name, sheetName: sheet.name, axis, at, count: n, remove,
         bandStart: b1, bandEnd: b2, sheetsBetween: (a, b) => this._editedSpan(a, b), newId }) });
@@ -6196,14 +6353,23 @@ export class Workbook extends EventTarget {
         mapSheetFilters(s, f => adjustFilterForEdit(f, options));
         if (!sheetFilters(s).length) s.filterHidden = new Set();
       }
+      // The cells inserted take the formatting of the cell before them (above, or to the left), as inserted lines do:
+      // its style alone, never its value. A table's header row keeps its look to itself, as does a merged block; cells
+      // inserted from the clipboard bring their own.
+      const lends = (r, c) => !paste && (axis === 'row' ? r : c) === at - 1 && !sheet.merges.some((m) => r >= m.r1 && r <= m.r2 && c >= m.c1 && c <= m.c2)
+        && !(axis === 'row' && sheet.tables.some((t) => t.headerRow !== false && t.range.r1 === r && c >= t.range.c1 && c <= t.range.c2));
+      const lent = [];
       const moved = new Map();
       for (const [key, cell] of sheet.cells) {
         const { r, c } = parseKey(key);
         if (!inBand(r, c)) { moved.set(key, cell); continue; }
+        if (!remove && cell.s && Object.keys(cell.s).length && lends(r, c)) lent.push({ r, c, s: cell.s });
         const i = moveIndex(axis === 'row' ? r : c);
         if (i == null) continue;
         moved.set(axis === 'row' ? cellKey(i, c) : cellKey(r, i), cell);
       }
+      // Stored cell by cell, as for inserted lines: only as far as formatting a range stores empty cells.
+      if (lent.length * n <= STYLE_FILL_CELLS) for (const { r, c, s } of lent) for (let i = at; i < at + n && i <= limit; i++) moved.set(axis === 'row' ? cellKey(i, c) : cellKey(r, i), { v: null, f: null, s: { ...s } });
       sheet.cells = moved;
       const movedNotes = new Map();
       for (const [key, text] of sheet.notes) {
@@ -6230,6 +6396,9 @@ export class Workbook extends EventTarget {
         .map((m) => (insideBand(m) ? adjust(m) : m))
         .filter((m) => m[hi] >= m[lo] && (m.r1 !== m.r2 || m.c1 !== m.c2));
       sheet.protectedRanges = sheet.protectedRanges.map((p) => (insideBand(p.range) ? { ...p, range: adjust(p.range) } : p)).filter((p) => p.range[hi] >= p.range[lo]);
+      // A print area the band holds follows its cells as a reference does, so the rows pushed down stay printed (one whose
+      // cells are all deleted goes). Print titles and page breaks belong to whole lines, which a shift within a band leaves.
+      if (sheet.printSettings?.areas.length) sheet.printSettings = normalizePrintSettings({ ...sheet.printSettings, areas: sheet.printSettings.areas.map((m) => (insideBand(m) ? adjust(m) : m)) });
       mapScenarioCells(sheet, (m) => (insideBand(m) ? adjust(m) : m));
       this._mapAdvancedFilters(sheet.id, (m) => (insideBand(m) ? adjust(m) : m));
       this._mapWatches(sheetId, (r, c) => {
@@ -6239,6 +6408,8 @@ export class Workbook extends EventTarget {
       });
       sheet.tables = sheet.tables.map((t) => {
         if (!touchesBand(t.range)) return t;
+        // A table without its Header Row keeps its column names on itself: the columns whose cells are deleted take theirs along.
+        if (remove && axis === 'col' && t.headerRow === false) t = headerlessDeleteColumns(t, (c) => c >= at && c < at + n);
         const range = adjust(t.range);
         if (range.r2 < range.r1 || range.c2 < range.c1) return null;
         const origin = t.calcRow ?? tableRows(t).dataStart;
@@ -6293,6 +6464,9 @@ export class Workbook extends EventTarget {
         ) });
       }
       this.names = this.names.map((nm) => ({ ...nm, ref: follow(nm.ref, nm.sheet || null, nm.relative === true) }));
+      // Cells shifted right across a table's rows make new columns of it, named as columns inserted inside it are, so its
+      // references keep reading the columns they name.
+      if (!remove && axis === 'col') for (const t of sheet.tables) if (insideBand(t.range) && t.range.c1 < at && at + n - 1 <= t.range.c2) this._nameInsertedTableColumns(sheet, t, at, n);
       // A row inserted among a table's data rows by shifting its cells down is a new table row, and
       // gets the calculated columns as one inserted with the row tools does. The templates were
       // adjusted above, so the shift is not applied to the fresh formulas a second time.
@@ -6516,6 +6690,8 @@ export class Workbook extends EventTarget {
     if (extent > limit) return false;
     const clamp = (range) => (range[hi] > limit ? { ...range, [hi]: limit } : range);
     this._structural(axis === 'row' ? 'Insert rows' : 'Insert columns', () => {
+      // The tables' own filters, told apart now from a worksheet filter over the top of a table (see below).
+      const tableFilters = axis === 'row' ? sheetFilters(sheet).filter(f => filterTable(sheet, f)).map(f => f.range) : [];
       this.nativePivots = mapNativePivotRanges(this.nativePivots, sheetId, ref => adjustRefForInsertedLines(ref, axis, lines));
       // The line before the new ones lends them its formatting (from above, or from
       // the left): the style alone, never a value, formula or note. A table's header row
@@ -6549,7 +6725,12 @@ export class Workbook extends EventTarget {
         moved.set(cellKey(rr, cc), cell);
         if (lends1(axis === 'row' ? r : c) && cell.s && Object.keys(cell.s).length && lends(r, c)) lent.push({ r, c, s: cell.s });
       }
-      for (const { r, c, s } of lent) for (const b of lendTo.get(axis === 'row' ? r : c)) {
+      // The formatting lent is stored cell by cell, so it goes only as far as formatting a range stores empty cells
+      // (STYLE_FILL_CELLS): a selection run to the sheet's end inserted a million rows under a formatted row, five
+      // million styled empty cells that held the page for minutes. Past that the new lines are left plain.
+      let lentCells = 0;
+      for (const { r, c } of lent) for (const b of lendTo.get(axis === 'row' ? r : c)) lentCells += b.n;
+      if (lentCells <= STYLE_FILL_CELLS) for (const { r, c, s } of lent) for (const b of lendTo.get(axis === 'row' ? r : c)) {
         for (let i = b.start; i < b.start + b.n && i <= limit; i++) moved.set(cellKey(axis === 'row' ? i : r, axis === 'row' ? c : i), { v: null, f: null, s: { ...s } });
       }
       sheet.cells = moved;
@@ -6569,7 +6750,10 @@ export class Workbook extends EventTarget {
       const lineStyles = axis === 'row' ? sheet.rowStyles : sheet.colStyles;
       const shiftedStyles = new Map();
       for (const [i, st] of lineStyles) if (move(i) <= limit) shiftedStyles.set(move(i), st);
-      for (const b of blocks) {
+      // A line's format is stored line by line too, and so goes as far as the cells' formatting does (above): lent to a
+      // million rows, every save and every later insertion wrote and rewrote a million line formats, half a minute each.
+      const lentLines = blocks.reduce((count, b) => count + (b.at > 0 && lineStyles.has(b.at - 1) ? b.n : 0), 0);
+      if (lentLines <= STYLE_FILL_CELLS) for (const b of blocks) {
         const lentLine = b.at > 0 ? lineStyles.get(b.at - 1) : null;
         if (lentLine) for (let i = b.start; i < b.start + b.n && i <= limit; i++) shiftedStyles.set(i, cloneStyle(lentLine));
       }
@@ -6577,7 +6761,7 @@ export class Workbook extends EventTarget {
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
       const lastLine = axis === 'row' ? MAX_ROW : MAX_COL;
       // Lines pushed past the grid's last one are gone; the grid never grows past A1:XFD1048576.
-      const shiftedHidden = new Set([...hidden].map(move).filter((i) => i <= lastLine));
+      const shiftedHidden = remapLines(hidden, move, lastLine);
       const groupKey = axis === 'row' ? 'rows' : 'cols';
       // Lines inserted inside a collapsed group join it hidden like the rest of it, rather than showing
       // through a group whose button says it is closed; lines at its first line move it down instead.
@@ -6620,28 +6804,17 @@ export class Workbook extends EventTarget {
           ...(axis === 'row' ? { calcRow: move(origin) } : {}) };
       });
       // Columns inserted inside a table get header names of their own, so no two columns share one.
-      if (axis === 'col') {
-        for (const t of sheet.tables) {
-          if (!(t.range.c1 < at && at + n - 1 <= t.range.c2)) continue;
-          this._invalidate(); // header displays are read at their moved positions
-          const others = this.tableColumns(sheet.id, t).filter((_, i) => t.range.c1 + i < at || t.range.c1 + i >= at + n);
-          // A table whose Header Row is off keeps its names on itself: the new columns are named there.
-          if (t.headerRow === false) { headerlessInsertColumns(t, at - t.range.c1, n, (taken, i) => this._freeColumnName(taken, i)); continue; }
-          for (let c = at; c < at + n; c++) {
-            const name = this._freeColumnName(others, c - t.range.c1);
-            others.push(name);
-            // The header cell keeps the formatting it inherited from the column to its left.
-            const inherited = sheet.cells.get(cellKey(t.range.r1, c))?.s;
-            sheet.cells.set(cellKey(t.range.r1, c), { v: name, f: null, ...(inherited ? { s: inherited } : {}) });
-          }
-        }
+      if (axis === 'col') for (const t of sheet.tables) if (t.range.c1 < at && at + n - 1 <= t.range.c2) this._nameInsertedTableColumns(sheet, t, at, n);
+      // A table's filter reaches its last data row, including rows inserted under a table that had none. A worksheet
+      // filter over the table's first rows and columns is no table's: it keeps its own extent.
+      if (axis === 'row') {
+        const owned = new Set(tableFilters.map(m => filterRangeKey({ range: clamp(grow(m)) })));
+        mapSheetFilters(sheet, f => {
+          const owner = owned.has(filterRangeKey(f)) && sheet.tables.find(t => t.range.r1 === f.range.r1 && t.range.c1 === f.range.c1 && t.range.c2 === f.range.c2);
+          const end = owner ? tableRows(owner).dataEnd : -1;
+          return owner && f.range.r2 < end ? { ...f, range: { ...f.range, r2: end } } : f;
+        });
       }
-      // A table's filter reaches its last data row, including rows inserted under a table that had none.
-      if (axis === 'row') mapSheetFilters(sheet, f => {
-        const owner = sheet.tables.find(t => t.range.r1 === f.range.r1 && t.range.c1 === f.range.c1 && t.range.c2 === f.range.c2);
-        const end = owner ? tableRows(owner).dataEnd : -1;
-        return owner && f.range.r2 < end ? { ...f, range: { ...f.range, r2: end } } : f;
-      });
       // Explicit insertion moves existing cells and layout. The scrolling
       // growth cap must not hide those shifted lines or shrink an import.
       if (axis === 'row') {
@@ -6650,10 +6823,15 @@ export class Workbook extends EventTarget {
         sheet.hiddenRows = shiftedHidden; sheet.rows = Math.min(sheet.rows + lines.count, MAX_ROW + 1);
       }
       else { sheet.colWidths = shifted; sheet.hiddenCols = shiftedHidden; sheet.cols = Math.min(sheet.cols + n, MAX_COL + 1); mapNativeWidths(sheet, c => c >= at ? c + n : c); }
-      // Lines inserted inside the frozen area stay frozen, so the pane keeps ending at the same content.
-      for (const { at, n } of bottomUp) {
-        if (axis === 'row' && at < sheet.frozenRows) sheet.frozenRows = Math.min(50, sheet.frozenRows + n);
-        if (axis === 'col' && at < sheet.frozenCols) sheet.frozenCols = Math.min(20, sheet.frozenCols + n);
+      // Lines inserted inside the frozen area stay frozen, so the pane keeps ending at the same content; lines inserted
+      // above a pane that starts further down (a file saved scrolled) move it down with its content.
+      const frozenKey = axis === 'row' ? 'frozenRows' : 'frozenCols', originKey = axis === 'row' ? 'r' : 'c';
+      if (sheet[frozenKey]) {
+        let start = sheet.frozenOrigin?.[originKey] || 0, count = sheet[frozenKey];
+        for (const { at, n } of bottomUp) { if (at < start) start += n; else if (at < start + count) count += n; }
+        sheet[frozenKey] = count = Math.min(axis === 'row' ? 50 : 20, count);
+        start = Math.min(start, limit - count);
+        if (start) sheet.frozenOrigin = { r: 0, c: 0, ...sheet.frozenOrigin, [originKey]: start };
       }
       this._adjustFormulas(sheet.name, axis, first, lines.count, false, points.length > 1 ? lines : null);
       // Rows inserted among a table's data rows are new table rows: they get the calculated
@@ -6672,6 +6850,24 @@ export class Workbook extends EventTarget {
       if (axis === 'row' && sheet.filterHidden?.size) for (const { start, n } of blocks) for (let i = start; i < start + n; i++) sheet.filterHidden.delete(i);
     });
     return true;
+  }
+
+  /**
+   * Name the `n` columns just inserted at `at` inside table `t` (whose range already takes them in), inside a structural
+   * step: each gets a free ColumnN name in its header cell, or among the names a table without its Header Row keeps.
+   */
+  _nameInsertedTableColumns(sheet, t, at, n) {
+    this._invalidate(); // header displays are read at their moved positions
+    const others = this.tableColumns(sheet.id, t).filter((_, i) => t.range.c1 + i < at || t.range.c1 + i >= at + n);
+    // A table whose Header Row is off keeps its names on itself: the new columns are named there.
+    if (t.headerRow === false) { headerlessInsertColumns(t, at - t.range.c1, n, (taken, i) => this._freeColumnName(taken, i)); return; }
+    for (let c = at; c < at + n; c++) {
+      const name = this._freeColumnName(others, c - t.range.c1);
+      others.push(name);
+      // The header cell keeps the formatting it inherited from the column to its left.
+      const inherited = sheet.cells.get(cellKey(t.range.r1, c))?.s;
+      sheet.cells.set(cellKey(t.range.r1, c), { v: name, f: null, ...(inherited ? { s: inherited } : {}) });
+    }
   }
 
   _deleteLines(sheetId, axis, asked, label = null) {
@@ -6811,7 +7007,7 @@ export class Workbook extends EventTarget {
       }
       if (axis === 'row') sheet.rowStyles = shiftedStyles; else sheet.colStyles = shiftedStyles;
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
-      const shiftedHidden = new Set([...hidden].map((i) => lines.move(i)).filter((i) => i != null));
+      const shiftedHidden = remapLines(hidden, lines.move, Infinity);
       const lo = axis === 'row' ? 'r1' : 'c1';
       const hi = axis === 'row' ? 'r2' : 'c2';
       // A range loses the lines deleted inside it; an end inside a run stops at the last line kept before it.
@@ -6923,9 +7119,15 @@ export class Workbook extends EventTarget {
       // where it was, the next structural undo or redo would grow the sheet back to it, the deleted lines' worth and all.
       if (sheet.reachedRows != null) sheet.reachedRows = Math.min(sheet.reachedRows, sheet.rows);
       if (sheet.reachedCols != null) sheet.reachedCols = Math.min(sheet.reachedCols, sheet.cols);
-      // Deleting frozen lines shrinks the frozen area by as many of them as were frozen.
-      if (axis === 'row') sheet.frozenRows -= lines.before(sheet.frozenRows);
-      else sheet.frozenCols -= lines.before(sheet.frozenCols);
+      // Deleting frozen lines shrinks the frozen area by as many of them as were frozen; deleting lines above a pane
+      // that starts further down moves it up with its content.
+      const frozenKey = axis === 'row' ? 'frozenRows' : 'frozenCols', originKey = axis === 'row' ? 'r' : 'c';
+      const start = sheet.frozenOrigin?.[originKey] || 0;
+      sheet[frozenKey] -= lines.before(start + sheet[frozenKey]) - lines.before(start);
+      if (start) {
+        sheet.frozenOrigin = { ...sheet.frozenOrigin, [originKey]: sheet[frozenKey] ? start - lines.before(start) : 0 };
+        if (!sheet.frozenOrigin.r && !sheet.frozenOrigin.c) delete sheet.frozenOrigin;
+      }
       this._adjustFormulas(sheet.name, axis, refLines.runs[0].from, refLines.count, true, refLines);
       this._refreshFilters(this.sheets);
     });
@@ -7062,19 +7264,26 @@ export class Workbook extends EventTarget {
       sheet.merges = sheet.merges.map(mapRange);
       mapPrintAreas(sheet, moveRect, axis);
       // A group a line is taken out of shrinks, and one lines land inside grows, as when they are deleted and
-      // inserted; the rest of the outline stays. (Two nested groups made the same by the move are one.)
+      // inserted; the rest of the outline stays. (Two nested groups made the same by the move are one; lines
+      // grouped twice over before it stay two levels deep.)
       const groupKey = axis === 'row' ? 'rows' : 'cols';
       const lineLo = axis === 'row' ? 'r1' : 'c1', lineHi = axis === 'row' ? 'r2' : 'c2';
-      const keptGroups = new Set();
-      sheet.groups[groupKey] = sheet.groups[groupKey]
-        .map((g) => {
-          const span = mapSpan(g.from, g.to);
-          if (span.contiguous) return { ...g, from: span.lo, to: span.hi };
-          const cut = adjustRefForDelete({ r1: g.from, r2: g.to, c1: g.from, c2: g.to }, axis, from, count);
-          const moved = cut && adjustRefForInsert(cut, axis, landing, count);
-          return moved ? { ...g, from: moved[lineLo], to: moved[lineHi] } : null;
-        })
-        .filter((g) => g && g.to >= g.from && !keptGroups.has(`${g.from}:${g.to}`) && keptGroups.add(`${g.from}:${g.to}`))
+      const spanKey = (g) => `${g.from}:${g.to}`;
+      const twins = new Map();
+      for (const g of sheet.groups[groupKey]) twins.set(spanKey(g), (twins.get(spanKey(g)) || 0) + 1);
+      const movedGroups = sheet.groups[groupKey].map((g) => {
+        const span = mapSpan(g.from, g.to);
+        if (span.contiguous) return { group: { ...g, from: span.lo, to: span.hi }, twins: twins.get(spanKey(g)) };
+        const cut = adjustRefForDelete({ r1: g.from, r2: g.to, c1: g.from, c2: g.to }, axis, from, count);
+        const moved = cut && adjustRefForInsert(cut, axis, landing, count);
+        return moved ? { group: { ...g, from: moved[lineLo], to: moved[lineHi] }, twins: twins.get(spanKey(g)) } : null;
+      }).filter((m) => m && m.group.to >= m.group.from);
+      const room = new Map();
+      for (const { group, twins: n } of movedGroups) room.set(spanKey(group), Math.max(room.get(spanKey(group)) || 0, n));
+      const keptGroups = new Map();
+      sheet.groups[groupKey] = movedGroups
+        .filter(({ group }) => { const k = spanKey(group); keptGroups.set(k, (keptGroups.get(k) || 0) + 1); return keptGroups.get(k) <= room.get(k); })
+        .map(({ group }) => group)
         .sort((a, b) => a.from - b.from || b.to - a.to); // in sheet order, as a file and grouping keep them
       const renumber = (formula, ownerSheet, relativeName = false) => mapFormulaRefs(formula, (ref) => {
         const target = ref.sheet ?? ownerSheet;
@@ -7152,7 +7361,13 @@ export class Workbook extends EventTarget {
       sheet.charts = sheet.charts.map((ch) => ({ ...ch, ...mapCellDrawing(ch, p => ({ ...p, [axis === 'row' ? 'r' : 'c']: map(p[axis === 'row' ? 'r' : 'c']) })), range: moveRect(ch.range), anchor: ch.anchorMode === 'absolute' ? ch.anchor : { r: axis === 'row' ? map(ch.anchor.r) : ch.anchor.r, c: axis === 'col' ? map(ch.anchor.c) : ch.anchor.c } }));
       sheet.tables = sheet.tables.map((t) => {
         const range = mapRange(t.range);
-        return { ...t, range,
+        // A table without its Header Row keeps its column names on itself: each goes with its column.
+        let columnNames;
+        if (axis === 'col' && t.headerRow === false) {
+          columnNames = [];
+          headerlessTableColumns(t).forEach((name, i) => { columnNames[map(t.range.c1 + i) - range.c1] = name; });
+        }
+        return { ...t, range, ...(columnNames ? { columnNames } : {}),
           calc: axis === 'col' ? Object.fromEntries(Object.entries(t.calc || {}).map(([c, f]) => [map(t.range.c1 + Number(c)) - range.c1, f])) : t.calc,
           ...(axis === 'col' && t.calcArray ? { calcArray: Object.fromEntries(Object.entries(t.calcArray).map(([c, v]) => [map(t.range.c1 + Number(c)) - range.c1, v])) } : {}),
           ...(axis === 'row' ? { calcRow: map(t.calcRow ?? tableRows(t).dataStart) } : {}) };
@@ -7508,10 +7723,13 @@ export class Workbook extends EventTarget {
     // The step keeps the lines it hid and showed, not every hidden line: a sheet whose filter hides most of its
     // rows would otherwise hold them all twice over for each group opened.
     const sets = ['hiddenRows', 'hiddenCols', 'filterHidden'];
-    const before = normalizeGroups(sheet.groups);
+    // The outline's lists are kept, not copied group by group: a group is never changed in place, only replaced, so
+    // a step costs the length of the list and Subtotal's thousands of groups, one step each, do not take seconds.
+    const outline = () => ({ rows: [...sheet.groups.rows], cols: [...sheet.groups.cols] });
+    const before = outline();
     const was = sets.map((key) => [...sheet[key]]);
     change();
-    const after = normalizeGroups(sheet.groups);
+    const after = outline();
     const deltas = sets.map((key, i) => {
       const now = sheet[key];
       // Most steps leave most of these sets as they were (grouping hides nothing): told without building one.
@@ -7522,7 +7740,8 @@ export class Workbook extends EventTarget {
     const apply = (undo) => {
       const live = this.sheet(sheet.id);
       if (!live) return;
-      live.groups = normalizeGroups(undo ? before : after);
+      const state = undo ? before : after;
+      live.groups = { rows: [...state.rows], cols: [...state.cols] };
       sets.forEach((key, i) => {
         const set = new Set(live[key]);
         for (const x of undo ? deltas[i].hid : deltas[i].showed) set.delete(x);
@@ -7535,36 +7754,58 @@ export class Workbook extends EventTarget {
     this._push({ label, undo: () => apply(true), redo: () => apply(false), snapshotCells: deltas.reduce((n, d) => n + d.hid.length + d.showed.length, 0) });
   }
 
+  /** The lines from..to a group would take: within the grid, whose edge it stops at. Null when none. */
+  _groupSpan(sheet, axis, from, to) {
+    const lo = Math.max(0, Math.min(from, to));
+    // A group stops at the grid's edge: collapsing one hides each of its lines, and lines past the grid
+    // are never drawn, so a bound far beyond it would only fill the hidden set and the file.
+    const hi = Math.min(Math.max(from, to), (axis === 'row' ? Math.max(sheet.rows, MAX_ROWS) : Math.max(sheet.cols, MAX_COLS)) - 1);
+    return lo <= hi ? { lo, hi } : null;
+  }
+
   /**
-   * Group lines from..to (rows when axis is 'row'). Groups nest when one
-   * lies inside another; a group that only partly overlaps an existing one
-   * is refused. Returns true when a group was added.
+   * Why lines from..to cannot be grouped, or null when they can: 'across' for a group that would only partly
+   * overlap one already there, 'depth' for one past the eight outline levels (seven groups deep) a file can hold.
+   */
+  groupRefusal(sheetId, axis, from, to) {
+    const sheet = this.sheet(sheetId);
+    const span = sheet && this._groupSpan(sheet, axis, from, to);
+    if (!span) return null;
+    const { lo, hi } = span;
+    const list = sheet.groups[axis === 'row' ? 'rows' : 'cols'];
+    if (list.some((g) => (g.from < lo && g.to >= lo && g.to < hi) || (g.from > lo && g.from <= hi && g.to > hi))) return 'across';
+    if (list.filter((g) => g.from <= lo && g.to >= hi).length >= 7) return 'depth';
+    return null;
+  }
+
+  /**
+   * Group lines from..to (rows when axis is 'row'). Groups nest when one lies inside another, and lines grouped
+   * again go one level deeper, as in Excel; a group that only partly overlaps an existing one is refused, as is
+   * one past the eighth level (see groupRefusal). Returns true when a group was added.
    */
   groupLines(sheetId, axis, from, to) {
     const sheet = this.sheet(sheetId);
     if (!sheet) return false;
     if (this._gridLocked(sheet)) return false;
     const key = axis === 'row' ? 'rows' : 'cols';
-    const lo = Math.max(0, Math.min(from, to));
-    // A group stops at the grid's edge: collapsing one hides each of its lines, and lines past the grid
-    // are never drawn, so a bound far beyond it would only fill the hidden set and the file.
-    const hi = Math.min(Math.max(from, to), (axis === 'row' ? Math.max(sheet.rows, MAX_ROWS) : Math.max(sheet.cols, MAX_COLS)) - 1);
-    if (!(lo <= hi)) return false;
+    const span = this._groupSpan(sheet, axis, from, to);
+    if (!span || this.groupRefusal(sheetId, axis, from, to)) return false;
+    const { lo, hi } = span;
     const list = sheet.groups[key];
-    if (list.some((g) => g.from === lo && g.to === hi)) return false;
-    const partial = list.some((g) => (g.from < lo && g.to >= lo && g.to < hi) || (g.from > lo && g.from <= hi && g.to > hi));
-    if (partial) return false;
-    if (list.filter((g) => g.from <= lo && g.to >= hi).length >= 7) return false; // eight levels, the .xlsx outline limit
+    // In sheet order (by first line, the longer first), after any group over the same lines: the list stays sorted.
+    let at = 0;
+    while (at < list.length && (list[at].from < lo || (list[at].from === lo && list[at].to >= hi))) at++;
     this._outlineStep(sheet, axis === 'row' ? 'Group rows' : 'Group columns', () => {
-      sheet.groups = normalizeGroups({ ...sheet.groups, [key]: [...list, { from: lo, to: hi, collapsed: false }] });
+      sheet.groups = { ...sheet.groups, [key]: [...list.slice(0, at), { from: lo, to: hi, collapsed: false }, ...list.slice(at)] };
     });
     return true;
   }
 
   /**
-   * Ungroup: remove the groups inside from..to; when none is, the innermost
-   * group around the selection goes. Lines a removed group had hidden come
-   * back. Returns how many groups were removed.
+   * Ungroup: take one outline level off the lines from..to, as Excel does: the outermost groups inside them go,
+   * and the groups nested in those stay, a level up; when no group is inside, the innermost group around the
+   * selection goes. Lines a removed group had hidden come back, unless a group still collapsed holds them.
+   * Returns how many groups were removed.
    */
   ungroupLines(sheetId, axis, from, to) {
     const sheet = this.sheet(sheetId);
@@ -7574,35 +7815,53 @@ export class Workbook extends EventTarget {
     const lo = Math.min(from, to);
     const hi = Math.max(from, to);
     const list = sheet.groups[key];
-    let gone = list.filter((g) => g.from >= lo && g.to <= hi);
+    let gone = [];
+    for (const g of list) {
+      if (g.from < lo || g.to > hi) continue;
+      const outer = gone.findIndex((o) => o.from <= g.from && o.to >= g.to);
+      if (outer < 0) gone.push(g);
+      // Lines grouped twice over lose the deeper group of the two (the list keeps such twins side by side).
+      else if (gone[outer].from === g.from && gone[outer].to === g.to) gone[outer] = g;
+    }
     if (!gone.length) {
-      const around = list.filter((g) => g.from <= lo && g.to >= hi).sort((a, b) => (a.to - a.from) - (b.to - b.from));
+      const around = list.filter((g) => g.from <= lo && g.to >= hi).sort((a, b) => (a.to - a.from) - (b.to - b.from) || list.indexOf(b) - list.indexOf(a));
       if (around.length) gone = [around[0]];
     }
     if (!gone.length) return 0;
     this._outlineStep(sheet, axis === 'row' ? 'Ungroup rows' : 'Ungroup columns', () => {
-      sheet.groups = normalizeGroups({ ...sheet.groups, [key]: list.filter((g) => !gone.includes(g)) });
+      const removed = new Set(gone);
+      sheet.groups = { ...sheet.groups, [key]: list.filter((g) => !removed.has(g)) };
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
-      for (const g of gone) if (g.collapsed) for (let i = g.from; i <= g.to; i++) if (!this._insideCollapsed(sheet, key, i)) hidden.delete(i);
+      for (const g of gone) {
+        if (!g.collapsed) continue;
+        const held = this._collapsedLines(sheet, key, g.from, g.to);
+        for (let i = g.from; i <= g.to; i++) if (!held.has(i)) hidden.delete(i);
+      }
     });
     return gone.length;
   }
 
-  /** Collapse (hide its lines) or expand a group identified by its bounds. */
-  toggleGroup(sheetId, axis, from, to) {
+  /**
+   * Collapse (hide its lines) or expand a group identified by its bounds, and by its level (see outlineGroups)
+   * among groups over the same lines.
+   */
+  toggleGroup(sheetId, axis, from, to, level = null) {
     const sheet = this.sheet(sheetId);
     if (!sheet) return;
     if (this._gridLocked(sheet)) return;
     const key = axis === 'row' ? 'rows' : 'cols';
-    const group = sheet.groups[key].find((g) => g.from === from && g.to === to);
+    const levels = this.outlineGroups(sheetId, axis);
+    const at = levels.findIndex((g) => g.from === from && g.to === to && (level == null || g.level === level));
+    const group = sheet.groups[key][at];
     if (!group) return;
     const collapse = !group.collapsed;
     this._outlineStep(sheet, collapse ? (axis === 'row' ? 'Collapse rows' : 'Collapse columns') : (axis === 'row' ? 'Expand rows' : 'Expand columns'), () => {
-      group.collapsed = collapse;
+      sheet.groups = { ...sheet.groups, [key]: sheet.groups[key].map((g, i) => (i === at ? { ...g, collapsed: collapse } : g)) };
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
+      const held = collapse ? null : this._collapsedLines(sheet, key, group.from, group.to);
       for (let i = group.from; i <= group.to; i++) {
         if (collapse) hidden.add(i);
-        else if (!this._insideCollapsed(sheet, key, i)) hidden.delete(i);
+        else if (!held.has(i)) hidden.delete(i);
       }
       if (sheetFilters(sheet).length) this._applyFilter(sheet);
     });
@@ -7618,10 +7877,8 @@ export class Workbook extends EventTarget {
     if (!list.length || list.every((g) => g.collapsed === !!collapsed)) return;
     this._outlineStep(sheet, collapsed ? (axis === 'row' ? 'Collapse all rows' : 'Collapse all columns') : (axis === 'row' ? 'Expand all rows' : 'Expand all columns'), () => {
       const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
-      for (const g of list) {
-        g.collapsed = !!collapsed;
-        for (let i = g.from; i <= g.to; i++) { if (collapsed) hidden.add(i); else hidden.delete(i); }
-      }
+      sheet.groups = { ...sheet.groups, [key]: list.map((g) => ({ ...g, collapsed: !!collapsed })) };
+      for (const g of list) for (let i = g.from; i <= g.to; i++) { if (collapsed) hidden.add(i); else hidden.delete(i); }
       if (sheetFilters(sheet).length) this._applyFilter(sheet);
     });
   }
@@ -7664,27 +7921,34 @@ export class Workbook extends EventTarget {
     return true;
   }
 
-  /** Is line i inside some group that is (still) collapsed? */
-  _insideCollapsed(sheet, key, i) {
-    return sheet.groups[key].some((g) => g.collapsed && g.from <= i && g.to >= i);
+  /**
+   * The lines from..to inside some group that is (still) collapsed, found in one pass over the groups: asked line by
+   * line, expanding the outer group of an outline of 20,000 groups compared every line with every group, for seconds.
+   */
+  _collapsedLines(sheet, key, from, to) {
+    const held = new Set();
+    for (const g of sheet.groups[key]) {
+      if (!g.collapsed || g.to < from || g.from > to) continue;
+      for (let i = Math.max(from, g.from); i <= Math.min(to, g.to); i++) held.add(i);
+    }
+    return held;
   }
 
   /** How deeply nested the groups on an axis go (0 when there are none). */
   outlineDepth(sheetId, axis) {
-    const sheet = this.sheet(sheetId);
-    if (!sheet) return 0;
-    const list = sheet.groups[axis === 'row' ? 'rows' : 'cols'];
-    let depth = 0;
-    for (const g of list) depth = Math.max(depth, list.filter((o) => o.from <= g.from && o.to >= g.to).length);
-    return depth;
+    return this.outlineGroups(sheetId, axis).reduce((depth, g) => Math.max(depth, g.level), 0);
   }
 
-  /** The groups on an axis, each with its nesting level (1 = outermost). */
+  /**
+   * The groups on an axis, each with its nesting level (1 = outermost). Of groups over the same lines (grouped
+   * twice), the one listed first is the outer.
+   */
   outlineGroups(sheetId, axis) {
     const sheet = this.sheet(sheetId);
     if (!sheet) return [];
     const list = sheet.groups[axis === 'row' ? 'rows' : 'cols'];
-    return list.map((g) => ({ ...g, level: list.filter((o) => o.from <= g.from && o.to >= g.to).length }));
+    const levels = outlineLevels(list);
+    return list.map((g, i) => ({ ...g, level: levels[i] }));
   }
 
   /** Show or hide the faint lines between cells on a sheet (a view setting that is saved). Undoable. */
@@ -8944,6 +9208,8 @@ export class Workbook extends EventTarget {
    */
   *_rangeValues(sheet, range) {
     const inside = (r, c) => r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2;
+    // A scan under way (see _scanRange) learns whether the range holds a formula from the walk itself.
+    const probe = this._scanProbe;
     const bounds = this._cellBounds(sheet);
     const { r1, c1 } = range;
     const r2 = Math.min(range.r2, bounds.r2);
@@ -8953,6 +9219,7 @@ export class Workbook extends EventTarget {
         for (let r = r1; r <= r2; r++) {
           for (let c = c1; c <= c2; c++) {
             const cell = sheet.cells.get(cellKey(r, c));
+            if (cell?.f != null && probe) probe.formula = true;
             if (cell && (cell.v != null || cell.f != null)) yield this._compute(sheet, r, c);
           }
         }
@@ -8960,11 +9227,14 @@ export class Workbook extends EventTarget {
         for (const [key, cell] of sheet.cells) {
           if (cell.v == null && cell.f == null) continue;
           const { r, c } = parseKey(key);
-          if (r >= r1 && r <= r2 && c >= c1 && c <= c2) yield this._compute(sheet, r, c);
+          if (r < r1 || r > r2 || c < c1 || c > c2) continue;
+          if (cell.f != null && probe) probe.formula = true;
+          yield this._compute(sheet, r, c);
         }
       }
     }
-    for (const { r, c, value } of this.spillEntries(sheet.id)) {
+    // Only the results spilled into the range: an array over the whole sheet spills more than any list holds.
+    for (const { r, c, value } of this.spillEntries(sheet.id, range)) {
       if (inside(r, c)) yield value;
     }
   }
@@ -8988,11 +9258,14 @@ export class Workbook extends EventTarget {
       kept.version = this.version; // weighed up to here, so a later lookup weighs only what comes after
       value = kept.value;
     } else {
-      value = scan();
+      // Every scan reads the whole of `range`, so it notes on the way whether a formula is there, rather than
+      // the range being walked a second time after every edit to find out. A sheet where an array spills is never plain.
+      const outer = this._scanProbe, probe = this._scanProbe = { formula: false };
+      try { value = scan(); } finally { this._scanProbe = outer; }
       // One entry per rule range per sheet, so the record stays as small as the book's rules; a book that
       // somehow names more ranges than that starts it again rather than letting it grow without end.
       if (this._scanCache.size > 1024) this._scanCache.clear();
-      this._scanCache.set(key, { version: this.version, constant: this._rangeIsConstant(sheet, range), value });
+      this._scanCache.set(key, { version: this.version, constant: !probe.formula && !this._ensureSpills(sheet).anchors.size, value });
     }
     this._statsCache.set(key, value);
     return value;
@@ -9007,27 +9280,6 @@ export class Workbook extends EventTarget {
     // whose box was not recorded, and any formula written on it, whose result may spill into the range.
     return changes.every((e) => e.type === 'layout' || (e.type === 'cells' && (e.sheetId !== sheet.id
       || (!e.formula && !!e.box && (e.box.r2 < range.r1 || e.box.r1 > range.r2 || e.box.c2 < range.c1 || e.box.c1 > range.c2)))));
-  }
-
-  /** Whether `range` holds nothing but plain values, on a sheet where no array formula spills. */
-  _rangeIsConstant(sheet, range) {
-    if (this._ensureSpills(sheet).anchors.size) return false;
-    const bounds = this._cellBounds(sheet);
-    const { r1, c1 } = range;
-    const r2 = Math.min(range.r2, bounds.r2);
-    const c2 = Math.min(range.c2, bounds.c2);
-    if (r2 < r1 || c2 < c1) return true;
-    // Read by coordinate or off the store's own entries, whichever is the smaller walk, as _rangeValues is.
-    if ((r2 - r1 + 1) * (c2 - c1 + 1) < sheet.cells.size) {
-      for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) if (sheet.cells.get(cellKey(r, c))?.f != null) return false;
-      return true;
-    }
-    for (const [key, cell] of sheet.cells) {
-      if (cell.f == null) continue;
-      const { r, c } = parseKey(key);
-      if (r >= r1 && r <= r2 && c >= c1 && c <= c2) return false;
-    }
-    return true;
   }
 
   /** Min and max of the numbers in a range, kept until a change could have reached them. */
@@ -9276,6 +9528,8 @@ export class Workbook extends EventTarget {
       if (matchesRule(rule, value, ctx)) {
         const style = { ...rule.style };
         for (const key of painted) delete style[key];
+        // A number format is one set of fields: the earlier rule's stands whole.
+        if (painted.has('fmt')) for (const key of FORMAT_DETAIL_KEYS) delete style[key];
         paint(style);
         // Imported rules combine non-conflicting formats in priority order unless a
         // matching rule stops evaluation. App-authored rules keep first-match behavior.
@@ -9525,7 +9779,7 @@ export class Workbook extends EventTarget {
     if (!sheet) return null;
     const named = this.namedRef(t);
     if (named) { const target = this.sheetByName(named.sheet); return target ? { sheetId: target.id, range: { r1: named.r1, c1: named.c1, r2: named.r2, c2: named.c2 } } : null; }
-    const found = /^[A-Za-z_][A-Za-z0-9_.]*$/.test(t) ? this.tableByName(t) : null;
+    const found = TABLE_NAME_RE.test(t) ? this.tableByName(t) : null;
     // A bare table name stands for its header and data: the totals row is never data, so a chart, a pivot or
     // a rule given the name does not take the Total row for a row of it. Table[#All] still names every row.
     if (found) return { sheetId: found.sheet.id, range: { ...found.table.range, r2: tableRows(found.table).dataEnd } };
@@ -10968,7 +11222,7 @@ export class Workbook extends EventTarget {
     if (existing && existing.ref === text && existing.name === t) return null; // saved as it was: nothing to undo
     const next = this.names.filter((n) => n !== existing);
     // The spelling as now typed: formulas find the name whatever its case, so a change of case needs no rewrite.
-    next.push({ name: t, ref: text, ...(existing?.hidden ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(existing?.relative ? { relative: true } : {}) });
+    next.push({ name: t, ref: text, ...(existing?.hidden ? { hidden: true } : {}), ...(scope ? { sheet: scope } : {}), ...(existing?.relative ? { relative: true } : {}), ...(existing?.comment ? { comment: existing.comment } : {}) });
     next.sort((a, b) => a.name.localeCompare(b.name));
     this._setNames(next, 'Define name');
     return null;
@@ -11042,7 +11296,7 @@ export class Workbook extends EventTarget {
         if (charts.some((chart, i) => chart !== owner.charts[i])) this._setCharts(owner, charts, label);
       }
       const next = this.names.filter((n) => (n.sheet || null) !== scope || n.name.toLowerCase() !== key);
-      next.push({ name: to, ref: text, ...(scope ? { sheet: scope } : {}), ...(existing.relative ? { relative: true } : {}) });
+      next.push({ name: to, ref: text, ...(scope ? { sheet: scope } : {}), ...(existing.relative ? { relative: true } : {}), ...(existing.comment ? { comment: existing.comment } : {}) });
       next.sort((a, b) => a.name.localeCompare(b.name));
       this._setNames(next, label);
     });
@@ -11167,38 +11421,60 @@ export class Workbook extends EventTarget {
    * that did not count them itself can still say what the merge cost.
    */
   mergeCells(sheetId, range) {
+    return this.mergeBlocks(sheetId, [range])[0];
+  }
+
+  /**
+   * Merge several blocks in one step (Merge Across, Merge Down): each as mergeCells merges it, in order, a later
+   * block replacing an earlier one it overlaps, with the sheet's merges set once at the end. One at a time, every
+   * block copied every merge on the sheet into its own undo record, so merging across 5,000 rows took half a
+   * second and 20,000 held the page for minutes. Whether each block was merged, in the order given.
+   */
+  mergeBlocks(sheetId, ranges) {
     const sheet = this.sheet(sheetId);
-    if (!sheet) return false;
-    if (this._gridLocked(sheet)) return false;
-    const n = normalizeRange(range);
-    const array = this._fixedArrays(sheet).overlapping(n).next().value;
-    if (array) { this._arrayRefused(sheet, array, 'overlap'); return false; }
-    if (n.r1 === n.r2 && n.c1 === n.c2) return false;
-    if ((n.r2 - n.r1 + 1) * (n.c2 - n.c1 + 1) > 20000) return false;
-    // A table's header and data cells cannot be merged: each column keeps its own name and each
-    // row its own cells. The totals row is a footer whose label may span columns.
-    if (sheet.tables.some((t) => !(n.r2 < t.range.r1 || n.r1 > tableRows(t).dataEnd || n.c2 < t.range.c1 || n.c1 > t.range.c2))) return false;
-    // Replacing an overlapping merge also changes cells outside the new range.
-    if ([n, ...this.mergesIn(sheetId, n)].some((g) => this.lockedIn(sheetId, g))) return false;
-    this.transaction('Merge cells', () => {
-      const entries = [];
-      for (let r = n.r1; r <= n.r2; r++) {
-        for (let c = n.c1; c <= n.c2; c++) {
-          if (r === n.r1 && c === n.c1) continue;
-          const prev = sheet.cells.get(cellKey(r, c));
-          if (prev && (prev.v != null || prev.f != null)) entries.push({ r, c, cell: { v: null, f: null, s: prev.s } });
-        }
-      }
-      // A merged block shows its top-left cell alone, so every other value and formula in it is cleared.
-      // Said here, once they are, so every door hears it — a script, a template, an import, a menu entry —
-      // and not only the one caller that counts the cells itself beforehand. A batch merging several blocks
-      // announces the last of them, as a batch does for every kind of change (see _announce).
-      const dropped = entries.length ? this.setCells(sheetId, entries, 'Merge cells') : 0;
-      if (dropped) this._announce('merged-values-dropped', sheetId, { range: { ...n }, count: dropped });
-      const kept = sheet.merges.filter((m) => m.r2 < n.r1 || m.r1 > n.r2 || m.c2 < n.c1 || m.c1 > n.c2);
-      this._setMerges(sheet, [...kept, { ...n }], 'Merge cells');
+    if (!sheet || this._gridLocked(sheet)) return ranges.map(() => false);
+    const existing = rectFinder(sheet.merges);
+    const blocks = [];
+    const merged = ranges.map((range) => {
+      const n = normalizeRange(range);
+      const array = this._fixedArrays(sheet).overlapping(n).next().value;
+      if (array) { this._arrayRefused(sheet, array, 'overlap'); return false; }
+      if (n.r1 === n.r2 && n.c1 === n.c2) return false;
+      if ((n.r2 - n.r1 + 1) * (n.c2 - n.c1 + 1) > 20000) return false;
+      // A table's header and data cells cannot be merged: each column keeps its own name and each
+      // row its own cells. The totals row is a footer whose label may span columns.
+      if (sheet.tables.some((t) => !(n.r2 < t.range.r1 || n.r1 > tableRows(t).dataEnd || n.c2 < t.range.c1 || n.c1 > t.range.c2))) return false;
+      // Replacing an overlapping merge also changes cells outside the new range. (A merge an earlier block
+      // replaced was checked with that block, and a block merged before this one was checked itself.)
+      if ([n, ...existing(n).map((i) => sheet.merges[i])].some((g) => this.lockedIn(sheetId, g))) return false;
+      blocks.push(n);
+      return true;
     });
-    return true;
+    if (!blocks.length) return merged;
+    this.transaction('Merge cells', () => {
+      for (const n of blocks) {
+        const entries = [];
+        for (let r = n.r1; r <= n.r2; r++) {
+          for (let c = n.c1; c <= n.c2; c++) {
+            if (r === n.r1 && c === n.c1) continue;
+            const prev = sheet.cells.get(cellKey(r, c));
+            if (prev && (prev.v != null || prev.f != null)) entries.push({ r, c, cell: { v: null, f: null, s: prev.s } });
+          }
+        }
+        // A merged block shows its top-left cell alone, so every other value and formula in it is cleared.
+        // Said here, once they are, so every door hears it — a script, a template, an import, a menu entry —
+        // and not only the one caller that counts the cells itself beforehand. A batch merging several blocks
+        // announces the last of them, as a batch does for every kind of change (see _announce).
+        const dropped = entries.length ? this.setCells(sheetId, entries, 'Merge cells') : 0;
+        if (dropped) this._announce('merged-values-dropped', sheetId, { range: { ...n }, count: dropped });
+      }
+      // Each block replaces the merges it overlaps: those on the sheet, and those of the blocks before it.
+      const later = rectFinder(blocks);
+      const replaced = new Set(blocks.flatMap((n) => existing(n)));
+      const kept = sheet.merges.filter((m, i) => !replaced.has(i));
+      this._setMerges(sheet, [...kept, ...blocks.filter((n, k) => !later(n).some((j) => j > k)).map((n) => ({ ...n }))], 'Merge cells');
+    });
+    return merged;
   }
 
   /** Split every merge that touches the range. */
@@ -11292,7 +11568,11 @@ export class Workbook extends EventTarget {
     const set = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
     // Any line of the grid can be hidden, reached by scrolling or not.
     const total = axis === 'row' ? gridLimits(sheet).rows : gridLimits(sheet).cols;
-    const list = [...new Set(indices)].filter((i) => i >= 0 && i < total && set.has(i) !== hidden);
+    // Lines listed in order, as the selection gives them, have no repeats to drop: a million of them, from under a
+    // list to the sheet's end, cost a set of their own before anything was hidden.
+    let ascending = Array.isArray(indices);
+    for (let k = 1; ascending && k < indices.length; k++) ascending = indices[k] > indices[k - 1];
+    const list = (ascending ? indices : [...new Set(indices)]).filter((i) => i >= 0 && i < total && set.has(i) !== hidden);
     if (!list.length) return false;
     // Never hide every line: the sheet must keep something to click on. Lines a collapsed group hid past
     // the sheet's end are not among the ones it shows, so they do not count.
@@ -11880,13 +12160,13 @@ export class Workbook extends EventTarget {
       if (!a.samples.has(key)) {
         if (a.sampling) return err('#CYCLE!');
         a.sampling = true;
-        try { a.samples.set(key, fixedArrayValue(a.sample(), row, col)); }
+        try { a.samples.set(key, uncalled(fixedArrayValue(a.sample(), row, col))); }
         catch (e) { a.samples.set(key, err(e instanceof RangeError ? '#VALUE!' : '#ERROR!')); }
         finally { a.sampling = false; }
       }
       return a.samples.get(key);
     }
-    return a.fixed ? fixedArrayValue(a.result, row, col) : a.values[row]?.[col] ?? 0;
+    return uncalled(a.fixed ? fixedArrayValue(a.result, row, col) : a.values[row]?.[col] ?? 0);
   }
 
   _fixedResult(sheet, r, c, result, randomized = false) {
@@ -12232,19 +12512,52 @@ export class Workbook extends EventTarget {
     return a ? { r1: a.r, c1: a.c, r2: a.r + a.rows - 1, c2: a.c + a.cols - 1 } : null;
   }
 
-  /** Spilled values as { r, c, value } (anchors excluded), optionally restricted to a rectangle. */
-  spillEntries(sheetId, range = null) {
+  /**
+   * Spilled values as { r, c, value } (anchors excluded), optionally restricted to a rectangle, and to the
+   * arrays of at most `maxCells` cells.
+   */
+  spillEntries(sheetId, range = null, { maxCells = Infinity } = {}) {
     const sheet = this.sheet(sheetId);
     if (!sheet) return [];
     const st = this._ensureSpills(sheet);
     const out = [];
     for (const a of st.anchors.values()) {
+      if (a.rows * a.cols > maxCells) continue;
       const i1 = range ? Math.max(0, range.r1 - a.r) : 0, i2 = range ? Math.min(a.rows, range.r2 - a.r + 1) : a.rows;
       const j1 = range ? Math.max(0, range.c1 - a.c) : 0, j2 = range ? Math.min(a.cols, range.c2 - a.c + 1) : a.cols;
       if (i1 >= i2 || j1 >= j2) continue;
       for (let i = i1; i < i2; i++) for (let j = j1; j < j2; j++) if (i || j) out.push({ r: a.r + i, c: a.c + j, value: this._arrayValue(a, i, j) });
     }
     return out;
+  }
+
+  /** spillEntries one at a time, for a walk that may stop early: an array over the whole sheet spills more than any list holds. */
+  *eachSpill(sheetId, range = null) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return;
+    for (const a of this._ensureSpills(sheet).anchors.values()) {
+      const i1 = range ? Math.max(0, range.r1 - a.r) : 0, i2 = range ? Math.min(a.rows, range.r2 - a.r + 1) : a.rows;
+      const j1 = range ? Math.max(0, range.c1 - a.c) : 0, j2 = range ? Math.min(a.cols, range.c2 - a.c + 1) : a.cols;
+      for (let i = i1; i < i2; i++) for (let j = j1; j < j2; j++) if (i || j) yield { r: a.r + i, c: a.c + j, value: this._arrayValue(a, i, j) };
+    }
+  }
+
+  /**
+   * How many values spillEntries lists for the rectangle, counted without listing them: an array declared over
+   * the whole sheet spills seventeen billion, which no list holds.
+   */
+  spillCount(sheetId, range) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return 0;
+    let n = 0;
+    for (const a of this._ensureSpills(sheet).anchors.values()) {
+      const rows = Math.min(a.r + a.rows - 1, range.r2) - Math.max(a.r, range.r1) + 1;
+      const cols = Math.min(a.c + a.cols - 1, range.c2) - Math.max(a.c, range.c1) + 1;
+      if (rows <= 0 || cols <= 0) continue;
+      const anchorIn = a.r >= range.r1 && a.r <= range.r2 && a.c >= range.c1 && a.c <= range.c2;
+      n += rows * cols - (anchorIn ? 1 : 0);
+    }
+    return n;
   }
 
   /* ---------- Evaluation ---------- */
@@ -12480,6 +12793,8 @@ export class Workbook extends EventTarget {
       const circled = !this._iteration && this._cyclic.has(key);
       value = circled ? err('#CYCLE!') : withArrayBudget(() => evaluateFormula(ast, ctx));
       raw = value;
+      // A union of references, (A1,A2), is no value a cell can show or spill out: #VALUE!, as in Excel.
+      if (isRange(value) && value.areas?.length > 1 && !value.sheetSpan) value = err('#VALUE!');
       if (fixed) value = this._fixedResult(sheet, r, c, value, ctx.fixedArray.randomized);
       else if (isRange(value)) value = this._spillResult(sheet, r, c, value, arrayCandidate);
       else {
@@ -12872,6 +13187,15 @@ export class Workbook extends EventTarget {
         const target = byName(sheetName);
         return !!target && (target.filterHidden.has(rr) || (manual && target.hiddenRows.has(rr)));
       },
+      hasHiddenRows: (sheetName, manual) => {
+        const target = byName(sheetName);
+        return !!target && (target.filterHidden.size > 0 || (!!manual && target.hiddenRows.size > 0));
+      },
+      // ...and the cells holding another SUBTOTAL or AGGREGATE, as getFormula reads them (see _nestedTotals).
+      nestedTotals: (sheetName) => {
+        const target = byName(sheetName);
+        return target ? this._nestedTotals(target) : null;
+      },
       getValue: (sheetName, rr, cc) => {
         const target = byName(sheetName);
         if (!target || target.kind === 'chart') return err('#REF!');
@@ -12960,8 +13284,13 @@ export class Workbook extends EventTarget {
         const repeats = !!longer && longer.length >= rows && longer[0]?.length === cols;
         if (repeats) {
           // Not kept itself: the next one up is read from the longer one too, which kept too many shorter copies would evict.
-          out = longer.slice(0, rows);
-          noteRangeRows(out, longer);
+          const last = LAST_CUT.get(longer);
+          if (last?.rows === rows) out = last.values;
+          else {
+            out = longer.slice(0, rows);
+            noteRangeRows(out, longer);
+            LAST_CUT.set(longer, { rows, values: out });
+          }
         } else if (kept && (rows - kept.length) * cols <= Math.min(rows * cols, target.cells.size + spills.cover.size)) {
           // Worth it only while appending the missing rows costs no more than reading the range afresh.
           const blank = Object.freeze(new Array(cols).fill(null));
@@ -13036,6 +13365,34 @@ export class Workbook extends EventTarget {
       return ctx.getRangeValues(ref).map((row, i) => row.map((value, j) => this.getDisplay(target.id, ref.r1 + i, ref.c1 + j, value)));
     };
     return ctx;
+  }
+
+  /**
+   * The cells of a sheet whose formula is a SUBTOTAL or AGGREGATE, which those two leave out of what they total:
+   * `cols` maps a column to the ascending rows of such cells, `areas` lists the array formulas that are one, every
+   * cell of which counts. Found once per calculation, for every total on the sheet to look up.
+   */
+  _nestedTotals(sheet) {
+    const key = `nestedTotals|${sheet.id}`;
+    let index = this._statsCache.get(key);
+    if (index) return index;
+    const arrays = this._fixedArrays(sheet);
+    index = { cols: new Map(), areas: [] };
+    for (const [address, cell] of sheet.cells) {
+      if (typeof cell?.f !== 'string' || !isNestedTotal(cell.f)) continue;
+      const { r, c } = parseKey(address);
+      // A cell inside an array formula reads as the array's formula, whatever it holds itself.
+      const array = arrays.size ? arrays.at(r, c) : null;
+      if (array) {
+        if (array.key === address) index.areas.push({ r1: array.r1, c1: array.c1, r2: array.r2, c2: array.c2 });
+        continue;
+      }
+      const rows = index.cols.get(c);
+      if (rows) rows.push(r); else index.cols.set(c, [r]);
+    }
+    for (const rows of index.cols.values()) rows.sort((a, b) => a - b);
+    this._statsCache.set(key, index);
+    return index;
   }
 
   /**
@@ -13358,6 +13715,8 @@ export class Workbook extends EventTarget {
     const top = r0 - 1, left = c0 - 1;
     const local = (ref) => !ref || !ref.sheet || sameSheetName(ref.sheet, sheet.name);
     if (top < 0 || left < 0 || !local(rowInput) || !local(colInput)) return err('#REF!');
+    // Past the cells any array may hold, as for a formula's: a file's table over the whole sheet ran the tab out of memory.
+    if (size.rows * size.cols > ARRAY_BUDGET) return err('#NUM!');
     const read = (r, c) => scalar(this._compute(sheet, r, c));
     const values = Array.from({ length: size.rows }, () => new Array(size.cols).fill(0));
     const runs = [];
@@ -13684,6 +14043,8 @@ export class Workbook extends EventTarget {
         // Zoom is a view preference, not part of a row/column undo step.
         if (was.viewZoom != null) s.viewZoom = was.viewZoom; else delete s.viewZoom;
         if (was.viewMode) s.viewMode = was.viewMode; else delete s.viewMode;
+        // View ▸ Page Breaks is no step of its own (see setShowPageBreaks), so no undo turns it off or on again.
+        if (was.showPageBreaks) s.showPageBreaks = true; else delete s.showPageBreaks;
         if (was.viewSelection) s.viewSelection = normalizeSheetSelection(was.viewSelection); else delete s.viewSelection;
         if (was.viewOrigin) s.viewOrigin = normalizeSheetOrigin(was.viewOrigin); else delete s.viewOrigin;
         if (s.kind === 'chart' && was.kind === 'chart') s.zoomToFit = was.zoomToFit;
