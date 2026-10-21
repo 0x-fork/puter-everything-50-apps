@@ -10833,6 +10833,47 @@ test("objects resize from every edge and corner and rotate by their handle", asy
   );
 });
 
+test("a dragged object moves with the pointer, not only its outline", async ({
+  page,
+}) => {
+  await start(page);
+  await page
+    .getByRole("button", { name: "New presentation", exact: true })
+    .click();
+  await openShapeMenu(page);
+  await page.getByRole("menuitem", { name: "Rectangle", exact: true }).click();
+  const rect = page.locator(".object-hit");
+  await expect(rect).toHaveCount(1);
+  const close = page.getByRole("button", { name: "Close format panel" });
+  if (await close.isVisible()) await close.click();
+  const canvas = page.locator("#slide-canvas");
+  const box = await rect.boundingBox();
+  const [cx, cy] = [box.x + box.width / 2, box.y + box.height / 2];
+  // Where the rectangle's middle lands: on the empty slide below it.
+  const offset = box.height * 1.2;
+  const spot = { x: cx - 4, y: cy + offset - 4, width: 8, height: 8 };
+  const empty = await page.screenshot({ clip: spot });
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx, cy + offset, { steps: 6 });
+  // The slide is drawn as layers: the background, and the rectangle on its
+  // own, which has followed the pointer.
+  const layers = canvas.locator(".drag-layer");
+  await expect(layers).toHaveCount(2);
+  await expect(layers.nth(1)).toHaveAttribute("style", /translate\(/);
+  await expect(canvas.locator(".slide-image")).toBeHidden();
+  await expect
+    .poll(async () => (await page.screenshot({ clip: spot })).equals(empty))
+    .toBe(false);
+  await page.mouse.up();
+  // The slide's own picture takes over, showing the rectangle moved.
+  await expect(layers).toHaveCount(0);
+  await expect(canvas.locator(".slide-image")).toBeVisible();
+  expect((await page.screenshot({ clip: spot })).equals(empty)).toBe(false);
+  const moved = await rect.boundingBox();
+  expect(moved.y).toBeCloseTo(box.y + offset, 0);
+});
+
 test("dragged objects snap to the slide's center and other objects' edges unless Alt is held", async ({
   page,
 }) => {

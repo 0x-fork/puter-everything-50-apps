@@ -1184,6 +1184,21 @@ select {
   inset: 0;
   pointer-events: none;
 }
+/* A drag draws the slide as layers (main.js liftDragLayers) that stand in
+   for its picture until the edit is drawn. */
+.drag-layer {
+  display: block;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.drag-layered > .slide-image,
+.drag-layered > .placeholder-inserts {
+  visibility: hidden;
+}
 .object-hit {
   position: absolute;
   z-index: 2;

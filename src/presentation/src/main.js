@@ -8217,10 +8217,10 @@ const MASTER_VIEW_NAMES = {
 // title"), which thumbnails, shows and files never contain. A slide without
 // one shows the navigator's render.
 const promptPreviews = new WeakMap();
+const canvasPrompts = (s) =>
+  masterView.active || P.getSlideShapes(s).some(P.isPlaceholderEmpty);
 function canvasPreview(s) {
-  const prompting =
-    masterView.active || P.getSlideShapes(s).some(P.isPlaceholderEmpty);
-  if (!prompting) return slidePreview(s);
+  if (!canvasPrompts(s)) return slidePreview(s);
   let cache = promptPreviews.get(doc.pres);
   if (!cache) promptPreviews.set(doc.pres, (cache = new Map()));
   const part = P.getSlidePartName(s);
@@ -8442,6 +8442,7 @@ function renderSlideArea(refreshNavigator = true) {
     canvas.querySelector(".slide-image").replaceWith(image);
   else canvas.replaceChildren(image);
   canvasContexts.set(canvas, { pres: doc.pres, part });
+  settleDragLayers(image);
   canvas.onclick = (e) => {
     if (performance.now() - marqueeEnded < 400) return;
     if (e.target === canvas || e.target.classList.contains("slide-image")) {
@@ -9329,6 +9330,114 @@ function updateSelectionUi() {
 // The click the browser sends after a drag's pointer release lasts until the
 // event loop turns; the flag is set for exactly that long.
 let dragClick = false;
+/* ---------- Drag layers ----------
+ * The slide is one picture, so a dragged object would otherwise stay put
+ * under its moving outline until release. Once a drag gets going, the slide
+ * is drawn again as a stack of pictures, the objects in motion on layers of
+ * their own between what lies below and above them, and those layers follow
+ * the pointer. After release they stay until the slide's new picture can be
+ * painted, so the object never flashes back to where it was.
+ */
+let dragLayers = null;
+function clearDragLayers() {
+  if (!dragLayers) return;
+  const { canvas, images } = dragLayers;
+  dragLayers = null;
+  for (const image of images) image.remove();
+  canvas.classList.remove("drag-layered");
+}
+// The canvas drew the slide again: its picture takes over once decoded.
+// Mid-drag only a redraw that took the layers away ends them.
+function settleDragLayers(image) {
+  const layers = dragLayers;
+  if (!layers) return;
+  if (!layers.images[0].isConnected) return clearDragLayers();
+  if (layers.dragging) return;
+  image
+    .decode()
+    .catch(() => {})
+    .then(() => {
+      if (dragLayers === layers) clearDragLayers();
+    });
+}
+// `ids` are top-level objects that move together. Returns the drag's handle
+// on its layers: place(transform, origin) moves them, land(applied) hands over to
+// the slide's own picture once the edit (a mutate promise, or null for none)
+// has drawn it. Null when an object in motion lies inside a group that stays
+// put: the slide cannot be split there, and the outline moves alone.
+function liftDragLayers(canvas, s, ids) {
+  clearDragLayers();
+  const parents = groupParents(s);
+  const top = P.getSlideShapes(s).filter(
+    (shape) => !parents.has(P.getShapeId(shape)),
+  );
+  const key = (shape) => String(P.getShapeId(shape));
+  if (![...ids].every((id) => top.some((shape) => key(shape) === id)))
+    return null;
+  const runs = [];
+  for (const shape of top) {
+    const moving = ids.has(key(shape));
+    const last = runs.at(-1);
+    if (last?.moving === moving) last.ids.add(key(shape));
+    else runs.push({ moving, ids: new Set([key(shape)]) });
+  }
+  // The background stays put under everything.
+  if (runs[0]?.moving !== false)
+    runs.unshift({ moving: false, ids: new Set() });
+  const prompts = canvasPrompts(s);
+  const images = runs.map((run, i) =>
+    el("img", {
+      class: "drag-layer",
+      src: preview(
+        doc.pres,
+        s,
+        { background: i === 0, shape: (shape) => run.ids.has(key(shape)) },
+        { prompts },
+      ),
+      alt: "",
+      draggable: "false",
+    }),
+  );
+  const moving = images.filter((_, i) => runs[i].moving);
+  const layers = { canvas, images, dragging: true };
+  let transform = "",
+    origin = "",
+    landed = false;
+  const place = () => {
+    for (const image of moving) {
+      image.style.transform = transform;
+      image.style.transformOrigin = origin;
+    }
+  };
+  // Shown once every layer can be painted; until then the outline leads.
+  Promise.all(images.map((image) => image.decode().catch(() => {}))).then(
+    () => {
+      const base = canvas.querySelector(".slide-image");
+      if (landed || !base || !canvas.isConnected) return;
+      clearDragLayers();
+      place();
+      base.after(...images);
+      canvas.classList.add("drag-layered");
+      dragLayers = layers;
+    },
+  );
+  return {
+    place(nextTransform, nextOrigin = "") {
+      transform = nextTransform;
+      origin = nextOrigin;
+      if (dragLayers === layers) place();
+    },
+    land(applied) {
+      landed = true;
+      if (dragLayers !== layers) return;
+      layers.dragging = false;
+      if (!applied) return clearDragLayers();
+      applied.then((changed) => {
+        if (!changed && dragLayers === layers) clearDragLayers();
+      });
+    },
+  };
+}
 function startDrag(e, shape, mode = "move") {
   if (e.button !== 0 || activeDrag) return;
   // A press on an object with Shift, Ctrl, or Cmd adds to or takes from the
@@ -9449,6 +9558,28 @@ function startDrag(e, shape, mode = "move") {
     return (Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180) / Math.PI + 90;
   };
   const startAngle = mode === "rotate" ? angleAt(e) : 0;
+  // The objects that visibly move: a grouped object carried by its group
+  // moves on the group's layer. A resize keeps to the outline, since a
+  // stretched picture would show text and lines distorted.
+  let lift;
+  const lifted = () => {
+    if (lift === undefined)
+      lift =
+        mode === "move" || mode === "rotate"
+          ? liftDragLayers(
+              canvas,
+              slide(),
+              new Set(
+                [
+                  ...(carried ? [] : [P.getShapeId(obj)]),
+                  ...companions.map((c) => c.id),
+                ].map(String),
+              ),
+            )
+          : null;
+    return lift;
+  };
+  const pct = (v, total) => `${(v / total) * 100}%`;
   function move(ev) {
     const dx = ((ev.clientX - startX) / rect.width) * size.cx,
       dy = ((ev.clientY - startY) / rect.height) * size.cy;
@@ -9470,6 +9601,10 @@ function startDrag(e, shape, mode = "move") {
       }
       nextRotation = Math.round(angle * 10) / 10;
       overlay.style.transform = `rotate(${nextRotation}deg)`;
+      lifted()?.place(
+        `rotate(${nextRotation - rotation}deg)`,
+        `${pct(b.x + b.w / 2, size.cx)} ${pct(b.y + b.h / 2, size.cy)}`,
+      );
       if (box)
         box.style.setProperty("--selection-rotation", `${nextRotation}deg`);
       return;
@@ -9497,6 +9632,10 @@ function startDrag(e, shape, mode = "move") {
     if (snapped) candidate = snapped.bounds;
     showGuides(canvas, snapped?.guides || [], size);
     next = mode === "move" ? withinSlide(candidate) : candidate;
+    if (mode === "move")
+      lifted()?.place(
+        `translate(${pct(next.x - b.x, size.cx)}, ${pct(next.y - b.y, size.cy)})`,
+      );
     placeHit(overlay, normalized(next), size, rotation);
     if (box) placeSelection(box, normalized(next), size, rotation);
     for (const c of companions)
@@ -9513,6 +9652,7 @@ function startDrag(e, shape, mode = "move") {
   }
   function end(ev) {
     activeDrag = null;
+    let applied = null;
     if (next || nextRotation != null) {
       dragClick = true;
       setTimeout(() => (dragClick = false), 0);
@@ -9526,7 +9666,7 @@ function startDrag(e, shape, mode = "move") {
     box?.classList.remove("rotating");
     if (nextRotation != null) {
       ev.preventDefault();
-      mutateShape(obj, (obj) => {
+      applied = mutateShape(obj, (obj) => {
         // The handle turns the object as the slide shows it; a grouped
         // object's own turn is what is left once its groups' turns are off.
         const angle = ownRotation(obj, nextRotation);
@@ -9544,7 +9684,7 @@ function startDrag(e, shape, mode = "move") {
       };
       if (!delta.x && !delta.y) updateSelectionUi();
       else
-        mutateSlide(slide(), (target) => {
+        applied = mutateSlide(slide(), (target) => {
           for (const item of [
             ...(carried ? [] : [{ id: P.getShapeId(obj), bounds: b }]),
             ...companions,
@@ -9560,7 +9700,7 @@ function startDrag(e, shape, mode = "move") {
         });
     } else if (next) {
       ev.preventDefault();
-      mutateShape(obj, (obj) => {
+      applied = mutateShape(obj, (obj) => {
         const bounds = Object.fromEntries(
           Object.entries(normalized(next)).map(([k, v]) => [k, Math.round(v)]),
         );
@@ -9587,6 +9727,7 @@ function startDrag(e, shape, mode = "move") {
     } else {
       updateSelectionUi();
     }
+    lift?.land(applied);
   }
   function cancel() {
     next = null;
