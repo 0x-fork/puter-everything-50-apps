@@ -4,6 +4,8 @@ import { normalizeAsset } from '../src/model/project.js';
 import { createActions } from '../src/ui/actions.js';
 import { mainTrack, findClip, allClips } from '../src/model/timeline.js';
 import { createAiToolRunner } from '../src/ui/ai-tool-runner.js';
+import { addTimeline } from '../src/model/timelines.js';
+import { createCompound } from '../src/model/compound.js';
 import { createAgent, requestMessages, userContent, userText, suggestions, SYSTEM_PROMPT, MAX_ROUNDS } from '../src/media/ai-agent.js';
 import { TOOLS, toolSpecs, changesProject, costly, describeCall, mediaBrief, projectSnapshot } from '../src/media/ai-tools.js';
 import { txt2vidOptions, fitSeconds, videoAspectFor, generateVideo, videoBlobFrom, videoErrorMessage, modelForFrames, estimateCents, formatCents, modelSummary, VIDEO_MODELS, DEFAULT_VIDEO_MODEL } from '../src/media/ai-video.js';
@@ -175,6 +177,18 @@ describe('AI sidebar tools', () => {
     expect(v.costly).toBe(true);
   });
 
+  it('names the length and cost of animating an image clip that will be asked for', async () => {
+    const { ctx, main } = setup(clip('image', 0, 12));
+    const { runner, services } = runnerFor(ctx);
+    const args = { clip: main().clips[0].id, prompt: 'sway' };
+    const card = describeCall('animate_image', args, { videoModel: 'seedance25', seconds: runner.videoSeconds('animate_image', args) });
+    expect(card.detail).toBe('"sway" Made with Seedance 2.5, 12s long. About $2.78 in Puter credits.');
+    await runner.run('animate_image', args);
+    expect(services.generateVideo.mock.calls[0][0].seconds).toBe(12);
+    expect(runner.videoSeconds('animate_image', { ...args, seconds: 6 })).toBe(6);
+    expect(runner.videoSeconds('generate_video', { prompt: 'x' })).toBe(undefined);
+  });
+
   it('tells the model the project and its media', () => {
     const { store } = setup(clip('video', 0, 4));
     const snap = projectSnapshot(assistState(store), { now: new Date(2026, 9, 17), videoModel: 'Wan 2.7' });
@@ -274,6 +288,114 @@ describe('AI sidebar tools', () => {
     expect(r).toEqual({ skipped: true });
     expect(main().clips).toHaveLength(1);
     expect(Object.values(store.project.assets).some((a) => a.origin === 'ai-video')).toBe(true);
+  });
+
+  it('keeps pictures and voiceovers that finish after Stop in the media library only', async () => {
+    for (const [name, args, origin] of [['generate_image', { prompt: 'forest' }, 'ai-image'], ['edit_image', { source: 'img', instruction: 'night' }, 'ai-image'], ['add_voiceover', { text: 'hello' }, 'tts']]) {
+      const { store, ctx, main } = setup(clip('image', 0, 3));
+      let stopped = false;
+      const made = (value) => vi.fn(async () => ((stopped = true), value));
+      const png = { blob: new Blob(['png'], { type: 'image/png' }) };
+      const { runner } = runnerFor(ctx, { generateImage: made(png), editPicture: made(png), synthesize: made(new Blob(['mp3'], { type: 'audio/mpeg' })) });
+      expect(await runner.run(name, args, { note: () => {}, stopped: () => stopped })).toEqual({ skipped: true });
+      await vi.waitFor(() => expect(Object.values(store.project.assets).filter((a) => a.origin === origin)).toHaveLength(1));
+      expect(main().clips).toHaveLength(1);
+    }
+  });
+
+  it('keeps what was stopped while it was being added to the project in the media only', async () => {
+    for (const [name, args] of [['generate_video', { prompt: 'fox' }], ['generate_image', { prompt: 'forest' }], ['edit_image', { source: 'img', instruction: 'night' }], ['add_voiceover', { text: 'hello' }]]) {
+      const { store, ctx, main } = setup(clip('image', 0, 3));
+      let stopped = false;
+      const importFile = ctx.library.importFile.bind(ctx.library);
+      ctx.library.importFile = (file, o) => {
+        stopped = true; // Stop pressed while the file is being added
+        return importFile(file, o);
+      };
+      const { runner } = runnerFor(ctx);
+      const r = await runner.run(name, args, { note: () => {}, stopped: () => stopped });
+      expect(r).toEqual({ skipped: true });
+      expect(main().clips).toHaveLength(1);
+      expect(Object.keys(store.project.assets).filter((id) => /^gen/.test(id))).toHaveLength(1);
+    }
+  });
+
+  it('saves what finishes after its editor was left into that project, or into the editor open on it again', async () => {
+    const toasts = () => [...document.querySelectorAll('.toast-text')].map((t) => t.textContent);
+    for (const reopened of [false, true]) {
+      document.querySelectorAll('.toast').forEach((t) => t.remove());
+      const { store, ctx } = setup(clip('video', 0, 4));
+      store.project.name = 'Trip';
+      const saved = structuredClone(store.project);
+      ctx.library.openProject = vi.fn(async (id) => (id === saved.id ? structuredClone(saved) : null));
+      ctx.library.saveProject = vi.fn(async () => {});
+      let open;
+      let stopped = false;
+      const { runner } = runnerFor(ctx, { generateVideo: vi.fn(() => new Promise((r) => (open = () => r(video())))) });
+      const running = runner.run('generate_video', { prompt: 'fox' }, { note: () => {}, stopped: () => stopped });
+      await vi.waitFor(() => expect(open).toBeTypeOf('function'));
+      // The editor is left: the panel closes its runner and stops the reply.
+      runner.close();
+      stopped = true;
+      const again = reopened ? setup() : null;
+      if (again) {
+        again.store.project.id = saved.id;
+        runnerFor(again.ctx);
+      }
+      open();
+      expect(await running).toEqual({ skipped: true });
+      await vi.waitFor(() => expect(toasts().join()).toMatch(/finished/));
+      expect(toasts()).toEqual(['The video you were making for Trip has finished. It is in that project\'s media.']);
+      expect(Object.values(store.project.assets).some((a) => a.origin === 'ai-video')).toBe(false);
+      if (reopened) {
+        expect(Object.values(again.store.project.assets).some((a) => a.origin === 'ai-video')).toBe(true);
+        expect(ctx.library.saveProject).not.toHaveBeenCalled();
+      } else {
+        const [project] = ctx.library.saveProject.mock.calls[0];
+        expect(Object.values(project.assets).filter((a) => a.origin === 'ai-video')).toHaveLength(1);
+        expect(project.tracks).toEqual(saved.tracks);
+      }
+    }
+  });
+
+  it('keeps what was made in the media only when another timeline was opened meanwhile', async () => {
+    const { store, ctx, main } = setup(clip('image', 0, 3));
+    let open;
+    const later = (value) => vi.fn(() => new Promise((r) => (open = () => r(value))));
+    const { runner } = runnerFor(ctx, { generateVideo: later(video()) });
+    const img = main().clips[0].id;
+    let b;
+    store.update('Add timeline', (p) => {
+      b = addTimeline(p, { name: 'Shorts' });
+    });
+    const a = store.project.timelineId;
+    for (const [name, args] of [['generate_video', { prompt: 'fox' }], ['animate_image', { clip: img, prompt: 'sway' }]]) {
+      open = null;
+      store.openTimeline(a);
+      const running = runner.run(name, args, { note: () => {}, stopped: () => false });
+      await vi.waitFor(() => expect(open).toBeTypeOf('function'));
+      store.openTimeline(b);
+      open();
+      const r = await running;
+      expect(r.ok).toBe(true);
+      expect(r.content).toMatch(/in the media library only, not on the timeline: another timeline was opened while it was being made/);
+      expect(r.target).toBe(null);
+      expect(main().clips).toHaveLength(0);
+      expect(store.project.assets[r.content.match(/media (gen\d+)/)[1]]).toBeTruthy();
+    }
+    store.openTimeline(a);
+    expect(main().clips.map((c) => [c.id, c.type])).toEqual([[img, 'image']]);
+    // A compound clip opened meanwhile counts too.
+    store.update('Group', (p) => createCompound(p, [img]));
+    const comp = main().clips[0].id;
+    open = null;
+    const { runner: pics } = runnerFor(ctx, { generateImage: later({ blob: new Blob(['png'], { type: 'image/png' }) }) });
+    const running = pics.run('generate_image', { prompt: 'forest' }, { note: () => {}, stopped: () => false });
+    await vi.waitFor(() => expect(open).toBeTypeOf('function'));
+    store.openCompound(comp);
+    open();
+    expect((await running).content).toMatch(/media library only/);
+    expect(main().clips.map((c) => c.id)).toEqual([img]);
   });
 
   it('makes and edits pictures, and speaks a voiceover', async () => {
@@ -532,6 +654,23 @@ describe('AI sidebar panel', () => {
     expect(panel.el.querySelector('.ai-undo').disabled).toBe(true);
     store.undo();
     expect(panel.el.querySelector('.ai-undo').disabled).toBe(false);
+  });
+
+  it('closes its runner when the editor is left, so a late video is saved into the project', async () => {
+    localStorage.setItem('video-studio:ai', JSON.stringify({ approval: 'never' }));
+    let open;
+    const { panel, ctx, store } = mount([[call('generate_video', { prompt: 'fox' })], [{ type: 'text', text: 'ok' }]], {
+      services: { generateVideo: () => new Promise((r) => (open = () => r(video()))) },
+    });
+    ctx.library.openProject = vi.fn(async () => structuredClone(store.project));
+    ctx.library.saveProject = vi.fn(async () => {});
+    panel.open();
+    panel.send('fox');
+    await vi.waitFor(() => expect(open).toBeTypeOf('function'));
+    panel.dispose();
+    open();
+    await vi.waitFor(() => expect(ctx.library.saveProject).toHaveBeenCalled());
+    expect(Object.values(ctx.library.saveProject.mock.calls[0][0].assets).some((a) => a.origin === 'ai-video')).toBe(true);
   });
 
   it('declines, stops, and reports a failure with Try again', async () => {

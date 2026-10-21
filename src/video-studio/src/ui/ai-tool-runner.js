@@ -5,9 +5,14 @@
  * it on the timeline in one synchronous undo step, so an edit the user makes
  * while a clip is being generated never folds into the assistant's step.
  *
+ * What is made lands on the timeline (or compound clip) that was open when
+ * the call started; when the user opened another one meanwhile it goes into
+ * the media library only, and the model is told so.
+ *
  * A clip still being generated when the user presses Stop is not thrown
  * away (it has been paid for): it lands in the media library when it is
- * done, and a toast says so.
+ * done, and a toast says so. When its editor was left meanwhile (close()),
+ * it goes into that project: the editor open on it again, else its saved file.
  *
  * Every call resolves to { ok, content, changed, entry, target }: content is
  * what the model is told, entry the undo step it made (or null), target the
@@ -53,8 +58,11 @@ export async function framePicture(ctx, t) {
   return { blob, width: c.width, height: c.height };
 }
 
+/** The runners of open editors by project id, for results that finish after their editor was left. */
+const openRunners = new Map();
+
 /**
- * createAiToolRunner(ctx, services) -> { run(name, args, control) }
+ * createAiToolRunner(ctx, services) -> { run(name, args, control), videoSeconds(name, args), close() }
  * services replace the slow or paid steps (tests): generateVideo(opts),
  * generateImage(prompt, opts), editPicture(picture, instruction),
  * synthesize(text, voice), picture(clip, time), frame(time), editDeps (for
@@ -76,6 +84,10 @@ export function createAiToolRunner(ctx, services = {}) {
     ...services,
   };
   const edits = createAssistantRunner(ctx, svc.editDeps);
+  const project = { id: store.project.id, name: store.project.name };
+  let closed = false;
+  const self = { add: (asset) => actions.registerAsset(asset) };
+  if (project.id) openRunners.set(project.id, self);
 
   // ---- Clips and pictures ----------------------------------------------------
 
@@ -117,6 +129,21 @@ export function createAiToolRunner(ctx, services = {}) {
     else t = clip.start;
     t = Math.min(Math.max(t, clip.start), clip.start + clip.duration);
     return { picture: await svc.picture(clip, t), from: `clip ${clip.id} at ${secs(t)}`, clip };
+  }
+
+  /**
+   * The length in seconds a video call asks for, before it is fitted to the
+   * model: the one it names, else an animated image clip's own length
+   * (undefined: the default). The Allow card shows the same.
+   */
+  function videoSeconds(name, args) {
+    const a = args && typeof args === 'object' ? args : {};
+    if (Number.isFinite(num(a.seconds))) return num(a.seconds);
+    if (name === 'animate_image') {
+      const f = oneClip(a.clip, (c) => c.type === 'image', 'image clip');
+      if (!f.error) return f.clip.duration / US;
+    }
+    return undefined;
   }
 
   // ---- Putting media in the project ----------------------------------------------
@@ -174,15 +201,22 @@ export function createAiToolRunner(ctx, services = {}) {
     return asset;
   }
 
-  /** Register an asset and do the rest of fn() as one undo step labeled label: { entry, value }. */
-  function oneStep(label, asset, fn) {
+  /** The timeline being edited, and the compound clips opened in it. */
+  const openedAt = () => [store.project.timelineId, ...store.nest.map((f) => f.id)].join('/');
+
+  /**
+   * Register an asset and do the rest of fn() as one undo step labeled label:
+   * { entry, value }. fn() is skipped when the timeline open at the start of
+   * the call (at) isn't the one open now.
+   */
+  function oneStep(label, asset, fn, at) {
     const mark = store.beginBatch();
     let value;
     try {
       store.update(`Add ${asset.name}`, (p) => {
         p.assets[asset.id] = asset;
       }, { structural: false });
-      value = fn();
+      value = at && at !== openedAt() ? { clip: null, words: 'in the media library only, not on the timeline: another timeline was opened while it was being made' } : fn();
     } catch (err) {
       store.endBatch(mark, label);
       throw err;
@@ -206,25 +240,51 @@ export function createAiToolRunner(ctx, services = {}) {
       clearInterval(timer);
     }
     if (control?.stopped?.()) {
-      await keep(result);
+      if (result) await Promise.resolve().then(() => keep(result)).catch(() => {});
       return null;
     }
     return result;
   }
 
-  // Generated after a Stop: kept in the media library, said so.
-  async function keepVideo({ blob }, prompt) {
+  /** Made but stopped: the asset goes into the media library only, said so. */
+  function keepMade(asset, what) {
+    if (closed) {
+      keepLeft(asset, what);
+      return { skipped: true };
+    }
+    actions.registerAsset(asset);
+    toast(`The ${what} you stopped has finished. It is in your media.`, { kind: 'success', duration: 6000 });
+    return { skipped: true };
+  }
+
+  /** Made after the editor was left: into the editor open on the project again, else into its saved file. */
+  async function keepLeft(asset, what) {
     try {
-      const asset = await importMade(new File([blob], videoFileName(prompt, blob.type), { type: blob.type || 'video/mp4' }), 'ai-video');
-      actions.registerAsset(asset);
-      toast('The video you stopped has finished. It is in your media.', { kind: 'success', duration: 6000 });
+      const open = openRunners.get(project.id);
+      if (open) open.add(asset);
+      else {
+        const saved = await ctx.library.openProject(project.id);
+        saved.assets[asset.id] = asset;
+        await ctx.library.saveProject(saved);
+      }
+      toast(`The ${what} you were making for ${project.name} has finished. It is in that project's media.`, { kind: 'success', duration: 8000 });
+    } catch (err) {
+      console.error(err);
+      toast(`The ${what} you were making for ${project.name} has finished, but it couldn't be added to the project.`, { kind: 'error' });
+    }
+  }
+
+  // Made after a Stop: imported and kept in the media library, said so.
+  async function keepFile(file, origin, what) {
+    try {
+      keepMade(await importMade(file, origin), what);
     } catch {
       /* nothing to keep */
     }
   }
 
   /** Make a video (opts as generateVideo's), import it and put it with put(asset): the tool's result. */
-  async function makeVideo(control, { prompt, seconds, aspect, firstFrame, lastFrame, sound, avoid }, label, put) {
+  async function makeVideo(control, { prompt, seconds, aspect, firstFrame, lastFrame, sound, avoid }, label, put, at) {
     // A model that can't start (or end) on a picture hands the clip to one that can.
     const chosen = videoModel(svc.videoModel());
     const { model, fallback } = modelForFrames(chosen, { first: Boolean(firstFrame || lastFrame), last: Boolean(firstFrame && lastFrame) });
@@ -233,11 +293,12 @@ export function createAiToolRunner(ctx, services = {}) {
     const len = fitSeconds(model, seconds ?? DEFAULT_SECONDS);
     const made = await generating(control, `Generating ${len ? `${len}s of ` : ''}video with ${model.label}`,
       () => svc.generateVideo({ prompt, model: model.id, seconds: len, aspect: shape, firstFrame, lastFrame, sound, negativePrompt: avoid, testMode: svc.testMode() }),
-      (r) => keepVideo(r, prompt));
+      (r) => keepFile(new File([r.blob], videoFileName(prompt, r.blob.type), { type: r.blob.type || 'video/mp4' }), 'ai-video', 'video'));
     if (!made) return { skipped: true };
     control?.note?.('Adding the video to the project…');
     const asset = await importMade(new File([made.blob], videoFileName(prompt, made.blob.type), { type: made.blob.type || 'video/mp4' }), 'ai-video');
-    const { entry, value } = oneStep(label, asset, () => put(asset));
+    if (control?.stopped?.()) return keepMade(asset, 'video');
+    const { entry, value } = oneStep(label, asset, () => put(asset), at);
     const clip = value?.clip || null;
     if (clip) store.select(clip.id);
     const length = asset.duration ? secs(asset.duration) : len ? `${len}s` : '';
@@ -256,7 +317,7 @@ export function createAiToolRunner(ctx, services = {}) {
       return ok(`\n${clipDetails(store.project, f.clip, f.track)}`, { target: { ids: [f.clip.id], time: f.clip.start } });
     },
 
-    async generate_video(a, control) {
+    async generate_video(a, control, at) {
       const prompt = str(a.prompt);
       if (!prompt) return fail('describe the video in prompt');
       let first = null;
@@ -269,10 +330,10 @@ export function createAiToolRunner(ctx, services = {}) {
         return fail(err.message);
       }
       return makeVideo(control, { prompt, seconds: num(a.seconds), aspect: a.aspect, firstFrame: first, lastFrame: last, sound: typeof a.sound === 'boolean' ? a.sound : undefined, avoid: str(a.avoid, 500) }, 'Generate video',
-        (asset) => place(asset, { place: a.place, start: a.start }));
+        (asset) => place(asset, { place: a.place, start: a.start }), at);
     },
 
-    async animate_image(a, control) {
+    async animate_image(a, control, at) {
       const f = oneClip(a.clip, (c) => c.type === 'image', 'image clip');
       if (f.error) return fail(f.error);
       const prompt = str(a.prompt);
@@ -285,7 +346,7 @@ export function createAiToolRunner(ctx, services = {}) {
       } catch (err) {
         return fail(err.message);
       }
-      const seconds = Number.isFinite(num(a.seconds)) ? num(a.seconds) : f.clip.duration / US;
+      const seconds = videoSeconds('animate_image', a);
       return makeVideo(control, { prompt, seconds, firstFrame: picture, sound: typeof a.sound === 'boolean' ? a.sound : undefined }, 'Animate picture', (asset) => {
         const now = T.findClip(store.project, id);
         if (!now || now.track.locked) return place(asset, { place: 'end' });
@@ -298,10 +359,10 @@ export function createAiToolRunner(ctx, services = {}) {
         });
         const clip = T.findClip(store.project, id)?.clip;
         return { clip, words: `in place of the picture, as clip ${id} at ${clip ? span(clip) : ''}` };
-      });
+      }, at);
     },
 
-    async extend_clip(a, control) {
+    async extend_clip(a, control, at) {
       const f = oneClip(a.clip, (c) => c.type === 'video' || c.type === 'image', 'video or image clip');
       if (f.error) return fail(f.error);
       const prompt = str(a.prompt);
@@ -319,10 +380,10 @@ export function createAiToolRunner(ctx, services = {}) {
         if (track.main) return place(asset, { place: 'after', afterId: clip.id });
         const now = T.findClip(store.project, clip.id)?.clip || clip;
         return place(asset, { place: 'overlay', start: T.clipEnd(now) / US, trackId: track.id });
-      });
+      }, at);
     },
 
-    async generate_transition(a, control) {
+    async generate_transition(a, control, at) {
       const f = oneClip(a.after_clip, (c) => c.type === 'video' || c.type === 'image', 'video or image clip');
       if (f.error) return fail(f.error);
       if (!f.track.main) return fail('AI transitions go between clips on the base track');
@@ -341,28 +402,27 @@ export function createAiToolRunner(ctx, services = {}) {
       const shortest = !model.seconds ? null : Array.isArray(model.seconds) ? model.seconds[0] : model.seconds.min;
       const prompt = `A seamless cinematic transition that morphs the first shot into the second. ${str(a.prompt) || 'Smooth camera movement, continuous motion, no cut.'}`;
       const id = f.clip.id;
-      return makeVideo(control, { prompt, seconds: Number.isFinite(num(a.seconds)) ? num(a.seconds) : shortest ?? undefined, firstFrame: from, lastFrame: to }, 'AI transition', (asset) => place(asset, { place: 'after', afterId: id }));
+      return makeVideo(control, { prompt, seconds: Number.isFinite(num(a.seconds)) ? num(a.seconds) : shortest ?? undefined, firstFrame: from, lastFrame: to }, 'AI transition', (asset) => place(asset, { place: 'after', afterId: id }), at);
     },
 
-    async generate_image(a, control) {
+    async generate_image(a, control, at) {
       const prompt = str(a.prompt, 1000);
       if (!prompt) return fail('describe the picture in prompt');
       const s = store.project.settings;
       const aspect = IMAGE_ASPECTS.some((x) => x.id === a.aspect) ? a.aspect : aspectForSize(s.width, s.height).id;
       const style = IMAGE_STYLES.some((x) => x.id === a.style) ? a.style : 'none';
-      const made = await generating(control, 'Generating the picture', () => svc.generateImage(prompt, { aspect, style, model: svc.imageModel(), testMode: svc.testMode() }), async (r) => {
-        const asset = await importMade(new File([r.blob], imageFileName(prompt), { type: r.blob.type || 'image/png' }), 'ai-image').catch(() => null);
-        if (asset) actions.registerAsset(asset);
-      });
+      const made = await generating(control, 'Generating the picture', () => svc.generateImage(prompt, { aspect, style, model: svc.imageModel(), testMode: svc.testMode() }),
+        (r) => keepFile(new File([r.blob], imageFileName(prompt), { type: r.blob.type || 'image/png' }), 'ai-image', 'picture'));
       if (!made) return { skipped: true };
       const asset = await importMade(new File([made.blob], imageFileName(prompt, (made.blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg')), { type: made.blob.type || 'image/png' }), 'ai-image');
+      if (control?.stopped?.()) return keepMade(asset, 'picture');
       const duration = Number.isFinite(num(a.duration)) ? Math.round(Math.max(0.2, num(a.duration)) * US) : 0;
-      const { entry, value } = oneStep('Generate picture', asset, () => place(asset, { place: a.place, start: a.start, duration }));
+      const { entry, value } = oneStep('Generate picture', asset, () => place(asset, { place: a.place, start: a.start, duration }), at);
       if (value.clip) store.select(value.clip.id);
       return ok(`made a picture (media ${asset.id}) and added it ${value.words}.`, { changed: true, entry, target: value.clip ? { ids: [value.clip.id], time: value.clip.start } : null });
     },
 
-    async edit_image(a, control) {
+    async edit_image(a, control, at) {
       const instruction = str(a.instruction, 600);
       if (!instruction) return fail('describe the change in instruction');
       control?.note?.('Capturing the picture…');
@@ -372,10 +432,12 @@ export function createAiToolRunner(ctx, services = {}) {
       } catch (err) {
         return fail(err.message);
       }
-      const made = await generating(control, 'Editing the picture', () => svc.editPicture(got.picture, instruction, { model: svc.imageModel(), testMode: svc.testMode() }), async () => {});
-      if (!made) return { skipped: true };
       const base = got.clip ? got.clip.name || store.project.assets[got.clip.assetId]?.name : 'Picture';
-      const asset = await importMade(new File([made.blob], imageFileName(`${String(base || 'Picture').replace(/\.[a-z0-9]{2,5}$/i, '')} edited`), { type: made.blob.type || 'image/png' }), 'ai-image');
+      const edited = (r) => new File([r.blob], imageFileName(`${String(base || 'Picture').replace(/\.[a-z0-9]{2,5}$/i, '')} edited`), { type: r.blob.type || 'image/png' });
+      const made = await generating(control, 'Editing the picture', () => svc.editPicture(got.picture, instruction, { model: svc.imageModel(), testMode: svc.testMode() }), (r) => keepFile(edited(r), 'ai-image', 'picture'));
+      if (!made) return { skipped: true };
+      const asset = await importMade(edited(made), 'ai-image');
+      if (control?.stopped?.()) return keepMade(asset, 'picture');
       const inPlace = got.clip?.type === 'image' && a.replace !== false;
       const sourceClip = got.clip;
       const { entry, value } = oneStep('Edit picture', asset, () => {
@@ -384,19 +446,20 @@ export function createAiToolRunner(ctx, services = {}) {
           return { clip, words: `in place of the picture of clip ${sourceClip.id}` };
         }
         return place(asset, { place: a.place || 'overlay', start: a.start ?? (sourceClip ? sourceClip.start / US : store.time / US) });
-      });
+      }, at);
       if (value.clip) store.select(value.clip.id);
       return ok(`changed the picture from ${got.from} (new media ${asset.id}) and put it ${value.words}.`, { changed: true, entry, target: value.clip ? { ids: [value.clip.id], time: value.clip.start } : null });
     },
 
-    async add_voiceover(a, control) {
+    async add_voiceover(a, control, at) {
       const text = str(a.text, 3000);
       if (!text) return fail('give the words to speak in text');
       const voice = TTS_VOICES.some((v) => v.id === a.voice) ? a.voice : TTS_VOICES[0].id;
-      const blob = await generating(control, 'Recording the voice', () => svc.synthesize(text, voice, { testMode: svc.testMode() }), async () => {});
+      const blob = await generating(control, 'Recording the voice', () => svc.synthesize(text, voice, { testMode: svc.testMode() }), (b) => keepFile(speechFile(b, text), 'tts', 'voiceover'));
       if (!blob) return { skipped: true };
       const asset = await importMade(speechFile(blob, text), 'tts');
-      const { entry, value } = oneStep('Add voiceover', asset, () => place(asset, { start: a.start }));
+      if (control?.stopped?.()) return keepMade(asset, 'voiceover');
+      const { entry, value } = oneStep('Add voiceover', asset, () => place(asset, { start: a.start }), at);
       return ok(`added the voiceover (media ${asset.id}) ${value.words}.`, { changed: true, entry, target: value.clip ? { ids: [value.clip.id], time: value.clip.start } : null });
     },
 
@@ -437,7 +500,7 @@ export function createAiToolRunner(ctx, services = {}) {
     if (!tool) return fail(`there is no tool called ${name}`);
     try {
       if (VIDEO_PAUSE.has(name)) ctx.player?.pause?.();
-      return await tool(a, control);
+      return await tool(a, control, openedAt());
     } catch (err) {
       if (err?.name === 'AbortError') return { skipped: true };
       console.error(err);
@@ -445,7 +508,16 @@ export function createAiToolRunner(ctx, services = {}) {
     }
   }
 
-  return { run };
+  return {
+    run,
+    videoSeconds,
+    /** The editor is being left: what is still being made goes into the project when it is done. */
+    close() {
+      closed = true;
+      project.name = store.project.name || project.name;
+      if (openRunners.get(project.id) === self) openRunners.delete(project.id);
+    },
+  };
 }
 
 const VIDEO_PAUSE = new Set(['animate_image', 'extend_clip', 'generate_transition', 'edit_image']);
