@@ -10,13 +10,18 @@ export default defineConfig({
     trace: "retain-on-failure",
     // Specs written against a blank first slide keep it: new presentations
     // start with the blank slide the app offers as a preference. Specs about
-    // the Title Slide start (e2e/layouts.spec.js) clear this.
+    // the Title Slide start (e2e/layouts.spec.js) clear this. The AI
+    // assistant opens with a deck unless closed; specs keep the full-width
+    // slide they were written against (e2e/assistant.spec.js tests the default).
     storageState: {
       cookies: [],
       origins: [
         {
           origin: `http://127.0.0.1:${port}`,
-          localStorage: [{ name: "presentation:start", value: "blank" }],
+          localStorage: [
+            { name: "presentation:start", value: "blank" },
+            { name: "presentation:assistant", value: '{"open":false}' },
+          ],
         },
       ],
     },

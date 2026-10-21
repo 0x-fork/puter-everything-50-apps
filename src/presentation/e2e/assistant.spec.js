@@ -22,15 +22,58 @@ const toolCall = (name, input, id = `call_${name}`) => ({
   input,
 });
 
+// Specs start with the assistant closed (playwright.config.js), the way the
+// user who closed it last time finds it.
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() =>
-    localStorage.removeItem("presentation:assistant"),
-  );
   await mockPuter(page);
   await page.goto("/");
   await expect(
     page.getByRole("button", { name: "Present", exact: true }),
   ).toBeVisible();
+});
+
+const present = (page) =>
+  expect(
+    page.getByRole("button", { name: "Present", exact: true }),
+  ).toBeVisible();
+
+test("the assistant opens with a deck until closed, then stays as left", async ({
+  page,
+}, info) => {
+  const panel = page.locator("#ai-panel");
+  const toggle = page.getByRole("button", { name: "Ask AI" });
+  const saved = () =>
+    page.evaluate(() =>
+      JSON.parse(localStorage.getItem("presentation:assistant")),
+    );
+  await page.evaluate(() => localStorage.removeItem("presentation:assistant"));
+  await page.reload();
+  await present(page);
+  if (info.project.name === "mobile") {
+    // On a phone the panel would cover the slide: it waits to be asked for.
+    await expect(panel).toBeHidden();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await toggle.click();
+  } else {
+    await expect(panel).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    // Opening by itself, it leaves keys to the slide.
+    await expect(
+      page.getByRole("textbox", { name: "Message the assistant" }),
+    ).not.toBeFocused();
+  }
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "Close the assistant" }).click();
+  await expect(panel).toBeHidden();
+  expect((await saved()).open).toBe(false);
+  await page.reload();
+  await present(page);
+  await expect(panel).toBeHidden();
+  await toggle.click();
+  await expect(panel).toBeVisible();
+  await page.reload();
+  await present(page);
+  await expect(panel).toBeVisible();
 });
 
 test("the assistant edits the slide, shows its steps, and undoes its reply", async ({
@@ -400,6 +443,12 @@ test("where the format panel lies over the slide, it and the assistant take turn
     "aria-expanded",
     "false",
   );
+  // Making room is not the user closing it: it opens with the next deck.
+  expect(
+    await page.evaluate(
+      () => JSON.parse(localStorage.getItem("presentation:assistant")).open,
+    ),
+  ).toBe(true);
   await page.getByRole("button", { name: "Ask AI" }).click();
   await expect(assistant).toBeVisible();
   await expect(format).toBeHidden();

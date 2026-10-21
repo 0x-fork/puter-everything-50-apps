@@ -4392,7 +4392,7 @@ function show(what, on) {
     editor.classList.toggle("show-inspector", on);
     chrome.formatPane = on;
     if (on && sidePanelsExclusive() && assistant?.isOpen)
-      assistant.close({ focusWorkspace: false });
+      assistant.close({ focusWorkspace: false, remember: false });
     if (on)
       document.querySelector("#inspector")?.focus({ preventScroll: true });
   } else if (what === "notes") {
@@ -7017,7 +7017,7 @@ function toggleInspector() {
   // Where the format panel lies over the slide, the assistant beside it
   // would leave no slide to see: one of the two is open at a time.
   if (!visible && sidePanelsExclusive() && assistant?.isOpen)
-    assistant.close({ focusWorkspace: false });
+    assistant.close({ focusWorkspace: false, remember: false });
   updatePanelToggles();
 }
 const sidePanelsExclusive = () => matchMedia("(max-width: 1150px)").matches;

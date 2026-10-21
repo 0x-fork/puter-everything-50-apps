@@ -48,10 +48,19 @@ export function loadAssistantSettings() {
     width: Number.isFinite(s.width)
       ? Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, s.width))
       : DEFAULT_WIDTH,
-    // Closed until asked for; once left open it opens with the next deck.
-    open: s.open === true,
+    // Open until the user closes it, then as they last left it. A phone has
+    // no room beside the slide (the panel is a sheet over it), so there it
+    // waits to be asked for.
+    open: typeof s.open === "boolean" ? s.open : !phoneLayout(),
   };
 }
+const phoneLayout = () => {
+  try {
+    return matchMedia("(max-width: 760px)").matches;
+  } catch {
+    return false;
+  }
+};
 function saveAssistantSettings(settings) {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -978,15 +987,19 @@ export function createAssistantPanel(env) {
       });
   }
 
-  function close({ focusWorkspace = true } = {}) {
+  // `remember: false` is for the editor making room, not the user choosing:
+  // the panel opens again with the next deck.
+  function close({ focusWorkspace = true, remember = true } = {}) {
     if (!isOpen) return;
     // A question waiting on the user goes unanswered with the panel shut: it
     // is declined, as Escape would.
     if (pendingApproval) answer(false);
     isOpen = false;
     root.hidden = true;
-    settings.open = false;
-    saveAssistantSettings(settings);
+    if (remember) {
+      settings.open = false;
+      saveAssistantSettings(settings);
+    }
     env.onToggle?.(false);
     if (focusWorkspace) env.focusWorkspace();
   }

@@ -14,6 +14,11 @@ test.use({ storageState: { cookies: [], origins: [] } });
 const mod = process.platform === "darwin" ? "Meta" : "Control";
 
 async function start(page) {
+  // The assistant stays shut, as in the shared config: on a tablet it would
+  // leave the placeholders too small for their insert buttons.
+  await page.addInitScript(() =>
+    localStorage.setItem("presentation:assistant", '{"open":false}'),
+  );
   await page.route("https://js.puter.com/v2/", (r) =>
     r.fulfill({
       contentType: "application/javascript",
