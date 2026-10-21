@@ -5,10 +5,12 @@ import { PDFDocument, PDFBool, PDFName, PDFHexString, PDFString, StandardFonts }
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createCanvas } from '@napi-rs/canvas';
 import { flattenCounts, flattenDocument } from '../src/core/flatten.js';
+import { duplicatePages, flattenFonts, insertPdfPages } from '../src/core/document.js';
 import { addNote, listNotes } from '../src/core/notes.js';
 import { addHighlight, listHighlights, rectQuad } from '../src/core/highlight.js';
 import { addLink, listLinks } from '../src/core/links.js';
 import { extractPages } from '../src/core/pages.js';
+import { addReply, addShapeAnnotation, setReviewState } from '../src/core/annotations.js';
 
 afterEach(() => vi.restoreAllMocks());
 async function view(bytes, intent = 'display') {
@@ -80,6 +82,20 @@ describe('flattening', () => {
     expect(after.pixels[i]).toBeGreaterThan(200);
     expect(after.pixels[i + 2]).toBeLessThan(200);
     expect(flattenDocument(reopened)).toBe(false);
+  });
+  it('counts a comment with its replies and review states as one', async () => {
+    const doc = await PDFDocument.create();
+    doc.addPage([300, 300]);
+    const id = addShapeAnnotation(doc, 0, {
+      kind: 'square',
+      rect: { x: 50, y: 50, width: 100, height: 80 },
+      text: 'Check',
+    });
+    addReply(doc, 0, addReply(doc, 0, id, { text: 'Done' }), { text: 'Thanks' });
+    setReviewState(doc, 0, id, { state: 'Completed', author: 'Ada' });
+    expect(flattenCounts(doc)).toEqual({ fields: 0, annotations: 1 });
+    expect(flattenDocument(doc)).toEqual({ fields: 0, annotations: 1 });
+    expect(doc.getPage(0).node.Annots()?.size() ?? 0).toBe(0);
   });
   it('flattens only what was asked for', async () => {
     const onlyFields = await reviewed();
@@ -365,6 +381,78 @@ it('regenerates missing field appearances and appearances the form says are stal
       expect((await page.getTextContent()).items.map((item) => item.str).join('')).toContain(
         'New value',
       );
+    } finally {
+      await task.destroy();
+    }
+  }
+});
+
+it('redraws fields in Polish, Cyrillic, or Korean when the form leaves drawing to viewers', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(
+    async (url) =>
+      new Response(
+        await readFile(new URL(`../public/fonts/${String(url).split('/').pop()}`, import.meta.url)),
+      ),
+  );
+  const source = await PDFDocument.create();
+  const page = source.addPage([300, 300]);
+  const form = source.getForm();
+  const values = { city: 'Łódź', name: 'Иван', greeting: '안녕하세요', plain: 'Paris' };
+  Object.entries(values).forEach(([key, value], i) => {
+    const field = form.createTextField(key);
+    field.addToPage(page, { x: 20, y: 40 + 50 * i, width: 200, height: 30 });
+    field.acroField.setValue(PDFHexString.fromText(value));
+  });
+  form.acroForm.dict.set(PDFName.of('NeedAppearances'), PDFBool.True);
+  const doc = await PDFDocument.load(await source.save({ updateFieldAppearances: false }));
+  const fonts = await flattenFonts(doc);
+  expect(fonts).toHaveLength(2);
+  expect(flattenDocument(doc, { fonts })).toEqual({ fields: 4, annotations: 0 });
+  const task = pdfjs.getDocument({
+    data: await doc.save(),
+    standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)
+      .pathname,
+  });
+  try {
+    const text = (await (await (await task.promise).getPage(1)).getTextContent()).items
+      .map((item) => item.str)
+      .join(' ');
+    for (const value of Object.values(values)) expect(text).toContain(value);
+  } finally {
+    await task.destroy();
+  }
+});
+
+it('copies, inserts, and extracts the pages of such a form, its Polish values drawn', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(
+    async (url) =>
+      new Response(
+        await readFile(new URL(`../public/fonts/${String(url).split('/').pop()}`, import.meta.url)),
+      ),
+  );
+  const source = await PDFDocument.create();
+  const field = source.getForm().createTextField('city');
+  field.addToPage(source.addPage([300, 300]), { x: 20, y: 40, width: 200, height: 30 });
+  field.acroField.setValue(PDFHexString.fromText('Łódź'));
+  source.getForm().acroForm.dict.set(PDFName.of('NeedAppearances'), PDFBool.True);
+  const bytes = await source.save({ updateFieldAppearances: false });
+  const duplicated = await PDFDocument.load(bytes);
+  await duplicatePages(duplicated, [0]);
+  const inserted = await PDFDocument.create();
+  await insertPdfPages(inserted, bytes);
+  for (const [result, page] of [
+    [await duplicated.save(), 2],
+    [await inserted.save(), 1],
+    [await extractPages(bytes, [0]), 1],
+  ]) {
+    const task = pdfjs.getDocument({
+      data: result.slice(),
+      standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)
+        .pathname,
+    });
+    try {
+      const content = await (await (await task.promise).getPage(page)).getTextContent();
+      expect(content.items.map((item) => item.str).join('')).toContain('Łódź');
     } finally {
       await task.destroy();
     }

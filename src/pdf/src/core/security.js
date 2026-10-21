@@ -394,6 +394,13 @@ function legacyUserFromOwner(paddedOwner, security) {
     );
   return value;
 }
+/** The password a padded legacy password was made from: its bytes before the pad string. */
+function unpaddedPassword(padded) {
+  let length = 0;
+  while (length < 32 && !equal(padded.subarray(length), PAD.subarray(0, 32 - length))) length++;
+  return String.fromCharCode(...padded.subarray(0, length));
+}
+
 /** Algorithm 2.B (revision 6) or plain SHA-256 (revision 5). */
 async function hashPassword(password, salt, userData, R) {
   let k = await sha(256, concat(password, salt, userData));
@@ -534,8 +541,10 @@ async function authenticate(security, password) {
     throw new PasswordError();
   }
   const padded = legacyPassword(password);
-  let key = legacyFileKey(legacyUserFromOwner(padded, security), security);
-  if (legacyUserKeyMatches(key, security)) return accepted(key, true);
+  const user = legacyUserFromOwner(padded, security);
+  let key = legacyFileKey(user, security);
+  if (legacyUserKeyMatches(key, security))
+    return { ...accepted(key, true), userPassword: unpaddedPassword(user) };
   key = legacyFileKey(padded, security);
   if (legacyUserKeyMatches(key, security)) return accepted(key, false);
   throw new PasswordError();
@@ -786,7 +795,7 @@ export async function unlockPdf(bytes, password = '') {
   const ids = context.lookup(context.trailerInfo.ID);
   const first = ids instanceof PDFArray && ids.size() ? context.lookup(ids.get(0)) : undefined;
   const security = readSecurity(encrypt, isString(first) ? first.asBytes() : EMPTY);
-  const { fileKey, owner } = await authenticate(security, password);
+  const { fileKey, owner, userPassword } = await authenticate(security, password);
   const selectStream = streamCiphers(security, fileKey, 'decrypt', encrypt);
   await transformLargeStreams(
     context,
@@ -812,6 +821,8 @@ export async function unlockPdf(bytes, password = '') {
     bytes: await savePdf(doc, { updateFieldAppearances: false, addDefaultPage: false }),
     owner,
     encryption,
+    // The permissions password of older revisions also yields the open password.
+    userPassword,
   };
 }
 /** What readers may do without the owner password, from the permission flags. */
@@ -823,13 +834,13 @@ export const permissionsOf = (P) => ({
 });
 /**
  * The protection of a file that has just been opened: the typed password in the role it
- * played, the other one unknown, the permissions the file grants, and its encryption so an
- * unchanged protection goes back as it came.
+ * played, the other one unknown (null), the permissions the file grants, and its encryption so
+ * an unchanged protection goes back as it came.
  */
-export function openedProtection({ owner, encryption }, password) {
+export function openedProtection({ owner, encryption, userPassword = null }, password) {
   return {
     owner,
-    open: owner ? null : password,
+    open: owner ? userPassword : password,
     permissions: owner ? password : null,
     allow: permissionsOf(encryption.security.P),
     original: encryption,
@@ -954,29 +965,48 @@ async function encryptAsBefore(bytes, { fileKey, security, dict }) {
   });
 }
 
-/** Bits 3 to 12 of the permission flags; the other bits are fixed by the specification. */
-export function permissionFlags({ print = true, copy = true, annotate = true, edit = true } = {}) {
+const PERMISSION_BITS = {
+  print: 0x4 | 0x800, // and at high resolution
+  copy: 0x10,
+  annotate: 0x20 | 0x100, // and fill in forms
+  edit: 0x8 | 0x400, // and assemble pages
+};
+/**
+ * Bits 3 to 12 of the permission flags; the other bits are fixed by the specification. With
+ * `base`, the flags of a file of revision 3 or later, each permission `allow` leaves as the
+ * file had it keeps the file's finer bits (printing at low resolution only, filling in forms
+ * without commenting, assembling pages without editing).
+ */
+export function permissionFlags(allow = {}, base = null) {
   let flags = 0xfffff0c0 | 0x200; // Text access for accessibility is always allowed.
-  if (print) flags |= 0x4 | 0x800;
-  if (copy) flags |= 0x10;
-  if (annotate) flags |= 0x20 | 0x100;
-  if (edit) flags |= 0x8 | 0x400;
+  const had = base == null ? null : permissionsOf(base);
+  for (const [key, bits] of Object.entries(PERMISSION_BITS)) {
+    const allowed = allow[key] ?? true;
+    if (had && allowed === had[key]) flags |= base & bits;
+    else if (allowed) flags |= bits;
+  }
   return flags | 0;
 }
 /**
  * Encrypt a PDF with AES-256 (revision 6). `open` is the password readers type; `permissions`
- * is the owner password that lifts the restrictions in `allow`, defaulting to the open password.
+ * is the owner password that lifts the restrictions in `allow`, defaulting to the open password;
+ * `base` keeps finer permissions of a file (see permissionFlags). With `open: null`, `openFrom` (an AES-256 file's encryption, as unlockPdf returns it) keeps
+ * that file's open password, which need not be known: its key and user entries carry over.
  */
 export async function protectPdf(
   bytes,
-  { open = '', permissions = '', allow = {}, original = null } = {},
+  { open = '', permissions = '', allow = {}, base = null, original = null, openFrom = null } = {},
 ) {
   if (original) return encryptAsBefore(bytes, original);
+  const reader = open === null && openFrom?.security.R >= 5 ? openFrom : null;
+  if (open === null && !reader) throw new Error('Choose a password to open the PDF.');
   open ||= '';
-  const ownerPassword = permissions || open;
+  // Without restrictions the permissions password lifts nothing; a random one will do.
+  const ownerPassword = permissions || open || (reader && toHex(randomBytes(16)));
   if (!open && !ownerPassword) throw new Error('Choose a password.');
+  const R = reader ? reader.security.R : 6;
   const doc = await PDFDocument.load(bytes, { updateMetadata: false });
-  declareRevision6(doc);
+  if (R === 6) declareRevision6(doc);
   const { context } = doc;
   // Fresh protection defines only StdCF, and encrypts every stream with it. A Crypt selector
   // from the old file must yield to that default, Identity exemptions included: edited content
@@ -987,22 +1017,30 @@ export async function protectPdf(
     if (streamCryptName(object.dict))
       context.assign(ref, PDFRawStream.of(withoutCryptFilter(object.dict), object.getContents()));
   }
-  const fileKey = randomBytes(32);
-  const user = modernPassword(open);
   const ownerBytes = modernPassword(ownerPassword);
-  const P = permissionFlags(allow);
-  const validationSalt = randomBytes(8);
-  const keySalt = randomBytes(8);
-  const U = concat(await hashPassword(user, validationSalt, EMPTY, 6), validationSalt, keySalt);
-  const UE = aesCbcEncrypt(await hashPassword(user, keySalt, EMPTY, 6), ZERO_IV, fileKey);
+  const P = permissionFlags(allow, base);
+  let fileKey, U, UE;
+  if (reader) {
+    // The open password checks (U, UE) depend only on that password and the file key.
+    ({ fileKey } = reader);
+    U = reader.security.U.subarray(0, 48);
+    UE = reader.security.UE.subarray(0, 32);
+  } else {
+    fileKey = randomBytes(32);
+    const user = modernPassword(open);
+    const validationSalt = randomBytes(8);
+    const keySalt = randomBytes(8);
+    U = concat(await hashPassword(user, validationSalt, EMPTY, 6), validationSalt, keySalt);
+    UE = aesCbcEncrypt(await hashPassword(user, keySalt, EMPTY, 6), ZERO_IV, fileKey);
+  }
   const ownerValidationSalt = randomBytes(8);
   const ownerKeySalt = randomBytes(8);
   const O = concat(
-    await hashPassword(ownerBytes, ownerValidationSalt, U, 6),
+    await hashPassword(ownerBytes, ownerValidationSalt, U, R),
     ownerValidationSalt,
     ownerKeySalt,
   );
-  const OE = aesCbcEncrypt(await hashPassword(ownerBytes, ownerKeySalt, U, 6), ZERO_IV, fileKey);
+  const OE = aesCbcEncrypt(await hashPassword(ownerBytes, ownerKeySalt, U, R), ZERO_IV, fileKey);
   const perms = aesCbcEncrypt(
     fileKey,
     ZERO_IV,
@@ -1018,7 +1056,7 @@ export async function protectPdf(
   const encrypt = context.obj({
     Filter: 'Standard',
     V: 5,
-    R: 6,
+    R,
     Length: 256,
     P,
     CF: { StdCF: { CFM: 'AESV3', AuthEvent: 'DocOpen', Length: 32 } },

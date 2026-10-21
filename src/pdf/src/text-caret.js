@@ -1,4 +1,5 @@
-function caretAt(x, y) {
+/** The collapsed range under a point, in browsers with either caret lookup. */
+export function caretAt(x, y) {
   const caret = document.caretPositionFromPoint?.(x, y);
   if (caret) {
     const range = document.createRange();
@@ -24,6 +25,7 @@ export function placeTextCaret(input, { clientX, clientY }) {
       pointerEvents: 'auto',
     });
     mirror.setAttribute('aria-hidden', 'true');
+    mirror.dir = input.dir;
     mirror.textContent = input.value + '\u200b';
     input.after(mirror);
     mirror.scrollTop = input.scrollTop;

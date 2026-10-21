@@ -15,7 +15,8 @@ import {
 } from 'pdf-lib';
 import { inspectPaths, pathColorHex } from './path-edit.js';
 import { decode, matrix, pageSource, parseContent } from './text-edit.js';
-import { annotationsOf } from './structure.js';
+import { annotationsOf, pageRotation } from './structure.js';
+import { visibleBox } from './document.js';
 
 const name = PDFName.of;
 const get = (dict, key) => dict?.lookup?.(name(key));
@@ -24,12 +25,12 @@ const apply = (m, [x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + 
 
 /* ---------- Text ---------- */
 
-/** PDF.js text items (user space of the unrotated page) as horizontal runs. */
-function fromTextContent(textContent) {
+/** PDF.js text items (user space of the unrotated page), turned by `turn`, as horizontal runs. */
+function fromTextContent(textContent, turn = identity) {
   const items = [];
   for (const item of textContent?.items ?? []) {
     if (typeof item.str !== 'string' || !item.str || !Array.isArray(item.transform)) continue;
-    const [a, b, c, d, x, y] = item.transform;
+    const [a, b, c, d, x, y] = matrix(turn, item.transform);
     // Rotated and vertical text is not a form label; skip it rather than guess its extent.
     if (Math.abs(b) > 1e-3 * Math.abs(a) || a <= 0 || !Number.isFinite(item.width)) continue;
     const size = Math.hypot(c, d) || item.height || 10;
@@ -87,7 +88,7 @@ function fontMetrics(font) {
  * A small text reader for when no PDF.js text is supplied: positions and simple-font text
  * from the content stream, including form XObjects. Two-byte fonts give positions only.
  */
-function extractText(doc, page) {
+function extractText(doc, page, turn = identity) {
   const items = [];
   const walk = (source, resources, ctm, depth) => {
     if (depth > 8) return;
@@ -182,7 +183,7 @@ function extractText(doc, page) {
       }
     }
   };
-  walk(pageSource(page), page.node.Resources(), identity, 0);
+  walk(pageSource(page), page.node.Resources(), turn, 0);
   return items;
 }
 
@@ -280,7 +281,7 @@ const luminance = (hex) => {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 };
 /** Visible rectangles, rules and the lines a table grid is drawn with, in page space. */
-function pageGeometry(doc, pageIndex) {
+function pageGeometry(doc, pageIndex, turn = identity) {
   const boxes = [],
     horizontals = [],
     verticals = [];
@@ -292,7 +293,7 @@ function pageGeometry(doc, pageIndex) {
   }
   for (const path of paths) {
     if (path.invisible) continue;
-    const ctm = path.ctm;
+    const ctm = matrix(turn, path.ctm);
     const scale = Math.sqrt(Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2])) || 1;
     let strokeColor = '#000000',
       fillColor = '#000000';
@@ -509,6 +510,17 @@ function readingOrder(candidates) {
   return rows.flatMap((row) => row.sort((a, b) => a.rect.x - b.rect.x));
 }
 
+/** A rectangle's bounds after `m`. */
+function turned(m, { x, y, width, height }) {
+  const corners = [
+    [x, y],
+    [x + width, y + height],
+  ].map((p) => apply(m, p));
+  return boundsOf(
+    corners.map((p) => p[0]),
+    corners.map((p) => p[1]),
+  );
+}
 const area = (r) => Math.max(0, r.width) * Math.max(0, r.height);
 function overlap(a, b) {
   const w = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
@@ -523,7 +535,7 @@ const inside = (rect, x, y, inset = 0) =>
 const runInside = (rect, run) =>
   inside(rect, run.x + Math.min(run.width, run.size) / 2, run.y + 0.3 * run.size, 0.5);
 
-function widgetRects(doc, page) {
+function widgetRects(doc, page, turn = identity) {
   const rects = [];
   for (const ref of annotationsOf(page)?.asArray() || []) {
     const dict = doc.context.lookup(ref);
@@ -532,7 +544,7 @@ function widgetRects(doc, page) {
       ?.asArray?.()
       .map((v) => doc.context.lookup(v)?.asNumber?.());
     if (values?.length !== 4 || !values.every(Number.isFinite)) continue;
-    rects.push(boundsOf([values[0], values[2]], [values[1], values[3]]));
+    rects.push(turned(turn, boundsOf([values[0], values[2]], [values[1], values[3]])));
   }
   return rects;
 }
@@ -547,15 +559,25 @@ function widgetRects(doc, page) {
  */
 export function detectFormFields(doc, pageIndex, { textContent } = {}) {
   const page = doc.getPage(pageIndex);
-  const { width: pageWidth } = page.getMediaBox?.() ?? { width: 612 };
+  // A turned page is read as it is shown: its text runs across the screen, not across the
+  // page's own coordinates. Fields are found there and turned back.
+  const angle = (pageRotation(page) * Math.PI) / 180;
+  const [cos, sin] = [Math.round(Math.cos(angle)), Math.round(Math.sin(angle))];
+  const turn = [cos, -sin, sin, cos, 0, 0],
+    back = [cos, sin, -sin, cos, 0, 0];
+  const { width: pageWidth } = turned(
+    turn,
+    page.getMediaBox?.() ?? { x: 0, y: 0, width: 612, height: 792 },
+  );
+  const shown = turned(turn, visibleBox(page));
   let items;
   try {
-    items = textContent ? fromTextContent(textContent) : extractText(doc, page);
+    items = textContent ? fromTextContent(textContent, turn) : extractText(doc, page, turn);
   } catch {
     items = [];
   }
   const { blanks, runs } = textLayout(items);
-  const { boxes, horizontals, verticals } = pageGeometry(doc, pageIndex);
+  const { boxes, horizontals, verticals } = pageGeometry(doc, pageIndex, turn);
   const candidates = [];
   const add = (type, rect, label, confidence, source, extra = {}) => {
     if (!(rect.width >= 4 && rect.height >= 4)) return;
@@ -645,8 +667,13 @@ export function detectFormFields(doc, pageIndex, { textContent } = {}) {
     const left = leftLabel(rule.x0, rule.y - 2, rule.y + 14, 80);
     const below = left ? null : labelBelow(rule.x0, rule.x1, rule.y - rule.width / 2);
     const above = left || below ? null : labelAbove(rule.x0, rule.x1, top + 14);
-    // A long line with no label beside or under it separates sections.
-    if (!left && !below && length > 0.6 * pageWidth) continue;
+    // A long line with no label beside or under it separates sections; near the top or
+    // bottom of the page it sets off the header or footer, whatever is printed by it.
+    if (length > 0.6 * pageWidth) {
+      if (!left && !below) continue;
+      const height = (rule.y - shown.y) / shown.height;
+      if (height < 0.1 || height > 0.9) continue;
+    }
     const height = headroom(rule.x0, rule.x1, top, Math.max(14, (left?.size ?? 10) * 1.6));
     if (height < 8) continue;
     const label = left ?? below ?? above;
@@ -696,6 +723,8 @@ export function detectFormFields(doc, pageIndex, { textContent } = {}) {
     }
     if (box.width < 30 || box.height < 10 || box.height > 220 || box.width > 0.95 * pageWidth)
       continue;
+    // Dark filled boxes are banners and bars; nothing written in them could be read.
+    if (box.filled && box.fill < 0.6) continue;
     // A frame around other boxes, lines or blanks groups them; it is not a field itself.
     const frames = (other) =>
       other !== box &&
@@ -765,10 +794,12 @@ export function detectFormFields(doc, pageIndex, { textContent } = {}) {
   }
 
   // Keep the most likely of overlapping candidates, away from existing fields.
-  const taken = widgetRects(doc, page);
+  const taken = widgetRects(doc, page, turn);
   const accepted = [];
   for (const candidate of candidates.sort((a, b) => b.confidence - a.confidence)) {
     const { rect } = candidate;
+    // Marks outside the page as it is shown (printer's marks past the crop box) are no fields.
+    if (overlap(shown, rect) < 0.5 * area(rect)) continue;
     if (taken.some((widget) => overlap(widget, rect) > 0)) continue;
     if (
       accepted.some(
@@ -787,8 +818,12 @@ export function detectFormFields(doc, pageIndex, { textContent } = {}) {
       `${candidate.type === 'checkbox' ? 'Check Box' : 'Text'}${++counters[candidate.type]}`;
     const count = (used.get(base) ?? 0) + 1;
     used.set(base, count);
+    const rect = turned(back, candidate.rect);
     return {
       ...candidate,
+      rect: Object.fromEntries(
+        Object.entries(rect).map(([key, n]) => [key, Math.round(n * 100) / 100]),
+      ),
       name: count > 1 ? `${base}_${count}` : base,
       label: label || null,
     };

@@ -23,6 +23,7 @@ import { ensureMarkupAppearance } from './highlight.js';
 import { ensureNoteAppearance } from './notes.js';
 import { smoothStroke } from './signature.js';
 import { parseContent } from './text-edit.js';
+import { pageUserUnit } from './structure.js';
 
 export const name = PDFName.of;
 /** Content-stream numbers: three decimals, never exponents, never -0. */
@@ -285,15 +286,15 @@ function arcCurves(cx, cy, r, from, sweep) {
   }
   return ops;
 }
-/** Scallop chord length for a cloud intensity (BE /I 0–2). */
-const cloudChord = (intensity) => 6 + 6 * intensity;
+/** Scallop chord length for a cloud intensity (BE /I 0–2), in points as page units. */
+const cloudChord = (intensity, unit = 1) => (6 + 6 * intensity) / unit;
 const SCALLOP = (100 * Math.PI) / 180; // half the arc of each scallop: overlapping bulges
 /**
  * A cloudy border around a closed polygon: each edge is split into chords of about the same
  * length, and each chord becomes an arc a little larger than a half circle bulging outwards,
  * which is how Acrobat draws BE /S /C borders. Returns the path and the points that bound it.
  */
-function cloudPath(vertices, intensity) {
+function cloudPath(vertices, intensity, unit = 1) {
   let area = 0;
   for (let i = 0; i < vertices.length; i++) {
     const a = vertices[i],
@@ -301,7 +302,7 @@ function cloudPath(vertices, intensity) {
     area += a.x * b.y - b.x * a.y;
   }
   const points = area < 0 ? [...vertices].reverse() : vertices;
-  const chord = cloudChord(intensity);
+  const chord = cloudChord(intensity, unit);
   const ops = [],
     reach = [...vertices];
   const turns = (angle) => ((angle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
@@ -354,19 +355,22 @@ function ellipseVertices([x0, y0, x1, y1], count = 24) {
   }));
 }
 
-/** The size of a line ending drawn with a stroke `width`. */
-export const endingSize = (width) => Math.max(6, width * 3 + 4);
+/**
+ * The size of a line ending drawn with a stroke `width`, at least six points however large the
+ * page's units (`unit` points each).
+ */
+export const endingSize = (width, unit = 1) => Math.max(6 / unit, width * 3 + 4 / unit);
 /**
  * One line ending (ISO 32000-1, Table 176) at `tip`, for a line arriving from `from`: its path,
  * whether it is a closed shape that takes the interior color, and the points it reaches.
  */
-function lineEnding(style, tip, from, width) {
+function lineEnding(style, tip, from, width, unit = 1) {
   const length = Math.hypot(tip.x - from.x, tip.y - from.y) || 1;
   const ux = (tip.x - from.x) / length,
     uy = (tip.y - from.y) / length;
   const nx = -uy,
     ny = ux;
-  const size = endingSize(width),
+  const size = endingSize(width, unit),
     half = size / 2;
   const at = (along, across) => ({
     x: tip.x + ux * along + nx * across,
@@ -425,7 +429,7 @@ function lineEnding(style, tip, from, width) {
   }
 }
 /** A stroked open path with optional endings at both ends; returns operators and points. */
-function openPathWithEndings(points, [startStyle, endStyle], width, interior) {
+function openPathWithEndings(points, [startStyle, endStyle], width, interior, unit = 1) {
   const ops = [polyPath(points, false), 'S'];
   const reach = [...points];
   const ends = [
@@ -433,7 +437,7 @@ function openPathWithEndings(points, [startStyle, endStyle], width, interior) {
     [endStyle, points.at(-1), points.at(-2)],
   ];
   for (const [style, tip, from] of ends) {
-    const ending = from && lineEnding(style, tip, from, width);
+    const ending = from && lineEnding(style, tip, from, width, unit);
     if (!ending) continue;
     reach.push(...ending.points);
     ops.push(ending.path, ending.closed ? (interior ? 'B' : 's') : 'S');
@@ -494,7 +498,7 @@ const strokeSetup = (color, width, dash) => [
 const paint = (fill, stroke) => (fill && stroke ? 'B' : fill ? 'f' : stroke ? 's' : 'n');
 
 /** Square and Circle: the shape inside `box`, plain or cloudy. RD keeps the box inside Rect. */
-function drawBoxShape(doc, dict, box) {
+function drawBoxShape(doc, dict, box, unit = 1) {
   const subtype = dict.lookup(name('Subtype')).decodeText();
   const color = colorOf(dict, 'C'),
     fill = colorOf(dict, 'IC');
@@ -516,8 +520,8 @@ function drawBoxShape(doc, dict, box) {
             { x: box[2], y: box[3] },
             { x: box[0], y: box[3] },
           ];
-    const { path, reach } = cloudPath(vertices, cloud);
-    rect = boundsOf(reach, width / 2 + 1);
+    const { path, reach } = cloudPath(vertices, cloud, unit);
+    rect = boundsOf(reach, width / 2 + 1 / unit);
     ops.push('1 j', path, paint(fill, stroke));
   } else {
     rect = box.map(round);
@@ -538,7 +542,7 @@ function drawBoxShape(doc, dict, box) {
 }
 
 /** Line, Polygon and PolyLine from their own points. */
-function drawPolyShape(doc, dict) {
+function drawPolyShape(doc, dict, unit = 1) {
   const subtype = dict.lookup(name('Subtype')).decodeText();
   const color = colorOf(dict, 'C') ?? [0, 0, 0],
     fill = colorOf(dict, 'IC');
@@ -556,20 +560,20 @@ function drawPolyShape(doc, dict) {
     const cloud = cloudOf(dict);
     if (fill) ops.push(colorOps(fill, false));
     if (dash?.length && cloud === null) ops.push(`[${dash.map(fmt).join(' ')}] 0 d`);
-    const cloudy = cloud === null ? null : cloudPath(points, cloud);
+    const cloudy = cloud === null ? null : cloudPath(points, cloud, unit);
     ops.push(cloudy ? cloudy.path : polyPath(points, true), paint(fill, stroke));
-    install(doc, dict, boundsOf(cloudy ? cloudy.reach : points, width / 2 + 1), ops);
+    install(doc, dict, boundsOf(cloudy ? cloudy.reach : points, width / 2 + 1 / unit), ops);
     return;
   }
   // Lines and polylines: the dash applies to the line itself, not to its endings.
   if (fill) ops.push(colorOps(fill, false));
   const endings = endingsOf(dict);
-  const drawn = openPathWithEndings(points, endings, width, fill);
+  const drawn = openPathWithEndings(points, endings, width, fill, unit);
   if (dash?.length)
     ops.push(`[${dash.map(fmt).join(' ')}] 0 d`, drawn.ops[0], drawn.ops[1], '[] 0 d');
   else ops.push(drawn.ops[0], drawn.ops[1]);
   ops.push(...drawn.ops.slice(2));
-  install(doc, dict, boundsOf(drawn.reach, width + 1), ops);
+  install(doc, dict, boundsOf(drawn.reach, width + 1 / unit), ops);
 }
 
 /** Pencil strokes, smoothed through their sampled points with round caps and joins. */
@@ -615,12 +619,12 @@ function drawCaret(doc, dict) {
 }
 
 /** A squiggly underline: a zigzag along the foot of each quad. */
-function drawSquiggly(doc, dict) {
+function drawSquiggly(doc, dict, unit = 1) {
   const flat = numbers(dict.lookup(name('QuadPoints')));
   if (!flat?.length || flat.length % 8 || !flat.every(Number.isFinite))
     throw new Error('Select text or an area to mark.');
   const color = colorOf(dict, 'C') ?? [1, 0, 0];
-  const ops = ['1 j', ...strokeSetup(color, 1, null)];
+  const ops = ['1 j', ...strokeSetup(color, 1 / unit, null)];
   const reach = [];
   for (let i = 0; i < flat.length; i += 8) {
     const [x1, y1, x2, y2, x3, y3, x4, y4] = flat.slice(i, i + 8);
@@ -629,8 +633,8 @@ function drawSquiggly(doc, dict) {
       { x: x3, y: y3 },
       { x: x4, y: y4 },
     ].sort((a, b) => a.x - b.x);
-    const height = Math.hypot(x1 - x3, y1 - y3) || 10;
-    const amplitude = Math.max(1, height * 0.08),
+    const height = Math.hypot(x1 - x3, y1 - y3) || 10 / unit;
+    const amplitude = Math.max(1 / unit, height * 0.08),
       step = amplitude * 2;
     const length = Math.hypot(foot[1].x - foot[0].x, foot[1].y - foot[0].y);
     if (!length) continue;
@@ -648,7 +652,7 @@ function drawSquiggly(doc, dict) {
     ops.push(polyPath(zig, false), 'S');
   }
   if (!reach.length) throw new Error('The selection has no area.');
-  install(doc, dict, boundsOf(reach, 1), ops);
+  install(doc, dict, boundsOf(reach, 1 / unit), ops);
 }
 
 const helveticaFonts = new WeakMap();
@@ -748,7 +752,7 @@ export function richText(value, { fontSize, color, align, family }) {
  * its CL points from the anchor to the box, with the LE ending at the anchor. The text wraps
  * inside the box and reads upright on a page turned by the annotation's Rotate.
  */
-async function drawFreeText(doc, dict, box, style = freeTextStyle(dict)) {
+async function drawFreeText(doc, dict, box, style = freeTextStyle(dict), unit = 1) {
   const value = text(dict, 'Contents').replace(/\t/g, '    ');
   const rotation = [90, 180, 270].includes(dict.lookup(name('Rotate'))?.asNumber?.())
     ? dict.lookup(name('Rotate')).asNumber()
@@ -765,9 +769,9 @@ async function drawFreeText(doc, dict, box, style = freeTextStyle(dict)) {
     { x: box[2], y: box[3] },
   ];
   if (callout.length >= 2 && callout.every((p) => Number.isFinite(p.x + p.y))) {
-    const lineWidth = Math.max(width, 1);
+    const lineWidth = Math.max(width, 1 / unit);
     const [startStyle] = endingsOf(dict);
-    const drawn = openPathWithEndings(callout, [startStyle, 'None'], lineWidth, fill);
+    const drawn = openPathWithEndings(callout, [startStyle, 'None'], lineWidth, fill, unit);
     ops.push('q', '1 j', ...strokeSetup(lineColor, lineWidth, null));
     if (fill) ops.push(colorOps(fill, false));
     ops.push(...drawn.ops, 'Q');
@@ -791,7 +795,8 @@ async function drawFreeText(doc, dict, box, style = freeTextStyle(dict)) {
     );
   }
   const frame = uprightFrame(box, rotation);
-  const pad = (border ? width : 0) + 2;
+  // Two points of space inside the frame, however large the page's units.
+  const pad = (border ? width : 0) + 2 / unit;
   const inner = frame.width - 2 * pad;
   const lines = inner > 0 ? wrapText(font, fontSize, value, inner) : [];
   const leading = fontSize * 1.2,
@@ -817,7 +822,7 @@ async function drawFreeText(doc, dict, box, style = freeTextStyle(dict)) {
     if (line) ops.push(`1 0 0 1 ${fmt(x)} ${fmt(y)} Tm`, `${font.encodeText(line).toString()} Tj`);
   });
   ops.push('ET', 'Q');
-  const rect = boundsOf(reach, callout.length >= 2 ? Math.max(width, 1) + 1 : 0);
+  const rect = boundsOf(reach, callout.length >= 2 ? Math.max(width, 1 / unit) + 1 / unit : 0);
   const margin = [box[0] - rect[0], box[1] - rect[1], rect[2] - box[2], rect[3] - box[3]];
   if (margin.some((v) => v > 1e-6)) dict.set(name('RD'), doc.context.obj(margin.map(round)));
   else dict.delete(name('RD'));
@@ -926,25 +931,33 @@ export const DRAWABLE = new Set([
  */
 export async function refreshAppearance(doc, page, dict, { box, style } = {}) {
   if (dict.lookup(name('Subtype')) === name('FreeText'))
-    return drawFreeText(doc, dict, box ?? innerBox(dict), style);
+    return drawFreeText(
+      doc,
+      dict,
+      box ?? innerBox(dict),
+      style ?? freeTextStyle(dict),
+      page ? pageUserUnit(page) : 1,
+    );
   return drawAppearance(doc, page, dict, { box });
 }
 export function drawAppearance(doc, page, dict, { box } = {}) {
   const subtype = dict.lookup(name('Subtype'))?.decodeText?.();
+  // Sizes in points (arrowheads, scallops) stay so on pages whose units are larger.
+  const unit = page ? pageUserUnit(page) : 1;
   switch (subtype) {
     case 'Square':
     case 'Circle':
-      return drawBoxShape(doc, dict, box ?? innerBox(dict));
+      return drawBoxShape(doc, dict, box ?? innerBox(dict), unit);
     case 'Line':
     case 'Polygon':
     case 'PolyLine':
-      return drawPolyShape(doc, dict);
+      return drawPolyShape(doc, dict, unit);
     case 'Ink':
       return drawInk(doc, dict);
     case 'Caret':
       return drawCaret(doc, dict);
     case 'Squiggly':
-      return drawSquiggly(doc, dict);
+      return drawSquiggly(doc, dict, unit);
     case 'Stamp':
       return drawStamp(doc, dict);
     case 'Text':

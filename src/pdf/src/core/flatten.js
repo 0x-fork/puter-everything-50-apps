@@ -34,6 +34,7 @@ import { annotationList, annotationsOf, formFields, pageRotation } from './struc
 import { ensureNoteAppearance } from './notes.js';
 import { ensureMarkupAppearance } from './highlight.js';
 import { addAnnotationVisibilityLayer } from './optional-content.js';
+import { choiceOptions, selectedChoices, textValue } from './form-values.js';
 
 const name = PDFName.of;
 const numbers = (value) =>
@@ -48,6 +49,8 @@ const KEEP = new Set(['Link', 'Popup', 'Widget']);
 const HIDDEN = 2,
   PRINT = 4,
   NO_VIEW = 32;
+/** Replies and review states belong to their comment's thread and are not counted apart. */
+const isReply = (dict) => dict.has(name('IRT'));
 const invisible = (flags) => !!(flags & HIDDEN) || !!(flags & NO_VIEW && !(flags & PRINT));
 /** Reuse at most two visibility groups for an entire flatten operation. */
 function visibilityLayer(doc, flags, layers) {
@@ -225,6 +228,50 @@ function annotationPages(doc) {
   return pages;
 }
 
+/** Whether flattening draws the field anew, instead of painting the drawing it has. */
+function redrawn(field, widgets, regenerate) {
+  return (
+    widgets.some((widget) => !invisible(widget.dict.lookup(name('F'))?.asNumber?.() ?? 0)) &&
+    // NeedAppearances asks viewers to redraw variable text. Buttons keep their own
+    // drawings (icons, check styles), as viewers show them, unless they have none.
+    ((regenerate &&
+      (field instanceof PDFTextField ||
+        field instanceof PDFDropdown ||
+        field instanceof PDFOptionList)) ||
+      field.needsAppearancesUpdate() ||
+      (field instanceof PDFTextField && field.isPassword()))
+  );
+}
+
+/**
+ * The texts flattening draws anew, field by field: values of fields that leave their drawing
+ * to the viewer or have none. A face that can write them is passed to flattenDocument.
+ */
+export function redrawnFieldTexts(doc) {
+  const fields = formFields(doc);
+  if (!fields?.length) return [];
+  const regenerate = doc.getForm().acroForm.dict.lookup(name('NeedAppearances')) === PDFBool.True;
+  return fields.flatMap((field) => {
+    try {
+      return redrawn(field, field.acroField.getWidgets(), regenerate) ? drawnFieldTexts(field) : [];
+    } catch {
+      // A field that cannot be read is kept as it is.
+      return [];
+    }
+  });
+}
+
+/** The texts a field's drawing shows: its value, or a list's options (passwords are masked). */
+export function drawnFieldTexts(field) {
+  if (field instanceof PDFTextField) return field.isPassword() ? [] : [textValue(field)];
+  if (field instanceof PDFOptionList) return choiceOptions(field).map(({ label }) => label);
+  if (field instanceof PDFDropdown) {
+    const options = choiceOptions(field);
+    return selectedChoices(field, options).map(({ key, index }) => options[index]?.label ?? key);
+  }
+  return [];
+}
+
 /**
  * Flatten every form field into its pages: each widget's normal appearance is drawn where the
  * widget sat, then the widget and the field are removed. Keep the entire field when any
@@ -233,9 +280,7 @@ function annotationPages(doc) {
  */
 export function flattenFields(
   doc,
-  refs = refIndex(doc),
-  unflattened = { fields: 0 },
-  layers = new Map(),
+  { refs = refIndex(doc), unflattened = { fields: 0 }, layers = new Map(), fonts = [] } = {},
 ) {
   const form = doc.getForm();
   const fields = formFields(doc);
@@ -250,19 +295,18 @@ export function flattenFields(
     // Fields that left their drawing to the viewer get an appearance first, as pdf-lib does.
     try {
       widgets = field.acroField.getWidgets();
-      if (
-        widgets.some((widget) => !invisible(widget.dict.lookup(name('F'))?.asNumber?.() ?? 0)) &&
-        // NeedAppearances asks viewers to redraw variable text. Buttons keep their own
-        // drawings (icons, check styles), as viewers show them, unless they have none.
-        ((regenerate &&
-          (field instanceof PDFTextField ||
-            field instanceof PDFDropdown ||
-            field instanceof PDFOptionList)) ||
-          field.needsAppearancesUpdate() ||
-          (field instanceof PDFTextField && field.isPassword()))
-      ) {
+      if (redrawn(field, widgets, regenerate)) {
         restore = appearanceRollback(field, widgets);
-        updateFieldAppearance(field, form, (font ??= form.getDefaultFont()));
+        // Text the standard font cannot write is drawn with a face the caller supplied.
+        const faces = [(font ??= form.getDefaultFont()), ...fonts];
+        for (const [i, face] of faces.entries())
+          try {
+            updateFieldAppearance(field, form, face);
+            break;
+          } catch (error) {
+            restore();
+            if (i === faces.length - 1) throw error;
+          }
       }
     } catch {
       // An old appearance may spell a different value from /V. Keep the field, never bake it.
@@ -315,14 +359,14 @@ export function flattenFields(
  * counts (including unflattened items), or false when there was nothing to flatten. Annotations
  * hidden both on screen and in print are removed without painting their appearances.
  */
-export function flattenDocument(doc, { fields = true, annotations = true } = {}) {
+export function flattenDocument(doc, { fields = true, annotations = true, fonts } = {}) {
   const counts = { fields: 0, annotations: 0 };
   const unflattened = { fields: 0, annotations: 0 };
   const refs = refIndex(doc);
   const readable = new WeakMap();
   const generated = new WeakMap();
   const layers = new Map();
-  if (fields) counts.fields = flattenFields(doc, refs, unflattened, layers);
+  if (fields) counts.fields = flattenFields(doc, { refs, unflattened, layers, fonts });
   if (annotations)
     for (const page of doc.getPages()) {
       let annots = annotationsOf(page);
@@ -356,7 +400,7 @@ export function flattenDocument(doc, { fields = true, annotations = true } = {})
         remove.add(ref);
         const popup = dict.get(name('Popup'));
         if (popup) remove.add(popup);
-        counts.annotations++;
+        if (!isReply(dict)) counts.annotations++;
       }
       if (remove.size) annots = annotationList(page);
       for (let i = annots.size() - 1; i >= 0; i--) {
@@ -396,7 +440,8 @@ export function flattenCounts(doc) {
     for (const ref of annots.asArray()) {
       const dict = doc.context.lookup(ref);
       const subtype = dict instanceof PDFDict ? dict.lookup(name('Subtype')) : null;
-      if (subtype instanceof PDFName && !KEEP.has(subtype.decodeText())) annotations++;
+      if (subtype instanceof PDFName && !KEEP.has(subtype.decodeText()) && !isReply(dict))
+        annotations++;
     }
   }
   return { fields: formFields(doc)?.length ?? 0, annotations };

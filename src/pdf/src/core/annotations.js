@@ -15,6 +15,7 @@ import {
   annotationList,
   annotationsOf,
   pageRotation,
+  pageUserUnit,
   removeAnnotationThread,
 } from './structure.js';
 import { editNote, listNotes, parsePdfDate } from './notes.js';
@@ -105,8 +106,9 @@ function opacityArg(opacity) {
     throw new Error('Choose an opacity from 0 to 1.');
   return opacity;
 }
-function fontSizeArg(size) {
-  if (!finite(size) || size < 1 || size > 288)
+/** A font size in page units, which on a page with a UserUnit are larger than points. */
+function fontSizeArg(size, unit = 1) {
+  if (!finite(size) || size * unit < 1 - 1e-9 || size * unit > 288 + 1e-9)
     throw new Error('Choose a font size from 1 to 288 points.');
   return size;
 }
@@ -174,17 +176,20 @@ const idAt = (page, position) => annotationsOf(page).get(position).toString();
 // ---------------------------------------------------------------------------------------------
 // Text boxes and callouts
 
-function textBoxStyle({
-  fontSize = 12,
-  color = '#000000',
-  fill = null,
-  borderColor = '#e5322d',
-  borderWidth = 1,
-  dash = null,
-  align = 'left',
-}) {
+function textBoxStyle(
+  page,
+  {
+    fontSize = 12,
+    color = '#000000',
+    fill = null,
+    borderColor = '#e5322d',
+    borderWidth = 1,
+    dash = null,
+    align = 'left',
+  },
+) {
   return {
-    fontSize: fontSizeArg(fontSize),
+    fontSize: fontSizeArg(fontSize, pageUserUnit(page)),
     color: hexToRgb(color, 'text color'),
     fill: optionalRgb(fill, 'fill color'),
     borderColor: optionalRgb(borderColor, 'border color'),
@@ -217,7 +222,7 @@ export async function addTextBox(doc, page, options = {}) {
   setOpacity(dict, options.opacity);
   await refreshAppearance(doc, page, dict, {
     box,
-    style: textBoxStyle(options),
+    style: textBoxStyle(page, options),
   });
   return register(doc, page, dict);
 }
@@ -227,7 +232,7 @@ export async function addTextBox(doc, page, options = {}) {
  * the nearest side, and the middle of that side (Acrobat's three-point CL). The knee runs
  * across the page as the reader sees it, so it stays level on turned pages too.
  */
-export function calloutLine(box, anchor, rotation = 0) {
+export function calloutLine(box, anchor, rotation = 0, unit = 1) {
   const [x0, y0, x1, y1] = box;
   const { x, y } = anchor;
   if (x >= x0 && x <= x1 && y >= y0 && y <= y1)
@@ -240,7 +245,7 @@ export function calloutLine(box, anchor, rotation = 0) {
       out = x < x0 ? -1 : 1;
     const end = { x: side, y: (y0 + y1) / 2 };
     const knee = {
-      x: side + out * Math.min(CALLOUT_KNEE, Math.abs(x - side) / 2),
+      x: side + out * Math.min(CALLOUT_KNEE / unit, Math.abs(x - side) / 2),
       y: end.y,
     };
     return [anchor, knee, end];
@@ -250,7 +255,7 @@ export function calloutLine(box, anchor, rotation = 0) {
   const end = { x: (x0 + x1) / 2, y: side };
   const knee = {
     x: end.x,
-    y: side + out * Math.min(CALLOUT_KNEE, Math.abs(y - side) / 2),
+    y: side + out * Math.min(CALLOUT_KNEE / unit, Math.abs(y - side) / 2),
   };
   return [anchor, knee, end];
 }
@@ -268,12 +273,15 @@ export async function addCallout(doc, page, options = {}) {
     intent: 'FreeTextCallout',
   });
   if (rotation) dict.set(name('Rotate'), PDFNumber.of(rotation));
-  dict.set(name('CL'), doc.context.obj(flatPoints(calloutLine(box, anchor, rotation))));
+  dict.set(
+    name('CL'),
+    doc.context.obj(flatPoints(calloutLine(box, anchor, rotation, pageUserUnit(page)))),
+  );
   dict.set(name('LE'), name(endingArg(options.ending ?? 'OpenArrow')));
   setOpacity(dict, options.opacity);
   await refreshAppearance(doc, page, dict, {
     box,
-    style: textBoxStyle(options),
+    style: textBoxStyle(page, options),
   });
   return register(doc, page, dict);
 }
@@ -489,6 +497,20 @@ function repliesOf(id, threads, seen = new Set([id])) {
       };
     });
 }
+/**
+ * Whether this module can draw the comment again from its dictionary: not a measurement or a
+ * captioned line, whose value, caption, and leader lines only its own drawing holds.
+ */
+function redrawable(dict, subtype) {
+  if (!DRAWABLE.has(subtype)) return false;
+  const intent = dict.lookup(name('IT'))?.decodeText?.() ?? '';
+  return !(
+    intent.endsWith('Dimension') ||
+    dict.has(name('Measure')) ||
+    dict.lookup(name('Cap'))?.asBoolean?.() ||
+    (dict.lookup(name('LL'))?.asNumber?.() ?? 0) !== 0
+  );
+}
 const boxObject = (r) => r && { x: r[0], y: r[1], width: r[2] - r[0], height: r[3] - r[1] };
 
 function describe(doc, { id, dict }, threads) {
@@ -524,7 +546,7 @@ function describe(doc, { id, dict }, threads) {
     locked: !!(flags & FLAGS.locked),
     lockedContents: !!(flags & FLAGS.lockedcontents),
     // Whether this module can redraw it after a change of style or geometry.
-    editable: DRAWABLE.has(subtype),
+    editable: redrawable(dict, subtype),
     ...statesOf(id, threads),
     replies: repliesOf(id, threads),
   };
@@ -676,7 +698,11 @@ export async function editAnnotation(doc, page, id, changes = {}) {
   const textChanged = body !== undefined && String(body) !== text(original, 'Contents');
   if (textChanged && flags & FLAGS.lockedcontents)
     throw new Error('The text of this comment is locked.');
-  const allowed = original.has(name('IRT')) ? [] : EDITS[subtype] || [];
+  const allowed = original.has(name('IRT'))
+    ? []
+    : redrawable(original, subtype)
+      ? EDITS[subtype] || []
+      : (EDITS[subtype] || []).filter((key) => key === 'rect');
   const refused = properties.find((key) => !allowed.includes(key));
   if (refused) throw new Error(`The ${refused} of this kind of comment cannot be changed.`);
   if (!textChanged && !properties.length) return id;
@@ -703,6 +729,32 @@ export async function editAnnotation(doc, page, id, changes = {}) {
   }
   dict.set(name('M'), PDFString.of(pdfDate()));
   if (!properties.length && subtype !== 'FreeText') return idAt(page, position);
+
+  // A move keeps the comment's own drawing, which readers place at its new Rect. Redrawing it
+  // would lose what this editor cannot draw again: another editor's fonts and rich text, or
+  // the caption and leader lines of a measurement.
+  if (properties.length === 1 && changes.rect && !textChanged && dict.lookup(name('AP'))) {
+    const from = rectOf(dict),
+      to = rectArg(changes.rect);
+    const same = (a, b) => Math.abs(a - b) < 1e-6;
+    if (from && same(to[2] - to[0], from[2] - from[0]) && same(to[3] - to[1], from[3] - from[1])) {
+      const [dx, dy] = [to[0] - from[0], to[1] - from[1]];
+      const shift = (flat) =>
+        flatPoints(pointsOf(flat).map(({ x, y }) => ({ x: x + dx, y: y + dy })));
+      for (const key of ['L', 'Vertices', 'CL']) {
+        const flat = numbers(dict.lookup(name(key)));
+        if (flat?.length && flat.every(Number.isFinite))
+          dict.set(name(key), doc.context.obj(shift(flat)));
+      }
+      if (subtype === 'Ink')
+        dict.set(
+          name('InkList'),
+          doc.context.obj(inkStrokes(dict).map((s) => shift(flatPoints(s)))),
+        );
+      dict.set(name('Rect'), doc.context.obj(to));
+      return idAt(page, position);
+    }
+  }
 
   let box = ['Square', 'Circle', 'FreeText'].includes(subtype) ? innerBox(dict) : null;
   const style = subtype === 'FreeText' ? freeTextStyle(dict) : null;
@@ -739,14 +791,20 @@ export async function editAnnotation(doc, page, id, changes = {}) {
     if (subtype === 'FreeText') {
       const callout = pointsOf(numbers(dict.lookup(name('CL'))));
       if (callout.length >= 2)
-        dict.set(name('CL'), doc.context.obj(flatPoints(calloutLine(box, callout[0], rotation))));
+        dict.set(
+          name('CL'),
+          doc.context.obj(flatPoints(calloutLine(box, callout[0], rotation, pageUserUnit(page)))),
+        );
     }
   }
   if (changes.anchor) {
     if (subtype !== 'FreeText' || !dict.has(name('CL')))
       throw new Error('Only callouts have a point to move.');
     const [anchor] = pointsArg([changes.anchor], 1, 'where the callout points');
-    dict.set(name('CL'), doc.context.obj(flatPoints(calloutLine(box, anchor, rotation))));
+    dict.set(
+      name('CL'),
+      doc.context.obj(flatPoints(calloutLine(box, anchor, rotation, pageUserUnit(page)))),
+    );
   }
   if (changes.points) {
     if (subtype === 'Ink')
@@ -778,7 +836,8 @@ export async function editAnnotation(doc, page, id, changes = {}) {
     }
     if (changes.width !== undefined) style.width = widthArg(changes.width);
     if (changes.dash !== undefined) style.dash = dashArg(changes.dash);
-    if (changes.fontSize !== undefined) style.fontSize = fontSizeArg(changes.fontSize);
+    if (changes.fontSize !== undefined)
+      style.fontSize = fontSizeArg(changes.fontSize, pageUserUnit(page));
     if (changes.align !== undefined) style.align = alignArg(changes.align);
   } else {
     if (changes.color !== undefined) {

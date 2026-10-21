@@ -9,10 +9,20 @@ import { openMenu } from './lib/menu.js';
  * actions: { rotate(indices, delta), remove(indices), extract(indices), duplicate(indices),
  *            insertBlank(after), insertFile(after), insertPictures(after), move(indices, to),
  *            open(index), close() } — each may return a promise; the view redraws on refresh().
+ * onSelectionChange(indices) hears of each change to the chosen pages.
  */
 const SIZES = [110, 150, 200, 260];
 
-export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isBusy, actions }) {
+export function createOrganizeView({
+  getPdf,
+  getRevision,
+  getLayers = () => undefined,
+  currentIndex,
+  can,
+  isBusy,
+  actions,
+  onSelectionChange,
+}) {
   let selected = new Set();
   let anchor = null; // the tile a Shift range starts from
   let size = 1;
@@ -50,6 +60,24 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
     if (isBusy()) return;
     await fn();
   };
+  async function duplicateChosen() {
+    const list = target();
+    const revision = getRevision();
+    await actions.duplicate(list);
+    if (getRevision() === revision || !selected.size) return;
+    // Each copy lands right after its page, pushing later selected pages along; keep the
+    // selection on the pages that were chosen rather than on whatever took their places.
+    const moved = (i) => i + list.filter((k) => k < i).length;
+    selected = new Set(indices().map(moved));
+    if (anchor != null) anchor = moved(anchor);
+    updateState();
+  }
+  async function removeChosen() {
+    if ((await actions.remove(target())) === false) return;
+    // The deleted pages' places now hold other pages, which were not chosen.
+    selected.clear();
+    updateState();
+  }
   const commands = {
     insert: button('Insert', 'FilePlus2', (e) => insertMenu(e.currentTarget), 'btn organize-btn', {
       'aria-haspopup': 'menu',
@@ -71,14 +99,9 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
         'data-permission': 'assemble',
       },
     ),
-    duplicate: iconButton(
-      'Duplicate pages',
-      'Copy',
-      run(() => actions.duplicate(target())),
-      {
-        'data-permission': 'assemble',
-      },
-    ),
+    duplicate: iconButton('Duplicate pages', 'Copy', run(duplicateChosen), {
+      'data-permission': 'assemble',
+    }),
     extract: iconButton(
       'Extract pages',
       'Scissors',
@@ -87,15 +110,9 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
         'data-permission': 'copy',
       },
     ),
-    remove: iconButton(
-      'Delete pages',
-      'Trash2',
-      run(async () => {
-        const removed = target();
-        if ((await actions.remove(removed)) !== false) selected.clear();
-      }),
-      { 'data-permission': 'assemble' },
-    ),
+    remove: iconButton('Delete pages', 'Trash2', run(removeChosen), {
+      'data-permission': 'assemble',
+    }),
   };
   function insertMenu(anchorButton) {
     const at = after();
@@ -123,7 +140,13 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
     commands.extract,
     commands.remove,
     el('span', { class: 'organize-sep', 'aria-hidden': 'true' }),
-    el('label', { class: 'organize-size' }, icon('ZoomOut', 16, { plain: true }), sizeInput, icon('ZoomIn', 16, { plain: true })),
+    el(
+      'label',
+      { class: 'organize-size' },
+      icon('ZoomOut', 16, { plain: true }),
+      sizeInput,
+      icon('ZoomIn', 16, { plain: true }),
+    ),
     button('Close', 'X', () => actions.close(), 'btn organize-close'),
   );
   const root = el(
@@ -133,9 +156,16 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
     grid,
   );
 
-  let shownBusy = null;
+  let shownBusy = null,
+    shownSelection = null;
   function updateState() {
     shownBusy = isBusy();
+    // Other controls offering the same commands, as the tools pane does, follow the choice.
+    const chosen = indices();
+    if (visible && chosen.join() !== shownSelection) {
+      shownSelection = chosen.join();
+      onSelectionChange?.(chosen);
+    }
     const n = selected.size;
     status.textContent = n
       ? `${n} of ${count()} ${count() === 1 ? 'page' : 'pages'} selected`
@@ -221,9 +251,22 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
   }
 
   function dropIndex(e) {
-    // The gap nearest the pointer, from the tile under it.
-    const tile = e.target.closest?.('.organize-tile');
-    if (!tile) return tiles.length;
+    // The gap nearest the pointer, from the tile under it, or else from the nearest tile of the
+    // nearest row: the spaces between and around the tiles are not the end of the document.
+    let tile = e.target.closest?.('.organize-tile');
+    if (!tile) {
+      let nearest = Infinity;
+      for (const candidate of tiles) {
+        const box = candidate.getBoundingClientRect();
+        const dy = Math.max(box.top - e.clientY, 0, e.clientY - box.bottom);
+        const dx = Math.max(box.left - e.clientX, 0, e.clientX - box.right);
+        if (dy * 1e6 + dx < nearest) {
+          nearest = dy * 1e6 + dx;
+          tile = candidate;
+        }
+      }
+      if (!tile) return tiles.length;
+    }
     const i = Number(tile.dataset.index);
     const box = tile.getBoundingClientRect();
     return e.clientX < box.left + box.width / 2 ? i : i + 1;
@@ -344,21 +387,28 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
       ? Number(document.activeElement.closest?.('.organize-tile')?.dataset.index)
       : null;
     selected = new Set([...selected].filter((i) => i < pdf.numPages));
+    // The tile holding the grid's tab stop must still exist once pages have gone.
+    if (anchor != null) anchor = Math.min(anchor, pdf.numPages - 1);
     tiles = Array.from({ length: pdf.numPages }, (_, i) => tile(i));
     grid.replaceChildren(...tiles);
     const revision = getRevision();
     const width = SIZES[size];
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    observer = new IntersectionObserver(
+    // Tiles are drawn as they come near the view and let go of their pictures once far from
+    // it, so scrolling through a long PDF does not keep a picture of every page it passed.
+    const drawn = new Set(),
+      renders = new Map();
+    const draw = new IntersectionObserver(
       (entries) =>
         entries.forEach(async (entry) => {
-          if (!entry.isIntersecting) return;
-          observer.unobserve(entry.target);
+          if (!entry.isIntersecting || drawn.has(entry.target)) return;
+          drawn.add(entry.target);
           const index = Number(entry.target.dataset.index);
           const canvas = entry.target.querySelector('canvas');
           try {
             const page = await pdf.getPage(index + 1);
             if (getPdf() !== pdf || getRevision() !== revision || !canvas.isConnected) return;
+            if (!drawn.has(entry.target)) return;
             const natural = page.getViewport({ scale: 1 });
             const scale = Math.min(width / natural.width, (width * 1.3) / natural.height);
             const view = page.getViewport({ scale });
@@ -366,11 +416,19 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
             canvas.height = Math.max(1, Math.floor(view.height * ratio));
             canvas.style.width = `${Math.floor(view.width)}px`;
             canvas.style.height = `${Math.floor(view.height)}px`;
-            await page.render({
+            const task = page.render({
               canvasContext: canvas.getContext('2d'),
               viewport: view,
               transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0],
-            }).promise;
+              // Layers hidden in the Layers panel stay hidden here, as on the pages.
+              optionalContentConfigPromise: getLayers(),
+            });
+            renders.set(entry.target, task);
+            try {
+              await task.promise;
+            } finally {
+              if (renders.get(entry.target) === task) renders.delete(entry.target);
+            }
             if (index !== currentIndex()) page.cleanup();
           } catch {
             /* A page that cannot be drawn keeps its blank tile. */
@@ -378,7 +436,27 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
         }),
       { root: grid, rootMargin: '200px' },
     );
-    tiles.forEach((t) => observer.observe(t));
+    const keep = new IntersectionObserver(
+      (entries) =>
+        entries.forEach((entry) => {
+          if (entry.isIntersecting || !drawn.delete(entry.target)) return;
+          renders.get(entry.target)?.cancel();
+          const canvas = entry.target.querySelector('canvas');
+          canvas.width = canvas.height = 0;
+        }),
+      { root: grid, rootMargin: '300% 0px' },
+    );
+    observer = {
+      disconnect() {
+        draw.disconnect();
+        keep.disconnect();
+        for (const task of renders.values()) task.cancel();
+      },
+    };
+    tiles.forEach((t) => {
+      draw.observe(t);
+      keep.observe(t);
+    });
     updateState();
     if (Number.isInteger(focusAt)) focusTile(Math.min(focusAt, tiles.length - 1));
   }
@@ -408,6 +486,7 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
     },
     hide() {
       visible = false;
+      shownSelection = null;
       root.hidden = true;
       observer?.disconnect();
       grid.replaceChildren();
@@ -419,6 +498,9 @@ export function createOrganizeView({ getPdf, getRevision, currentIndex, can, isB
     updateState() {
       if (visible) updateState();
     },
+    /** Duplicate or delete the chosen pages, as the grid's own buttons do. */
+    duplicate: run(duplicateChosen),
+    remove: run(removeChosen),
     select(list) {
       selected = new Set(list);
       anchor = list[0] ?? null;

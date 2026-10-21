@@ -44,6 +44,8 @@ const ELEMENTS = {
   Stamp: 'stamp',
   Caret: 'caret',
 };
+/** XFDF's names for a text box's alignment (Q 0, 1 and 2). */
+const JUSTIFICATION = ['left', 'centered', 'right'];
 const SUBTYPES = Object.fromEntries(Object.entries(ELEMENTS).map(([k, v]) => [v, k]));
 
 const escapeAttribute = (value) =>
@@ -234,7 +236,7 @@ export function exportXfdf(doc) {
       }
       case 'FreeText': {
         const q = dict.lookup(name('Q'))?.asNumber?.();
-        attributes.justification = q === 1 || q === 2 ? q : 0;
+        attributes.justification = JUSTIFICATION[q === 1 || q === 2 ? q : 0];
         const cl = numbers(dict.lookup(name('CL')));
         if (cl?.length >= 4 && cl.every(Number.isFinite)) {
           attributes.callout = list(cl);
@@ -286,6 +288,29 @@ const childElements = (node) =>
   Array.from(node?.childNodes || []).filter((child) => child.nodeType === 1);
 const child = (node, tag) => childElements(node).find((c) => c.localName === tag);
 const textOf = (node) => (node ? node.textContent : null);
+/** The words of an XFDF rich text body, a line for each paragraph or line break. */
+function richTextOf(node) {
+  const lines = [''];
+  const walk = (parent) => {
+    for (const item of Array.from(parent.childNodes || [])) {
+      if (item.nodeType === 3 || item.nodeType === 4) {
+        // Line breaks that only lay out the XML between paragraphs are not part of the text.
+        if (parent.localName !== 'body' || item.data.trim()) lines[lines.length - 1] += item.data;
+      } else if (item.nodeType !== 1) continue;
+      else if (item.localName === 'br') lines.push('');
+      else if (['p', 'div'].includes(item.localName)) {
+        if (lines.at(-1)) lines.push('');
+        walk(item);
+        lines.push('');
+      } else walk(item);
+    }
+  };
+  const body = child(node, 'body');
+  if (!body) return null;
+  walk(body);
+  if (!lines.at(-1)) lines.pop();
+  return lines.join('\n');
+}
 function colorValue(value) {
   if (!value) return null;
   const hex = /^#[0-9a-f]{6}$/i.test(value) ? value : null;
@@ -326,7 +351,9 @@ function dictFromElement(doc, page, element, subtype) {
   if (attr('subject') !== null) set('Subj', hexText(attr('subject')));
   set('M', dateString(attr('date')));
   set('CreationDate', dateString(attr('creationdate')));
-  const contents = textOf(child(element, 'contents')) ?? '';
+  // Acrobat often writes a comment's text only as rich text.
+  const contents =
+    textOf(child(element, 'contents')) ?? richTextOf(child(element, 'contents-richtext')) ?? '';
   set('Contents', hexText(contents.replace(/\r\n?/g, '\n')));
   const color = colorValue(attr('color'));
   if (color) set('C', doc.context.obj(color));
@@ -417,7 +444,11 @@ function dictFromElement(doc, page, element, subtype) {
       set('DA', PDFString.of(da || '/Helv 12 Tf 0 g'));
       const ds = textOf(child(element, 'defaultstyle'));
       if (ds) set('DS', PDFString.of(ds));
-      const q = Number(attr('justification'));
+      // XFDF names the alignment; files once written by this editor number it.
+      const justification = String(attr('justification') ?? '').toLowerCase();
+      const q = JUSTIFICATION.includes(justification)
+        ? JUSTIFICATION.indexOf(justification)
+        : Number(justification);
       if (q === 1 || q === 2) set('Q', PDFNumber.of(q));
       const callout = numberList(attr('callout'));
       if ((callout.length === 4 || callout.length === 6) && callout.every(Number.isFinite)) {
@@ -480,12 +511,32 @@ export async function importXfdf(doc, xfdf) {
   const pages = doc.getPages();
   // Names already in the document, so replies can find their parents and repeats are skipped.
   const named = new Map();
-  for (const page of pages)
+  // Comments without a name went out as annot-<object>-<generation> (see exportXfdf). Such a
+  // name is this PDF's comment only while that object is still the same kind of comment, on
+  // the same page and in the same place: another PDF's objects can share the numbers.
+  const unnamed = new Map();
+  pages.forEach((page, index) => {
     for (const ref of annotationsOf(page)?.asArray() || []) {
       const dict = doc.context.lookup(ref);
-      const nm = dict instanceof PDFDict ? text(dict, 'NM') : '';
-      if (nm && ref instanceof PDFRef && !named.has(nm)) named.set(nm, ref);
+      if (!(dict instanceof PDFDict) || !(ref instanceof PDFRef)) continue;
+      const nm = text(dict, 'NM');
+      if (nm && !named.has(nm)) named.set(nm, ref);
+      if (!nm)
+        unnamed.set(`annot-${ref.objectNumber}-${ref.generationNumber}`, { ref, dict, index });
     }
+  });
+  const sameComment = (element, entry) => {
+    if (!entry || Number(element.getAttribute('page')) !== entry.index) return false;
+    if (entry.dict.lookup(name('Subtype'))?.decodeText?.() !== SUBTYPES[element.localName])
+      return false;
+    const rect = numberList(element.getAttribute('rect')),
+      own = numbers(entry.dict.lookup(name('Rect')));
+    return (
+      rect.length === 4 &&
+      own?.length === 4 &&
+      rect.every((value, i) => Number.isFinite(value) && Math.abs(value - own[i]) < 0.01)
+    );
+  };
   const result = { imported: 0, skipped: 0, duplicates: 0 };
   let pending = elements.filter((element) => {
     if (SUBTYPES[element.localName]) return true;
@@ -502,6 +553,8 @@ export async function importXfdf(doc, xfdf) {
         continue;
       }
       const nm = element.getAttribute('name');
+      if (nm && !named.has(nm) && sameComment(element, unnamed.get(nm)))
+        named.set(nm, unnamed.get(nm).ref);
       if (nm && named.has(nm)) {
         result.duplicates++;
         continue;

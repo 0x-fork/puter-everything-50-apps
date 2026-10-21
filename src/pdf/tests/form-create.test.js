@@ -1,6 +1,19 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
-import { PDFArray, PDFDict, PDFDocument, PDFName, StandardFonts, degrees, rgb } from 'pdf-lib';
+import {
+  PDFArray,
+  PDFDict,
+  PDFDocument,
+  PDFHexString,
+  PDFName,
+  StandardFonts,
+  concatTransformationMatrix,
+  decodePDFRawStream,
+  degrees,
+  popGraphicsState,
+  pushGraphicsState,
+  rgb,
+} from 'pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createCanvas } from '@napi-rs/canvas';
 import {
@@ -337,6 +350,207 @@ it('joins radio buttons into their group, which the fill tool then selects', asy
   ]);
 });
 
+it('joins a radio button to the group it is named after, as placed buttons are grouped', async () => {
+  await mockTextFont();
+  const doc = await blank();
+  // Each button placed with the radio tool starts its own group, with the first choice.
+  const place = (x) =>
+    addFormField(doc, 0, { type: 'radio', rect: rect(x, 700, 14, 14), exportValue: 'Choice 1' });
+  const first = await place(50);
+  const second = await place(80);
+  const third = await place(110);
+  expect(await updateFormField(doc, second, { name: first, widgetIndex: 0 })).toBe(first);
+  // An export value asked for at the same time is kept. A button on in its own group is off
+  // in a group that has another value.
+  await updateFormField(doc, third, { checked: true, widgetIndex: 0 });
+  expect(
+    await updateFormField(doc, third, { name: first, widgetIndex: 0, exportValue: 'Other' }),
+  ).toBe(first);
+  const states = () =>
+    doc
+      .getForm()
+      .getRadioGroup(first)
+      .acroField.getWidgets()
+      .map((w) => w.getAppearanceState()?.decodeText());
+  expect(states()).toEqual(['Off', 'Off', 'Off']);
+  expect(listFormFields(doc).map((f) => [f.name, f.props.exportValue])).toEqual([
+    [first, 'Choice 1'],
+    [first, 'Choice 2'],
+    [first, 'Other'],
+  ]);
+  await fillFields(doc, { [first]: 'Choice 2' });
+  const bytes = await doc.save();
+  const reopened = await PDFDocument.load(bytes);
+  expect(listFields(reopened).map((f) => f.name)).toEqual([first]);
+  const widgets = reopened.getForm().getRadioGroup(first).acroField.getWidgets();
+  expect(widgets.map((w) => w.getAppearanceState()?.decodeText())).toEqual([
+    'Off',
+    'Choice 2',
+    'Off',
+  ]);
+  const buttons = (await annotations(bytes)).filter((a) => a.radioButton);
+  expect(buttons.map((a) => [a.fieldName, a.buttonValue])).toEqual([
+    [first, 'Choice 1'],
+    [first, 'Choice 2'],
+    [first, 'Other'],
+  ]);
+  // Fields of other kinds still take a free name.
+  const text = await addFormField(doc, 0, { type: 'text', rect: rect(50, 600, 100, 20) });
+  expect(await updateFormField(doc, text, { name: first })).toBe(`${first}_2`);
+});
+
+it('checks by default the box of a check box group whose properties say so', async () => {
+  const source = await blank();
+  const box = source.getForm().createCheckBox('Pick');
+  box.addToPage(source.getPage(0), { x: 40, y: 600, width: 16, height: 16 });
+  box.addToPage(source.getPage(0), { x: 80, y: 600, width: 16, height: 16 });
+  // The second box gets its own on state, as the boxes of Acrobat's check box groups have.
+  const states = box.acroField.getWidgets()[1].dict.lookup(name('AP'));
+  for (const kind of ['N', 'D']) {
+    const drawings = states.lookup(name(kind));
+    drawings.set(name('Two'), drawings.get(name('Yes')));
+    drawings.delete(name('Yes'));
+  }
+  const doc = await PDFDocument.load(await source.save());
+  await updateFormField(doc, 'Pick', { checked: true, widgetIndex: 1 });
+  const listed = listFormFields(await PDFDocument.load(await doc.save()));
+  expect(
+    listed.map(({ props }) => [props.exportValue, props.checked, props.checkedByDefault]),
+  ).toEqual([
+    ['Yes', false, false],
+    ['Two', true, true],
+  ]);
+});
+
+it('keeps the drawing of a signed signature field when it is moved or changed', async () => {
+  const doc = await blank();
+  await addFormField(doc, 0, { type: 'signature', name: 'Sig', rect: rect(50, 50, 150, 40) });
+  const field = doc.getForm().getSignature('Sig');
+  const widget = field.acroField.getWidgets()[0];
+  const drawing = doc.context.register(
+    doc.context.formXObject([], { BBox: doc.context.obj([0, 0, 150, 40]) }),
+  );
+  widget.dict.set(name('AP'), doc.context.obj({ N: drawing }));
+  field.acroField.dict.set(name('V'), doc.context.obj({ Type: 'Sig', Filter: 'Adobe.PPKLite' }));
+  await updateFormField(doc, 'Sig', { tooltip: 'Signed by Ada' });
+  await moveFormWidget(doc, 'Sig', 0, rect(60, 50, 150, 40));
+  expect(widget.dict.lookup(name('AP')).get(name('N'))).toBe(drawing);
+  expect(listFormFields(doc)[0].props).toMatchObject({ signed: true, tooltip: 'Signed by Ada' });
+});
+
+it('keeps the picture of a button when it is renamed, retitled, or moved', async () => {
+  await mockTextFont();
+  const source = await blank();
+  const logo = await source.embedPng(await readFile(new URL('../icon.png', import.meta.url)));
+  const button = source.getForm().createButton('Logo');
+  button.addToPage('', source.getPage(0), { x: 50, y: 600, width: 64, height: 64 });
+  button.setImage(logo);
+  const doc = await PDFDocument.load(await source.save());
+  const widget = () => doc.getForm().getFields()[0].acroField.getWidgets()[0];
+  const drawing = () => widget().dict.lookup(name('AP')).get(name('N'));
+  const original = drawing();
+  await updateFormField(doc, 'Logo', { tooltip: 'Company logo', required: true, name: 'Brand' });
+  await moveFormWidget(doc, 'Brand', 0, rect(80, 500, 64, 64));
+  expect(drawing()).toBe(original);
+  // A new size is drawn anew.
+  await moveFormWidget(doc, 'Brand', 0, rect(80, 500, 96, 64));
+  expect(drawing()).not.toBe(original);
+});
+
+it('keeps the first of several selections when a list stops taking several', async () => {
+  await mockTextFont();
+  const doc = await blank();
+  await addFormField(doc, 0, {
+    type: 'listbox',
+    name: 'Toppings',
+    rect: rect(50, 600, 120, 60),
+    options: ['Olives', 'Cheese', 'Ham'],
+    multiSelect: true,
+    defaultValue: ['Cheese', 'Ham'],
+  });
+  await fillFields(doc, { Toppings: ['Olives', 'Ham'] });
+  await updateFormField(doc, 'Toppings', { multiSelect: false });
+  const bytes = await doc.save();
+  const reopened = await PDFDocument.load(bytes);
+  const [field] = listFormFields(reopened);
+  expect(field.props).toMatchObject({
+    multiSelect: false,
+    value: ['Olives'],
+    defaultValue: ['Cheese'],
+  });
+  expect(reopened.getForm().getOptionList('Toppings').acroField.dict.has(name('I'))).toBe(false);
+  expect(listFields(reopened)[0]).toMatchObject({ multiple: false, value: ['Olives'] });
+  // Only the row still chosen is painted as selected.
+  const widget = reopened.getForm().getOptionList('Toppings').acroField.getWidgets()[0];
+  const drawing = reopened.context.lookup(widget.getNormalAppearance());
+  const operators = new TextDecoder().decode(decodePDFRawStream(drawing).decode());
+  expect(operators.match(/0\.6 0\.7\d* 0\.8\d* rg/g)).toHaveLength(1);
+});
+
+it('takes only numbers in number and percent fields', async () => {
+  await mockTextFont();
+  const doc = await blank();
+  await addFormField(doc, 0, {
+    type: 'text',
+    name: 'Amount',
+    rect: rect(50, 600, 200, 24),
+    format: 'number',
+    tooltip: 'Amount due',
+  });
+  await addFormField(doc, 0, { type: 'text', name: 'Rate', rect: rect(50, 500, 200, 24) });
+  await updateFormField(doc, 'Rate', { format: 'percent', decimals: 1 });
+  await addFormField(doc, 0, { type: 'text', name: 'Note', rect: rect(50, 400, 200, 24) });
+  await expect(fillFields(doc, { Amount: '12 apples' })).rejects.toThrow(
+    'Enter a number in Amount due, such as 1234.5.',
+  );
+  await expect(fillFields(doc, { Rate: '5%' })).rejects.toThrow('Enter a number in Rate');
+  await fillFields(doc, { Amount: '-1234.5', Rate: '0,25', Note: 'twelve' });
+  await fillFields(doc, { Amount: '' });
+  expect(listFields(doc).map((field) => field.value)).toEqual(['', '0,25', 'twelve']);
+});
+
+it('shows number and percent fields as their formats do, keeping the value typed', async () => {
+  await mockTextFont();
+  const doc = await blank();
+  const formats = {
+    Amount: { format: 'number', decimals: 2 },
+    Count: { format: 'number', decimals: 0 },
+    Rate: { format: 'percent', decimals: 1 },
+  };
+  for (const [i, [fieldName, props]] of Object.entries(formats).entries())
+    await addFormField(doc, 0, {
+      type: 'text',
+      name: fieldName,
+      rect: rect(50, 600 - 60 * i, 200, 24),
+      ...props,
+    });
+  // Another tool's currency format, with negative amounts in parentheses.
+  await addFormField(doc, 0, { type: 'text', name: 'Price', rect: rect(50, 400, 200, 24) });
+  const actions = doc.getForm().getTextField('Price').acroField.dict;
+  actions.set(
+    name('AA'),
+    doc.context.obj({
+      F: {
+        S: 'JavaScript',
+        JS: PDFHexString.fromText('AFNumber_Format(2, 2, 2, 0, " \\u20AC", false);'),
+      },
+    }),
+  );
+  await fillFields(doc, { Amount: '1234567.5', Count: '-42', Rate: '0.125', Price: '-1234,5' });
+  expect(listFields(doc).map((field) => field.value)).toEqual([
+    '1234567.5',
+    '-42',
+    '0.125',
+    '-1234,5',
+  ]);
+  flattenDocument(doc);
+  const text = await withPdfjs(await doc.save(), async (page) =>
+    (await page.getTextContent()).items.map((item) => item.str).join(' '),
+  );
+  for (const shown of ['1,234,567.50', '-42', '12.5%', '(1.234,50 €)'])
+    expect(text).toContain(shown);
+});
+
 it('gives taken names a numbered suffix, also for names nested under a field', async () => {
   const doc = await blank();
   const add = (type, fieldName, y) =>
@@ -477,6 +691,30 @@ it('refuses a character limit shorter than the value the field holds', async () 
   // A new default value replaces the old one, so it is checked on its own.
   await updateFormField(doc, 'Code', { maxLength: 3, defaultValue: 'XYZ' });
   expect(listFormFields(doc)[0].props).toMatchObject({ maxLength: 3, value: 'XYZ' });
+});
+
+it('keeps a list’s default value and its filled value apart when its options change', async () => {
+  await mockTextFont();
+  const doc = await blank();
+  for (const [field, y] of [
+    ['Size', 700],
+    ['Color', 650],
+  ])
+    await addFormField(doc, 0, {
+      type: 'dropdown',
+      name: field,
+      rect: rect(50, y, 120, 22),
+      options: ['A', 'B', 'C'],
+      defaultValue: 'A',
+    });
+  await fillFields(doc, { Size: ['B'] });
+  // Other tools can leave a list its default alone, which viewers show as its value.
+  doc.getForm().getDropdown('Color').acroField.dict.delete(name('V'));
+  for (const field of ['Size', 'Color'])
+    await updateFormField(doc, field, { options: ['A', 'B', 'C', 'D'] });
+  const [size, color] = listFormFields(await PDFDocument.load(await doc.save()));
+  expect(size.props).toMatchObject({ value: ['B'], defaultValue: ['A'] });
+  expect(color.props).toMatchObject({ value: ['A'], defaultValue: ['A'] });
 });
 
 it('moves widgets and deletes one widget or the whole field', async () => {
@@ -698,6 +936,92 @@ it('detects the fields of a flat form, with or without PDF.js text', async () =>
   expect(detectFormFields(target, 0)).toEqual([]);
 });
 
+it('takes dark banners for decoration, not for fields, and shaded boxes for fields', async () => {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  page.drawRectangle({ x: 50, y: 680, width: 512, height: 40, color: rgb(0.1, 0.2, 0.5) });
+  page.drawText('Comments', { x: 50, y: 606, size: 11, font });
+  page.drawRectangle({ x: 120, y: 600, width: 300, height: 22, color: rgb(0.92, 0.92, 0.95) });
+  expect(detectFormFields(doc, 0).map(({ type, name }) => [type, name])).toEqual([
+    ['text', 'Comments'],
+  ]);
+});
+
+it('takes header and footer rules and marks outside the page for no fields', async () => {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  page.setCropBox(36, 36, 540, 720);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const text = (value, x, y, size = 11) => page.drawText(value, { x, y, size, font });
+  const line = (x0, x1, y) =>
+    page.drawLine({ start: { x: x0, y }, end: { x: x1, y }, thickness: 0.75 });
+  text('Annual Report 2025', 50, 735, 14);
+  line(50, 562, 725);
+  text('Page 1', 290, 50, 9);
+  line(50, 562, 62);
+  // Printer's marks past the crop box.
+  text('Job 42', 5, 10, 8);
+  line(40, 200, 8);
+  page.drawRectangle({ x: 560, y: 300, width: 40, height: 20, borderWidth: 1 });
+  // A form's own lines, a long one with its label under it among them.
+  text('Name', 60, 600);
+  line(100, 300, 598);
+  line(50, 562, 400);
+  text('Signature of applicant', 50, 388, 9);
+  expect(detectFormFields(doc, 0).map(({ name }) => name)).toEqual([
+    'Name',
+    'Signature of applicant',
+  ]);
+});
+
+it('detects the fields of a form that reads upright on a turned page', async () => {
+  const found = {};
+  for (const rotation of [0, 90, 180, 270]) {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([612, 792]);
+    page.setRotation(degrees(rotation));
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    // Shown on screen, the page is `width` wide; `shown` maps its points to the page's own.
+    const height = rotation % 180 ? 612 : 792;
+    const shown = {
+      0: [1, 0, 0, 1, 0, 0],
+      90: [0, 1, -1, 0, 612, 0],
+      180: [-1, 0, 0, -1, 612, 792],
+      270: [0, -1, 1, 0, 0, 792],
+    }[rotation];
+    page.pushOperators(pushGraphicsState(), concatTransformationMatrix(...shown));
+    page.drawText('First name: ____________________', { x: 50, y: height - 100, size: 11, font });
+    page.drawText('City', { x: 50, y: height - 160, size: 11, font });
+    page.drawLine({
+      start: { x: 80, y: height - 162 },
+      end: { x: 300, y: height - 162 },
+      thickness: 1,
+    });
+    page.pushOperators(popGraphicsState());
+    const bytes = await doc.save();
+    const textContent = await withPdfjs(bytes, (p) => p.getTextContent());
+    for (const options of [{}, { textContent }]) {
+      const fields = detectFormFields(await PDFDocument.load(bytes), 0, options);
+      expect(fields.map((field) => field.name)).toEqual(['First name', 'City']);
+      // The City line, from 80 to 300 across the shown page, as the page itself places it.
+      const city = fields[1].rect;
+      const ends = [80, 300].map((x) => [
+        shown[0] * x + shown[2] * (height - 162) + shown[4],
+        shown[1] * x + shown[3] * (height - 162) + shown[5],
+      ]);
+      const [x0, x1] = [ends[0][0], ends[1][0]].sort((a, b) => a - b);
+      const [y0, y1] = [ends[0][1], ends[1][1]].sort((a, b) => a - b);
+      expect(city.x).toBeLessThanOrEqual(x0 + 2);
+      expect(city.x + city.width).toBeGreaterThanOrEqual(x1 - 2);
+      expect(city.y).toBeLessThanOrEqual(y0 + 2);
+      expect(city.y + city.height).toBeGreaterThanOrEqual(y1 - 2);
+      found[rotation] = fields.length;
+    }
+  }
+  expect(found).toEqual({ 0: 2, 90: 2, 180: 2, 270: 2 });
+});
+
 it('fills created fields with the existing fill tool', async () => {
   await mockTextFont();
   const doc = await blank();
@@ -765,6 +1089,30 @@ it('runs as editor operations and draws text a standard font cannot', async () =
   expect(ink(rect(50, 700, 200, 22), 2).count).toBeGreaterThan(50);
   await session.change((d) => deleteFormField(d, 'Город'));
   expect((await PDFDocument.load(session.bytes)).getForm().getFields()).toHaveLength(0);
+});
+
+it('keeps the font of a field made by another tool when it is moved or changed', async () => {
+  await mockTextFont();
+  const source = await blank();
+  const form = source.getForm();
+  const arial = source.context.register(
+    source.context.obj({ Type: 'Font', Subtype: 'TrueType', BaseFont: 'Arial' }),
+  );
+  form.acroForm.dict.set(name('DR'), source.context.obj({ Font: { Arial: arial } }));
+  const field = form.createTextField('Name');
+  field.setText('Hello');
+  field.addToPage(source.getPage(0), { x: 50, y: 600, width: 200, height: 24 });
+  field.acroField.setDefaultAppearance('/Arial 11 Tf 0 0 1 rg');
+  const doc = await PDFDocument.load(await source.save({ updateFieldAppearances: false }));
+  await updateFormField(doc, 'Name', { tooltip: 'Your name' });
+  await moveFormWidget(doc, 'Name', 0, rect(60, 600, 200, 24));
+  const saved = await PDFDocument.load(await doc.save());
+  expect(saved.getForm().getTextField('Name').acroField.getDefaultAppearance()).toBe(
+    '/Arial 11 Tf 0 0 1 rg',
+  );
+  // The drawing stands in for the font, which the PDF does not carry.
+  const { ink } = await rendered(await doc.save());
+  expect(ink(rect(60, 600, 200, 24), 2).count).toBeGreaterThan(50);
 });
 
 it('lists fields made by other tools', async () => {

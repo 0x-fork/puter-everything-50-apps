@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
-import { PDFDocument, PDFName, PDFString, degrees } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFNumber, PDFString, degrees } from 'pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createCanvas } from '@napi-rs/canvas';
 import {
@@ -166,6 +166,26 @@ const subtypesOf = (doc, index = 0) =>
 const near = (a, b, tolerance = 0.01) => a.every((value, i) => Math.abs(value - b[i]) <= tolerance);
 
 describe('text boxes', () => {
+  it('reads the same on a page whose units are larger than points', async () => {
+    // Letter paper in units of ten points, as large drawings are made, beside plain Letter.
+    const views = [];
+    for (const unit of [1, 10]) {
+      const doc = await blank(1, [612 / unit, 792 / unit]);
+      doc.getPage(0).node.set(PDFName.of('UserUnit'), PDFNumber.of(unit));
+      const rect = { x: 100 / unit, y: 400 / unit, width: 160 / unit, height: 16 / unit };
+      await addTextBox(doc, 0, {
+        rect,
+        text: 'Measured',
+        fontSize: 10 / unit,
+        borderColor: null,
+        borderWidth: 0,
+      });
+      views.push((await render(await doc.save())).count(rect));
+    }
+    expect(views[0].inside).toBeGreaterThan(100);
+    expect(views[1].inside).toBeGreaterThan(views[0].inside * 0.8);
+    expect(views[1].outside).toBe(0);
+  });
   it('writes a FreeText with DA, DS, RC and an appearance that wraps its text in the box', async () => {
     const doc = await blank();
     const rect = { x: 100, y: 500, width: 160, height: 90 };
@@ -605,6 +625,58 @@ describe('editing', () => {
     expect(Array.from(view.data.slice(i, i + 3))).toEqual([0, 0, 255]);
   });
 
+  it('moves a comment from another editor with the drawing it came with', async () => {
+    // A dimension line as Acrobat's Measure tool draws it: its caption is in its appearance.
+    const doc = await blank();
+    const font = doc.embedStandardFont('Helvetica');
+    const drawing = doc.context.register(
+      doc.context.stream(
+        '0 0 1 RG 1 w 100 100 m 300 100 l S BT /F1 10 Tf 180 106 Td (2.78 in) Tj ET',
+        {
+          Type: 'XObject',
+          Subtype: 'Form',
+          BBox: [90, 90, 310, 120],
+          Resources: { Font: { F1: font.ref } },
+        },
+      ),
+    );
+    const line = doc.context.register(
+      doc.context.obj({
+        Type: 'Annot',
+        Subtype: 'Line',
+        Rect: [90, 90, 310, 120],
+        L: [100, 100, 300, 100],
+        C: [0, 0, 1],
+        IT: 'LineDimension',
+        Cap: true,
+        Contents: PDFString.of('2.78 in'),
+        AP: { N: drawing },
+      }),
+    );
+    doc.getPage(0).node.set(PDFName.of('Annots'), doc.context.obj([line]));
+    const [entry] = listAnnotations(doc, 0);
+    // Its look cannot be drawn again here, so it can be moved but not restyled.
+    expect(entry.editable).toBe(false);
+    await expect(editAnnotation(doc, 0, entry.id, { color: '#ff0000' })).rejects.toThrow(
+      'cannot be changed',
+    );
+    await editAnnotation(doc, 0, entry.id, {
+      rect: { ...entry.rect, x: entry.rect.x + 50, y: entry.rect.y + 200 },
+    });
+    expect(listAnnotations(doc, 0)[0]).toMatchObject({
+      rect: { x: 140, y: 290, width: 220, height: 30 },
+      points: [
+        { x: 150, y: 300 },
+        { x: 350, y: 300 },
+      ],
+    });
+    const bytes = await doc.save();
+    expect(await paintedText(bytes)).toEqual(['2.78 in']);
+    const view = await render(bytes);
+    expect(view.count({ x: 140, y: 290, width: 220, height: 30 })).toMatchObject({ outside: 0 });
+    expect(view.count({ x: 140, y: 290, width: 220, height: 30 }).inside).toBeGreaterThan(100);
+  });
+
   it('edits annotations from other writers and respects their locks', async () => {
     const doc = await blank();
     const page = doc.getPage(0);
@@ -889,6 +961,81 @@ const essence = (a) => ({
   ),
 });
 
+describe('pages with large units', () => {
+  // The same comments, in points, on Letter paper and on Letter paper in units of ten points.
+  async function placed(unit) {
+    const doc = await blank(1, [612 / unit, 792 / unit]);
+    doc.getPage(0).node.set(PDFName.of('UserUnit'), PDFNumber.of(unit));
+    const at = (x, y) => ({ x: x / unit, y: y / unit });
+    addShapeAnnotation(doc, 0, {
+      kind: 'arrow',
+      points: [at(100, 100), at(300, 100)],
+      width: 1 / unit,
+    });
+    addShapeAnnotation(doc, 0, {
+      kind: 'cloud',
+      rect: { ...at(100, 200), width: 200 / unit, height: 100 / unit },
+      width: 1 / unit,
+    });
+    await addCallout(doc, 0, {
+      rect: { ...at(300, 500), width: 180 / unit, height: 50 / unit },
+      anchor: at(150, 400),
+      text: 'Here',
+      fontSize: 12 / unit,
+      borderWidth: 1 / unit,
+    });
+    addNote(doc, 0, { ...at(100, 700), text: 'Note' });
+    return doc;
+  }
+  it('draws arrowheads, clouds, callouts, and notes at their sizes in points', async () => {
+    const [plain, large] = [await placed(1), await placed(10)];
+    const rects = (doc, unit) =>
+      listAnnotations(doc, 0).map(({ rect }) =>
+        [rect.x, rect.y, rect.width, rect.height].map((v) => Math.round(v * unit)),
+      );
+    expect(rects(large, 10)).toEqual(rects(plain, 1));
+    const points = (doc, unit) =>
+      listAnnotations(doc, 0)[2].points.map(({ x, y }) => [
+        Math.round(x * unit),
+        Math.round(y * unit),
+      ]);
+    expect(points(large, 10)).toEqual(points(plain, 1));
+    const [a, b] = [await render(await plain.save()), await render(await large.save())];
+    expect(difference(signature(b, 48, 48), signature(a, 48, 48))).toBeLessThan(0.02);
+  });
+  it('redraws a recolored squiggly underline at its size in points', async () => {
+    const views = [],
+      rects = [];
+    for (const unit of [1, 10]) {
+      const doc = await blank(1, [612 / unit, 792 / unit]);
+      doc.getPage(0).node.set(PDFName.of('UserUnit'), PDFNumber.of(unit));
+      // Another editor's squiggly under a line of 12 point text.
+      const quad = [100, 412, 300, 412, 100, 400, 300, 400].map((v) => v / unit);
+      const squiggly = doc.context.register(
+        doc.context.obj({
+          Type: 'Annot',
+          Subtype: 'Squiggly',
+          Rect: [100 / unit, 400 / unit, 300 / unit, 412 / unit],
+          QuadPoints: quad,
+          C: [1, 0, 0],
+          F: 4,
+        }),
+      );
+      doc.getPage(0).node.set(PDFName.of('Annots'), doc.context.obj([squiggly]));
+      await editAnnotation(doc, 0, listAnnotations(doc, 0)[0].id, { color: '#0000ff' });
+      const { rect } = listAnnotations(doc, 0)[0];
+      rects.push([rect.x, rect.y, rect.width, rect.height].map((v) => Math.round(v * unit)));
+      views.push(await render(await doc.save()));
+    }
+    expect(rects[1]).toEqual(rects[0]);
+    // The same zigzag, to the pixel.
+    const [a, b] = views.map((view) => view.inkBox());
+    for (const key of ['x0', 'y0', 'x1', 'y1'])
+      expect(Math.abs(a[key] - b[key])).toBeLessThanOrEqual(1);
+    expect(difference(signature(views[1], 48, 8), signature(views[0], 48, 8))).toBeLessThan(0.1);
+  });
+});
+
 describe('comment exchange', () => {
   it('round-trips every kind of comment through XFDF', async () => {
     const source = await everything();
@@ -1005,6 +1152,95 @@ describe('comment exchange', () => {
       expect(view.count(region).inside).toBeGreaterThan(100);
     await expect(importXfdf(doc, '<nope')).rejects.toThrow('could not be read');
     await expect(importXfdf(doc, '<!DOCTYPE x><xfdf/>')).rejects.toThrow('could not be read');
+  });
+
+  it('writes and reads text alignment by the names XFDF gives it', async () => {
+    const source = await blank();
+    for (const [align, y] of [
+      ['left', 100],
+      ['center', 200],
+      ['right', 300],
+    ])
+      await addTextBox(source, 0, {
+        rect: { x: 100, y, width: 200, height: 40 },
+        text: align,
+        align,
+      });
+    const xfdf = exportXfdf(source);
+    for (const name of ['left', 'centered', 'right'])
+      expect(xfdf).toContain(`justification="${name}"`);
+    const target = await blank();
+    await importXfdf(target, xfdf);
+    expect(listAnnotations(target, 0).map((a) => a.align)).toEqual(['left', 'center', 'right']);
+    // Files written with numbers are read as before.
+    const older = await blank();
+    await importXfdf(
+      older,
+      `<xfdf xmlns="http://ns.adobe.com/xfdf/"><annots><freetext page="0" rect="0,0,90,40" name="n" justification="2"><contents>x</contents></freetext></annots></xfdf>`,
+    );
+    expect(listAnnotations(older, 0)[0].align).toBe('right');
+  });
+
+  it('knows its own comments without names when their XFDF comes back', async () => {
+    // Comments from writers that give them no name (NM), and a reply added by a reviewer.
+    const source = await blank();
+    const square = addShapeAnnotation(source, 0, {
+      kind: 'square',
+      rect: { x: 100, y: 100, width: 100, height: 80 },
+      text: 'Unnamed',
+    });
+    addNote(source, 0, { x: 300, y: 500, text: 'Unnamed note' });
+    for (const ref of source.getPage(0).node.Annots().asArray())
+      source.context.lookup(ref).delete(PDFName.of('NM'));
+    const exported = exportXfdf(source);
+    const squareName = `annot-${square.split(' ')[0]}-0`;
+    expect(exported).toContain(`name="${squareName}"`);
+    const reviewed = exported.replace(
+      '</annots>',
+      `<text page="0" rect="100,160,120,180" name="reply-1" inreplyto="${squareName}" title="Grace"><contents>Looks right</contents></text></annots>`,
+    );
+    const bytes = await source.save();
+
+    // Back into the same PDF: nothing is added twice, and the reply joins its comment.
+    const same = await PDFDocument.load(bytes);
+    expect(await importXfdf(same, reviewed)).toEqual({ imported: 1, skipped: 0, duplicates: 2 });
+    const [kept, note] = listAnnotations(same, 0);
+    expect([kept.contents, note.contents]).toEqual(['Unnamed', 'Unnamed note']);
+    expect(kept.replies.map((r) => r.contents)).toEqual(['Looks right']);
+    expect(listAnnotations(same, 0)).toHaveLength(2);
+
+    // A PDF whose objects of those numbers are other comments, or elsewhere, takes them all.
+    const other = await PDFDocument.load(bytes);
+    const [moved] = listAnnotations(other, 0);
+    await editAnnotation(other, 0, moved.id, { rect: { ...moved.rect, x: moved.rect.x + 50 } });
+    expect(listAnnotations(other, 0)[0].id).toBe(moved.id);
+    expect(await importXfdf(other, reviewed)).toEqual({ imported: 2, skipped: 0, duplicates: 1 });
+    expect(listAnnotations(other, 0).map((a) => a.contents)).toEqual([
+      'Unnamed',
+      'Unnamed note',
+      'Unnamed',
+    ]);
+    expect(listAnnotations(other, 0)[2].replies.map((r) => r.contents)).toEqual(['Looks right']);
+  });
+
+  it('takes the text of comments that carry only rich text', async () => {
+    const doc = await blank();
+    const body = (paragraphs) =>
+      `<contents-richtext><body xmlns="http://www.w3.org/1999/xhtml" xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/" xfa:APIVersion="Acrobat:23.8.0" xfa:spec="2.0.2">${paragraphs}</body></contents-richtext>`;
+    const xfdf = `<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
+<annots>
+<square color="#FF0000" flags="print" name="sq-1" page="0" rect="100,100,200,180" title="Ada" width="1">${body('<p dir="ltr"><span style="font-size:10.0pt">Check </span><span style="font-weight:bold">this</span></p><p dir="ltr">and that</p>')}</square>
+<text flags="print,nozoom,norotate" inreplyto="sq-1" name="r-1" page="0" rect="100,160,120,180" title="Grace">${body('<p>Fixed<br/>now</p>')}</text>
+<freetext flags="print" name="ft-1" page="0" rect="300,600,500,650" width="0">${body('\n<p dir="ltr">Hello</p>\n')}<defaultappearance>/Helv 12 Tf 0 g</defaultappearance></freetext>
+</annots>
+</xfdf>`;
+    expect(await importXfdf(doc, xfdf)).toMatchObject({ imported: 3 });
+    const [square, freetext] = listAnnotations(doc, 0);
+    expect(square.contents).toBe('Check this\nand that');
+    expect(square.replies.map((r) => r.contents)).toEqual(['Fixed\nnow']);
+    expect(freetext.contents).toBe('Hello');
+    expect(await paintedText(await doc.save())).toEqual(['Hello']);
   });
 
   it('summarizes comments per page with authors, dates, types, status and replies', async () => {

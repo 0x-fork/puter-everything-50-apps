@@ -37,7 +37,10 @@ import { decode, pageSource } from './text-edit.js';
 import { annotationList, annotationsOf, formFields } from './structure.js';
 import { ensureNoteAppearance } from './notes.js';
 import { ensureMarkupAppearance } from './highlight.js';
-import { updateFieldAppearance } from './form-appearance.js';
+import { DRAWABLE, refreshAppearance } from './annotation-appearance.js';
+import { appearanceRollback, updateFieldAppearance } from './form-appearance.js';
+import { drawnFieldTexts } from './flatten.js';
+import { textFonts } from './document.js';
 import { withoutCryptFilter } from './stream-filters.js';
 import { removeStructReferences } from './redact.js';
 import { STANDARD_ENCODING, SYMBOL_ENCODING, WIN_ANSI_ENCODING } from './pdfa-font-tables.js';
@@ -1135,12 +1138,7 @@ const zeroRect = (dict) => {
   const [a, b, c, d] = rect.asArray().map((v) => numberOf(dict.context.lookup(v)) ?? 0);
   return a === c && b === d;
 };
-const appearanceGenerable = (dict) => {
-  const subtype = text(get(dict, 'Subtype'));
-  if (subtype === 'Text')
-    return [undefined, name('Note'), name('Comment')].includes(get(dict, 'Name'));
-  return ['Highlight', 'Underline', 'StrikeOut', 'Squiggly'].includes(subtype);
-};
+const appearanceGenerable = (dict) => DRAWABLE.has(text(get(dict, 'Subtype')));
 
 function checkAnnotations(doc, { part }, add, widgets) {
   const context = doc.context;
@@ -1802,26 +1800,50 @@ export async function convertToPdfA(doc, options = {}) {
       fixed('Removed the XFA form; the AcroForm fields remain.');
     }
     const regenerate = get(acroForm, 'NeedAppearances') === PDFBool.True;
-    const fields = formFields(doc) || [];
     let font,
       drawn = 0,
       failed = 0;
-    for (const field of fields) {
-      let needed = false;
+    const needed = (formFields(doc) || []).filter((field) => {
       try {
         const widgets = field.acroField.getWidgets();
         const variable =
           field instanceof PDFTextField ||
           field instanceof PDFDropdown ||
           field instanceof PDFOptionList;
-        needed =
+        return (
           (regenerate && variable) ||
-          widgets.some((w) => !w.getAppearances()?.normal && !zeroRect(w.dict));
-        if (!needed) continue;
-        updateFieldAppearance(field, doc.getForm(), (font ??= doc.getForm().getDefaultFont()));
+          widgets.some((w) => !w.getAppearances()?.normal && !zeroRect(w.dict))
+        );
+      } catch {
+        return false;
+      }
+    });
+    // Text the standard font cannot write (Polish, Cyrillic, Korean) is drawn with a bundled
+    // face, which is embedded like any other.
+    const texts = needed.flatMap((field) => {
+      try {
+        return drawnFieldTexts(field);
+      } catch {
+        return [];
+      }
+    });
+    const fonts = await textFonts(doc, texts);
+    for (const field of needed) {
+      const faces = [(font ??= doc.getForm().getDefaultFont()), ...fonts];
+      let restore;
+      try {
+        restore = appearanceRollback(field, field.acroField.getWidgets());
+        for (const [i, face] of faces.entries())
+          try {
+            updateFieldAppearance(field, doc.getForm(), face);
+            break;
+          } catch (error) {
+            restore();
+            if (i === faces.length - 1) throw error;
+          }
         drawn++;
       } catch {
-        if (needed) failed++;
+        failed++;
       }
     }
     if (drawn) fixed('Drew form field appearances.', drawn);
@@ -1904,7 +1926,8 @@ export async function convertToPdfA(doc, options = {}) {
   await convertOptionalContent(doc, part, fixed);
 
   // Annotations.
-  convertAnnotations(doc, part, fixed);
+  // Text box appearances can use fonts pdf-lib embeds lazily; materialize them for the checks.
+  if (await convertAnnotations(doc, part, fixed)) await doc.flush();
 
   // Content: images, forms, graphics states, streams, fonts.
   let model = scanDocument(doc);
@@ -2229,8 +2252,9 @@ async function convertOptionalContent(doc, part, fixed) {
   });
 }
 
-function convertAnnotations(doc, part, fixed) {
+async function convertAnnotations(doc, part, fixed) {
   const context = doc.context;
+  let drew = false;
   const allowed = ANNOTATIONS[part === 1 ? 1 : 2];
   const removed = new Set(),
     structKeys = new Set();
@@ -2302,6 +2326,14 @@ function convertAnnotations(doc, part, fixed) {
         try {
           if (ensureNoteAppearance(doc, page, dict) || ensureMarkupAppearance(doc, dict))
             fixed('Drew missing annotation appearances.');
+          else if (DRAWABLE.has(subtype)) {
+            // Shapes, lines, ink, text boxes, stamps: drawn from the dictionary, as comments are.
+            await refreshAppearance(doc, page, dict);
+            if (get(dict, 'AP') instanceof PDFDict) {
+              fixed('Drew missing annotation appearances.');
+              drew = true;
+            }
+          }
         } catch {
           /* Left for the report. */
         }
@@ -2339,6 +2371,7 @@ function convertAnnotations(doc, part, fixed) {
     }
   }
   removeStructReferences(doc, removed, structKeys);
+  return drew;
 }
 
 /** Re-encode LZW streams with Flate; the stages after LZW are kept as they are. */

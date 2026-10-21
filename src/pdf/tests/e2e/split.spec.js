@@ -519,3 +519,63 @@ test('pages extracted from a PDF with a long name keep their page numbers in the
   await dialog.getByRole('button', { name: 'Download pages', exact: true }).click();
   expect((await pending).suggestedFilename()).toMatch(/ pages? [\d,– -]+\.pdf$/);
 });
+
+test('Batch process keeps the password of the open PDF on its processed copy', async ({ page }) => {
+  const { unlockPdf } = await import('../../src/core/security.js');
+  await mockPuter(page);
+  await page.goto('/#library');
+  const doc = await PDFDocument.create();
+  doc.addPage([300, 400]);
+  await openPdf(page, doc);
+  await protectForSplit(page);
+  await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Tools' });
+  await pane.getByRole('button', { name: 'View more' }).click();
+  await pane.getByRole('button', { name: 'Batch process', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Batch process' });
+  await dialog.getByLabel('Rotate all pages').check();
+  const pending = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: 'Run', exact: true }).click();
+  const bytes = new Uint8Array(await readFile(await (await pending).path()));
+  await expect(PDFDocument.load(bytes)).rejects.toThrow(/encrypt/i);
+  const unlocked = await PDFDocument.load((await unlockPdf(bytes, 'split-secret')).bytes);
+  expect(unlocked.getPage(0).getRotation().angle).toBe(90);
+});
+
+test('Organize pages says why a page cannot be extracted or duplicated', async ({ page }) => {
+  await mockPuter(page);
+  await page.goto('/#library');
+  await openPdf(page, await unflattenableWidget());
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  await page
+    .getByRole('complementary', { name: 'Tools' })
+    .getByRole('button', { name: 'Organize pages', exact: true })
+    .click();
+  const toolbar = page.getByRole('toolbar', { name: 'Organize pages' });
+  const downloads = [];
+  page.on('download', (download) => downloads.push(download));
+  for (const name of ['Extract pages', 'Duplicate pages']) {
+    await page.locator('#toast').evaluate((node) => (node.hidden = true));
+    await toolbar.getByRole('button', { name, exact: true }).click();
+    await expect(page.locator('#toast')).toContainText('could not be flattened safely');
+  }
+  expect(downloads).toHaveLength(0);
+  expect(errors).toEqual([]);
+  await expect(page.getByRole('listbox', { name: 'Pages' }).getByRole('option')).toHaveCount(2);
+});
+
+test('Split a PDF says why a one-page PDF cannot be split', async ({ page }) => {
+  await mockPuter(page);
+  await page.goto('/#library');
+  const doc = await PDFDocument.create();
+  doc.addPage([300, 400]);
+  await openPdf(page, doc);
+  await page.getByRole('button', { name: 'Tools', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Tools' });
+  await pane.getByRole('button', { name: 'View more' }).click();
+  await pane.getByRole('button', { name: 'Split a PDF', exact: true }).click();
+  await expect(page.locator('#toast')).toContainText('only one page');
+  await expect(page.getByRole('dialog', { name: 'Split PDF' })).toHaveCount(0);
+});

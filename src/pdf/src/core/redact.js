@@ -21,6 +21,7 @@ import {
   contentReport,
   filterContent,
   formQuad,
+  latticeSome,
   placementQuad,
   quadOverlapsRect,
   rectInside,
@@ -538,6 +539,34 @@ function redactionPolicy(doc, areas, { codec } = {}) {
       const quad = formQuad(object, ctm);
       return !quad || hits(quad) ? 'remove' : 'keep';
     },
+    tiled(lattice, bounds) {
+      const within = areas
+        .map(({ rect }) => [
+          Math.max(rect[0], bounds[0]),
+          Math.max(rect[1], bounds[1]),
+          Math.min(rect[2], bounds[2]),
+          Math.min(rect[3], bounds[3]),
+        ])
+        .filter((rect) => rect[2] - rect[0] > 0.01 && rect[3] - rect[1] > 0.01);
+      if (!within.length) return null;
+      // A pattern cell shows in every repetition, so what any repetition puts under a mark goes.
+      const tileHits = (quad) =>
+        within.some((rect) => latticeSome(quad, rect, lattice, quadOverlapsRect));
+      const image = ({ ctm }) =>
+        tileHits(placementQuad(ctm)) ? { remove: true, repeated: true } : null;
+      return {
+        conservative: true,
+        softMasks: true,
+        glyph: tileHits,
+        image,
+        inlineImage: image,
+        form: () => 'descend',
+        formFailed: ({ object, ctm }) => {
+          const quad = formQuad(object, ctm);
+          return !quad || tileHits(quad) ? 'remove' : 'keep';
+        },
+      };
+    },
   };
 }
 
@@ -862,11 +891,12 @@ export function findRedactionMatches(items, query, { measure, wholeWord = false 
  * XObjects, including invisible OCR text) and return one rectangle per matched line run, built
  * from the matched glyphs' boxes. Unlike interpolating PDF.js text items, this places marks on
  * the precise glyphs, whatever the font. `query` is as for `findRedactionMatches`. Text comes
- * from each font's ToUnicode map or glyph names; fonts without either cannot be searched.
+ * from each font's ToUnicode map or glyph names; fonts without either cannot be searched, and
+ * `report.unsearchable` is then set, so the page can be checked by eye.
  * Rects are drawn slightly inside the outer glyphs and their line, so applying them does not
  * reach kerned or tightly leaded neighbours. Returns `[{ text, rects }]`.
  */
-export async function findTextRects(doc, pageIndex, query, { wholeWord = false } = {}) {
+export async function findTextRects(doc, pageIndex, query, { wholeWord = false, report } = {}) {
   const page = doc.getPage(pageIndex);
   const glyphs = [];
   await filterContent(doc, {
@@ -875,7 +905,9 @@ export async function findTextRects(doc, pageIndex, query, { wholeWord = false }
     report: contentReport(),
     policy: {
       glyph(quad, { code, metrics, box }) {
-        glyphs.push({ quad, text: metrics.unicode(code), box });
+        const text = metrics.unicode(code);
+        if (!text && report) report.unsearchable = true;
+        glyphs.push({ quad, text, box });
         return false;
       },
     },

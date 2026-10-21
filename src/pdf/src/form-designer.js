@@ -145,9 +145,9 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
                 refocus = neighbor ? keyOf(neighbor) : null;
                 refocusFrom = keyOf(field);
                 onDelete(field);
-              } else if (e.key.startsWith('Arrow')) {
+              } else if (e.key.startsWith('Arrow') && !e.altKey && !e.ctrlKey && !e.metaKey) {
                 // Arrow keys nudge a point at a time in the direction they point on screen,
-                // also on turned pages; Shift moves ten.
+                // also on turned pages; Shift moves ten. Alt with an arrow turns the page.
                 e.preventDefault();
                 const step = e.shiftKey ? 10 : 1;
                 const { x, y, width, height } = field.rect;
@@ -197,10 +197,13 @@ export function createFormDesigner({ onMove, onOpen, onDelete, onSelect }) {
     get selected() {
       return fields.find((field) => keyOf(field) === selected) || null;
     },
-    /** A field took another name: its box keeps the selection and gets the pending focus. */
-    renamed(from, to) {
+    /**
+     * A field took another name: its box keeps the selection and gets the pending focus. A
+     * radio button that joined another group gives its place in that group (`widgetIndex`).
+     */
+    renamed(from, to, widgetIndex) {
       const swap = (key) =>
-        key?.startsWith(`${from}#`) ? `${to}#${key.slice(from.length + 1)}` : key;
+        key?.startsWith(`${from}#`) ? `${to}#${widgetIndex ?? key.slice(from.length + 1)}` : key;
       refocus = swap(refocus);
       selected = swap(selected);
     },

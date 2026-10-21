@@ -1,12 +1,18 @@
 import { paragraphLayout } from './paragraph-layout.js';
 import { groupLineHeight } from './core/text-group.js';
 import { koreanDraftFace } from './text-fonts.js';
+import { caretAt } from './text-caret.js';
 
 /**
  * Pasted or dropped text as a draft takes it: one kind of line break, and tabs (copied tables
- * have them, the text fonts do not) as spaces, as text box comments draw them.
+ * have them, the text fonts do not) as spaces, as text box comments draw them. A vertical tab
+ * (PowerPoint's break within a paragraph), form feed, and the Unicode line and paragraph
+ * separators are line breaks too.
  */
-export const draftText = (text) => text.replace(/\r\n?/g, '\n').replace(/\t/g, '    ');
+export const draftText = (text) =>
+  text.replace(/\r\n?|[\v\f\u0085\u2028\u2029]/g, '\n').replace(/\t/g, '    ');
+/** Whether pasted text needs `draftText` before a plain text field may take it. */
+export const needsDraftText = (text) => /[\t\v\f\u0085\u2028\u2029]/.test(text);
 
 /** A native editing surface whose spans retain the source font of each text fragment. */
 export function textLineInput(group) {
@@ -280,7 +286,7 @@ export function textLineInput(group) {
     if (dragging) return;
     e.preventDefault();
     // Place plain text at the drop caret; never import arbitrary clipboard markup.
-    const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+    const caret = caretAt(e.clientX, e.clientY);
     if (!caret || !input.contains(caret.startContainer)) return;
     const selection = window.getSelection();
     selection.removeAllRanges();

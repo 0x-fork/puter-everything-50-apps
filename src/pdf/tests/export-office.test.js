@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import { PDFDocument, PDFName, StandardFonts, rgb, degrees } from 'pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { DOMParser } from '@xmldom/xmldom';
@@ -967,6 +967,110 @@ it('turns pictures the way their page shows them', async () => {
     expect(top[2]).toBeLessThan(60);
     expect(bottom[2]).toBeGreaterThan(200);
     expect(bottom[0]).toBeLessThan(60);
+  } finally {
+    await loading.destroy();
+  }
+});
+
+it('reads right-to-left words drawn one at a time from the rightmost', async () => {
+  // Hebrew set word by word, as many writers do: the first word is drawn rightmost. The font
+  // draws Latin glyphs, but its ToUnicode map reads them as Hebrew letters.
+  const letters = 'שלוםעולםטוב';
+  const cmap =
+    '/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Hebrew def ' +
+    '1 begincodespacerange <00> <FF> endcodespacerange ' +
+    `${letters.length} beginbfchar ` +
+    [...letters]
+      .map(
+        (c, i) => `<${(0x41 + i).toString(16)}> <${c.charCodeAt(0).toString(16).padStart(4, '0')}>`,
+      )
+      .join(' ') +
+    ' endbfchar endcmap CMapName currentdict /CMap defineresource pop end end';
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([400, 200]);
+  const font = doc.context.register(
+    doc.context.obj({
+      Type: 'Font',
+      Subtype: 'Type1',
+      BaseFont: 'Helvetica',
+      ToUnicode: doc.context.register(doc.context.stream(cmap)),
+    }),
+  );
+  page.node.set(PDFName.of('Resources'), doc.context.obj({ Font: { F1: font } }));
+  // Each word's codes run left to right on the page, so they are its letters reversed.
+  const word = (from, count, x) =>
+    `1 0 0 1 ${x} 100 Tm <${Array.from({ length: count }, (_, i) => (from + count - 1 - i).toString(16)).join('')}> Tj`;
+  const content = `BT /F1 12 Tf ${word(0x41, 4, 300)} ${word(0x45, 4, 263.7)} ${word(0x49, 3, 243.4)} ET`;
+  page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(content)));
+  const bytes = await doc.save();
+  const loading = pdfjs.getDocument({ data: bytes.slice(), verbosity: 0 });
+  try {
+    const out = await exportDocument(await loading.promise, bytes, 'txt');
+    expect(text(out.bytes)).toBe('שלום עולם טוב');
+  } finally {
+    await loading.destroy();
+  }
+});
+
+it('keeps the numbers of an HTML list after a nested list and across pages', async () => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const pages = [
+    [
+      [0, '1.', 'First step of the process'],
+      [1, '•', 'A detail of the first step'],
+      [1, '•', 'Another detail of it'],
+      [0, '2.', 'Second step of the process'],
+      [0, '3.', 'Third step of the process'],
+    ],
+    [[0, '4.', 'Fourth step of the process']],
+  ];
+  for (const items of pages) {
+    const page = doc.addPage([612, 792]);
+    items.forEach(([level, marker, line], k) => {
+      const x = 80 + level * 24;
+      page.drawText(marker, { x, y: 700 - k * 15, size: 11, font });
+      page.drawText(line, { x: x + 16, y: 700 - k * 15, size: 11, font });
+    });
+  }
+  const bytes = await doc.save();
+  const loading = pdfjs.getDocument({ data: bytes.slice(), verbosity: 0 });
+  try {
+    const html = text((await exportDocument(await loading.promise, bytes, 'html')).bytes);
+    const parsed = new DOMParser().parseFromString(
+      html.slice(html.indexOf('<body>'), html.indexOf('</body>') + 7),
+      'text/html',
+    );
+    const [first, second] = elements(parsed, 'section');
+    // One numbered list on the first page holds all three steps, the bullets nested in it.
+    const lists = elements(first, 'ol');
+    expect(lists).toHaveLength(1);
+    expect(
+      Array.from(lists[0].childNodes).map((item) => item.firstChild.textContent.trim()),
+    ).toEqual([
+      'First step of the process',
+      'Second step of the process',
+      'Third step of the process',
+    ]);
+    expect(elements(lists[0], 'ul')).toHaveLength(1);
+    // The list goes on at 4 on the next page.
+    expect(elements(second, 'ol')[0].getAttribute('start')).toBe('4');
+  } finally {
+    await loading.destroy();
+  }
+});
+
+it('keeps text that looks like an Excel character escape as it reads', async () => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  doc.addPage([400, 200]).drawText('Column field_x0020_name', { x: 40, y: 100, size: 12, font });
+  const bytes = await doc.save();
+  const loading = pdfjs.getDocument({ data: bytes.slice(), verbosity: 0 });
+  try {
+    const files = await unzip((await exportDocument(await loading.promise, bytes, 'xlsx')).bytes);
+    const strings = elements(parseXml(text(files['xl/sharedStrings.xml']), 'sst'), 't');
+    // Excel turns "_x0020_" into a space unless its underscore is escaped as "_x005F_".
+    expect(strings.map((t) => t.textContent)).toEqual(['Column field_x005F_x0020_name']);
   } finally {
     await loading.destroy();
   }

@@ -1,8 +1,15 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { PDFDocument, PDFName } from 'pdf-lib';
+import { PDFDocument, PDFHexString, PDFName } from 'pdf-lib';
 import { readFile } from 'node:fs/promises';
-import { PasswordError, unlockPdf } from '../../src/core/security.js';
+import {
+  PasswordError,
+  aesCbcEncrypt,
+  protectPdf,
+  toHex,
+  unlockPdf,
+} from '../../src/core/security.js';
+import { createSelfSignedId, signPdf } from '../../src/core/digital-signature.js';
 
 const PUTER_MOCK = `window.puter = { env: 'web', auth: { isSignedIn: () => true, getUser: async () => ({username:'test-user'}), signIn: async () => {}, signOut: async () => {} }, fs: { readdir: async () => [], write: async () => ({}) }, ui: { onLaunchedWithItems: () => {}, onItemsOpened: () => {} } };`;
 async function mockPuter(page) {
@@ -227,6 +234,100 @@ for (const [password, label] of [
     expect((await unlockPdf(bytes, 'user')).owner).toBe(false);
     expect((await unlockPdf(bytes, 'owner')).owner).toBe(true);
   });
+
+for (const name of ['aes-256', 'aes-256-r5', 'rc4-128'])
+  test(`changing the restrictions of a ${name} PDF opened with its permissions password keeps its open password`, async ({
+    page,
+  }) => {
+    await mockPuter(page);
+    await page.goto('/#library');
+    await chooseFile(page, await fixture(name));
+    const dialog = passwordDialog(page);
+    await dialog.getByLabel('Password', { exact: true }).fill('owner');
+    await dialog.getByRole('button', { name: 'Open', exact: true }).click();
+    await expect(page.locator('.page-caption')).toHaveText('Page 1 of 2');
+    await badge(page).click();
+    const change = page.getByRole('dialog', { name: 'Change password' });
+    await expect(change.getByLabel('Permissions password', { exact: true })).toHaveValue('owner');
+    await change.getByLabel('Print', { exact: true }).uncheck();
+    await change.getByRole('button', { name: 'Update', exact: true }).click();
+    await expect(change).toBeHidden();
+    const bytes = await downloaded(page);
+    // The reader password nobody typed here still guards the file.
+    await expect(unlockPdf(bytes, '')).rejects.toBeInstanceOf(PasswordError);
+    const reader = await unlockPdf(bytes, 'user');
+    expect(reader.owner).toBe(false);
+    expect(reader.encryption.security.P & 0x4).toBe(0);
+    expect((await unlockPdf(bytes, 'owner')).owner).toBe(true);
+  });
+
+test('changing the password keeps permissions the dialog does not list', async ({ page }) => {
+  await mockPuter(page);
+  await page.goto('/#library');
+  // Printing at low resolution only, and filling in forms without commenting, as Acrobat offers.
+  const doc = await PDFDocument.create();
+  doc.addPage([300, 300]);
+  const plain = await doc.save();
+  const opened = await unlockPdf(
+    await protectPdf(plain, { open: 'user', permissions: 'owner' }),
+    'owner',
+  );
+  const { fileKey, dict } = opened.encryption;
+  const P = (-4 & ~0x800 & ~0x20) | 0;
+  const block = new Uint8Array(16);
+  new DataView(block.buffer).setInt32(0, P, true);
+  block.set([0xff, 0xff, 0xff, 0xff, 0x54, 0x61, 0x64, 0x62], 4);
+  dict.set(PDFName.of('P'), dict.context.obj(P));
+  dict.set(
+    PDFName.of('Perms'),
+    PDFHexString.of(toHex(aesCbcEncrypt(fileKey, new Uint8Array(16), block))),
+  );
+  opened.encryption.security.P = P;
+  const restricted = await protectPdf(plain, { original: opened.encryption });
+  await chooseFile(page, Buffer.from(restricted));
+  const dialog = passwordDialog(page);
+  await dialog.getByLabel('Password', { exact: true }).fill('owner');
+  await dialog.getByRole('button', { name: 'Open', exact: true }).click();
+  await expect(page.locator('.page-caption')).toHaveText('Page 1 of 1');
+  await badge(page).click();
+  const change = page.getByRole('dialog', { name: 'Change password' });
+  await change.getByLabel('Password to open', { exact: true }).fill('reader');
+  await change.getByLabel('Confirm password', { exact: true }).fill('reader');
+  await change.getByRole('button', { name: 'Update', exact: true }).click();
+  await expect(change).toBeHidden();
+  const { owner, encryption } = await unlockPdf(await downloaded(page), 'reader');
+  expect(owner).toBe(false);
+  // Printing stays at low resolution, and forms can still be filled in.
+  expect(encryption.security.P & 0x4).toBe(0x4);
+  expect(encryption.security.P & 0x800).toBe(0);
+  expect(encryption.security.P & 0x20).toBe(0);
+  expect(encryption.security.P & 0x100).toBe(0x100);
+});
+
+test('the Signatures panel reads the reason and field of a signed PDF opened with its password', async ({
+  page,
+}) => {
+  await mockPuter(page);
+  await page.goto('/#library');
+  const doc = await PDFDocument.create();
+  doc.addPage([300, 300]);
+  const id = await createSelfSignedId({ name: 'Ada Lovelace' });
+  const signed = await signPdf(await doc.save(), id, {
+    fieldName: 'Approval',
+    reason: 'Approved by finance',
+    rect: { x: 20, y: 20, width: 200, height: 50 },
+  });
+  // Its strings are encrypted, the signature value is not.
+  const locked = await protectPdf(signed, { open: 'user', permissions: 'owner' });
+  await chooseFile(page, Buffer.from(locked));
+  const dialog = passwordDialog(page);
+  await dialog.getByLabel('Password', { exact: true }).fill('user');
+  await dialog.getByRole('button', { name: 'Open', exact: true }).click();
+  await expect(page.locator('.page-caption')).toHaveText('Page 1 of 1');
+  await page.getByRole('tab', { name: 'Signatures' }).click();
+  const panel = page.getByRole('tabpanel', { name: 'Signatures' });
+  await expect(panel.locator('dd')).toContainText(['Approved by finance', 'Approval']);
+});
 
 test('protects a PDF with an open password, marks it unsaved, and removes the password again', async ({
   page,

@@ -18,7 +18,7 @@ import {
 import { autotagDocument, tagAnnotations } from '../src/core/autotag.js';
 import { addLink } from '../src/core/links.js';
 import { readXmp } from '../src/core/xmp.js';
-import { PdfSession } from '../src/core/document.js';
+import { PdfSession, duplicatePage } from '../src/core/document.js';
 
 const fontUrl = new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname;
 const reload = async (doc) => PDFDocument.load(await doc.save(), { updateMetadata: false });
@@ -311,6 +311,20 @@ describe('accessibility check', () => {
     expect(tagAnnotations(fixed)).toBe(false);
   });
 
+  it('counts a copied page whose marked content no tag claims as untagged', async () => {
+    const doc = await untaggedPdf();
+    autotagDocument(doc);
+    const session = new PdfSession(await doc.save());
+    expect(
+      status(checkAccessibility(await PDFDocument.load(session.bytes)), 'tagged-content').status,
+    ).toBe('passed');
+    // The copy keeps the page's MCIDs, but the tag tree describes only the original.
+    await session.change((current) => duplicatePage(current, 0));
+    const report = checkAccessibility(await PDFDocument.load(session.bytes));
+    expect(status(report, 'tagged-content').status).toBe('failed');
+    expect(status(report, 'tagged-content').details.map((detail) => detail.page)).toEqual([1]);
+  });
+
   it('reports a figure without alternate text and setFigureAltText fixes it', async () => {
     const doc = await taggedPdf([['H1'], ['Figure'], ['P']]);
     const report = checkAccessibility(doc);
@@ -576,4 +590,61 @@ describe('accessibility check', () => {
     expect(setMarked(doc)).toBeUndefined();
     expect(setMarked(doc)).toBe(false);
   });
+});
+
+describe('pages copied in a tagged PDF', () => {
+  /** The marked-content IDs PDF.js finds in a page's tag tree. */
+  async function claimed(bytes) {
+    const task = pdfjs.getDocument({ data: bytes.slice(), standardFontDataUrl: fontUrl });
+    try {
+      const pdf = await task.promise;
+      const pages = [];
+      for (let n = 1; n <= pdf.numPages; n++) {
+        const ids = [];
+        const pending = [await (await pdf.getPage(n)).getStructTree()];
+        while (pending.length) {
+          const node = pending.pop();
+          if (!node) continue;
+          if (node.type === 'content') ids.push(node.id);
+          pending.push(...(node.children || []));
+        }
+        pages.push(ids.length);
+      }
+      return pages;
+    } finally {
+      await task.destroy();
+    }
+  }
+  const contentOf = async (bytes, index) => {
+    const doc = await PDFDocument.load(bytes);
+    const { decodePDFRawStream, PDFArray } = await import('pdf-lib');
+    const contents = doc.getPage(index).node.lookup(PDFName.of('Contents'));
+    const streams = contents instanceof PDFArray ? contents.asArray() : [contents];
+    return streams
+      .map((ref) =>
+        new TextDecoder('latin1').decode(decodePDFRawStream(doc.context.lookup(ref)).decode()),
+      )
+      .join('\n');
+  };
+
+  for (const how of ['duplicated', 'inserted from another tagged PDF'])
+    it(`can be tagged once ${how}, since no MCID of the original stays on the copy`, async () => {
+      const { duplicatePage, insertPdfPages } = await import('../src/core/document.js');
+      const doc = await untaggedPdf();
+      autotagDocument(doc);
+      const tagged = await doc.save();
+      const session = new PdfSession(tagged);
+      await session.change((current) =>
+        how === 'duplicated' ? duplicatePage(current, 0) : insertPdfPages(current, tagged),
+      );
+      expect(await contentOf(session.bytes, 1)).not.toMatch(/\/MCID/);
+      // The original page keeps its tags.
+      expect(await contentOf(session.bytes, 0)).toMatch(/\/MCID/);
+      await session.change((current) => {
+        autotagDocument(current);
+      });
+      const [original, copy] = await claimed(session.bytes);
+      expect(original).toBeGreaterThan(0);
+      expect(copy).toBe(original);
+    });
 });

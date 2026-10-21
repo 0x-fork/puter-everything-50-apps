@@ -423,6 +423,66 @@ it('changes only the selected text size and color, retaining the next text state
   after.transform.forEach((n, i) => expect(n).toBeCloseTo(before.transform[i], 5));
 });
 
+it('reads a kerning gap before a real space as one space, and leaves an untouched line alone', async () => {
+  const bytes = await fixture('BT /F 18 Tf 40 300 Td [(Hello) -300 ( world) -300 (again)] TJ ET');
+  // Loading a PDF stamps it with the time, so the two copies compared below are loaded at the
+  // same moment.
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.UTC(2026, 0, 1) });
+  let parsed;
+  try {
+    parsed = await read(bytes);
+    expect(parsed.runs[0].text).toBe('Hello world again');
+    // Saving the line as it is changes nothing in the file.
+    expect(await replaceText(parsed.doc, 0, parsed.runs[0], 'Hello world again')).toBe(false);
+    expect(await parsed.doc.save()).toEqual(await (await PDFDocument.load(bytes)).save());
+  } finally {
+    vi.useRealTimers();
+  }
+  await replaceText(parsed.doc, 0, parsed.runs[0], 'Hello world again!');
+  const result = await read(await parsed.doc.save());
+  expect(result.content.map((item) => item.str).join('')).toBe('Hello world again!');
+});
+
+it('keeps a line in its own typeface when only its color or size changes', async () => {
+  // A subset font with no space glyph spaces its words by kerning, as many producers write it.
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+    const file = String(url).split('/').pop();
+    return new Response(await readFile(new URL(`../public/fonts/${file}`, import.meta.url)));
+  });
+  const doc = await PDFDocument.create();
+  const { default: fontkit } = await import('@pdf-lib/fontkit');
+  doc.registerFontkit(fontkit);
+  const face = await doc.embedFont(
+    await readFile(new URL('../public/fonts/GreatVibes-Regular.ttf', import.meta.url)),
+    { subset: true },
+  );
+  const page = doc.addPage([400, 400]);
+  const [hello, world] = ['Hello', 'world'].map((word) => face.encodeText(word).toString());
+  page.node.set(PDFName.of('Resources'), doc.context.obj({ Font: { F: face.ref } }));
+  page.node.set(
+    PDFName.of('Contents'),
+    doc.context.register(
+      doc.context.flateStream(`BT /F 20 Tf 40 300 Td [${hello} -300 ${world}] TJ ET`),
+    ),
+  );
+  const bytes = await doc.save();
+  const parsed = await read(bytes);
+  expect(parsed.runs[0].text).toBe('Hello world');
+  const width = parsed.content[0].width;
+  for (const [options, scale] of [
+    [{ hex: '#cc2200' }, 1],
+    [{ size: 30 }, 1.5],
+  ]) {
+    const { doc: edited, runs } = await read(bytes);
+    await replaceText(edited, 0, runs[0], 'Hello world', options);
+    const result = await read(await edited.save());
+    const run = result.runs.find((r) => r.text === 'Hello world');
+    expect(run.fontName).toMatch(/GreatVibes/);
+    expect(result.content[0].str).toBe('Hello world');
+    expect(result.content[0].width).toBeCloseTo(width * scale, 3);
+  }
+});
+
 it('reads and restores text stroke colors and widths without recoloring a no-op edit', async () => {
   const parsed = await read(
     await fixture(

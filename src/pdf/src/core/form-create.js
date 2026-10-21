@@ -642,15 +642,29 @@ function drawSignatureField(doc, field) {
 async function refreshAppearances(doc, field) {
   if (field instanceof PDFCheckBox || field instanceof PDFRadioGroup)
     return drawToggleField(doc, field);
-  if (field instanceof PDFSignature) return drawSignatureField(doc, field);
+  if (field instanceof PDFSignature) {
+    // A signed field keeps the drawing of its signature; only an empty one is a bordered box.
+    if (!(field.acroField.dict.lookup(name('V')) instanceof PDFDict))
+      drawSignatureField(doc, field);
+    return;
+  }
   const current = daFont(doc, field.acroField.dict);
   let font = formFont(doc, FORM_FONTS[current.font] ? current.font : 'Helvetica');
   const text = appearanceTexts(field).join('\n');
-  if (!encodable(font, text)) {
-    font = await embedFont(doc, 'regular', text);
-    resourceFonts(doc).set(name(font.name), font.ref);
+  const embedded = !encodable(font, text);
+  if (embedded) font = await embedFont(doc, 'regular', text);
+  // A face of the form's own that is not a standard one (an Arial from another tool) stays
+  // the field's font for viewers that redraw it; the drawing stands in for it. A bundled face
+  // drawn with before is a subset of that text's characters, so it gives way.
+  const entry = current.key ? resourceFonts(doc).lookup(name(current.key)) : undefined;
+  const own =
+    !current.font &&
+    entry instanceof PDFDict &&
+    !/^(?:[A-Z]{6}\+)?NotoSans(?:KR)?-/.test(entry.lookup(name('BaseFont'))?.decodeText?.() ?? '');
+  if (!own) {
+    if (embedded) resourceFonts(doc).set(name(font.name), font.ref);
+    writeDA(doc, field.acroField.dict, { font });
   }
-  writeDA(doc, field.acroField.dict, { font });
   updateFieldAppearance(field, doc.getForm(), font);
 }
 
@@ -1033,20 +1047,41 @@ function applyFieldProps(doc, field, props) {
       if (values.length > 1 && !(flagsOf(dict) & MULTI_SELECT))
         throw new Error('This list accepts one selection.');
       writeChoiceValue(doc, dict, values);
-    } else if (listChanged) {
-      // Keep the selection that is still on the list, with indices into the new order.
-      const value = inherited(dict, 'V');
-      const current = (
-        value instanceof PDFArray
-          ? value.asArray().map((e) => textOf(dict.context.lookup(e)))
-          : [textOf(value)]
-      ).filter((v) => v !== undefined);
+    } else if (
+      listChanged ||
+      // A list that now takes one selection keeps the first of several it held.
+      (props.multiSelect === false &&
+        ['V', 'DV'].some((key) => {
+          const value = inherited(dict, key);
+          return value instanceof PDFArray && value.size() > 1;
+        }))
+    ) {
+      // Keep the selection and the default that are still on the list, each on its own,
+      // with indices into the new order.
       const options = choiceOptionsOf(dict);
-      writeChoiceValue(
-        doc,
-        dict,
-        current.filter((v) => flagsOf(dict) & EDIT || options.some((o) => o.value === v)),
-      );
+      const single = field instanceof PDFOptionList && !(flagsOf(dict) & MULTI_SELECT);
+      const kept = (key) => {
+        const value = inherited(dict, key);
+        return (
+          value instanceof PDFArray
+            ? value.asArray().map((e) => textOf(dict.context.lookup(e)))
+            : [textOf(value)]
+        )
+          .filter(
+            (v) => v !== undefined && (flagsOf(dict) & EDIT || options.some((o) => o.value === v)),
+          )
+          .slice(0, single ? 1 : undefined);
+      };
+      const defaults = kept('DV');
+      writeChoiceValue(doc, dict, kept('V'), { initial: false });
+      if (!defaults.length) dict.delete(name('DV'));
+      else
+        dict.set(
+          name('DV'),
+          defaults.length === 1
+            ? textObject(defaults[0])
+            : doc.context.obj(defaults.map(textObject)),
+        );
     }
   }
 }
@@ -1303,6 +1338,21 @@ export function listFormFields(doc) {
   });
 }
 
+/** Properties that do not change how a field is drawn. */
+const UNDRAWN = new Set([
+  'name',
+  'widgetIndex',
+  'tooltip',
+  'required',
+  'readOnly',
+  'format',
+  'decimals',
+  'dateFormat',
+  'spellcheck',
+  'scroll',
+  'editable',
+  'action',
+]);
 /**
  * Change a field's properties and redraw it. Accepts the props addFormField takes, plus
  * `name` (rename: dots move the field to that group; a taken name gets _2...), `label`
@@ -1317,6 +1367,21 @@ export async function updateFormField(doc, fieldName, props = {}) {
   const { widgetIndex } = props;
   if (widgetIndex !== undefined && !widgets[widgetIndex])
     throw new Error('That widget does not exist.');
+  // Radio buttons named after another radio group join it, as buttons sharing a name form one.
+  if (field instanceof PDFRadioGroup && props.name !== undefined) {
+    const wanted = cleanName(props.name);
+    const group = requireFields(doc).find(
+      (other) =>
+        other !== field &&
+        other instanceof PDFRadioGroup &&
+        fullName(other.acroField.dict) === wanted,
+    );
+    if (group) {
+      const index = joinRadioGroup(doc, field, group, props);
+      const rest = { ...props, name: undefined, exportValue: undefined };
+      return updateFormField(doc, wanted, { ...rest, widgetIndex: index });
+    }
+  }
   const targets = widgetIndex === undefined ? widgets : [widgets[widgetIndex]];
   let result = fieldName;
   if (props.name !== undefined && cleanName(props.name) !== fieldName) {
@@ -1363,7 +1428,8 @@ export async function updateFormField(doc, fieldName, props = {}) {
       }
     }
     if (props.checked !== undefined) {
-      const widget = radio ? targets[0] : widgets[0];
+      // A box of a check box group has its own on state, as a radio button does.
+      const widget = targets[0];
       if (radio && widgetIndex === undefined && props.checked && widgets.length > 1)
         throw new Error('Choose which radio button is checked by default.');
       const state = props.checked ? onState(widget) : OFF;
@@ -1371,8 +1437,42 @@ export async function updateFormField(doc, fieldName, props = {}) {
       if (!props.checked) dict.delete(name('DV'));
     }
   }
-  await refreshAppearances(doc, wrapField(doc, field.ref));
+  // A drawing is redone only for what it shows: a picture on a button, or the look another
+  // tool gave a check box, stays when only the name, tooltip, or behavior changes.
+  if (Object.entries(props).some(([key, value]) => value !== undefined && !UNDRAWN.has(key)))
+    await refreshAppearances(doc, wrapField(doc, field.ref));
   return result;
+}
+
+/**
+ * Move a radio field's buttons into `group`, each keeping its export value unless the group
+ * has a button with that value already and none was asked for: those get the next free
+ * "Choice n". Returns the group's index of the button `props.widgetIndex` names (or the first).
+ */
+function joinRadioGroup(doc, field, group, props) {
+  const kids = group.acroField.dict.lookup(KIDS);
+  const entries = widgetEntries(field);
+  if (!(kids instanceof PDFArray) || entries.some((entry) => entry.merged || !entry.ref))
+    throw new Error('This radio group cannot take more buttons.');
+  const exports = buttonExports(field);
+  detachField(doc, field.ref, field.acroField.dict);
+  let chosen;
+  entries.forEach((entry, i) => {
+    entry.dict.set(PARENT, group.ref);
+    kids.push(entry.ref);
+    const widgets = group.acroField.getWidgets();
+    const index = widgets.findIndex((widget) => widget.dict === entry.dict);
+    const taken = new Set(buttonExports(group).filter((_, j) => j !== index));
+    const asked = props.exportValue !== undefined && (props.widgetIndex ?? 0) === i;
+    let value = asked ? String(props.exportValue) : exports[i];
+    for (let n = index + 1; !asked && taken.has(value); n++) value = `Choice ${n}`;
+    const state = setWidgetExport(doc, group, index, value);
+    renameState(doc, group, widgets[index], state);
+    // A button that was on in its own group is on here only when the group's value is its.
+    widgets[index].setAppearanceState(inherited(group.acroField.dict, 'V') === state ? state : OFF);
+    if (i === (props.widgetIndex ?? 0)) chosen = index;
+  });
+  return chosen;
 }
 
 /** Move or resize one widget (rect in unrotated user space) and redraw the field. */
@@ -1391,7 +1491,13 @@ export async function moveFormWidget(doc, fieldName, widgetIndex = 0, rect) {
     name('Rect'),
     doc.context.obj([box.x, box.y, box.x + box.width, box.y + box.height].map(round)),
   );
-  await refreshAppearances(doc, field);
+  // A widget moved without resizing shows its drawing as it was, wherever it now sits.
+  if (
+    !before ||
+    Math.abs(before.width - box.width) > 1e-3 ||
+    Math.abs(before.height - box.height) > 1e-3
+  )
+    await refreshAppearances(doc, field);
 }
 
 /**
