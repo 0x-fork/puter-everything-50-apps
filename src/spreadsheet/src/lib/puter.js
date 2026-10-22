@@ -794,7 +794,7 @@ export function isDirItem(item) {
   return !!(item?.is_dir || item?.isDirectory || item?.isDir || item?.fsentry_is_dir);
 }
 
-/** Browser download of a Blob (for the open web; inside Puter, prefer saveFileAs). */
+/** Browser download of a Blob: to this device, inside Puter too. */
 export function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

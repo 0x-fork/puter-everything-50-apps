@@ -59,7 +59,8 @@ describe('menu bar definitions', () => {
     expect(labels(bare, 'file')).not.toContain('New from template…');
     expect(labels(bare, 'file')).not.toContain('Open from Puter…');
     expect(labels(bare, 'file')).toContain('Excel workbook (.xlsx)');
-    expect(labels(menubarMenus({ saving: true }), 'file')).toContain('Excel workbook (.xlsx)…');
+    expect(menubarMenus({ saving: true }).find((m) => m.id === 'file').items.map((it) => it?.label)).toContain('Export');
+    expect(labels(menubarMenus({ saving: true }), 'file')).toContain('Excel workbook (.xlsx)');
     expect(labels(bare, 'help')).toEqual(['Search the menus…']);
     expect(labels(bare, 'insert')).toContain('Note');
     expect(labels(bare, 'insert')).not.toContain('From Puter…');

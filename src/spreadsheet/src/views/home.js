@@ -505,8 +505,7 @@ export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, i
     try {
       const bytes = await P.readFile(file.path);
       const blob = new Blob([bytes]);
-      if (P.isApp() && P.canSaveFiles()) P.saveFileAs(blob, file.name).catch(() => {});
-      else P.downloadBlob(blob, file.name);
+      P.downloadBlob(blob, file.name);
     } catch (e) {
       toast(P.failureText(e, 'Could not download'), { icon: 'alert' });
     }

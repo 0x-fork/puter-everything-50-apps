@@ -2858,9 +2858,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         const blob = new Blob([rangeToCsv(wb, sheetId, range)], { type: CSV_MIME });
         const label = table ? table.name : rangeName(range).replace(':', '-');
         const name = `${P.sanitizeName(doc.name)} - ${label}.csv`;
-        // A save that failed (out of space, offline) is said, as the sheet exports say it; the editor may have been left by then.
-        if (P.isApp() && P.canSaveFiles()) P.saveFileAs(blob, name).then((saved) => saved && toast(`Saved ${saved.name}`, { icon: 'check' })).catch((e) => { if (!destroyed) toast(`Could not export: ${e?.message || 'unknown error'}`, { icon: 'alert' }); });
-        else P.downloadBlob(blob, name);
+        P.downloadBlob(blob, name);
         return;
       }
       case 'exportPdf':
@@ -3987,9 +3985,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
             blob = format === 'svg' ? new Blob([svg], { type: 'image/svg+xml' }) : await svgToPng(svg, ch.w, ch.h);
             name = `${P.sanitizeName(ch.title || 'chart') || 'chart'}.${format}`;
           }
-          // A save that failed (out of space, offline) is said, as the sheet exports say it; the editor may have been left by then.
-        if (P.isApp() && P.canSaveFiles()) P.saveFileAs(blob, name).then((saved) => saved && toast(`Saved ${saved.name}`, { icon: 'check' })).catch((e) => { if (!destroyed) toast(`Could not export: ${e?.message || 'unknown error'}`, { icon: 'alert' }); });
-          else P.downloadBlob(blob, name);
+          P.downloadBlob(blob, name);
         } catch (e) {
           console.error(e);
           toast('Could not export that', { icon: 'alert' });
@@ -5880,13 +5876,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       const perSheet = kind === 'csv' || kind === 'tsv' || kind === 'html';
       const blob = kind === 'csv' ? doc.toCsvBlob(grid.sheetId) : kind === 'tsv' ? doc.toTsvBlob(grid.sheetId) : kind === 'html' ? doc.toHtmlBlob(grid.sheetId) : kind === 'ods' ? await doc.toOdsBlob() : await doc.toXlsxBlob();
       const name = perSheet ? `${P.sanitizeName(doc.name)}${wb.sheets.length > 1 ? ` - ${sheet.name}` : ''}.${kind}` : `${P.sanitizeName(doc.name)}.${kind === 'ods' ? 'ods' : 'xlsx'}`;
-      if (P.isApp() && P.canSaveFiles()) {
-        // Puter's save dialog is not awaited (a cancelled one never settles), so its failure is reported from here.
-        P.saveFileAs(blob, name).then((saved) => saved && toast(`Saved ${saved.name}`, { icon: 'check' }))
-          .catch((e) => { if (!destroyed) toast(`Could not export: ${e?.message || 'unknown error'}`, { icon: 'alert' }); });
-      } else {
-        P.downloadBlob(blob, name);
-      }
+      // An export goes to this device, as an import comes from it; saving to Puter is Save and Save a copy.
+      P.downloadBlob(blob, name);
     } catch (e) {
       toast(`Could not export: ${e?.message || 'unknown error'}`, { icon: 'alert' });
     }

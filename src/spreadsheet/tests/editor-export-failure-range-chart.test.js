@@ -6,13 +6,14 @@ import * as P from '../src/lib/puter.js';
 import * as notifications from '../src/ui/toast.js';
 import { closeMenu } from '../src/ui/menu.js';
 
-// The sheet exports say why Puter's save failed; the selection-as-CSV and chart exports still
-// swallowed the failure, so they seemed to do nothing.
+// The selection-as-CSV and chart exports download to this device inside the Puter app, as the sheet
+// exports do: Puter's save dialog put them in the user's Puter files instead.
 vi.mock('../src/lib/puter.js', async (importOriginal) => ({
   ...(await importOriginal()),
   isApp: () => true,
   canSaveFiles: () => true,
   saveFileAs: vi.fn(),
+  downloadBlob: vi.fn(),
 }));
 
 function memoryStorage() {
@@ -34,7 +35,7 @@ beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ measureText: (t) => ({ width: t.length * 7 }), font: '' });
   document.body.innerHTML = '<div id="app"></div>';
   P.saveFileAs.mockReset();
-  P.saveFileAs.mockRejectedValue(new Error('disk full'));
+  P.downloadBlob.mockReset();
 });
 afterEach(() => { closeMenu(); view?.destroy(); view = null; vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren(); });
 
@@ -53,30 +54,30 @@ async function mount() {
   return { wb, id, chartId, toast: vi.spyOn(notifications, 'toast') };
 }
 
-it('says why the selection could not be exported as CSV', async () => {
-  const { toast } = await mount();
+it('downloads the selection as CSV', async () => {
+  await mount();
   view.goTo('Sheet1!A1:B3');
   await vi.advanceTimersByTimeAsync(1);
   view.el.querySelector('[data-menu="file"]').click();
   menuItem((label) => label === 'Export').click();
-  menuItem((label) => label === 'Selection as .csv…').click();
+  menuItem((label) => label === 'Selection as .csv').click();
   await vi.advanceTimersByTimeAsync(5);
-  expect(P.saveFileAs).toHaveBeenCalledTimes(1);
-  expect(P.saveFileAs.mock.calls[0][1]).toBe('Report - A1-B3.csv');
-  expect(toast).toHaveBeenCalledWith('Could not export: disk full', expect.objectContaining({ icon: 'alert' }));
+  expect(P.saveFileAs).not.toHaveBeenCalled();
+  expect(P.downloadBlob).toHaveBeenCalledTimes(1);
+  expect(P.downloadBlob.mock.calls[0][1]).toBe('Report - A1-B3.csv');
 });
 
-it('says why a chart could not be exported', async () => {
-  const { chartId, toast } = await mount();
+it('downloads a chart', async () => {
+  const { chartId } = await mount();
   const box = view.el.querySelector(`.chart-box[data-chart="${chartId}"]`);
   expect(box).not.toBeNull();
   box.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 200 }));
   await vi.advanceTimersByTimeAsync(1);
   menuItem((label) => label === 'Download as SVG').click();
   await vi.advanceTimersByTimeAsync(5);
-  expect(P.saveFileAs).toHaveBeenCalledTimes(1);
-  expect(P.saveFileAs.mock.calls[0][1]).toBe('Quantities.svg');
-  expect(toast).toHaveBeenCalledWith('Could not export: disk full', expect.objectContaining({ icon: 'alert' }));
+  expect(P.saveFileAs).not.toHaveBeenCalled();
+  expect(P.downloadBlob).toHaveBeenCalledTimes(1);
+  expect(P.downloadBlob.mock.calls[0][1]).toBe('Quantities.svg');
 });
 
 it('keeps imported image mirroring when downloading the picture', async () => {
@@ -99,5 +100,5 @@ it('keeps imported image mirroring when downloading the picture', async () => {
   expect(ctx.translate).toHaveBeenCalledWith(600, 0);
   expect(ctx.scale).toHaveBeenCalledWith(-1, 1);
   expect(ctx.drawImage).toHaveBeenCalledTimes(1);
-  expect(P.saveFileAs).toHaveBeenCalledWith(png, 'Artwork.png');
+  expect(P.downloadBlob).toHaveBeenCalledWith(png, 'Artwork.png');
 });
