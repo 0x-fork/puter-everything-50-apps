@@ -8,8 +8,9 @@
  *  pickers   Puter's Open / Save dialogs, feature-detected
  *
  * Files are never stored in KV. Documents are .docx blobs written to
- * `Documents/<name>.docx`, so they show up as ordinary files a user can
- * move, share, or open with any other app.
+ * `Documents/<name>.docx`, or inside the Puter desktop wherever its Save
+ * dialog puts them, so they show up as ordinary files a user can move,
+ * share, or open with any other app.
  */
 
 import { DOCUMENT_FOLDER, documentRoot, rememberDocumentRoot, learnDocumentPath } from './document-paths.js';
@@ -303,15 +304,50 @@ export async function pickImage() {
 }
 
 /**
- * Puter's Save dialog with content. The SDK writes the file itself.
- * When the user cancels, the SDK's promise never settles, so callers must
- * not block UI on this.
+ * Inside the Puter desktop a new file goes where the user puts it, with
+ * Puter's Save dialog; elsewhere it goes into the app folder.
+ */
+export function asksWhereToSave() {
+  return isApp() && canSaveFiles();
+}
+
+/** How long after the dialog is asked for a key or click can still reach this window before the desktop covers it. */
+export const DIALOG_COVER_MS = 1000;
+
+/**
+ * Puter's Save dialog with content. The desktop writes the file itself (and
+ * asks before replacing one), then answers with it: { path, name, uid,
+ * modified }, the path relative to the home folder (~/Desktop/Report.docx).
+ * null when the user cancels.
+ *
+ * The SDK's own promise never settles on a cancel; `undefinedOnCancel` does,
+ * where the SDK has it. A write that fails in the desktop sends no answer at
+ * all. The desktop covers this window while its dialog is open, so a key or
+ * click that reaches the window again means the dialog has gone: that counts
+ * as cancelled, or a document could never be saved again.
  */
 export async function saveFileAs(blob, suggestedName) {
   if (!canSaveFiles()) return null;
-  const item = await sdk().ui.showSaveFilePicker(blob, suggestedName);
-  if (!item) return null;
-  return { path: item.path, name: item.name || displayName(item.path) };
+  const asked = sdk().ui.showSaveFilePicker(blob, suggestedName);
+  const done = new AbortController();
+  try {
+    const item = await Promise.race([asked?.undefinedOnCancel ?? asked, backInWindow(done.signal)]);
+    if (!item?.path) return null;
+    return { path: item.path, name: item.name || displayName(item.path), uid: item.uid || null, modified: item.modified ?? null };
+  } finally {
+    done.abort();
+  }
+}
+
+/** Resolves null at the first key or click in this window once the desktop has had time to cover it. */
+function backInWindow(signal) {
+  return new Promise((resolve) => {
+    const target = globalThis.window;
+    if (!target?.addEventListener) return;
+    const asked = Date.now();
+    const back = () => { if (Date.now() - asked >= DIALOG_COVER_MS) resolve(null); };
+    for (const type of ['pointerdown', 'keydown']) target.addEventListener(type, back, { capture: true, signal });
+  });
 }
 
 /* ---------- Small per-user settings ---------- */
@@ -388,6 +424,22 @@ export function hostingDelete(subdomain) {
 
 export function setWindowTitle(title) {
   try { sdk()?.ui?.setWindowTitle?.(title); } catch { /* not in a window */ }
+}
+
+/**
+ * Take over the Puter desktop window's close button: the window stays open
+ * until exitApp() is called. False, and nothing taken over, where the window
+ * could then never close (no window, or an SDK without puter.exit).
+ */
+export function onWindowClose(handler) {
+  const owner = sdk();
+  if (!isApp() || typeof owner?.ui?.onWindowClose !== 'function' || typeof owner?.exit !== 'function') return false;
+  try { owner.ui.onWindowClose(handler); return true; } catch { return false; }
+}
+
+/** Close the app's Puter desktop window. */
+export function exitApp() {
+  try { sdk()?.exit?.(); } catch { /* not in a window */ }
 }
 
 /** Register for "Open with" launches from the Puter desktop. */

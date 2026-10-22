@@ -16,6 +16,7 @@ import { importFiles, nothingImportable } from './lib/importfiles.js';
 import { imageFilesFrom } from './lib/images.js';
 import { customTemplatePath } from './lib/customtemplates.js';
 import { parseLink } from './collab/protocol.js';
+import { CLOSE_TITLE, createCloseWindow } from './views/window-close.js';
 
 const appRoot = document.getElementById('app');
 let current = null; // { kind: 'home' | 'editor' | 'gate', view }
@@ -93,7 +94,7 @@ async function unmount(stillWanted = () => true) {
   return true;
 }
 
-const LEAVE_TITLES = ['Leave without saving?', 'Save before leaving?'];
+const LEAVE_TITLES = ['Leave without saving?', 'Save before leaving?', CLOSE_TITLE];
 /** Whether the question about leaving an unsaved document is on screen, whichever navigation or import asked it. */
 const leaveQuestionOpen = () => [...document.querySelectorAll('.modal-root:not(.closing) [role="dialog"]')].some((dialog) => LEAVE_TITLES.includes(dialog.getAttribute('aria-label')));
 
@@ -367,6 +368,8 @@ async function start() {
     if (booted) nav.openPath(first.path);
     else launchedPath = first.path;
   });
+  // The Puter desktop window's close button waits for the document's edits, and asks about a never-saved one.
+  P.onWindowClose(createCloseWindow({ open: () => current, leaveDialog, exit: P.exitApp }));
   await boot();
 }
 

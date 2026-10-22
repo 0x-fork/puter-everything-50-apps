@@ -885,7 +885,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       return recentFiles(await P.listFiles(), { exclude: doc.path }).map(f => ({ name: Doc.nameFor(f.path), path: f.path, when: relativeTime(f.modified) }));
     } : null,
     openRecent: path => openPath?.(path),
-    documentLocation: () => ({ location: local ? 'This device' : doc.path ? `Puter › ${doc.path.replace(/^\/[^/]+\//, '')}` : 'Puter (not saved yet)' }),
+    documentLocation: () => ({ location: local ? 'This device' : doc.path ? `Puter › ${doc.path.replace(/^(?:\/[^/]+|~)\//, '')}` : 'Puter (not saved yet)' }),
     autosaveEnabled: () => doc.autosave !== false,
     setAutosave: cloud ? on => { doc.setAutosave?.(on); updateStatus(); } : null,
     preferences: section => openPreferencesDialog(section),
@@ -1074,6 +1074,14 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       catch (e) { return e?.message || String(e); }
       const failure = await doc.saveAs(name, { stillWanted: () => !destroyed });
       if (!failure) { title.value = doc.name; refreshTitle(); document.title = `${doc.name} — Documents`; }
+      return failure;
+    } : null,
+    // Inside the Puter desktop Save a copy asks where, with Puter's Save dialog, rather than for a name in the app folder.
+    saveCopyWhere: cloud && P.asksWhereToSave() ? async () => {
+      try { await ready; if (!engine || failed) return 'The document is not open.'; engine.finishComposition(); if (session.signedOut && !await session.signIn()) return 'Sign in to save a copy.'; }
+      catch (e) { return e?.message || String(e); }
+      const failure = await doc.saveCopy({ stillWanted: () => !destroyed });
+      if (failure === null && !destroyed) { title.value = doc.name; refreshTitle(); document.title = `${doc.name} — Documents`; }
       return failure;
     } : null,
     refreshTitle: () => { title.value = doc.name; refreshTitle(); },
@@ -1428,10 +1436,13 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       : doc.status === 'offline' ? ['Offline', 'wifiOff', 'offline']
       // A shared document's other tabs leave saving to the owner's (see collab/live.js).
       : doc.writes === false ? (local ? ['Shared in this browser', 'monitor', 'local'] : ['Shared · saved by the owner', 'cloud', 'saved'])
+      // Inside the Puter desktop a new document's edits wait for a first Save to ask where they go: AutoSave cannot write them yet.
+      : doc.waitsForPlace ? ['Not saved yet', 'cloudOff', 'unsaved']
       : doc.dirty ? ['Unsaved changes', 'cloudOff', 'unsaved']
       : local ? ['On this device', 'monitor', 'local']
       : doc.path ? ['Saved to Puter', 'cloud', 'saved'] : ['Not saved yet', 'cloud', 'unsaved'];
     renderStatus(label, name, state);
+    if (label === 'Not saved yet' && doc.waitsForPlace) status.title = 'Not saved yet. Save to choose where it goes; AutoSave starts then';
     status.disabled = !signedOut && (!doc.exporter || doc.status === 'saving');
     if (doc.exporter) saveButton.disabled = false;
     refreshTitle();
@@ -1677,7 +1688,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       const flushing = doc.flush();
       flushing.catch(() => {});
       let timer;
-      const stalled = new Promise(resolve => { timer = setTimeout(() => resolve('stalled'), FLUSH_STALL_MS); });
+      // Time spent in Puter's Save dialog is the user's, not a stalled connection: the wait starts over while it is open.
+      const stalled = new Promise(resolve => { const wait = () => { timer = setTimeout(() => (doc.choosingPlace ? wait() : resolve('stalled')), FLUSH_STALL_MS); }; wait(); });
       try {
         const saved = await Promise.race([flushing, stalled]);
         if (saved !== 'stalled') return saved;

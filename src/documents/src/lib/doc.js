@@ -6,8 +6,11 @@
  *
  * Edits autosave after a short pause. A document that has never been saved
  * gets a file in the app folder the first time it changes, so nothing typed
- * is ever only in memory for long. Files opened from outside the app folder
- * (the Puter file picker, "Open with") save back to where they came from.
+ * is ever only in memory for long. Inside the Puter desktop it waits for the
+ * first Save instead, which asks where the file goes (Puter's Save dialog,
+ * which writes it); autosaves and retries never ask. Files opened from
+ * outside the app folder (the Puter file picker, "Open with") save back to
+ * where they came from.
  *
  * Without a Puter session there is nowhere to write: autosaves wait, and an
  * explicit save fails with SIGN_IN_TO_SAVE so the view can ask for a sign-in.
@@ -192,13 +195,16 @@ export class Doc extends EventTarget {
     return Math.min(MAX_AUTOSAVE_MS, Math.max(AUTOSAVE_MS, 3 * (this._lastSaveMs || 0)));
   }
 
-  /** Finish all pending edits before leaving the editor; failures keep it open. */
+  /** Finish all pending edits before leaving the editor; failures keep it open. Resolves false when the Save dialog was cancelled. */
   async flush() {
     while (this.dirty || this._saving) {
       // A clean document only waits for the operation holding the lock (a
       // rename, say); saving it again could turn a clean .dotx into a copy.
       if (!this.dirty) { try { await this._saving; } catch { /* that operation reported its own failure */ } continue; }
-      if (!await this.save()) throw new Error('The document is still opening. Try again in a moment');
+      if (await this.save()) continue;
+      // Nowhere was chosen for the file: nothing went wrong, and leaving asks what to do with the document.
+      if (this.exporter && this._needsPlace()) return false;
+      throw new Error('The document is still opening. Try again in a moment');
     }
     return true;
   }
@@ -243,6 +249,9 @@ export class Doc extends EventTarget {
       if (auto) return false;
       throw new Error(SIGN_IN_TO_SAVE);
     }
+    // A new file inside the Puter desktop goes where the user puts it. Only Save asks; an autosave or a retry
+    // writes nothing until then, since a dialog nobody asked for would come up in the middle of the typing.
+    if (this._needsPlace()) return auto ? false : !!await this._placeFile(this.fileName, { copy: !!this.path, first: true });
     // The save that held the file may have planned another for these edits: this is it.
     clearTimeout(this._timer);
     this._timer = null;
@@ -429,8 +438,9 @@ export class Doc extends EventTarget {
     // A template being edited becomes a .docx copy at its first save: the name goes to that copy, not to the template file.
     if (!this.path || (!this.isDocxPath && this.dirty)) {
       // The first save would quietly become "Taken 2" if that name is in use;
-      // say so now instead. Without a session there is nothing to check yet.
-      if (!session.signedOut) {
+      // say so now instead. Without a session there is nothing to check yet,
+      // and a Save dialog asks about the name in the folder the user chose.
+      if (!session.signedOut && !P.asksWhereToSave()) {
         try { if (await P.fileExists(`${P.FOLDER}/${clean}.docx`)) return 'A file with that name already exists'; }
         catch { /* the save will pick a free name if the folder cannot be read */ }
       }
@@ -474,7 +484,88 @@ export class Doc extends EventTarget {
     return null;
   }
 
-  /** Save a copy under a new name in the app folder and switch to it. */
+  /**
+   * Whether saving has to make a new file through Puter's Save dialog: inside the Puter desktop, a document
+   * with no file of its own, or a template or other non-docx source whose edits go to a fresh .docx.
+   */
+  _needsPlace() {
+    return (!this.path || !this.isDocxPath) && P.asksWhereToSave();
+  }
+
+  /** Whether edits are waiting for a first Save to ask where they go: nothing writes them until then, autosave included. */
+  get waitsForPlace() {
+    return this.dirty && !!this.exporter && this.writes !== false && !this._deleted && this._needsPlace();
+  }
+
+  /** Whether Puter's Save dialog is open for this document, so a save waiting on it is waiting on the user. */
+  get choosingPlace() {
+    return !!this._choosing;
+  }
+
+  /**
+   * Puter's Save dialog for the document as it stands, suggesting `suggestedName`. The desktop writes the file,
+   * and the document lives there from then on, as after a first save (`first`: a version snapshot is due) or
+   * Save a copy (`copy`: the file it was opened from stays as it was). Resolves the file, or null when the user
+   * cancels and nothing changes.
+   *
+   * The dialog holds no lock: it can stay open as long as the user likes, or never answer, and the file's
+   * other operations must not wait on it. Taking the new path does, so no write in flight lands at the old one.
+   */
+  _placeFile(suggestedName, { copy = false, first = false } = {}) {
+    // One dialog at a time: a second Save pressed before the desktop covers the window answers with the first.
+    if (this._choosing) return this._choosing;
+    const choosing = (async () => {
+      while (this._saving) {
+        try { await this._saving; } catch { /* that operation reported its own failure */ }
+      }
+      let version, blob, item;
+      try {
+        if (this._ready) await this._ready;
+        version = this.version;
+        blob = await this.exporter();
+        item = await P.saveFileAs(blob, suggestedName);
+      } catch (e) {
+        this._setStatus('error', e?.message || String(e));
+        throw e;
+      }
+      if (!item || this._deleted) return null;
+      await this._withFileLock(async () => {
+        // A new file under the name of one that was shared and deleted is not that document: it must not rejoin its room.
+        await forgetRoom(item.path);
+        this._remoteModified = item.modified ?? null;
+        this.path = item.path;
+        this.name = Doc.nameFor(item.path);
+        this.size = blob?.size ?? this.size;
+        this.lastSaved = Date.now();
+        this.lastVersionAt = undefined;
+        this.savedVersion = version;
+        this._emitPath({ copy });
+        if (first) this._snapshot(blob);
+        // Edits made while the dialog was open keep the doc dirty, and now have a file to autosave to.
+        this._setStatus(this.dirty ? 'unsaved' : 'saved');
+        if (this.dirty && this.autosave) this._schedule(this.autosaveDelay);
+      });
+      return item;
+    })().finally(() => { if (this._choosing === choosing) this._choosing = null; });
+    this._choosing = choosing;
+    return choosing;
+  }
+
+  /**
+   * Save a copy where the user chooses (Puter's Save dialog, suggesting "<name> copy.docx") and switch to it.
+   * Resolves null when saved, '' when the user cancelled (there is nothing to say), or why it failed.
+   */
+  async saveCopy({ stillWanted = () => true } = {}) {
+    if (this._closed || !stillWanted()) return 'Saving a copy cancelled';
+    if (this._deleted) return 'This document has been deleted';
+    try {
+      return await this._placeFile(`${P.documentStem(this.name) || UNTITLED} copy.docx`, { copy: true }) ? null : '';
+    } catch (e) {
+      return e?.message || 'Could not save';
+    }
+  }
+
+  /** Save a copy under a new name in the app folder and switch to it. Without Puter's Save dialog, Save a copy asks for the name alone. */
   async saveAs(newName, { stillWanted = () => true } = {}) {
     return this._withFileLock(() => this._saveAs(newName, stillWanted));
   }

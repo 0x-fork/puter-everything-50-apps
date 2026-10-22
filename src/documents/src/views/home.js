@@ -134,7 +134,10 @@ export function homeView({ openPath, newDoc, newFromTemplate, importFile }) {
         el('h2.home-h2', {}, 'Your documents'),
         el('div.home-list-tools', {}, sortBtn, search)),
       list, listStatus),
-    el('footer.home-foot', {}, 'Saved as .docx in your Puter cloud under ', el('code', {}, `${P.FOLDER}/`)));
+    // Inside the Puter desktop a new document is saved where the user chooses; the list still shows the app's own folder.
+    el('footer.home-foot', {}, ...(P.asksWhereToSave()
+      ? ['Listed here: .docx files in the app’s own ', el('code', {}, `${P.FOLDER}/`), ' folder. Save asks where to keep a new document.']
+      : ['Saved as .docx in your Puter cloud under ', el('code', {}, `${P.FOLDER}/`)])));
 
   /* Drag and drop anywhere on the home screen imports documents. */
   let dragDepth = 0;

@@ -202,8 +202,12 @@
         throw notFound(p);
       },
     },
+    /** Closing the app's window: counted for tests (window.__exits), since the mock has no window to close. */
+    exit() { window.__exits = (window.__exits || 0) + 1; console.log('[puter-mock] exit'); },
     ui: {
       setWindowTitle(t) { document.title = t; },
+      /** The desktop's close button: tests press it with window.__closeWindow(). */
+      onWindowClose(handler) { window.__closeWindow = handler; },
       onLaunchedWithItems() {},
       async showOpenFilePicker({ accept = [] } = {}) {
         await delay();
@@ -219,11 +223,22 @@
         console.log(`[puter-mock] open picker -> ${p}`);
         return item(p, state.fs[p]);
       },
-      async showSaveFilePicker(data, suggestedName) {
-        const p = `Desktop/${suggestedName || `export-${Date.now()}`}`;
-        const it = await window.puter.fs.write(p, data);
-        console.log(`[puter-mock] save picker -> ${p}`);
-        return it;
+      // Like the desktop's Save dialog: it writes the file under ~/Desktop and answers with a home-relative path;
+      // a cancel settles only `undefinedOnCancel`. Tests answer it with window.__puterSaveAs: a name to save
+      // under instead of the suggested one, or null to cancel; a function of the suggested name for either.
+      showSaveFilePicker(data, suggestedName) {
+        const answer = (async () => {
+          await delay();
+          const chosen = typeof window.__puterSaveAs === 'function' ? window.__puterSaveAs(suggestedName) : window.__puterSaveAs;
+          if (chosen === null) { console.log('[puter-mock] save picker cancelled'); return undefined; }
+          const p = `~/Desktop/${chosen || suggestedName || `export-${Date.now()}`}`;
+          const it = await window.puter.fs.write(p, data);
+          console.log(`[puter-mock] save picker -> ${p}`);
+          return { name: it.name, path: it.path, uid: it.uid };
+        })();
+        const saved = answer.then((it) => (it ? it : new Promise(() => {})));
+        saved.undefinedOnCancel = answer;
+        return saved;
       },
     },
   };

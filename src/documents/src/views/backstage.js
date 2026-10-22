@@ -198,13 +198,27 @@ export function createBackstage(api) {
         if (!failure) { api.refreshTitle?.(); }
       } finally { submit.disabled = false; }
     } }, el('label.bs-field', {}, el('span.field-label', {}, 'Save a copy as'), name), submit);
+    // Inside the Puter desktop the copy goes where Puter's Save dialog puts it, under the name chosen there.
+    const copy = el('button.btn.btn-primary', { type: 'button', onclick: async () => {
+      // A second press while the dialog comes up would only ask again.
+      if (copy.disabled) return;
+      copy.disabled = true;
+      message.textContent = '';
+      try {
+        const failure = await api.saveCopyWhere();
+        // A cancelled dialog has nothing to report.
+        message.textContent = failure === '' ? '' : failure || 'Saved. You are now editing the copy.';
+        if (failure === null) api.refreshTitle?.();
+      } finally { copy.disabled = false; }
+    } }, 'Save a Copy…');
+    const copyWhere = el('div', {}, el('p.bs-muted', {}, 'Choose where on Puter to keep a copy. You then edit the copy, and the original stays as it is.'), el('div.bs-actions', {}, copy));
     return [...heading('Save', api.saveStatus?.()),
       el('section.bs-section', {}, el('div.bs-tiles', {},
         tile('Save now', 'save', act(() => api.save()), { primary: true, hint: `${MOD_KEY}+S` }),
         api.download ? tile('Download a copy', 'download', act(() => api.download()), { hint: '.docx file' }) : null,
         api.saveTemplate ? tile('Save as template', 'template', act(() => api.saveTemplate()), { disabled: !!api.readOnly?.() }) : null,
         api.rename ? tile('Rename', 'rename', act(() => api.rename())) : null)),
-      api.saveAs ? el('section.bs-section.bs-card', {}, el('h2', {}, 'Save As'), saveAs, message) : null];
+      api.saveCopyWhere || api.saveAs ? el('section.bs-section.bs-card', {}, el('h2', {}, 'Save As'), api.saveCopyWhere ? copyWhere : saveAs, message) : null];
   }
 
   /* ---- Print ---- */
