@@ -323,20 +323,24 @@ export function openChartDialog(ctx, { chart = null, range = null, type = null }
       ctx.grid.selectChart(chart.id);
       return;
     }
-    // Place the new chart just right of its data, or below when there is no room.
+    // Place the new chart just right of its data, or below when there is no room; where that is out
+    // of the window, in the middle of the window instead.
     const r = draft.range;
     let anchor = { r: r.r1, c: r.c2 + 1 };
     if (anchor.c + 4 > sheet.cols) anchor = { r: r.r2 + 2, c: r.c1 };
+    let place = { anchor, dx: draft.dx || 0, dy: draft.dy || 0 };
+    const seen = ctx.grid.placeInView?.({ ...place, w: draft.w, h: draft.h });
+    if (seen) place = seen;
     // Below data in the sheet's last rows the grid would draw the chart clamped onto that data, and
     // move it once the sheet grew: the sheet grows now to hold the whole chart, as typing there would.
     // At the grid's very bottom, where it cannot, the chart goes right of the data after all.
-    const rowsNeeded = anchor.r + 1 + Math.ceil(((draft.dy || 0) + draft.h) / sheet.defaultRowHeight);
+    const rowsNeeded = place.anchor.r + 1 + Math.ceil((place.dy + draft.h) / sheet.defaultRowHeight);
     if (rowsNeeded > sheet.rows) wb.ensureSize(sheetId, rowsNeeded, sheet.cols);
-    if (anchor.r >= sheet.rows) {
-      anchor = { r: r.r1, c: r.c2 + 1 };
-      if (anchor.c >= sheet.cols) wb.ensureSize(sheetId, sheet.rows, anchor.c + 1);
+    if (place.anchor.r >= sheet.rows) {
+      place = { ...place, anchor: { r: r.r1, c: r.c2 + 1 } };
+      if (place.anchor.c >= sheet.cols) wb.ensureSize(sheetId, sheet.rows, place.anchor.c + 1);
     }
-    const id = wb.addChart(sheetId, { ...draft, anchor });
+    const id = wb.addChart(sheetId, { ...draft, ...place });
     modal.close();
     ctx.grid.selectChart(id);
   };

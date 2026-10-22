@@ -42,15 +42,17 @@ export const seriesCountOf = (wb, sheetId, chart) => {
   return ['pie', 'donut'].includes(chart.type) ? data.categories.length : data.series.length;
 };
 
-/** Insert a chart of `subtype` over `range` beside the data, select it and show Chart Design. */
+/** Insert a chart of `subtype` over `range` beside the data (or in view), select it and show Chart Design. */
 export function insertChart(ctx, subtype = DEFAULT_SUBTYPE, range = null) {
   const { wb } = ctx, sheetId = ctx.sheetId(), sheet = wb.sheet(sheetId);
   if (!sheet || sheet.kind === 'chart') return null;
   const r = normalizeRange(range || ctx.dataRange?.(ctx.range()) || ctx.range());
   if (r.r2 - r.r1 + 1 > 5000 || r.c2 - r.c1 + 1 > 200) { toast('That range is too large to chart', { icon: 'info' }); return null; }
   const chart = newExcelChart(wb, sheetId, r, subtype, { font: themeChartFont(wb) });
+  // Beside data that runs past the window, the chart goes in the middle of the window instead.
+  Object.assign(chart, ctx.grid.placeInView?.(chart));
   // A chart placed in the sheet's last rows grows the sheet to hold it, as the Insert chart dialog does.
-  const rowsNeeded = chart.anchor.r + 1 + Math.ceil(chart.h / (sheet.defaultRowHeight || 20));
+  const rowsNeeded = chart.anchor.r + 1 + Math.ceil((chart.dy + chart.h) / (sheet.defaultRowHeight || 20));
   if (rowsNeeded > sheet.rows) wb.ensureSize(sheetId, rowsNeeded, sheet.cols);
   if (chart.anchor.c >= sheet.cols) wb.ensureSize(sheetId, sheet.rows, chart.anchor.c + 1);
   const id = wb.addChart(sheetId, chart);

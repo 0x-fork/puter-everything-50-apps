@@ -6879,6 +6879,27 @@ export function createGrid(opts) {
       const s = sheet(), r = clamp(rowOffsets.indexAt(Math.max(0, y)), 0, s.rows - 1), c = clamp(colOffsets.indexAt(Math.max(0, x)), 0, s.cols - 1);
       return { anchor: { r, c }, dx: (x - colX(c)) / zoom, dy: (y - rowY(r)) / zoom };
     },
+    /**
+     * A new chart's place `{ anchor, dx, dy }` (its size `w` × `h` at 100%), kept when the chart shows there
+     * in the scrolling part of the window, or else the chart centred in that part, as Excel puts a new chart
+     * in the middle of the window. Null when the grid has no size to tell by.
+     */
+    placeInView({ anchor, dx = 0, dy = 0, w, h }) {
+      const s = sheet(), view = viewMetrics();
+      if (!s || s.kind === 'chart' || !(view.vw > 0 && view.vh > 0)) return null;
+      ensureOffsets();
+      const x0 = view.sl + frozen.w, x1 = view.sl + view.vw, y0 = view.st + frozen.h, y1 = view.st + view.vh;
+      const width = w * zoom, height = h * zoom;
+      // As much of the chart shows on an axis as the window could show of it; a line outside the laid-out
+      // window has no exact position, so the anchor must be among the lines in view.
+      const shows = (at, size, v0, v1) => at >= v0 && Math.min(at + size, v1) - at >= Math.min(size, v1 - v0) - 1;
+      const inLines = (offsets, i, v0, v1) => i >= offsets.indexAt(v0) && i <= offsets.indexAt(v1);
+      if (anchor.r < s.rows && anchor.c < s.cols && inLines(rowOffsets, anchor.r, y0, y1) && inLines(colOffsets, anchor.c, x0, x1)
+        && shows(colX(anchor.c) + dx * zoom, width, x0, x1) && shows(rowY(anchor.r) + dy * zoom, height, y0, y1)) return { anchor, dx, dy };
+      const x = x0 + Math.max(0, (x1 - x0 - width) / 2), y = y0 + Math.max(0, (y1 - y0 - height) / 2);
+      const r = clamp(rowOffsets.indexAt(y), 0, s.rows - 1), c = clamp(colOffsets.indexAt(x), 0, s.cols - 1);
+      return { anchor: { r, c }, dx: Math.round((x - colX(c)) / zoom), dy: Math.round((y - rowY(r)) / zoom) };
+    },
     /** Ink: an object's box in canvas pixels. */
     chartRect(id) { const ch = sheet()?.charts.find(o => o.id === id); return ch ? chartBoxRect(ch) : null; },
     get showFormulas() { return showFormulas; },
