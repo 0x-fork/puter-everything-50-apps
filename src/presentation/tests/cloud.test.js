@@ -18,6 +18,8 @@ import {
   pickFile,
   saveFileAs,
   downloadBlob,
+  asksWhereToSave,
+  oneDialog,
   onWindowClose,
   onLaunch,
 } from "../src/cloud.js";
@@ -210,6 +212,56 @@ describe("Puter storage boundary", () => {
     expect(await downloadBlob(new Blob(["x"]), "Deck.pptx")).toEqual({
       saved,
     });
+  });
+  it("asks where a new file goes only inside the Puter desktop, with its Save dialog", () => {
+    const ui = { showSaveFilePicker: () => {} };
+    vi.stubGlobal("puter", { env: "app", ui });
+    expect(asksWhereToSave()).toBe(true);
+    // An SDK without the dialog keeps the Presentations folder.
+    vi.stubGlobal("puter", { env: "app", ui: {} });
+    expect(asksWhereToSave()).toBe(false);
+    // On the open web a new file goes to the Presentations folder.
+    vi.stubGlobal("puter", { env: "web", ui });
+    expect(asksWhereToSave()).toBe(false);
+  });
+  it("keeps one Save dialog open per save, until it answers or the app has the focus back", async () => {
+    const app = new EventTarget();
+    vi.stubGlobal("addEventListener", app.addEventListener.bind(app));
+    vi.stubGlobal("removeEventListener", app.removeEventListener.bind(app));
+    let answer;
+    const open = vi.fn(() => new Promise((resolve) => (answer = resolve)));
+    const first = oneDialog("first:a", open);
+    // A second save while the dialog is open waits for it.
+    const second = oneDialog("first:a", open);
+    expect(second).toBe(first);
+    await Promise.resolve();
+    expect(open).toHaveBeenCalledOnce();
+    // Another presentation's save is its own.
+    const other = oneDialog("first:b", () => "other");
+    expect(other).not.toBe(first);
+    expect(await other).toBe("other");
+    answer(true);
+    expect(await second).toBe(true);
+    // Answered, the next save opens a new dialog.
+    const next = oneDialog("first:a", open);
+    expect(next).not.toBe(first);
+    await Promise.resolve();
+    expect(open).toHaveBeenCalledTimes(2);
+    // A dialog that never answers holds the saves only until the desktop
+    // hands the focus back.
+    app.dispatchEvent(new Event("focus"));
+    const after = oneDialog("first:a", open);
+    expect(after).not.toBe(next);
+    await Promise.resolve();
+    expect(open).toHaveBeenCalledTimes(3);
+    answer(false);
+    expect(await after).toBe(false);
+    // A failed dialog lets the next save try again.
+    const failing = oneDialog("copy:a", async () => {
+      throw new Error("Read-only folder");
+    });
+    await expect(failing).rejects.toThrow("Read-only folder");
+    expect(await oneDialog("copy:a", () => "again")).toBe("again");
   });
   it("takes over the window's close button only where the window can still close", () => {
     const handler = () => {};

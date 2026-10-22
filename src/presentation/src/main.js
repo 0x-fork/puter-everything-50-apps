@@ -2514,29 +2514,50 @@ async function settled() {
 }
 // Resolves to whether the open presentation's latest revision is in Puter.
 // `force` writes over a file that changed elsewhere (the person chose to);
-// `quiet` leaves a conflict for the caller to put to the person.
+// `quiet` leaves a conflict for the caller to put to the person. `chosen` is
+// the file Puter's Save dialog wrote for `chosen.target`: the save adopts it.
 async function saveCloud(
   explicit = true,
-  { force = false, quiet = false } = {},
+  { force = false, quiet = false, chosen = null } = {},
 ) {
-  const target = doc;
+  const target = chosen?.target ?? doc;
   await settled();
-  if (!target || doc !== target) return false;
+  if (!target || (doc !== target && !chosen)) return false;
   if (!account) {
     if (!explicit) return false;
     if (!(await login())) return false;
   }
+  // Inside the Puter desktop the first file goes where the person chooses in
+  // Puter's Save dialog, which writes it; closing the dialog saves nothing.
+  // Autosave and its retries never open it: a presentation without a file
+  // waits, in its draft, for a Save. The dialog is not kept in the queue,
+  // since it may never answer.
+  if (!chosen && !target.path && cloud.asksWhereToSave()) {
+    if (!explicit) return false;
+    return cloud.oneDialog(`first:${target.id}`, async () => {
+      const rev = revision;
+      const bytes = await P.savePresentation(target.pres);
+      if (doc !== target) return false;
+      const file = await cloud.saveFileAs(
+        new Blob([bytes], { type: MIME }),
+        `${cleanName(target.name, { stripExtension: false, maxLength: Infinity })}.pptx`,
+      );
+      if (!file) return false;
+      return saveCloud(true, { chosen: { target, file, bytes, rev } });
+    });
+  }
   const accountVersion = accountRequest;
   const saved = await saveQueue.run(async () => {
     // An autosave that waited behind a save of the same revision has nothing
-    // left to upload.
-    if (doc !== target) return false;
+    // left to upload. A file the dialog wrote is adopted even when another
+    // presentation has been opened since, as a first save's is.
+    if (doc !== target && !chosen) return false;
     if (!explicit && (!target.path || savedRevision === revision))
       return savedRevision === revision;
     savingDocument = target;
     updateSaveStatus();
-    const rev = revision;
-    const firstSave = !target.path;
+    const rev = chosen ? chosen.rev : revision;
+    const firstSave = !target.path || !!chosen;
     try {
       if (!firstSave && !force) {
         // Each check answers afresh; one that fails leaves no stale answer.
@@ -2548,8 +2569,9 @@ async function saveCloud(
           return false;
         }
       }
-      const bytes = await P.savePresentation(target.pres);
-      const file = await cloud.saveFile(bytes, target.name, target.path);
+      const bytes = chosen?.bytes ?? (await P.savePresentation(target.pres));
+      const file =
+        chosen?.file ?? (await cloud.saveFile(bytes, target.name, target.path));
       target.path = file.path || target.path;
       if (!target.path)
         throw new Error("Puter did not return the saved file location.");
@@ -2570,6 +2592,9 @@ async function saveCloud(
         retryDelay = 0;
         if (firstSave) showDocumentName(target.name);
         target.owner = owner();
+        // A file the dialog put outside the Presentations folder is listed
+        // in the library as one opened from elsewhere on the drive is.
+        if (chosen) rememberOpened(target);
         savedRevision = rev;
         // Autosave skipped edits made during a first save, the document
         // having no file to save them to yet.
@@ -2578,13 +2603,14 @@ async function saveCloud(
           () => true,
           () => false,
         );
+        // The dialog's folder is named, so the file can be found there.
+        const where = chosen
+          ? `Saved to ${cloud.folderName(target.path) || "Home"} in your Puter.`
+          : "Saved to your Puter cloud.";
         if (explicit)
-          toast(
-            recovered
-              ? "Saved to your Puter cloud."
-              : "Saved to your Puter cloud. Local recovery is unavailable.",
-          );
-      } else if (firstSave)
+          toast(recovered ? where : `${where} Local recovery is unavailable.`);
+      } else if (firstSave) {
+        if (chosen) rememberOpened(target);
         // The draft left behind takes the file's baseline, so a later save
         // from it notices a change made since; it is the saved version only
         // when it holds the revision just written.
@@ -2596,6 +2622,7 @@ async function saveCloud(
             cloudSaved: target.draftedRevision === rev,
           })
           .catch(warnStorage);
+      }
       return true;
     } catch (error) {
       // The edits stay dirty and on this device. A failure that passes (the
@@ -2781,8 +2808,9 @@ async function reloadFromCloud(target) {
     target.leaveUnsaved = false;
   }
 }
-// The file is gone: the presentation becomes a new one in the Presentations
-// folder, and its first save puts it there.
+// The file is gone: the presentation becomes a new one, and its first save
+// puts it where a new one goes (where the person chooses inside the Puter
+// desktop, the Presentations folder elsewhere).
 async function saveAsNewFile(target) {
   const from = target.path;
   target.path = null;
@@ -2797,11 +2825,16 @@ async function saveAsNewFile(target) {
 // A copy of the presentation under a new name in Puter, which then becomes
 // the open presentation; the original stays as it was last saved. Inside the
 // Puter desktop, Puter's own Save dialog chooses the folder as well as the
-// name; elsewhere the copy goes to the Presentations folder.
+// name, and a second Save a copy while it is open opens no other; elsewhere
+// the copy goes to the Presentations folder under the name asked for.
 async function saveCopy() {
   const target = doc;
   if (!target) return;
-  const useDialog = cloud.isApp() && cloud.canSaveFiles();
+  if (cloud.asksWhereToSave())
+    return cloud.oneDialog(`copy:${target.id}`, () => copyOf(target, true));
+  return copyOf(target, false);
+}
+async function copyOf(target, useDialog) {
   const name = useDialog
     ? `${target.name} copy`
     : await promptName("Save a copy", `${target.name} copy`, null, {
@@ -8007,7 +8040,9 @@ async function aboutDialog() {
       el(
         "p",
         { class: "muted" },
-        "Saved presentations live in your own Puter cloud under Presentations/. Recovery drafts stay on this device.",
+        cloud.asksWhereToSave()
+          ? "Saved presentations live in your own Puter cloud, in the folder you choose when you first save them. Recovery drafts stay on this device."
+          : "Saved presentations live in your own Puter cloud under Presentations/. Recovery drafts stay on this device.",
       ),
     ),
     cancel: null,

@@ -6,8 +6,10 @@ import { P, createDeck } from "../src/model.js";
 // to opening and saving: every file has an id it keeps through renames and
 // moves, which the drive stamps as modifications; relative paths resolve
 // under the app's own folder and "~/" under the home folder; the pickers never
-// settle when cancelled but carry `undefinedOnCancel`; and the window's close
-// button waits for puter.exit() once a handler is registered.
+// settle when cancelled but carry `undefinedOnCancel`; the Save dialog writes
+// the file itself (to ~/Documents here) and answers, as the desktop does,
+// with no time or size; and the window's close button waits for puter.exit()
+// once a handler is registered.
 function installPuter({ env, seed, launch }) {
   const bytesOf = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   let clock = 1_700_000_000;
@@ -59,7 +61,16 @@ function installPuter({ env, seed, launch }) {
       files.delete(path);
     },
   };
-  window.__ui = { titles: [], close: null, exited: false, saveAs: null };
+  // `saveAs` is the name typed in the Save dialog, "cancel" to close it,
+  // "fail" for a dialog that cannot write, or "hold" to leave it open until
+  // __ui.answer(name); `saved` lists the name each dialog was opened with.
+  window.__ui = {
+    titles: [],
+    close: null,
+    exited: false,
+    saveAs: null,
+    saved: [],
+  };
   const cancellable = (result) => {
     const pending = new Promise(() => {});
     pending.undefinedOnCancel = Promise.resolve(result);
@@ -130,9 +141,22 @@ function installPuter({ env, seed, launch }) {
           window.__ui.pick ? info(files.get(window.__ui.pick)) : undefined,
         ),
       showSaveFilePicker(content, name) {
-        if (window.__ui.saveAs === "cancel") return cancellable(undefined);
-        const path = `/test/Documents/${window.__ui.saveAs || name}`;
-        return cancellable(info(put(path, new Blob([content]))));
+        window.__ui.saved.push(name);
+        const choice = window.__ui.saveAs;
+        if (choice === "cancel") return cancellable(undefined);
+        if (choice === "fail")
+          return Promise.reject(new Error("That folder is read-only."));
+        const write = (typed) => {
+          const f = put(
+            `/test/Documents/${typed || name}`,
+            new Blob([content]),
+          );
+          return { path: f.path, name: f.path.split("/").pop(), uid: f.uid };
+        };
+        if (choice !== "hold") return cancellable(write(choice));
+        return cancellable(
+          new Promise((resolve) => (window.__ui.answer = resolve)).then(write),
+        );
       },
     },
     exit() {
@@ -335,12 +359,15 @@ test("a file deleted elsewhere offers to save the edits as a new file", async ({
     name: "This presentation was moved or deleted",
   });
   await expect(status(page)).toHaveText("Moved or deleted");
+  // A new file goes where Puter's Save dialog puts it.
   await dialog.getByRole("button", { name: "Save as a new file" }).click();
   await expect(status(page)).toHaveText("Saved to Puter");
-  expect((await writes(page)).at(-1)).toMatchObject({
-    path: `${APP_FOLDER}/Doomed.pptx`,
-    options: { overwrite: false, dedupeName: true },
-  });
+  await expect(status(page)).toHaveAttribute(
+    "title",
+    "/test/Documents/Doomed.pptx",
+  );
+  expect(await page.evaluate(() => window.__ui.saved)).toEqual(["Doomed.pptx"]);
+  expect(await writes(page)).toEqual([]);
 });
 
 test("leaving the editor saves edits that autosave has not sent yet", async ({
@@ -366,11 +393,13 @@ test("leaving the editor saves edits that autosave has not sent yet", async ({
   ).toHaveCount(0);
 });
 
+// Outside the Puter desktop a first save writes to the Presentations folder
+// itself (inside it, Puter's Save dialog writes the file).
 test("a draft left during a first save notices the file changing later", async ({
   page,
 }) => {
   const story = await base64(createDeck("story"));
-  await mockDrive(page, { path: "/" });
+  await mockDrive(page, { env: "web", path: "/" });
   await expect(title(page)).toHaveText("Untitled presentation");
   await addText(page);
   await page.evaluate(() => {
@@ -412,7 +441,7 @@ test("a draft left during a first save notices the file changing later", async (
 test("an edit made during a first save is autosaved after it", async ({
   page,
 }) => {
-  await mockDrive(page, { path: "/" });
+  await mockDrive(page, { env: "web", path: "/" });
   await expect(title(page)).toHaveText("Untitled presentation");
   await addText(page);
   await page.evaluate(() => {
@@ -598,12 +627,104 @@ test("closing the Puter window asks about a presentation never saved", async ({
   });
   await dialog.getByRole("button", { name: "Cancel" }).click();
   expect(await page.evaluate(() => window.__ui.exited)).toBe(false);
+  // Saving asks where; closing Puter's Save dialog keeps the window open.
+  await page.evaluate(() => (window.__ui.saveAs = "cancel"));
+  await page.evaluate(() => window.__ui.close());
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => window.__ui.exited)).toBe(false);
+  await expect(page.locator("#toast")).not.toBeVisible();
+  await page.evaluate(() => (window.__ui.saveAs = null));
   await page.evaluate(() => window.__ui.close());
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.__ui.exited)).toBe(true);
-  expect((await writes(page)).at(-1).path).toBe(
-    `${APP_FOLDER}/Untitled presentation.pptx`,
+  expect(await page.evaluate(() => window.__ui.saved)).toEqual([
+    "Untitled presentation.pptx",
+    "Untitled presentation.pptx",
+  ]);
+  expect(await page.evaluate(() => window.__fs.paths())).toContain(
+    "/test/Documents/Untitled presentation.pptx",
   );
+  expect(await writes(page)).toEqual([]);
+});
+
+test("inside Puter, the first save asks where the file goes, and autosave never does", async ({
+  page,
+}) => {
+  await mockDrive(page);
+  await expect(title(page)).toHaveText("Untitled presentation");
+  const asked = () => page.evaluate(() => window.__ui.saved);
+  await addText(page);
+  // Autosave keeps a presentation without a file on this device.
+  await page.waitForTimeout(2500);
+  expect(await asked()).toEqual([]);
+  await expect(status(page)).toHaveText("Saved on this device");
+  // Closing the dialog saves nothing, and says nothing.
+  await page.evaluate(() => (window.__ui.saveAs = "cancel"));
+  await page.keyboard.press("Control+s");
+  await expect.poll(asked).toEqual(["Untitled presentation.pptx"]);
+  await page.waitForTimeout(300);
+  await expect(page.locator("#toast")).not.toBeVisible();
+  await expect(status(page)).toHaveText("Saved on this device");
+  await addText(page);
+  await page.waitForTimeout(2500);
+  expect(await asked()).toHaveLength(1);
+  // A second Save while the dialog is open opens no other.
+  await page.evaluate(() => (window.__ui.saveAs = "hold"));
+  await page.keyboard.press("Control+s");
+  await expect.poll(asked).toHaveLength(2);
+  await page.keyboard.press("Control+s");
+  await page.waitForTimeout(300);
+  expect(await asked()).toHaveLength(2);
+  await expect(status(page)).toHaveText("Saved on this device");
+  // The presentation takes the file the dialog wrote, and its name.
+  await page.evaluate(() => window.__ui.answer("Pitch.pptx"));
+  await expect(page.locator("#toast")).toHaveText(
+    "Saved to Documents in your Puter.",
+  );
+  await expect(title(page)).toHaveText("Pitch");
+  await expect(status(page)).toHaveText("Saved to Puter");
+  await expect(status(page)).toHaveAttribute(
+    "title",
+    "/test/Documents/Pitch.pptx",
+  );
+  expect(await writes(page)).toEqual([]);
+  // Later edits are autosaved to it, without asking again.
+  await addText(page);
+  await expect.poll(() => writes(page)).toHaveLength(1);
+  await expect(status(page)).toHaveText("Saved to Puter");
+  expect((await writes(page))[0]).toMatchObject({
+    path: "/test/Documents/Pitch.pptx",
+    options: { overwrite: true },
+  });
+  expect(await asked()).toHaveLength(2);
+  // The library lists it, and keeps no recovery draft of it.
+  await page.getByRole("button", { name: "Back to presentations" }).click();
+  await expect(
+    page.getByRole("button", { name: /^Pitch PowerPoint presentation/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Recovery draft/ }),
+  ).toHaveCount(0);
+});
+
+test("a first save that fails inside Puter is not retried with another dialog", async ({
+  page,
+}) => {
+  // It waits out the first retry's pause.
+  test.slow();
+  await mockDrive(page);
+  await expect(title(page)).toHaveText("Untitled presentation");
+  await addText(page);
+  await page.evaluate(() => (window.__ui.saveAs = "fail"));
+  await page.keyboard.press("Control+s");
+  await expect(page.locator("#toast")).toHaveText("That folder is read-only.");
+  await addText(page);
+  // Past the first retry's pause, and an edit's autosave.
+  await page.waitForTimeout(9000);
+  expect(await page.evaluate(() => window.__ui.saved)).toHaveLength(1);
+  await expect(status(page)).toHaveText("Saved on this device");
 });
 
 test("closing the Puter window saves a Puter file's pending edits first", async ({

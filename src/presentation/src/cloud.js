@@ -196,6 +196,28 @@ export async function saveFileAs(blob, suggestedName) {
   );
   return item || null;
 }
+// Inside the Puter desktop a presentation's first file, and a copy, go where
+// the person chooses in Puter's Save dialog. Elsewhere they go to the app's
+// Presentations folder, a relative path the SDK keeps under the app's data.
+export const asksWhereToSave = () => isApp() && canSaveFiles();
+// Puter's Save dialog never answers when the desktop fails to write the file.
+// A save made while one is open waits for that one, under the same `key`,
+// rather than opening another; once the app has the focus back (the desktop
+// holds it while its dialog is up) the dialog is gone, answered or not, and
+// the next save opens a new one. `open` resolves with what the save did.
+const openDialogs = new Map();
+export function oneDialog(key, open) {
+  const pending = openDialogs.get(key);
+  if (pending) return pending;
+  const release = () => {
+    globalThis.removeEventListener?.("focus", release);
+    if (openDialogs.get(key) === done) openDialogs.delete(key);
+  };
+  const done = Promise.resolve().then(open).finally(release);
+  openDialogs.set(key, done);
+  globalThis.addEventListener?.("focus", release);
+  return done;
+}
 // What the app was launched with ("Open with", a double-click on the
 // desktop) arrives through this, as soon as it is registered. Every item is
 // handed on, so a folder or another kind of file can be explained.
