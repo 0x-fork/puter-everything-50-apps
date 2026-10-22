@@ -4014,7 +4014,7 @@ test("printing an all-hidden deck explains why there is nothing to print", async
   ).toHaveCount(0);
 });
 
-test("Puter export failures are reported instead of claiming a download", async ({
+test("inside Puter, exports download to this device rather than open Puter's Save dialog", async ({
   page,
 }) => {
   await mockPuter(page, { signedIn: true, env: "app" });
@@ -4022,20 +4022,25 @@ test("Puter export failures are reported instead of claiming a download", async 
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.evaluate(() => {
+    window.__asked = 0;
     puter.ui.showSaveFilePicker = async () => {
+      window.__asked++;
       throw new Error("Export destination unavailable");
     };
   });
   await page
     .getByRole("button", { name: "New presentation", exact: true })
     .click();
+  const downloading = page.waitForEvent("download");
   await openFileMenu(page);
   await page
     .getByRole("menuitem", { name: "Download PowerPoint (.pptx)" })
     .click();
+  expect((await downloading).suggestedFilename()).toMatch(/\.pptx$/);
   await expect(page.locator("#toast")).toHaveText(
-    "Export destination unavailable",
+    "PowerPoint file downloaded.",
   );
+  expect(await page.evaluate(() => window.__asked)).toBe(0);
   expect(errors).toEqual([]);
   await expect(page.locator("#save-status")).toContainText(
     "Saved on this device",

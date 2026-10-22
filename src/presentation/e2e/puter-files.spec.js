@@ -803,26 +803,44 @@ test("pictures dropped from the Puter desktop go on the slide, or say which kind
   await expect(pictures).toHaveCount(before + 1);
 });
 
-test("inside Puter, exports and copies go through Puter's Save dialog", async ({
+test("inside Puter, exports download to this device and copies go through Puter's Save dialog", async ({
   page,
 }) => {
   await mockDrive(page);
   await expect(title(page)).toHaveText("Untitled presentation");
-  await page.evaluate(() => (window.__ui.saveAs = "cancel"));
+  // Exporting is the reverse of importing from this device: no dialog.
+  const downloading = page.waitForEvent("download");
   await fileMenu(page);
   await page
     .getByRole("menuitem", { name: "Download PowerPoint (.pptx)" })
     .click();
-  await page.waitForTimeout(300);
-  await expect(page.locator("#toast")).not.toBeVisible();
-  await page.evaluate(() => (window.__ui.saveAs = null));
-  await fileMenu(page);
-  await page
-    .getByRole("menuitem", { name: "Download PowerPoint (.pptx)" })
-    .click();
-  await expect(page.locator("#toast")).toHaveText(
-    "Saved Untitled presentation.pptx to your Puter.",
+  expect((await downloading).suggestedFilename()).toBe(
+    "Untitled presentation.pptx",
   );
+  await expect(page.locator("#toast")).toHaveText(
+    "PowerPoint file downloaded.",
+  );
+  const template = page.waitForEvent("download");
+  await fileMenu(page);
+  await page
+    .getByRole("menuitem", { name: "Save as template", exact: true })
+    .click();
+  expect((await template).suggestedFilename()).toBe(
+    "Untitled presentation.potx",
+  );
+  const exported = page.waitForEvent("download");
+  await fileMenu(page);
+  await page.getByRole("menuitem", { name: "Export…" }).click();
+  const exporting = page.getByRole("dialog", { name: "Export" });
+  await exporting
+    .getByRole("radio", { name: "PDF document", exact: true })
+    .check();
+  await exporting.getByRole("button", { name: "Export", exact: true }).click();
+  expect((await exported).suggestedFilename()).toBe(
+    "Untitled presentation.pdf",
+  );
+  await expect(page.locator("#toast")).toHaveText("PDF downloaded.");
+  expect(await page.evaluate(() => window.__ui.saved)).toEqual([]);
   // A copy goes where the dialog puts it, and becomes the open presentation.
   await addText(page);
   await page.evaluate(() => (window.__ui.saveAs = "Elsewhere.pptx"));
@@ -832,6 +850,9 @@ test("inside Puter, exports and copies go through Puter's Save dialog", async ({
     "title",
     "/test/Documents/Elsewhere.pptx",
   );
+  expect(await page.evaluate(() => window.__ui.saved)).toEqual([
+    "Untitled presentation copy.pptx",
+  ]);
   // Its content went with it, so no recovery draft of the original remains.
   await page.getByRole("button", { name: "Back to presentations" }).click();
   await expect(

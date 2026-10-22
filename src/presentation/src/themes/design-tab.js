@@ -283,7 +283,7 @@ export function createThemeTools(host) {
         onSelect: browseThemes,
       },
       {
-        label: "Save Current Theme…",
+        label: "Save Current Theme",
         icon: "o:save",
         onSelect: run(saveTheme),
       },
@@ -312,7 +312,7 @@ export function createThemeTools(host) {
     await host.download(
       new Blob([bytes], { type: "application/vnd.ms-officetheme" }),
       `${name}.thmx`,
-      "Theme saved.",
+      "Theme downloaded.",
     );
   }
   // A small PNG of the theme's Title Slide layout, for file browsers.
@@ -925,7 +925,7 @@ export function createThemeTools(host) {
         onSelect: browseThemes,
       },
       {
-        label: "Save Current Theme…",
+        label: "Save Current Theme",
         icon: "o:save",
         onSelect: run(saveTheme),
       },

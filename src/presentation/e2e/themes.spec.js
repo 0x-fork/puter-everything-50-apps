@@ -291,7 +291,7 @@ test("the current theme saves as a theme file that another deck can use", async 
   await expect(page.locator("#save-status")).toContainText("Saved");
   await galleryPanel(page, "Themes");
   const saving = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Save Current Theme…" }).click();
+  await page.getByRole("button", { name: "Save Current Theme" }).click();
   const saved = await saving;
   expect(saved.suggestedFilename()).toBe("Orbit.thmx");
   const thmx = await readFile(await saved.path());

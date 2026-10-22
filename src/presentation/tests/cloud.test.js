@@ -195,9 +195,6 @@ describe("Puter storage boundary", () => {
     });
     expect(await pickFile()).toBeNull();
     expect(await saveFileAs(new Blob(["x"]), "Deck.pptx")).toBeNull();
-    expect(await downloadBlob(new Blob(["x"]), "Deck.pptx")).toEqual({
-      cancelled: true,
-    });
     const saved = { path: "/u/Documents/Deck.pptx", name: "Deck.pptx" };
     const chosen = () => {
       const pending = Promise.resolve(saved);
@@ -209,9 +206,43 @@ describe("Puter storage boundary", () => {
       ui: { showOpenFilePicker: () => chosen(), showSaveFilePicker: chosen },
     });
     expect(await pickFile()).toEqual(saved);
-    expect(await downloadBlob(new Blob(["x"]), "Deck.pptx")).toEqual({
-      saved,
-    });
+    expect(await saveFileAs(new Blob(["x"]), "Deck.pptx")).toEqual(saved);
+  });
+  it("downloads exports to this device, inside the Puter desktop too", async () => {
+    vi.useFakeTimers();
+    try {
+      const picker = vi.fn();
+      const clicked = [];
+      const link = {
+        click() {
+          clicked.push({ href: this.href, download: this.download });
+        },
+        remove: vi.fn(),
+      };
+      vi.stubGlobal("document", {
+        createElement: vi.fn(() => link),
+        body: { append: vi.fn() },
+      });
+      const revoke = vi
+        .spyOn(URL, "revokeObjectURL")
+        .mockImplementation(() => {});
+      vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:deck");
+      for (const env of ["app", "web"]) {
+        vi.stubGlobal("puter", { env, ui: { showSaveFilePicker: picker } });
+        await downloadBlob(new Blob(["x"]), "Deck.pdf");
+      }
+      expect(picker).not.toHaveBeenCalled();
+      expect(clicked).toEqual([
+        { href: "blob:deck", download: "Deck.pdf" },
+        { href: "blob:deck", download: "Deck.pdf" },
+      ]);
+      expect(link.remove).toHaveBeenCalledTimes(2);
+      vi.runAllTimers();
+      expect(revoke).toHaveBeenCalledWith("blob:deck");
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
   });
   it("asks where a new file goes only inside the Puter desktop, with its Save dialog", () => {
     const ui = { showSaveFilePicker: () => {} };

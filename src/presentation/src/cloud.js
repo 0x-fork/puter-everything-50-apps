@@ -264,15 +264,10 @@ export async function download(bytes, name) {
     `${cleanName(name, { stripExtension: false, maxLength: Infinity })}.pptx`,
   );
 }
-// Any file the app produces goes through Puter's Save dialog in the app
-// environment and through the browser's download elsewhere. Resolves to
-// { saved: file } for the former, { cancelled: true } when its dialog was
-// closed, and { downloaded: true } for a download.
+// A file the app exports is downloaded to this device, inside the Puter
+// desktop too (its app frames allow downloads): exporting is the reverse of
+// importing from this device, and Save is what puts a file in Puter.
 export async function downloadBlob(blob, filename) {
-  if (isApp() && canSaveFiles()) {
-    const saved = await saveFileAs(blob, filename);
-    return saved ? { saved } : { cancelled: true };
-  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -281,7 +276,6 @@ export async function downloadBlob(blob, filename) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
-  return { downloaded: true };
 }
 // Serialize writes so a slow request cannot overwrite a newer revision.
 export class SaveQueue {

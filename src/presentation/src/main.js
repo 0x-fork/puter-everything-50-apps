@@ -1513,15 +1513,10 @@ function libraryFileMenu(e, f) {
           {
             label: "Download PPTX",
             icon: "Download",
-            action: run(async () =>
-              reportExport(
-                await cloud.download(
-                  await cloud.readFile(f.path),
-                  fileTitle(f),
-                ),
-                "PowerPoint file downloaded.",
-              ),
-            ),
+            action: run(async () => {
+              await cloud.download(await cloud.readFile(f.path), fileTitle(f));
+              toast("PowerPoint file downloaded.");
+            }),
           },
           { separator: true },
           {
@@ -1596,15 +1591,10 @@ function libraryFileMenu(e, f) {
           {
             label: "Download PPTX",
             icon: "Download",
-            action: run(async () =>
-              reportExport(
-                await cloud.download(
-                  await cloud.readFile(f.path),
-                  fileTitle(f),
-                ),
-                "PowerPoint file downloaded.",
-              ),
-            ),
+            action: run(async () => {
+              await cloud.download(await cloud.readFile(f.path), fileTitle(f));
+              toast("PowerPoint file downloaded.");
+            }),
           },
         ]
       : []),
@@ -2971,18 +2961,8 @@ async function downloadDeck() {
   await settled();
   if (!target) return;
   const name = target.name;
-  reportExport(
-    await cloud.download(await P.savePresentation(target.pres), name),
-    "PowerPoint file downloaded.",
-  );
-}
-// Inside the Puter desktop a file the app produces is saved through Puter's
-// Save dialog rather than downloaded; the message says which happened, and
-// nothing when the dialog was closed.
-function reportExport(result, downloaded) {
-  if (result?.saved)
-    toast(`Saved ${result.saved.name || "the file"} to your Puter.`);
-  else if (!result?.cancelled) toast(downloaded);
+  await cloud.download(await P.savePresentation(target.pres), name);
+  toast("PowerPoint file downloaded.");
 }
 /* ---------- Slide size ---------- */
 const SLIDE_SIZES = [
@@ -3158,10 +3138,8 @@ async function exportImages(all) {
   if (!all) {
     const blob = await rasterizeSlide(target.pres, slides[0], target.previews);
     if (doc !== target) return;
-    reportExport(
-      await cloud.downloadBlob(blob, `${name} - Slide ${index + 1}.png`),
-      "Slide downloaded as a PNG image.",
-    );
+    await cloud.downloadBlob(blob, `${name} - Slide ${index + 1}.png`);
+    toast("Slide downloaded as a PNG image.");
     return;
   }
   // Drawing every slide takes a moment on a long deck; say so up front.
@@ -3175,13 +3153,11 @@ async function exportImages(all) {
       new Uint8Array(await blob.arrayBuffer());
   }
   const zip = zipSync(files, { level: 0 });
-  reportExport(
-    await cloud.downloadBlob(
-      new Blob([zip], { type: "application/zip" }),
-      `${name} - slides.zip`,
-    ),
-    `${slides.length} slides downloaded as PNG images.`,
+  await cloud.downloadBlob(
+    new Blob([zip], { type: "application/zip" }),
+    `${name} - slides.zip`,
   );
+  toast(`${slides.length} slides downloaded as PNG images.`);
 }
 async function renameDoc() {
   const target = doc;
@@ -3749,7 +3725,8 @@ const fileTools = createFileTools({
     }
   },
   async download(blob, filename, message) {
-    reportExport(await cloud.downloadBlob(blob, filename), message);
+    await cloud.downloadBlob(blob, filename);
+    toast(message);
   },
 });
 // The ribbon, built once per editor from the tab definitions, and refreshed
@@ -3842,8 +3819,10 @@ const themeTools = createThemeTools({
   preview: (view) => preview(doc.pres, view),
   formatBackground: () => ribbonApi().formatBackground(),
   pickFile: (accept, handle) => pickLocalFile(accept, handle),
-  download: async (blob, name, message) =>
-    reportExport(await cloud.downloadBlob(blob, name), message),
+  download: async (blob, name, message) => {
+    await cloud.downloadBlob(blob, name);
+    toast(message);
+  },
   fontList: () => FONTS,
   docName: () => doc?.name || "",
 });
@@ -7482,7 +7461,7 @@ function fileMenu(anchor) {
         onSelect: run(saveCopy),
       },
       {
-        label: "Save as template…",
+        label: "Save as template",
         icon: "LayoutTemplate",
         onSelect: run(() => fileTools.saveAsTemplate()),
       },

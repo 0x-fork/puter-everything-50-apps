@@ -335,7 +335,7 @@ test("stops an export when asked", async ({ page }) => {
 
 test("saves a template whose main part is a template", async ({ page }) => {
   await start(page);
-  const template = await downloadVia(page, "Save as template…");
+  const template = await downloadVia(page, "Save as template");
   expect(template.name).toBe("Export test.potx");
   const files = unzipSync(template.bytes);
   expect(strFromU8(files["[Content_Types].xml"])).toContain(
