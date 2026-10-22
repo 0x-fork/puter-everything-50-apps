@@ -106,3 +106,34 @@ test('time spent in the Save dialog while leaving is not reported as a stalled s
   await expect(page.getByRole('dialog', { name: 'Leave without saving?' })).toHaveCount(0);
   expect(await drive(page)).toEqual(['~/Desktop/Untitled document.docx']);
 });
+
+test('File > Export downloads every format to this device, without the Save dialog', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('Exported');
+  await text(page).press('ControlOrMeta+s');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Saved to Puter');
+  const before = await drive(page);
+  const tiles = [['Word document', 'Untitled document.docx'], ['PDF', 'Untitled document.pdf'], ['Web page', 'Untitled document.html'], ['Markdown', 'Untitled document.md'], ['Plain text', 'Untitled document.txt']];
+  for (const [tile, file] of tiles) {
+    await page.getByRole('button', { name: 'File', exact: true }).click();
+    const view = page.getByRole('dialog', { name: 'File' });
+    await view.getByRole('tab', { name: 'Export' }).click();
+    const [download] = await Promise.all([page.waitForEvent('download'), view.getByRole('button', { name: new RegExp(`^${tile}`) }).click()]);
+    expect(download.suggestedFilename()).toBe(file);
+  }
+  expect(await page.evaluate(() => window.__dialogs)).toEqual(['Untitled document.docx']);
+  expect(await drive(page)).toEqual(before);
+});
+
+test('the documents screen downloads a document to this device, without the Save dialog', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/mock.html?env=app#/home');
+  await page.evaluate(async () => { await puter.fs.write('Documents/Report.docx', new Blob(['not opened'])); });
+  await page.reload();
+  await page.evaluate(() => { window.__dialogs = []; puter.ui.showSaveFilePicker = (data, name) => { window.__dialogs.push(name); return new Promise(() => {}); }; });
+  await page.locator('[data-path="Documents/Report.docx"] .file-menu-btn').click();
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('menuitem', { name: 'Download' }).click()]);
+  expect(download.suggestedFilename()).toBe('Report.docx');
+  expect(await page.evaluate(() => window.__dialogs)).toEqual([]);
+  await expect(page.getByText('Save asks where to keep a new document.')).toBeVisible();
+});

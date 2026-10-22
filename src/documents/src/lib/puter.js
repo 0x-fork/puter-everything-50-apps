@@ -449,7 +449,7 @@ export function onLaunchedWithItems(handler) {
   } catch { /* not supported */ }
 }
 
-/** Browser download of a Blob (for the open web; inside Puter, prefer saveFileAs). */
+/** Browser download of a Blob to this device, in the Puter desktop too: every export and download goes this way. */
 export function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

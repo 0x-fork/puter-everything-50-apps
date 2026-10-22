@@ -266,14 +266,26 @@ describe('home document actions', () => {
     expect(isStarred(renamed)).toBe(true);
   });
 
-  it('reports a failed Puter download instead of silently discarding the error', async () => {
+  it('downloads to this device inside the Puter desktop too, without Puter\'s Save dialog', async () => {
     puter.env = 'app';
-    puter.ui = { showSaveFilePicker: vi.fn(async () => { throw new Error('Storage quota exceeded'); }) };
+    puter.ui = { showSaveFilePicker: vi.fn() };
+    const download = vi.spyOn(P, 'downloadBlob').mockImplementation(() => {});
     await setup();
+    view.el.querySelector('.file-menu-btn').click();
+    [...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent === 'Download').click();
+    await vi.waitFor(() => expect(download).toHaveBeenCalledWith(files.get(original), 'Report.docx'));
+    expect(puter.ui.showSaveFilePicker).not.toHaveBeenCalled();
+  });
+
+  it('reports a download that could not be read instead of silently discarding the error', async () => {
+    const download = vi.spyOn(P, 'downloadBlob').mockImplementation(() => {});
+    await setup();
+    puter.fs.read = async () => { throw new Error('Storage quota exceeded'); };
     toast.mockClear();
     view.el.querySelector('.file-menu-btn').click();
     [...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent === 'Download').click();
     await vi.waitFor(() => expect(toast).toHaveBeenCalledWith('Storage quota exceeded', { icon: 'alert' }));
+    expect(download).not.toHaveBeenCalled();
     expect(files.get(original)).toBeDefined();
   });
 

@@ -755,7 +755,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const baseContextTabs = editorCommands.contextTabs;
   editorCommands.contextTabs = kit => [...(baseContextTabs?.(kit) || []), ...references.contextTabs(kit)];
   const baseFileItems = editorCommands.fileItems;
-  editorCommands.fileItems = () => [...(baseFileItems?.() || []), { label: 'Save as PDF…', icon: 'pdf', disabled: !engine || failed, onSelect: savePdf }];
+  editorCommands.fileItems = () => [...(baseFileItems?.() || []), { label: 'Save as PDF', icon: 'pdf', disabled: !engine || failed, onSelect: savePdf }];
   async function savePdf() {
     const editor = engine; if (!editor) return;
     try {

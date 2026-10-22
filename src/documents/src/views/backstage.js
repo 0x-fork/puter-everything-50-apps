@@ -284,7 +284,7 @@ export function createBackstage(api) {
 
   /* ---- Export ---- */
   function exportPage() {
-    return [...heading('Export', 'Save a copy of this document in another format.'),
+    return [...heading('Export', 'Download a copy of this document in another format to this device.'),
       el('section.bs-section', {}, el('div.bs-tiles', {},
         tile('Word document', 'download', act(() => api.download()), { hint: '.docx — keeps everything', primary: true }),
         api.savePdf ? tile('PDF', 'pdf', act(() => api.savePdf()), { hint: '.pdf — fixed pages, searchable text' }) : null,

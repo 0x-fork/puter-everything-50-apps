@@ -352,9 +352,8 @@ export function homeView({ openPath, newDoc, newFromTemplate, importFile }) {
 
   async function download(file) {
     try {
-      const blob = await P.readFile(file.path);
-      if (P.isApp() && P.canSaveFiles()) P.saveFileAs(blob, file.name).catch((e) => toast(e?.message || 'Could not save the download', { icon: 'alert' }));
-      else P.downloadBlob(blob, file.name);
+      // A download comes to this device, as Import takes from it, in the Puter desktop too.
+      P.downloadBlob(await P.readFile(file.path), file.name);
     } catch (e) {
       if (gone(e)) return;
       toast(e?.message || 'Could not download', { icon: 'alert' });
