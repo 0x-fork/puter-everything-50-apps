@@ -73,6 +73,7 @@ export const SCRIPT_API = {
     ['unmerge', '()', 'Split merged cells.', 'chain'],
     ['sort', '([{ column, ascending }], { hasHeaders?, matchCase? })', 'Sort the rows by one or more columns, counted from the range’s left.', 'chain'],
     ['autoFill', '(destination)', 'Extend a pattern into a larger range, as the fill handle does.'],
+    ['moveTo', '(destination)', 'Move the cells to a place on the same sheet, as dragging them does: formulas that point at them follow.'],
     ['removeDuplicates', '(columns?, hasHeaders?)', 'Remove rows that repeat in the given columns (all by default).', 'chain'],
     ['setRowsHidden', '(hidden)', 'Hide or show the rows it spans.', 'chain'],
     ['setColumnsHidden', '(hidden)', 'Hide or show the columns it spans.', 'chain'],
@@ -84,12 +85,13 @@ export const SCRIPT_API = {
   Format: [
     ['getFill', '()', 'The cell fill.'],
     ['getFont', '()', 'The font.'],
-    ['setHorizontalAlignment', '(alignment)', '"left", "center", "right" or "general".', 'chain'],
+    ['setHorizontalAlignment', '(alignment)', '"left", "center", "right" or "general"; or "fill", "justify", "centerContinuous" or "distributed".', 'chain'],
     ['setVerticalAlignment', '(alignment)', '"top", "middle" or "bottom".', 'chain'],
     ['setWrapText', '(wrap)', 'Wrap long text onto more lines.', 'chain'],
+    ['setTextWrapping', '(mode)', 'Long text: "overflow" into empty cells beside it, "wrap" onto more lines, or "clip" at the cell\'s edge.', 'chain'],
     ['setTextRotation', '(degrees)', 'Turn the text from -90 to 90 degrees.', 'chain'],
     ['setIndent', '(level)', 'Indent the text.', 'chain'],
-    ['setBorder', '(edge, { style?, color? })', 'Borders: "all", "outline", "inside", "top", "bottom", "left", "right", or "none".', 'chain'],
+    ['setBorder', '(edge, { style?, color? })', 'Borders: "all", "outline", "inside", "top", "bottom", "left", "right", or "none"; style "none" takes an edge\'s off.', 'chain'],
     ['clearBorders', '()', 'Remove the borders.', 'chain'],
     ['setColumnWidth', '(pixels)', 'Width of its columns.', 'chain'],
     ['setRowHeight', '(pixels)', 'Height of its rows.', 'chain'],
@@ -112,8 +114,8 @@ export const SCRIPT_API = {
     ['setUnderline', '(underline?)', 'Underline on or off.', 'chain'],
     ['setStrikethrough', '(strike?)', 'Strikethrough on or off.', 'chain'],
     ['setColor', '(color)', 'The text colour.', 'chain'],
-    ['setSize', '(points)', 'The size in points.', 'chain'],
-    ['setName', '(name)', 'The font family, such as "Georgia".', 'chain'],
+    ['setSize', '(points)', 'The size in points (null: the workbook\'s own).', 'chain'],
+    ['setName', '(name)', 'The font family, such as "Georgia" (null: the workbook\'s own).', 'chain'],
     ['getBold', '()', 'Whether the first cell is bold.', 'async'],
     ['getItalic', '()', 'Whether the first cell is italic.', 'async'],
     ['getUnderline', '()', 'Whether the first cell is underlined.', 'async'],
@@ -146,7 +148,7 @@ export const SCRIPT_API = {
 export const SCRIPT_API_RETURNS = {
   getActiveWorksheet: 'Worksheet', getWorksheet: 'Worksheet', addWorksheet: 'Worksheet', getSelectedRange: 'Range',
   getRange: 'Range', getCell: 'Range', getRow: 'Range', getColumn: 'Range', getOffsetRange: 'Range', getResizedRange: 'Range',
-  getEntireRow: 'Range', getEntireColumn: 'Range', getLastCell: 'Range', autoFill: 'Range', getFormat: 'Format', getFill: 'Fill',
+  getEntireRow: 'Range', getEntireColumn: 'Range', getLastCell: 'Range', autoFill: 'Range', moveTo: 'Range', getFormat: 'Format', getFill: 'Fill',
   getFont: 'Font', addTable: 'Table',
 };
 

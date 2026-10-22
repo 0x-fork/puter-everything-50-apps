@@ -1,4 +1,4 @@
-import { chartAxisScale, chartAxisTransferBounds } from '../core/chart-axis-scale.js';
+import { axisFraction, chartAxisScale, chartAxisTransferBounds } from '../core/chart-axis-scale.js';
 import { chartDateAxis } from '../core/chart-date-axis.js';
 /**
  * Draw a chart as SVG markup. Pure: data in, a string out, so it can be
@@ -10,7 +10,7 @@ import { authoredBarGapWidth, chartPointStyle, niceScale, axisLabel, histogramBi
 import { formatValue, formatGeneral, fontStack, numFmtToStyle } from '../core/format.js';
 import { maxOf, minOf } from '../core/numeric.js';
 import { wrapLines } from '../core/textfit.js';
-import { SPECIAL_CHART_TYPES, renderSpecialChart } from './chartsvg-special.js';
+import { SPECIAL_CHART_TYPES, renderSpecialChart, renderWaterfall } from './chartsvg-special.js';
 
 // The light theme's --series-* tokens in tokens.css, in order: every fill reads at 3:1 on white.
 export const SERIES_COLORS = ['#337bfc', '#eb6834', '#0f8f61', '#b57a00', '#c4417a', '#4a3aa7', '#0e7490', '#8a5a00', '#918f88'];
@@ -455,6 +455,8 @@ function renderChartContent(data, chart, width, height) {
   // without rereading the potentially large chart series.
   if (data.titles) chart = { ...chart, ...Object.fromEntries(Object.entries(data.titles).filter(([key]) => chart[`${key}Ref`])) };
   if (SPECIAL_CHART_TYPES.has(chart.type)) return renderSpecialChart(data, chart, width, height);
+  // A waterfall in the default style draws in its appearance, as the newer types do; an app chart's below.
+  if (chart.type === 'waterfall' && chart.appearance) return renderWaterfall(data, chart, width, height);
   if (chart.type === 'radar' && chart.appearance?.radar) return renderNativeRadar(data, chart, width, height);
   if (['pie', 'donut'].includes(chart.type) && chart.appearance?.pie) return renderStyledPie(data, chart, width, height);
   // A histogram in the default style is a column chart of its bins' counts, and is drawn as one in that style, so its
@@ -507,9 +509,10 @@ function renderChartContent(data, chart, width, height) {
   // Legend: along the bottom (default), along the top, or stacked on the right.
   let bottom = H - 8;
   let right = W;
-  // A pie's legend names its slices, including negative values plotted by magnitude.
-  const sliceValues = pieLike ? series[0].values : null;
-  const allItems = pieLike ? categories.map((c, i) => ({ name: c, color: seriesPaint(chart, i), drawn: Number.isFinite(sliceValues[i]) && sliceValues[i] !== 0 })).filter((it) => it.drawn)
+  // A pie's legend names its slices, including negative values plotted by magnitude; a doughnut's, those of any ring.
+  const rings = chart.type === 'donut' ? series.slice(0, MAX_SERIES) : series.slice(0, 1);
+  const sliceDrawn = (i) => rings.some((s) => Number.isFinite(s.values[i]) && s.values[i] !== 0);
+  const allItems = pieLike ? categories.map((c, i) => ({ name: c, color: seriesPaint(chart, i), drawn: sliceDrawn(i) })).filter((it) => it.drawn)
     : isWaterfall ? [{ name: 'Increase', color: wfColor('increase') }, { name: 'Decrease', color: wfColor('decrease') }, { name: 'Total', color: wfColor('total') }]
       : series.map((s, i) => ({ name: s.name, color: seriesPaint(chart, i) }));
   // Past a dozen entries the legend keeps its first eleven and counts the rest, rather than vanishing.
@@ -720,7 +723,7 @@ function renderChartContent(data, chart, width, height) {
   const yFrac = Number.isFinite(ySpan) ? (v) => held((v - yScale.min) / ySpan) : (v) => held((v / 2 - yScale.min / 2) / (yScale.max / 2 - yScale.min / 2));
   const vy = (v) => plot.y + plot.h - yFrac(v) * plot.h;
   const vx = (v) => plot.x + yFrac(v) * plot.w;
-  const vy2 = secondary ? (v) => plot.y + plot.h - held((v - y2Scale.min) / (y2Scale.max - y2Scale.min)) * plot.h : vy;
+  const vy2 = secondary ? (v) => plot.y + plot.h - held(axisFraction(v, y2Scale.min, y2Scale.max)) * plot.h : vy;
   // The right-hand axis, in the line's color so it reads as that series' scale.
   if (secondary) {
     const lineColor = seriesPaint(chart, lineIdx[0]);
@@ -755,7 +758,7 @@ function renderChartContent(data, chart, width, height) {
   const categoryLabelY = isHistogram || wf ? plot.y + plot.h : vy(categoryAxisValue);
   const categoryLabels = [];
   if (isScatter) {
-    const sx = (v) => plot.x + ((v - xScale.min) / (xScale.max - xScale.min)) * plot.w;
+    const sx = (v) => plot.x + axisFraction(v, xScale.min, xScale.max) * plot.w;
     for (const v of scaleTicks(xScale)) {
       categoryLabels.push(`<text x="${f(sx(v))}" y="${f(categoryLabelY + 15)}" text-anchor="middle" font-size="11" fill="var(--ink-3)">${esc(axisLabel(v, xStyle, xScale.step))}</text>`);
     }
@@ -1244,7 +1247,7 @@ function renderStyledCartesian(data, chart, width, height) {
   const valueFraction = (v, domain, reverse) => {
     // A value at or below zero on a logarithmic axis lies past its foot (and is clipped there).
     const fraction = domain.log ? (v > 0 ? Math.log(v / domain.min) / Math.log(domain.max / domain.min) : -1)
-      : (v - domain.min) / (domain.max - domain.min || 1);
+      : axisFraction(v, domain.min, domain.max);
     return reverse ? 1 - fraction : fraction;
   };
   const sy = v => bottom - valueFraction(v, scale, a.reverseValues) * plot.h;
@@ -1267,7 +1270,7 @@ function renderStyledCartesian(data, chart, width, height) {
   const inset = numericX || a.categoryBetween === false ? 0 : .5;
   const sx = v => {
     const fraction = dates ? dates.fraction(v) : xScale?.log ? (v > 0 ? Math.log(v / xMin) / Math.log(xMax / xMin) : -1)
-      : xMax === xMin && !inset ? .5 : (v - xMin + inset) / (xMax - xMin + 2 * inset || 1);
+      : xMax === xMin && !inset ? .5 : axisFraction(v, xMin - inset, xMax + inset);
     return plot.x + (a.reverseCategories ? 1 - fraction : fraction) * plot.w;
   };
   const dateCoordinate = fraction => horizontal ? plot.y + plot.h * (a.reverseCategories ? fraction : 1 - fraction)
@@ -1443,6 +1446,15 @@ function renderStyledCartesian(data, chart, width, height) {
       l = Math.max(l, (outer * left - inset * right) / (outer - inset));
       r = Math.min(r, (outer * right - inset * left) / (outer - inset));
     }
+    plot.x = Math.min(plot.x + Math.max(0, plot.w - 10), l);
+    plot.w = Math.max(10, r - plot.x);
+  }
+  if (!horizontal && numericX && categoryLabels && !a.plot && xTicks.length) {
+    // A scatter chart's x labels sit centred on their ticks, the outer ones on the plot's edges: the plot
+    // leaves room for half of each, as Excel's does, rather than cutting the last date or number off.
+    const overhang = text => axisTextBox(text.width, a.xStyle.size, a.xRotation, categoryHigh, text.height, text.ascent);
+    const first = categoryLayouts[a.reverseCategories ? categoryLayouts.length - 1 : 0], last = categoryLayouts[a.reverseCategories ? 0 : categoryLayouts.length - 1];
+    const l = Math.max(plot.x, overhang(first).left + 6), r = Math.min(plot.x + plot.w, W - overhang(last).right - 6);
     plot.x = Math.min(plot.x + Math.max(0, plot.w - 10), l);
     plot.w = Math.max(10, r - plot.x);
   }
@@ -1956,7 +1968,7 @@ function renderStyledCartesian(data, chart, width, height) {
  * Unlike an axis, it must not apply display units or percent-stack transforms.
  * CT_DTable: https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.charts.datatable
  */
-function layoutChartDataTable(data, chart, plot, limit, automatic, axisGap = 0) {
+export function layoutChartDataTable(data, chart, plot, limit, automatic, axisGap = 0) {
   const table = chart.appearance?.dataTable;
   if (!table || !data.categories.length || !data.series.length) return null;
   const { style } = table, pad = style.size / 2, keyWidth = table.keys ? style.size * 2.5 : 0;
@@ -1982,7 +1994,7 @@ function layoutChartDataTable(data, chart, plot, limit, automatic, axisGap = 0) 
     heights, height, scale, headLines, names, pad, keyWidth };
 }
 
-function renderChartDataTable(data, chart, box) {
+export function renderChartDataTable(data, chart, box) {
   const table = chart.appearance.dataTable, st = table.style;
   const { heading, column, width, heights, scale, headLines, names, pad, keyWidth } = box;
   const height = heights.reduce((a, b) => a + b, 0), parts = [`<g class="chart-data-table" role="table" aria-label="Chart data" transform="translate(${f(box.x)} ${f(box.y)}) scale(1 ${f(scale)})" font-family="${esc(fontStack(st.font))}" font-size="${st.size}" fill="${esc(st.color)}"${st.bold ? ' font-weight="700"' : ''}${st.italic ? ' font-style="italic"' : ''}>`,
@@ -2128,7 +2140,7 @@ function renderNativeRadar(data, chart, width, height) {
   const angle = i => -Math.PI / 2 + (a.reverseCategories ? -1 : 1) * i / Math.max(1, n) * Math.PI * 2;
   const position = (i, fraction) => [cx + radius * fraction * Math.cos(angle(i)), cy + radius * fraction * Math.sin(angle(i))];
   const point = (i, value) => {
-    const fraction = (value - scale.min) / (scale.max - scale.min || 1);
+    const fraction = axisFraction(value, scale.min, scale.max);
     return position(i, Math.max(0, a.reverseValues ? 1 - fraction : fraction));
   };
   const polygon = fraction => categories.map((_, i) => position(i, fraction).map(f).join(',')).join(' ');
@@ -2138,7 +2150,7 @@ function renderNativeRadar(data, chart, width, height) {
   };
   if (n && a.plotFill) parts.push(`<polygon points="${polygon(1)}" fill="${esc(a.plotFill)}"/>`);
   if (n && chart.gridlines) for (const value of scaleTicks(scale)) {
-    const fraction = (value - scale.min) / (scale.max - scale.min || 1);
+    const fraction = axisFraction(value, scale.min, scale.max);
     parts.push(`<polygon class="chart-radar-grid" points="${polygon(a.reverseValues ? 1 - fraction : fraction)}" fill="none" ${strokeAttrs(a.gridlineStyles?.y)}/>`);
   }
   const labelSkip = a.xLabelSkip || Math.max(1, Math.ceil(n * a.xStyle.size * 1.4 / (2 * Math.PI * Math.max(1, radius))));
@@ -2262,7 +2274,7 @@ function renderRadar(data, chart, right, top, bottom) {
   const max = yMax ?? scale.max, min = Math.min(0, scale.min);
   const vs = data.valueStyle || null;
   const angle = (i) => -Math.PI / 2 + (i / n) * Math.PI * 2;
-  const radius = (v) => R * Math.max(0, Math.min(v, max) - min) / (max - min);
+  const radius = (v) => R * Math.max(0, axisFraction(Math.min(v, max), min, max));
   const point = (i, v) => [cx + radius(v) * Math.cos(angle(i)), cy + radius(v) * Math.sin(angle(i))];
   const out = [];
   // Rings and spokes.
@@ -2457,7 +2469,13 @@ function renderOfPie(data, chart, right, top, bottom, bounds) {
 
 function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
   if (chart.ofPie && chart.type === 'pie' && !opts.center && data.series[0]?.values.length > 1) return renderOfPie(data, chart, right, top, bottom, bounds);
-  const s = data.series[0];
+  if (chart.type === 'donut' && !opts.ring && data.series.length > 1) {
+    // A doughnut draws each series as a ring of its own, the first innermost, all as wide as each other (as
+    // Excel does); every ring's labels go over all the rings.
+    const rings = data.series.slice(0, MAX_SERIES).map((s, k, all) => renderPie({ ...data, series: [s] }, chart, right, top, bottom, bounds, { ring: { k, n: all.length } }));
+    return rings.map(r => r[0]).join('') + rings.map(r => r[1]).join('');
+  }
+  const s = data.series[0], si = opts.ring?.k ?? 0;
   const at = i => (opts.indexMap ? opts.indexMap[i] : i);
   // Slice areas use magnitudes but labels use signed values/percentages.
   // Keep source values intact for editing, tooltips and native export.
@@ -2471,9 +2489,11 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
   }
   const cx = opts.center ? opts.center.cx : bounds ? bounds.x + bounds.w / 2 : right / 2;
   const cy = opts.center ? opts.center.cy : bounds ? bounds.y + bounds.h / 2 : top + (bottom - top) / 2;
-  // An exploded pie shrinks so its slices, pulled out along their middles, stay within the plot.
-  const explode = opts.noExplode ? 0 : (chart.explosion || 0) / 100;
-  const r = Math.max(10, opts.center ? opts.center.r : bounds ? Math.min(bounds.w, bounds.h) / 2 : Math.min(right, bottom - top) / 2 - 14) / (1 + explode);
+  // An exploded pie shrinks so its slices, pulled out along their middles, stay within the plot. Of a doughnut's
+  // rings only the outermost is pulled out.
+  const shrink = opts.noExplode ? 0 : (chart.explosion || 0) / 100, explode = opts.ring && opts.ring.k < opts.ring.n - 1 ? 0 : shrink;
+  let r = Math.max(10, opts.center ? opts.center.r : bounds ? Math.min(bounds.w, bounds.h) / 2 : Math.min(right, bottom - top) / 2 - 14) / (1 + shrink);
+  if (!total && opts.ring) return ['', ''];
   if (!total) return `<text x="${cx}" y="${cy}" text-anchor="middle" font-size="13" fill="var(--ink-3)">No nonzero numbers to chart</text>`;
   // Past a slice per pixel of the rim the smallest could not be seen: they gather into one Other slice,
   // drawn last, so the slices that can be told apart keep their places and the mark count stays bounded.
@@ -2486,12 +2506,17 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
     for (const i of bySize.slice(budget - 1)) { other.count++; other.value += values[i]; values[i] = 0; }
   }
   const out = [], labelOut = [], outsideLabels = [], pie = bounds ? chart.appearance.pie : null;
-  const pieLabel = ({ x, y, lines, st, anchor, leader, rim }) => `${leader ? `<path d="M ${f(rim[0])} ${f(rim[1])} L ${f(x)} ${f(y)}" fill="none" stroke="${esc(st.color)}"/>` : ''}<text class="chart-data-label" x="${f(x)}" y="${f(y)}" text-anchor="${anchor}" font-family="${esc(fontStack(st.font))}" font-size="${st.size}"${st.bold ? ' font-weight="700"' : ''}${st.italic ? ' font-style="italic"' : ''} fill="${esc(st.color)}" data-el="dataLabels" data-series="0">${lines.map((line, j) => `<tspan x="${f(x)}" dy="${f(j ? st.size * 1.2 : st.size * .35 - (lines.length - 1) * st.size * .6)}">${esc(line)}</tspan>`).join('')}</text>`;
-  const colors = new Map((chart.appearance?.pointColors?.[0] || []).map(p => [p.index, p.color]));
-  const pointLabels = new Map((pie?.labels.points || []).map(p => [p.index, p]));
-  const pointBorders = new Map((pie?.points || []).map(p => [p.index, p]));
+  const pieLabel = ({ x, y, lines, st, anchor, leader, rim }) => `${leader ? `<path d="M ${f(rim[0])} ${f(rim[1])} L ${f(x)} ${f(y)}" fill="none" stroke="${esc(st.color)}"/>` : ''}<text class="chart-data-label" x="${f(x)}" y="${f(y)}" text-anchor="${anchor}" font-family="${esc(fontStack(st.font))}" font-size="${st.size}"${st.bold ? ' font-weight="700"' : ''}${st.italic ? ' font-style="italic"' : ''} fill="${esc(st.color)}" data-el="dataLabels" data-series="${si}">${lines.map((line, j) => `<tspan x="${f(x)}" dy="${f(j ? st.size * 1.2 : st.size * .35 - (lines.length - 1) * st.size * .6)}">${esc(line)}</tspan>`).join('')}</text>`;
+  const colors = new Map((chart.appearance?.pointColors?.[si] || []).map(p => [p.index, p.color]));
+  // A point's own label and border belong to the first series; the labels' shared settings, to every ring.
+  const pointLabels = new Map((si ? [] : pie?.labels.points || []).map(p => [p.index, p]));
+  const pointBorders = new Map((si ? [] : pie?.points || []).map(p => [p.index, p]));
   let angle = opts.startAngle != null ? opts.startAngle : -Math.PI / 2 + (pie?.firstSliceAngle || 0) * Math.PI / 180;
-  const inner = chart.type === 'donut' ? r * (pie ? pie.holeSize / 100 : .58) : 0;
+  let inner = chart.type === 'donut' ? r * (pie ? pie.holeSize / 100 : .58) : 0;
+  if (opts.ring) {
+    const width = (r - inner) / opts.ring.n;
+    [inner, r] = [inner + opts.ring.k * width, inner + (opts.ring.k + 1) * width];
+  }
   const slice = (v, color, tip, i) => {
     const frac = v / total;
     const a2 = angle + frac * Math.PI * 2;
@@ -2518,7 +2543,7 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
     const pct = `${Math.round(signedFraction * 100)}%`;
     const border = pointBorders.get(at(i));
     const shift = explode ? ` transform="translate(${f(r * explode * Math.cos((angle + a2) / 2))} ${f(r * explode * Math.sin((angle + a2) / 2))})"` : '';
-    out.push(`<path d="${d}" fill="${esc(color)}" stroke="${esc(border?.stroke ?? pie?.stroke ?? 'var(--surface)')}" stroke-width="${border?.strokeWidth ?? pie?.strokeWidth ?? 1.5}"${inner ? ' fill-rule="evenodd"' : ''}${shift}${i == null || at(i) == null || i === opts.otherIndex ? '' : ` data-el="series" data-series="0" data-point="${at(i)}"`}${pie ? effectAttr(chart.appearance, 'series:0') : ''}><title>${esc(`${tip(v)} (${pct})`)}</title></path>`);
+    out.push(`<path d="${d}" fill="${esc(color)}" stroke="${esc(border?.stroke ?? pie?.stroke ?? 'var(--surface)')}" stroke-width="${border?.strokeWidth ?? pie?.strokeWidth ?? 1.5}"${inner ? ' fill-rule="evenodd"' : ''}${shift}${i == null || at(i) == null || i === opts.otherIndex ? '' : ` data-el="series" data-series="${si}" data-point="${at(i)}"`}${pie ? effectAttr(chart.appearance, `series:${si}`) : ''}><title>${esc(`${tip(v)} (${pct})`)}</title></path>`);
     const dxe = explode ? r * explode * Math.cos((angle + a2) / 2) : 0, dye = explode ? r * explode * Math.sin((angle + a2) / 2) : 0;
     if (pie && i != null) {
       const l = pointLabels.get(at(i)) || pie.labels, st = l.style;
@@ -2532,8 +2557,9 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
         // Best Fit sets a label in its slice where it fits there, and outside it, on a leader line, where it does not.
         const centre = inner ? (r + inner) / 2 : r * .68, width = maxOf(lines.map(line => axisTextWidth(line, st))), height = lines.length * st.size * 1.2;
         const fits = (a2 - angle) * centre >= width + 4 && (inner ? r - inner : r) >= height + 2;
-        const outside = l.position === 'outEnd' || l.position === 'bestFit' && !fits;
-        const lr = outside ? r + st.size : l.position === 'inEnd' ? r - st.size : centre;
+        // A doughnut's rings centre their labels, as Excel does: one outside an inner ring would lie over the next.
+        const outside = !opts.ring && (l.position === 'outEnd' || l.position === 'bestFit' && !fits);
+        const lr = outside ? r + st.size : l.position === 'inEnd' && !opts.ring ? r - st.size : centre;
         const x = cx + dxe + lr * Math.cos(mid) + (l.dx || 0) * bounds.W, y = cy + dye + lr * Math.sin(mid) + (l.dy || 0) * bounds.H;
         const label = { x, y, mid, lines, st, height, anchor: outside ? Math.cos(mid) >= 0 ? 'start' : 'end' : 'middle', leader: outside && l.leaderLines,
           rim: [cx + dxe + r * Math.cos(mid), cy + dye + r * Math.sin(mid)] };
@@ -2549,7 +2575,10 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
   };
   const style = seriesStyle(s, data.valueStyle || null);
   // The Other slice of a pie of pie takes the next colour after the slices of the main pie.
-  values.forEach((v, i) => { if (v) slice(v, pie ? piePaint(chart, at(i), colors) : seriesPaint(chart, at(i)), () => `${data.categories[i]}: ${tipText(s.values[i], chartPointStyle(s, i, style))}`, i); });
+  // A ring's own point colour comes before the chart's colour for the category, which every ring shares.
+  const paint = i => opts.ring && colors.has(i) ? colors.get(i) : pie ? piePaint(chart, i, colors) : seriesPaint(chart, i);
+  const ringName = opts.ring ? `${s.name} · ` : '';
+  values.forEach((v, i) => { if (v) slice(v, paint(at(i)), () => `${ringName}${data.categories[i]}: ${tipText(s.values[i], chartPointStyle(s, i, style))}`, i); });
   if (other) slice(other.value, 'var(--ink-3)', (v) => `Other (${other.count.toLocaleString('en-US')} slices)${Number.isFinite(v * scale) ? `: ${(v * scale).toLocaleString('en-US')}` : ''}`);
   // Labels outside the pie stand in a column down each side: each moved down past the one above it where they
   // would overlap (the first kept below the top of the plot), the column moved back up where it runs past the
@@ -2568,7 +2597,7 @@ function renderPie(data, chart, right, top, bottom, bounds = null, opts = {}) {
       labelOut.push(pieLabel(l));
     }
   }
-  return out.join('') + labelOut.join('');
+  return opts.ring ? [out.join(''), labelOut.join('')] : out.join('') + labelOut.join('');
 }
 
 // The pieces of the chart frame the newer chart types (chartsvg-special.js) draw with too.

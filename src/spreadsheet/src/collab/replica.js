@@ -25,7 +25,7 @@
 
 import { Workbook, sheetShapeJSON, sameJSON, cloneCell } from '../core/workbook.js';
 import { cellKey, parseKey, cutText } from '../core/cell.js';
-import { LINE_PROPS, SHEET_PROPS, BOOK_PROPS, MAX_LABEL, MAX_CHANGE, mapCellKey, mapLineKey, mergeRuns, transformStructure, isStructure } from './ops.js';
+import { LINE_PROPS, SHEET_PROPS, BOOK_PROPS, MAX_LABEL, MAX_CHANGE, MAX_OPS, MAX_RUNS, mapCellKey, mapLineKey, mergeRuns, transformStructure, isStructure, parseCellKey } from './ops.js';
 import { applyOps, contentOf, sheetJSON, lineValues, sheetProps } from './apply.js';
 
 const UNDO_LIMIT = 100;
@@ -35,6 +35,10 @@ const BIG_BOOK = new Set(['dataModel', 'nativePivots', 'externalWorkbooks', 'que
 const own = (o, k) => o != null && Object.prototype.hasOwnProperty.call(o, k);
 const parse = (json) => (json == null ? null : JSON.parse(json));
 const json = (v) => JSON.stringify(v === undefined ? null : v);
+
+/** Does the operation change the sheets Protect Workbook locks: which there are, their order, names, visibility or tab colors? */
+const SHEET_OPS = new Set(['put', 'drop', 'rename', 'order']);
+const changesSheets = (op) => SHEET_OPS.has(op.t) || (op.t === 'props' && (own(op.v, 'hidden') || own(op.v, 'veryHidden') || own(op.v, 'color')));
 
 export function changeId() {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
@@ -126,6 +130,10 @@ export class Replica extends EventTarget {
     });
     semantic('_insert', {
       op: ([s, axis, at, n], ok) => ok && { t: 'insert', s, axis, at, n },
+    });
+    // Several insertions at once, as taking back a deletion of many runs applies them (see applyOps): each recorded as itself.
+    semantic('_insertSequence', {
+      op: ([s, axis, inserts], ok) => ok && inserts.map(({ at, n }) => ({ t: 'insert', s, axis, at, n })),
     });
     semantic('_deleteLines', {
       before: ([s, axis]) => { const sh = wb.sheet(s); return sh ? (axis === 'row' ? sh.rows : sh.cols) : 0; },
@@ -367,10 +375,24 @@ export class Replica extends EventTarget {
     if (op) {
       this.shadow = this._fullShadow();
       this._resetDirty();
-      this._record(op, this._inverseOf(op, old, result, before));
+      for (const one of Array.isArray(op) ? op : [op]) this._recordStructure(one, old, result, before);
     }
     if (step) this._flushStep(step.label || 'Edit', { rollback: () => step.undo() });
     return result;
+  }
+
+  /** Record a structural operation made here with its inverse. */
+  _recordStructure(op, old, result, before) {
+    const inverse = this._inverseOf(op, old, result, before);
+    if (op.t === 'delete' && op.runs.length > MAX_RUNS) {
+      // More runs than the room takes in one deletion (the rows a filter shows, deleted): several deletions, the lowest
+      // rows first so that each one's positions still hold. Taken back, the rows go back from the top, then what was on them.
+      const rest = inverse.slice(op.runs.length);
+      for (let end = op.runs.length; end > 0; end -= MAX_RUNS / 2) {
+        const from = Math.max(0, end - MAX_RUNS / 2);
+        this._record({ ...op, runs: op.runs.slice(from, end) }, [...inverse.slice(from, end), ...(end === op.runs.length ? rest : [])]);
+      }
+    } else this._record(op, inverse);
   }
 
   /**
@@ -547,7 +569,7 @@ export class Replica extends EventTarget {
           }
           this._applyRemote(ch.ops, rec.username, ch.label);
           incoming.push(...ch.ops);
-          for (const e of [...this.undoStack, ...this.redoStack]) e.ops = this._xform(e.ops, theirs, false)[0];
+          for (const e of [...this.undoStack, ...this.redoStack]) e.ops = keepOthersWork(this._xform(e.ops, theirs, false)[0], theirs);
           applied = true;
           if (ch.ops.some((o) => isStructure(o) || o.t === 'put')) structural = true;
           else touched.push(...ch.ops);
@@ -676,15 +698,24 @@ export class Replica extends EventTarget {
    */
   _xform(a, b, aWins) {
     if (!a.length || !b.length) return [a, b];
+    // One operation at a time, folded along the list (an undone deletion of the rows a filter showed is thousands of
+    // insertions): taken by recursion, each step copied the rest of the list, which grew with the square of its length.
     if (a.length > 1) {
-      const [a0, b1] = this._xform([a[0]], b, aWins);
-      const [rest, b2] = this._xform(a.slice(1), b1, aWins);
-      return [[...a0, ...rest], b2];
+      const out = [];
+      let rest = b;
+      for (const x of a) { const [x2, b2] = this._xform([x], rest, aWins); out.push(...x2); rest = b2; }
+      return [out, rest];
     }
     if (b.length > 1) {
-      const [a1, b0] = this._xform(a, [b[0]], aWins);
-      const [a2, rest] = this._xform(a1, b.slice(1), aWins);
-      return [a2, [...b0, ...rest]];
+      let cur = a;
+      const out = [];
+      for (let k = 0; k < b.length; k++) {
+        if (cur.length > 1) { const [a2, rest] = this._xform(cur, b.slice(k), aWins); return [a2, [...out, ...rest]]; }
+        const [a1, y] = this._xform(cur, [b[k]], aWins);
+        out.push(...y);
+        cur = a1;
+      }
+      return [cur, out];
     }
     const x = a[0], y = b[0];
     const xs = isStructure(x), ys = isStructure(y);
@@ -703,7 +734,11 @@ export class Replica extends EventTarget {
    */
   _rebaseInverse(id, mine, theirs) {
     const entry = this.undoStack.find((e) => e.id === id);
-    if (!entry || [...mine, ...theirs].some((op) => isStructure(op) || op.t === 'put')) return;
+    if (!entry) return;
+    // A sheet renamed by both at once has the later name, this one: its Undo puts back the other's, as for a register.
+    const renamed = new Map(theirs.filter((t) => t.t === 'rename' && mine.some((m) => m.t === 'rename' && m.s === t.s)).map((t) => [t.s, t.name]));
+    if (renamed.size) entry.ops = entry.ops.map((op) => (op.t === 'rename' && renamed.has(op.s) ? { ...op, name: renamed.get(op.s) } : op));
+    if ([...mine, ...theirs].some((op) => isStructure(op) || op.t === 'put')) return;
     for (const t of theirs) for (const m of mine) { const o = overlap(t, m); if (o) entry.ops.push(o); }
   }
 
@@ -773,6 +808,8 @@ export class Replica extends EventTarget {
 
   _takeBack(kind) {
     const stack = kind === 'undo' ? this.undoStack : this.redoStack;
+    // One that adds, removes, renames, moves, hides or recolors a sheet waits while the structure is protected (see Workbook.undo).
+    if (stack.at(-1)?.ops.some(changesSheets) && this.wb._structureLocked()) return false;
     const entry = stack.pop();
     if (!entry) return false;
     this.undoing = kind;
@@ -916,12 +953,25 @@ const REGISTERS = new Set(['cells', 'lines', 'props', 'book']);
  * inverse puts back what its own registers held, so a part the room has not confirmed is taken back alone.
  */
 export function splitChange(ops, inverses, limit = PART) {
-  if (!ops.every((op, i) => REGISTERS.has(op.t) && inverses[i]?.length === 1 && inverses[i][0].t === op.t)) return null;
+  // A sheet added whole (a copy of a long sheet, say) can be larger than a change on its own: it travels as the sheet
+  // without its cells, then its cells as writes like any other, which split as theirs do.
+  if (ops.some((op) => op.t === 'put')) {
+    const split = ops.flatMap((op, i) => (op.t === 'put' && inverses[i]?.length === 1 && inverses[i][0].t === 'drop' ? putInParts(op, inverses[i]) : [[op, inverses[i]]]));
+    ops = split.map(([op]) => op);
+    inverses = split.map(([, inv]) => inv);
+  }
+  // Rows, columns or sheets that move go whole, each in the part it falls in, with its own inverse (an undone deletion
+  // of many rows puts them back, then writes back what was on them, which splits as any write does).
+  if (!ops.every((op, i) => (REGISTERS.has(op.t) ? inverses[i]?.length === 1 && inverses[i][0].t === op.t : (isStructure(op) || op.t === 'put') && Array.isArray(inverses[i])))) return null;
   const keysOf = (op) => (op.t === 'cells' ? (op.st ? [...new Set([...Object.keys(op.v || {}), ...Object.keys(op.st)])] : Object.keys(op.v || {})) : op.t === 'lines' ? Object.keys(op.v) : null);
-  // Fewer cells or lines than this cannot make a change too large (a cell holds 32,767 characters at most).
-  let count = 0;
-  for (const op of ops) if (op.t === 'cells' || op.t === 'lines') count += Object.keys(op.v || {}).length + Object.keys(op.st || {}).length;
-  if (count < 64) return null;
+  // Fewer cells or lines than this cannot make a change too large (a cell holds 32,767 characters at most), nor can
+  // deletions of fewer runs of lines; more operations than a change carries (an undone deletion of many runs) split too.
+  let count = 0, runs = 0;
+  for (const op of ops) {
+    if (op.t === 'cells' || op.t === 'lines') count += Object.keys(op.v || {}).length + Object.keys(op.st || {}).length;
+    else if (op.t === 'delete') runs += op.runs.length;
+  }
+  if (count < 64 && runs < 10_000 && ops.length <= MAX_OPS) return null;
   // What each operation, and each key of a write to cells or lines, takes when sent.
   let total = 0;
   const sized = ops.map((op) => {
@@ -932,13 +982,13 @@ export function splitChange(ops, inverses, limit = PART) {
     total += size;
     return { size, keys, sizes };
   });
-  if (total <= SPLIT_AT) return null;
+  if (total <= SPLIT_AT && ops.length <= MAX_OPS) return null;
   const parts = [];
   let cur = null;
   const add = (op, inv, size) => {
-    if (!cur || (cur.size && cur.size + size > limit)) parts.push((cur = { ops: [], inverse: [], size: 0 }));
+    if (!cur || cur.ops.length >= MAX_OPS || (cur.size && cur.size + size > limit)) parts.push((cur = { ops: [], inverse: [], size: 0 }));
     cur.ops.push(op);
-    cur.inverse.unshift(inv);
+    cur.inverse.unshift(...inv);
     cur.size += size;
   };
   const piece = (op, keys) => {
@@ -953,11 +1003,11 @@ export function splitChange(ops, inverses, limit = PART) {
     return out;
   };
   ops.forEach((op, i) => {
-    const inv = inverses[i][0];
     const { size, keys, sizes } = sized[i];
-    if (!keys || size <= limit) { add(op, inv, size); return; }
+    if (!keys || size <= limit) { add(op, inverses[i], size); return; }
+    const inv = inverses[i][0];
     let run = [], runSize = 0;
-    const flush = () => { if (run.length) add(piece(op, run), piece(inv, run), runSize); run = []; runSize = 0; };
+    const flush = () => { if (run.length) add(piece(op, run), [piece(inv, run)], runSize); run = []; runSize = 0; };
     keys.forEach((k, j) => {
       if (runSize && runSize + sizes[j] > limit) flush();
       run.push(k);
@@ -966,6 +1016,59 @@ export function splitChange(ops, inverses, limit = PART) {
     flush();
   });
   return parts.length > 1 ? parts.map(({ ops: o, inverse }) => ({ ops: o, inverse })) : null;
+}
+
+/**
+ * An undo (or redo) entry ending in a deletion of lines, as one taking back an insertion does, leaves out the lines
+ * someone else has since written something into (`theirs`, a change just applied), and one ending in a deletion of a
+ * sheet (taking back an added sheet) leaves the sheet if someone else has worked on it: Undo takes back only what this
+ * person did, and only where nobody has changed it since, so another person's entries are not deleted with it.
+ */
+function keepOthersWork(ops, theirs) {
+  const last = ops.at(-1);
+  if (last?.t === 'drop') return theirs.some((t) => t.s === last.s && t.t !== 'drop') ? ops.slice(0, -1) : ops;
+  if (last?.t !== 'delete') return ops;
+  const written = new Set();
+  const line = (key) => { const p = parseCellKey(key); if (p) written.add(last.axis === 'row' ? p.r : p.c); };
+  for (const t of theirs) {
+    if (t.s !== last.s) continue;
+    if (t.t === 'cells') {
+      for (const [k, v] of Object.entries(t.v || {})) if (v != null) line(k);
+      for (const [k, patch] of Object.entries(t.st || {})) if (Object.values(patch).some((v) => v != null)) line(k);
+    } else if (t.t === 'lines') {
+      for (const [k, v] of Object.entries(t.v)) {
+        if (v == null) continue;
+        if (LINE_PROPS[t.p] === 'cell') line(k);
+        else if (LINE_PROPS[t.p] === last.axis) written.add(Number(k));
+      }
+    }
+  }
+  if (!written.size) return ops;
+  const kept = [...written].sort((a, b) => a - b);
+  const runs = [];
+  for (const r of mergeRuns(last.runs)) {
+    let from = r.from;
+    for (const i of kept) if (i >= from && i <= r.to) { if (i > from) runs.push({ from, to: i - 1 }); from = i + 1; }
+    if (from <= r.to) runs.push({ from, to: r.to });
+  }
+  return runs.length ? [...ops.slice(0, -1), { ...last, runs }] : ops.slice(0, -1);
+}
+
+/** A sheet added whole as [operation, inverse] pairs: the sheet without its cells, taken back by dropping it, then its cells. */
+function putInParts(op, inverse) {
+  const cells = op.sheet?.cells || {};
+  const keys = Object.keys(cells);
+  if (!keys.length) return [[op, inverse]];
+  const v = {}, st = {}, iv = {}, ist = {};
+  for (const key of keys) {
+    const cell = cells[key];
+    v[key] = contentOf(cell);
+    iv[key] = null;
+    if (cell?.s && Object.keys(cell.s).length) { st[key] = { ...cell.s }; ist[key] = Object.fromEntries(Object.keys(cell.s).map((k) => [k, null])); }
+  }
+  const write = { t: 'cells', s: op.s, v, ...(Object.keys(st).length ? { st } : {}) };
+  const undo = { t: 'cells', s: op.s, v: iv, ...(Object.keys(ist).length ? { st: ist } : {}) };
+  return [[{ ...op, sheet: { ...op.sheet, cells: {} } }, inverse], [write, [undo]]];
 }
 
 /** Two register writes made at once: where both write one register, the winner's value stands. */

@@ -922,10 +922,34 @@ export async function workbookToXlsx(wb, { sourceWorkbook = null, history = true
   wb = sharedBook(wb);
   const { completeXlsx } = await import('./xlsx-export.js');
   const X = await XLSX();
-  const book = buildBook(X, wb, { history });
-  writeDocumentProperties(book, wb.documentProperties);
-  const data = await completeXlsx(X, wb, book, X.write(book, { bookType: 'xlsx', type: 'array' }), { sourceWorkbook });
+  const build = () => {
+    const book = buildBook(X, wb, { history });
+    writeDocumentProperties(book, wb.documentProperties);
+    return book;
+  };
+  const write = (book) => X.write(book, { bookType: 'xlsx', type: 'array' });
+  const version = wb.version;
+  // A large book takes a second or more to encode on the page's one thread (an autosave after a paste of 200,000
+  // cells held scrolling still for that long): the page gets a turn between the steps. The last step reads the
+  // book again, so an edit made meanwhile has the steps before it done over, at once, to go with it.
+  const large = wb.sheets.reduce((n, sheet) => n + sheet.cells.size, 0) > YIELD_CELLS;
+  let book = build();
+  if (large) await nextTask();
+  let bytes = write(book);
+  if (large) {
+    await nextTask();
+    if (wb.version !== version) bytes = write(book = build());
+  }
+  const data = await completeXlsx(X, wb, book, bytes, { sourceWorkbook });
   return new Blob([data], { type: XLSX_MIME });
+}
+
+/** A book of more cells than this takes long enough to encode that the page is given turns along the way. */
+const YIELD_CELLS = 50_000;
+/** Resolves in a task of its own, once the page has had its turn (input, a frame). */
+export function nextTask() {
+  if (typeof MessageChannel !== 'function') return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => { const channel = new MessageChannel(); channel.port1.onmessage = () => { channel.port1.close(); resolve(); }; channel.port2.postMessage(null); });
 }
 
 /**
@@ -1990,10 +2014,35 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
       cell.f = scalarFormulas.get(cell.f);
     }
   }
+  // On the 1904 date system a rule's cells are dates when one of the stored cells it covers is
+  // date-formatted and none carries another number format, as shiftDateNames weighs a name.
+  const dateTargets = date1904 ? (ranges) => {
+    let date = 0, other = 0;
+    for (const [key, cell] of Object.entries(cells)) {
+      const { r, c } = parseKey(key);
+      if (!ranges.some((g) => r >= g.r1 && r <= g.r2 && c >= g.c1 && c <= g.c2)) continue;
+      const kind = dateTimeKind(cell.s, 0), fmt = cell.s?.fmt;
+      if (kind === 'date' || kind === 'datetime') date++;
+      else if (fmt && fmt !== 'general' && fmt !== 'text') other++;
+    }
+    return date > 0 && !other;
+  } : null;
   const savedFilters = sheetFilters(own).filter(f => validMetaRange(f.range));
+  // A file on the 1904 system gives a date column's custom filter bounds ("after 2024-01-01") as 1904 serials, which
+  // move with the column's cells to this app's 1900 serials, as a conditional format's thresholds do.
+  const filterDates = (filter) => {
+    if (!filter || !dateTargets) return filter;
+    let criteria = filter.criteria;
+    for (const [key, crit] of Object.entries(criteria)) {
+      if (!['gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'between'].includes(crit?.op) || typeof crit.value !== 'number') continue;
+      if (!dateTargets([{ r1: filter.range.r1 + 1, c1: Number(key), r2: filter.range.r2, c2: Number(key) }])) continue;
+      criteria = { ...criteria, [key]: { ...crit, value: crit.value + 1462, ...(typeof crit.value2 === 'number' ? { value2: crit.value2 + 1462 } : {}) } };
+    }
+    return criteria === filter.criteria ? filter : { ...filter, criteria };
+  };
   const currentFilters = [fileFilter(X, ws?.['!autofilter']),
     ...(ws?.['!filters'] || []).map(f => fileFilter(X, f)),
-    ...native.filter(t => t.filter).map(t => fileFilter(X, null, t.filter))].filter(Boolean);
+    ...native.filter(t => t.filter).map(t => fileFilter(X, null, t.filter))].filter(Boolean).map(filterDates);
   const savedOwners = new Map((Array.isArray(own?.tables) ? own.tables : []).filter(t => typeof t?.name === 'string' && validMetaRange(t.range))
     .map(t => [filterRangeKey({ range: { ...t.range, r2: t.range.r2 - Number(!!t.totalsRow) } }), t]));
   const currentByRange = new Map(currentFilters.map(f => [filterRangeKey(f), f]));
@@ -2099,19 +2148,6 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
       }
     }
   }
-  // On the 1904 date system a rule's cells are dates when one of the stored cells it covers is
-  // date-formatted and none carries another number format, as shiftDateNames weighs a name.
-  const dateTargets = date1904 ? (ranges) => {
-    let date = 0, other = 0;
-    for (const [key, cell] of Object.entries(cells)) {
-      const { r, c } = parseKey(key);
-      if (!ranges.some((g) => r >= g.r1 && r <= g.r2 && c >= g.c1 && c <= g.c2)) continue;
-      const kind = dateTimeKind(cell.s, 0), fmt = cell.s?.fmt;
-      if (kind === 'date' || kind === 'datetime') date++;
-      else if (fmt && fmt !== 'general' && fmt !== 'text') other++;
-    }
-    return date > 0 && !other;
-  } : null;
   const frozen = partXml ? nativePart?.frozen : own?.frozen;
   const merges = fileMerges((ws?.['!merges'] || []).filter((m) => m?.s && m?.e).map((m) => ({ r1: m.s.r, c1: m.s.c, r2: m.e.r, c2: m.e.c })));
   return {
@@ -2820,9 +2856,14 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
   if (nativeSlicers?.caches.some(c => c.kind === 'pivot')) {
     wb.nativePivots = normalizeNativePivots(importNativePivotSlicerCaches(nativeSlicers, wb.nativePivots, wb.sheets));
     if (!wb.nativePivots) throw new Error('Native pivot storage exceeds limits');
-    for (const sheet of wb.sheets) for (const control of sheet.charts) if (control.type === 'slicer' && control.pivotCache != null) {
-      if (!slicerItems(wb, control)) throw new Error('Missing native pivot slicer binding');
-    }
+    // A slicer whose members cannot be listed here is left out with a word; the workbook still opens.
+    for (const sheet of wb.sheets) sheet.charts = sheet.charts.filter(control => {
+      if (control.type !== 'slicer' || control.pivotCache == null) return true;
+      let problem;
+      try { if (!slicerItems(wb, control)) problem = 'Missing native pivot slicer binding'; } catch (e) { problem = e?.message || String(e); }
+      if (problem) console.warn(`Slicer ${control.nativeName || control.title} is not shown: ${problem}`);
+      return !problem;
+    });
   }
   // PivotTable slicers travel in the app's own data (see xlsx-pivot-slicer-sidecar.js).
   restorePivotSlicerSidecar(wb, meta?.pivotSlicers, meta?.sheets);

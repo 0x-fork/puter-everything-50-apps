@@ -32,7 +32,12 @@ export function themeChartFont(wb) {
   return fontKeyFor(name, { literal: true }) || 'calibri';
 }
 
+/** How many rings a chart draws: a doughnut one per series, every other chart one. */
+export const ringCountOf = (wb, sheetId, chart) => (chart.type === 'donut' ? chartData(wb, sheetId, chart).series.length : 1);
+
 export const seriesCountOf = (wb, sheetId, chart) => {
+  // A waterfall's colours are its increases', decreases' and total's, which Change Colors recolours together.
+  if (chart.type === 'waterfall') return 3;
   const data = chartData(wb, sheetId, chart);
   return ['pie', 'donut'].includes(chart.type) ? data.categories.length : data.series.length;
 };
@@ -87,7 +92,8 @@ export function insertChartSheet(ctx, subtype = DEFAULT_SUBTYPE) {
 export function moveChart(ctx, chart, { newSheet = null, toSheetId = null }) {
   const { wb } = ctx, fromId = ctx.sheetId();
   const detached = detachedChart(wb, fromId, chart);
-  const { id, ...model } = detached;
+  // A chart moved out of a group leaves it: the group's other objects stay behind on this sheet.
+  const { id, group, ...model } = detached;
   let moved = false;
   // A chart sheet whose only chart leaves goes with it, which Protect Workbook forbids: the chart would land on
   // the other sheet and stay on its own as well. Refused instead, with the workbook's structure notice.
@@ -196,7 +202,7 @@ export function runChartAction(ctx, arg = {}) {
     case 'move': return openMoveChartDialog(ctx, chart);
     case 'format': {
       const key = arg.element || ctx.chartUi?.element() || 'chartArea';
-      return update(elementFormatPatch(chart, key, arg), 'Format chart');
+      return update(elementFormatPatch(chart, key, { ...arg, rings: ringCountOf(wb, sheetId, chart) }), 'Format chart');
     }
     case 'size': {
       const patch = {};

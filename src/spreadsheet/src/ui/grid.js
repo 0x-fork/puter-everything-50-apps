@@ -52,7 +52,7 @@ import { cellName, cellKey, rangeName, normalizeRange, parseRange, parseCellRef,
 import { splitAtCell, dropSplit } from '../core/split-panes.js';
 import { RTL_LEAD } from '../core/bidi.js';
 import { formatValue, formatGeneral, localeInfo, defaultAlign, layoutAlign, editText, fontStack, borderCss, errorHelp, indentWidth, dateTimeKind } from '../core/format.js';
-import { extractRefs, refToText, quoteSheet, MAX_ROW, MAX_COL } from '../core/refs.js';
+import { extractRefs, refToText, quoteSheet, selectionName, MAX_ROW, MAX_COL } from '../core/refs.js';
 import { tokenize } from '../core/formula/tokenizer.js';
 import { inString, signatureFor } from '../core/formula/hints.js';
 import { isError, FUNCTIONS } from '../core/formula/functions.js';
@@ -84,6 +84,12 @@ const TAP_SLOP = 8;
 const GROW_ROWS = 100;
 const GROW_COLS = 10;
 const SPOKEN_MAX = 200; // characters of a cell's text read out when it is selected; the rest is summed up
+// Ctrl (⌘) chords that change the selected cells, held back while a drawing object is selected over them: always,
+// only with Shift (number formats, font size), or only without it (underline; Ctrl+Shift+U shows the formula bar).
+const OBJECT_IDLE_CHORDS = new Set(['KeyB', 'KeyI', 'KeyR', 'KeyK', 'KeyE', 'KeyL', 'KeyT', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6',
+  'Digit7', 'Digit9', 'Digit0', 'Minus', 'NumpadAdd', 'NumpadSubtract', 'Semicolon', 'Quote']);
+const OBJECT_IDLE_SHIFT_CHORDS = new Set(['Digit1', 'Backquote', 'Period', 'Comma', 'Equal']);
+const OBJECT_IDLE_PLAIN_CHORDS = new Set(['KeyU']);
 const CHART_READ_DELAY = 150; // how long a chart over a computed range may keep its picture while typing goes on (see readRangeLater)
 // Room grid.css keeps beside a cell's text for its decorations, beyond the cell's own text inset.
 const FILTER_BUTTON_W = 18; // .filter-head: 18px plus the text inset
@@ -247,6 +253,7 @@ export function createGrid(opts) {
   let edit = null; // { r, c, text, mode: 'type' | 'inplace', refInsert: {start,end} | null }
   let fillPreview = null;
   let movePreview = null; // range the selection would move to while dragging its border
+  let ariaSelected = []; // the cell nodes renderSelection marked selected
   let cellFont = '13px system-ui';
   let plainPaste = false; // set by Ctrl/Cmd+Shift+V, read by the paste handler
   let baseFontSize = 13;
@@ -378,7 +385,9 @@ export function createGrid(opts) {
   // first stretch of the scrolling pane's, as Excel divides its scrollbars at the bars.
   const splitScrollV = el('div.split-scroll.v', { 'aria-hidden': 'true', hidden: true }, el('div.split-scroll-size'));
   const splitScrollH = el('div.split-scroll.h', { 'aria-hidden': 'true', hidden: true }, el('div.split-scroll-size'));
-  const root = el('div.grid', {}, corner, colClip, rowClip, viewport, frzRows.el, frzCols.el, frzCorner.el, resizeGuide, resizeFeedback, freezeV, freezeH, splitV, splitH, splitScrollV, splitScrollH);
+  // The outline's level buttons (1, 2, 3 …) over the corner, beside the select-all button rather than inside it.
+  const outlineLevels = el('div.outline-levels');
+  const root = el('div.grid', {}, corner, outlineLevels, colClip, rowClip, viewport, frzRows.el, frzCols.el, frzCorner.el, resizeGuide, resizeFeedback, freezeV, freezeH, splitV, splitH, splitScrollV, splitScrollH);
   const hints = createFormulaHints({
     host: root,
     extraNames: (name) => {
@@ -1133,11 +1142,15 @@ export function createGrid(opts) {
 
   /** Why a move from `src` to `dst` will be refused, when it can be told beforehand; null otherwise. */
   function knownMoveProblem(src, dst) {
-    if ((src.r2 - src.r1 + 1) * (src.c2 - src.c1 + 1) > 200000) return 'Select at most 200,000 cells to move at once';
     const s = sheet();
+    // Whole columns (or rows) move whole, however many cells they span (Workbook.moveRange walks only those held).
+    const wholeCols = src.r1 === 0 && src.r2 >= Math.max(s.rows, MAX_ROWS) - 1, wholeRows = src.c1 === 0 && src.c2 >= Math.max(s.cols, MAX_COLS) - 1;
+    if ((src.r2 - src.r1 + 1) * (src.c2 - src.c1 + 1) > 200000 && !wholeCols && !wholeRows) return 'Select at most 200,000 cells to move at once';
     const overlaps = (a, b) => !(a.r2 < b.r1 || a.r1 > b.r2 || a.c2 < b.c1 || a.c1 > b.c2);
     const inside = (a, b) => a.r1 >= b.r1 && a.r2 <= b.r2 && a.c1 >= b.c1 && a.c2 <= b.c2;
-    for (let r = src.r1; r <= src.r2; r++) for (let c = src.c1; c <= src.c2; c++) {
+    // Arrays lie inside the used range, which bounds the cells of whole lines to look through.
+    const used = wb.usedRange(sheetId) || { r2: -1, c2: -1 };
+    for (let r = src.r1; r <= Math.min(src.r2, used.r2); r++) for (let c = src.c1; c <= Math.min(src.c2, used.c2); c++) {
       const a = wb.spillAt(sheetId, r, c)?.anchor;
       if (a && !(a.r >= src.r1 && a.r <= src.r2 && a.c >= src.c1 && a.c <= src.c2)) return `Part of an array cannot be moved without its formula in ${cellName(a.r, a.c)}`;
     }
@@ -3041,18 +3054,25 @@ export function createGrid(opts) {
     } else linkPop.hidden = true;
     syncPopovers(view);
     viewport.setAttribute('aria-activedescendant', `gc-${sel.active.r}-${sel.active.c}`);
-    for (const n of cellsLayer.querySelectorAll('.cell[aria-selected]')) n.removeAttribute('aria-selected');
     // Every rendered cell of the selection is marked, not just the active one, so assistive tech can tell the range.
+    // Only the rows the selection crosses are walked, and only the cells marked before are unmarked: this runs on
+    // every frame of a scroll, and zoomed far out the view holds tens of thousands of cells, each one of which was
+    // visited twice a frame.
+    for (const n of ariaSelected) n.removeAttribute('aria-selected');
+    ariaSelected = [];
     const ranges = [...extras, S.selRange(sel)];
-    for (const n of cellsLayer.querySelectorAll('.cell')) {
-      const m = /^gc-(\d+)-(\d+)$/.exec(n.id);
-      if (!m) continue;
-      const r = Number(m[1]);
-      const c = Number(m[2]);
-      if (ranges.some((rg) => r >= rg.r1 && r <= rg.r2 && c >= rg.c1 && c <= rg.c2)) n.setAttribute('aria-selected', 'true');
+    for (const row of cellsLayer.children) {
+      const r = Number(row.getAttribute('aria-rowindex')) - 1;
+      const across = ranges.filter((rg) => r >= rg.r1 && r <= rg.r2);
+      if (!across.length) continue;
+      for (const n of row.children) {
+        if (!n.id) continue; // a merged block's border paint
+        const c = Number(n.dataset.c);
+        if (across.some((rg) => c >= rg.c1 && c <= rg.c2)) { n.setAttribute('aria-selected', 'true'); ariaSelected.push(n); }
+      }
     }
     const activeNode = document.getElementById(`gc-${sel.active.r}-${sel.active.c}`);
-    if (activeNode) activeNode.setAttribute('aria-selected', 'true');
+    if (activeNode) { activeNode.setAttribute('aria-selected', 'true'); ariaSelected.push(activeNode); }
   }
 
   function syncHeaders() {
@@ -3139,10 +3159,16 @@ export function createGrid(opts) {
   function setSelection(next, { scroll = true, announce = true, add = false, scrollActive = false, grow = true } = {}) {
     if (sheet()?.kind === 'chart') { extras = []; schedule(); opts.onSelection?.(sel); return; }
     tabOrigin = null; // any move but a Tab ends a run of Tabs; tabStep puts the origin back
+    addCursor = false; // any selection but Add to Selection's arrow is one to keep; that arrow puts the mark back
     const b = bounds();
     if (!add) extras = [];
     const fix = (p) => ({ r: clamp(p.r, 0, b.rows - 1), c: clamp(p.c, 0, b.cols - 1) });
     sel = { active: fix(next.active), anchor: fix(next.anchor), focus: fix(next.focus), ...(next.scope ? { scope: next.scope } : {}) };
+    // The active cell is always one of the cells selected. Moved off the anchor by Enter or Tab, a stretch of
+    // the range back past it with Shift (or a page, or a jump) left it outside, outlined nowhere, yet the cell
+    // typing went into; it goes back to the corner the range stretches from.
+    const own = sheet().merges.length && !sel.scope ? wb.expandToMerges(sheetId, S.selRange(sel)) : S.selRange(sel);
+    if (sel.active.r < own.r1 || sel.active.r > own.r2 || sel.active.c < own.c1 || sel.active.c > own.c2) sel.active = { ...sel.anchor };
     // The active cell of a range never sits in a hidden row or column (a header click or
     // Ctrl+A puts it at the first line): typing would open an editor nobody can see. It
     // moves to the range's nearest visible cell, as in Excel; a range of hidden lines alone
@@ -3176,7 +3202,13 @@ export function createGrid(opts) {
         }
         if (r <= range.r2 && c <= range.c2) sel.active = { r, c };
       }
-      if (grown.r1 !== range.r1 || grown.c1 !== range.c1 || grown.r2 !== range.r2 || grown.c2 !== range.c2) sel.range = grown;
+      // A range lying wholly inside one merged block is that block's one cell, as in Excel: a click on a large
+      // merged title that slipped into another of its cells, or a Shift+click on it, named it B2:C3 rather than B2.
+      if (!whole && m && grown.r1 === m.r1 && grown.c1 === m.c1 && grown.r2 === m.r2 && grown.c2 === m.c2) {
+        sel.anchor = { ...sel.active };
+        sel.focus = { ...sel.active };
+        sel.range = grown;
+      } else if (grown.r1 !== range.r1 || grown.c1 !== range.c1 || grown.r2 !== range.r2 || grown.c2 !== range.c2) sel.range = grown;
     }
     // Selecting the last row or column grows the sheet so there is always somewhere to go, like an
     // endless page. A Ctrl+Arrow jump that lands on the last line, nothing lying beyond it, stops
@@ -3215,18 +3247,21 @@ export function createGrid(opts) {
   /**
    * Ctrl+A (and Ctrl+Shift+Space): the block of data around the active cell first, keeping the
    * active cell, as in Excel; the whole sheet when pressed again, or when the active cell has no
-   * block around it. The select-all corner takes the whole sheet at once.
+   * block around it. The select-all corner takes the whole sheet at once. The whole sheet keeps the active
+   * cell where it was too, as in Excel and Sheets: moved to A1, the next entry typed (or Ctrl+Enter) went in
+   * there, and the sheet jumped back to the top to show it.
    */
+  const wholeSheet = () => ({ ...S.selectAll(bounds()), active: { ...sel.active } });
   function selectAllStep() {
     const { r, c } = sel.active;
     const b = bounds();
     const range = S.selRange(sel);
     // Once the whole sheet is selected, further presses keep it, as in Excel, rather than going back to the block.
-    if (range.r1 === 0 && range.c1 === 0 && range.r2 >= b.rows - 1 && range.c2 >= b.cols - 1) { setSelection(S.selectAll(b), { scroll: false }); return; }
+    if (range.r1 === 0 && range.c1 === 0 && range.r2 >= b.rows - 1 && range.c2 >= b.cols - 1) { setSelection(wholeSheet(), { scroll: false }); return; }
     const region = wb.dataRegion(sheetId, r, c);
     const block = region && (region.r1 !== region.r2 || region.c1 !== region.c2)
       && !(range.r1 === region.r1 && range.c1 === region.c1 && range.r2 === region.r2 && range.c2 === region.c2);
-    setSelection(block ? S.fromRange(region, { r, c }) : S.selectAll(b), { scroll: false });
+    setSelection(block ? S.fromRange(region, { r, c }) : wholeSheet(), { scroll: false });
   }
 
   /**
@@ -3234,6 +3269,7 @@ export function createGrid(opts) {
    * Extend Selection (F8: arrows and clicks extend) and Add to Selection (Shift+F8: arrows and clicks add ranges).
    */
   let keyMode = null;
+  let addCursor = false; // the selection is the lone cell Add to Selection's arrows moved the cursor to
   function setKeyMode(mode) {
     if (keyMode === mode) return;
     keyMode = mode;
@@ -3268,7 +3304,11 @@ export function createGrid(opts) {
     // So is a note, which shows beside it too (unless notes are set to show nothing).
     const note = appOption('commentIndicators') === 'none' ? null : sheet().notes.get(cellKey(r, c));
     if (note) msg += `. Note: ${spoken(note)}`;
-    if (!S.isSingle(sel)) msg = `${rangeName(range)} selected. ${msg}`;
+    // A comment thread is marked on the cell too, and is said to be there, as Excel's screen reader support says.
+    const thread = appOption('commentIndicators') === 'none' ? null : sheet().comments?.get(cellKey(r, c));
+    if (thread) msg += thread.done ? '. Has a resolved comment' : '. Has a comment';
+    // Whole columns and rows are named as the Name Box names them (B:D, 3:5), not B1:D1048576.
+    if (!S.isSingle(sel)) msg = `${selectionName(range)} selected. ${msg}`;
     if (extras.length) msg = `${extras.length + 1} ranges selected. ${msg}`;
     opts.announce(msg);
   }
@@ -3474,7 +3514,10 @@ export function createGrid(opts) {
     else if (st?.valign === 'bottom') padTop = h - lineH - 5;
     else padTop = (h - lineH) / 2 - 2;
     editor.style.paddingTop = `${Math.max(0, padTop).toFixed(2)}px`;
-    editor.style.height = `${h}px`;
+    // On a touch screen the text is never under 16px (above), which a short row, or one zoomed out, cannot
+    // hold: at 50% a row is 10px, and the line typed was cut to a sliver. The box grows down to show it.
+    const forced = size > (st?.size || baseFontSize) * zoom;
+    editor.style.height = `${forced && single ? Math.max(h, Math.ceil(lineH)) : h}px`;
     edit.overflowBelow = 0;
     if (!single) {
       const screenTop = rowY(r) - bandST(r, view);
@@ -3606,8 +3649,11 @@ export function createGrid(opts) {
     }
     const targets = [...extras, S.selRange(sel)];
     const arrayRange = edit.arrayRange || (arrayEntry ? S.selRange(sel) : null);
+    // A refused entry stays open, and is said on screen as well as to a screen reader: the announcement alone
+    // left Ctrl+Enter over a whole column looking as though it had done nothing.
+    const refuse = (message) => { opts.onInvalid?.({ message }); opts.announce?.(`${message}. Your entry is still being edited.`); };
     if (arrayEntry && extras.length) {
-      opts.announce?.('Select one continuous range for an array formula. Your entry is still being edited.');
+      refuse('Select one continuous range for an array formula');
       editor.focus({ preventScroll: true });
       return false;
     }
@@ -3627,7 +3673,7 @@ export function createGrid(opts) {
     if (filling) {
       const count = targets.reduce((total, rg) => total + (rg.r2 - rg.r1 + 1) * (rg.c2 - rg.c1 + 1), 0);
       if (count > 50000) {
-        opts.announce?.('Select at most 50,000 cells to fill at once. Your entry is still being edited.');
+        refuse('Select at most 50,000 cells to fill at once');
         editor.focus({ preventScroll: true });
         return false;
       }
@@ -3719,31 +3765,60 @@ export function createGrid(opts) {
     const m = wb.mergeAt(sheetId, from.active.r, from.active.c);
     // Leaving a merge steps off its far edge; the other axis stays where the step began, so a
     // selection's focus inside a merge comes back to its own row or column.
-    const start = m ? { ...from, active: { r: dr > 0 ? m.r2 : dr < 0 ? m.r1 : from.active.r, c: dc > 0 ? m.c2 : dc < 0 ? m.c1 : from.active.c } } : from;
+    const start = m ? leavingMerge(from, m, dr, dc) : from;
     let next = S.move(start, dr, dc, b);
     while ((dr && rowHidden(s, next.active.r)) || (dc && s.hiddenCols.has(next.active.c))) {
-      const further = S.move(next, dr, dc, b);
+      const further = S.move(next, dr && pastHidden(rowOffsets, next.active.r, dr), dc && pastHidden(colOffsets, next.active.c, dc), b);
       if (further.active.r === next.active.r && further.active.c === next.active.c) return from;
       next = further;
     }
     return next;
   }
 
+  /**
+   * How far to step from hidden line i going `dir` (1 or -1): past the whole run of hidden lines it lies in, in
+   * one leap, as the layout knows them, or one line. Rows hidden to the end of a sheet are a million of them,
+   * and an arrow press at the last row shown walked them one by one.
+   */
+  function pastHidden(offsets, i, dir) {
+    ensureOffsets();
+    const run = offsets.blankRun(i);
+    return run ? (dir > 0 ? run[1] + 1 - i : run[0] - 1 - i) : dir;
+  }
+
+  /**
+   * Where a step out of merged block m begins: its far edge along the step, and across it the row (or column)
+   * the step began on, or, when that line is hidden (a merged title whose first row is hidden is selected at
+   * its hidden anchor), the block's first line on show: a step sideways from it landed on a hidden cell.
+   */
+  function leavingMerge(from, m, dr, dc) {
+    const s = sheet();
+    const across = (at, lo, hi, hidden) => {
+      if (!hidden(at)) return at;
+      for (let i = lo; i <= hi; i++) if (!hidden(i)) return i;
+      return at;
+    };
+    return { ...from, active: {
+      r: dr > 0 ? m.r2 : dr < 0 ? m.r1 : across(from.active.r, m.r1, m.r2, (r) => rowHidden(s, r)),
+      c: dc > 0 ? m.c2 : dc < 0 ? m.c1 : across(from.active.c, m.c1, m.c2, (c) => s.hiddenCols.has(c)),
+    } };
+  }
+
   /** Resolve a keyboard destination to visible lines, falling back at an edge. */
   function visibleTarget(target, dr, dc) {
     const s = sheet();
-    const line = (at, delta, total, hidden) => {
+    const line = (at, delta, total, hidden, offsets) => {
       if (!delta || !hidden(at)) return at;
       let i = at;
-      while (i >= 0 && i < total && hidden(i)) i += delta;
+      while (i >= 0 && i < total && hidden(i)) i += pastHidden(offsets, i, delta);
       if (i >= 0 && i < total) return i;
       i = at;
-      while (i >= 0 && i < total && hidden(i)) i -= delta;
+      while (i >= 0 && i < total && hidden(i)) i += pastHidden(offsets, i, -delta);
       return i >= 0 && i < total ? i : at;
     };
     return {
-      r: line(target.r, dr, bounds().rows, (r) => rowHidden(s, r)),
-      c: line(target.c, dc, bounds().cols, (c) => s.hiddenCols.has(c)),
+      r: line(target.r, dr, bounds().rows, (r) => rowHidden(s, r), rowOffsets),
+      c: line(target.c, dc, bounds().cols, (c) => s.hiddenCols.has(c), colOffsets),
     };
   }
 
@@ -3772,6 +3847,9 @@ export function createGrid(opts) {
       // instead of visiting every cell in its area.
       if (dir === 'down' && s.hiddenCols.has(p.c)) edge.r = back ? range.r1 : range.r2;
       else if (dir === 'right' && rowHidden(s, p.r)) edge.c = back ? range.c1 : range.c2;
+      // A run of hidden lines along the walk is passed in one leap, to its last line inside the range.
+      else if (dir === 'down' && rowHidden(s, p.r)) edge.r = clamp(p.r + pastHidden(rowOffsets, p.r, back ? -1 : 1) + (back ? 1 : -1), range.r1, range.r2);
+      else if (dir === 'right' && s.hiddenCols.has(p.c)) edge.c = clamp(p.c + pastHidden(colOffsets, p.c, back ? -1 : 1) + (back ? 1 : -1), range.c1, range.c2);
       else {
         const m = wb.mergeAt(sheetId, p.r, p.c);
         if (m && (m.r1 !== p.r || m.c1 !== p.c)) {
@@ -3999,8 +4077,9 @@ export function createGrid(opts) {
   function jumpFrom(from, dr, dc) {
     const s = sheet();
     const m = s.merges.length ? wb.mergeAt(sheetId, from.active.r, from.active.c) : null;
-    const start = m ? { ...from, active: { r: dr > 0 ? m.r2 : dr < 0 ? m.r1 : from.active.r, c: dc > 0 ? m.c2 : dc < 0 ? m.c1 : from.active.c } } : from;
-    return S.jump(start, dr, dc, bounds(), hasValue, (r, c) => !rowHidden(s, r) && !s.hiddenCols.has(c), nextFilled);
+    const start = m ? leavingMerge(from, m, dr, dc) : from;
+    const leap = (r, c, ddr, ddc) => Math.abs(ddr ? pastHidden(rowOffsets, r, ddr) : pastHidden(colOffsets, c, ddc));
+    return S.jump(start, dr, dc, bounds(), hasValue, (r, c) => !rowHidden(s, r) && !s.hiddenCols.has(c), nextFilled, leap);
   }
 
   /**
@@ -4074,8 +4153,11 @@ export function createGrid(opts) {
     else { focus = step(focus); anchor = focus; }
     // The range goes in as anchor and focus, not its corners: insertRef keeps them as the point the next
     // Shift+arrow stretches from, so stretching up or left kept going rather than shrinking back.
-    insertRef({ r1: anchor.r, c1: anchor.c, r2: focus.r, c2: focus.c });
+    const ref = insertRef({ r1: anchor.r, c1: anchor.c, r2: focus.r, c2: focus.c });
     scrollIntoView(focus);
+    // The reference picked is read out: the formula's text changes under the caret, which a screen reader
+    // does not speak, so the arrows seemed to do nothing.
+    if (ref) opts.announce?.(ref);
   }
 
   /** Insert a whole-column (B:D) or whole-row (2:3) reference, from a header press or drag. */
@@ -4114,6 +4196,7 @@ export function createGrid(opts) {
     positionEditor();
     renderRefHighlights();
     opts.onEdit?.({ editing: true, text: next, r: edit.r, c: edit.c });
+    return refText;
   }
 
   // The references of the formula being edited, kept from one paint to the next: the layer is painted on
@@ -4378,7 +4461,7 @@ export function createGrid(opts) {
       return;
     }
     if (edit && !commitEdit()) return;
-    if (keyMode === 'add') { addRange(S.selRange(sel, true)); setSelection(S.single(r, c), { add: true }); drag = { kind: 'select' }; grab(viewport, e); viewport.focus({ preventScroll: true }); return; }
+    if (keyMode === 'add') { if (!addCursor) addRange(S.selRange(sel, true)); setSelection(S.single(r, c), { add: true }); drag = { kind: 'select' }; grab(viewport, e); viewport.focus({ preventScroll: true }); return; }
     // Shift stretches the range last selected; the ranges added before it with Ctrl/Cmd+click stay, as in Excel.
     if (e.shiftKey || keyMode === 'extend') setSelection(S.extendTo(sel, r, c), { add: true });
     else setSelection(S.single(r, c));
@@ -4419,6 +4502,10 @@ export function createGrid(opts) {
     const cell = wb.getCell(sheetId, r, c);
     if (cell?.f != null) return; // a formula decides the value
     wb.setInput(sheetId, r, c, cell?.v === true ? 'FALSE' : 'TRUE');
+    // The box's new state is read out: the cell stays the active one, so a screen reader following the grid's
+    // cursor hears nothing of the change otherwise.
+    const now = wb.getCell(sheetId, r, c)?.v;
+    if (typeof now === 'boolean' && now !== (cell?.v === true)) opts.announce?.(`${cellName(r, c)}, ${now ? 'checked' : 'not checked'}`);
   }
 
   function startFill(e) {
@@ -4496,7 +4583,10 @@ export function createGrid(opts) {
       return;
     }
     if (drag.kind === 'select') {
-      if (r !== sel.focus.r || c !== sel.focus.c) setSelection(S.extendTo(sel, r, c), { scroll: false, announce: false, add: extras.length > 0 });
+      // Across the cells of the merged block the selection already ends on, it stays as it is.
+      const m = sheet().merges.length ? mergeAt(r, c) : null;
+      const same = m ? sel.focus.r >= m.r1 && sel.focus.r <= m.r2 && sel.focus.c >= m.c1 && sel.focus.c <= m.c2 : r === sel.focus.r && c === sel.focus.c;
+      if (!same) setSelection(S.extendTo(sel, r, c), { scroll: false, announce: false, add: extras.length > 0 });
     } else if (drag.kind === 'fill') {
       const next = fillTarget(drag.source, r, c);
       if (rangeName(next) !== rangeName(fillPreview || drag.source)) { fillPreview = next; schedule(); }
@@ -4532,7 +4622,12 @@ export function createGrid(opts) {
       autoScrollAt = next;
       autoScroll = setInterval(() => {
         const at = autoScrollAt;
-        viewport.scrollBy(at.dx * 24, at.dy * 24);
+        // The farther past the edge the pointer is, the faster the sheet goes, as in Excel: a step of 24px a tick
+        // up to 25px out, and another for every 25px beyond, to eight. At one speed a drag to row 1,000 took 40 seconds.
+        const speed = (past) => 24 * Math.min(8, 1 + Math.floor(Math.max(0, past) / 25));
+        const pastX = at.dx < 0 ? at.left - at.e.clientX : at.e.clientX - at.rect.right;
+        const pastY = at.dy < 0 ? at.top - at.e.clientY : at.e.clientY - at.rect.bottom;
+        viewport.scrollBy(at.dx * speed(pastX), at.dy * speed(pastY));
         if (!drag) return;
         const x = clamp(at.e.clientX, at.left + 1, at.rect.right - 1), y = clamp(at.e.clientY, at.top + 1, at.rect.bottom - 1);
         // Rows or columns dragged by their headers land beside the line now at the edge.
@@ -4581,6 +4676,9 @@ export function createGrid(opts) {
     if (d.kind === 'move') {
       const target = movePreview;
       movePreview = null;
+      // Copy or move is the keys held as the block is dropped, as in Excel: Ctrl pressed after the last move
+      // of the mouse, just before letting go, still copies rather than moving the cells out of their place.
+      d.copy = e.altKey || e.ctrlKey;
       if (target && rangeName(target) !== rangeName(d.source)) {
         // Dropping onto cells that hold something asks first, when the options say to warn before overwriting.
         // A move that will be refused anyway says why at once, without asking first.
@@ -4686,7 +4784,8 @@ export function createGrid(opts) {
       schedule();
       return;
     }
-    setSelection(S.fromRange(target, { r: target.r1 + (sel.active.r - d.source.r1), c: target.c1 + (sel.active.c - d.source.c1) }));
+    // Whole columns (or rows) stay whole lines where they land, so the sheet is not grown to show their far end.
+    setSelection(S.fromRange(sel.scope ? { ...target, scope: sel.scope } : target, { r: target.r1 + (sel.active.r - d.source.r1), c: target.c1 + (sel.active.c - d.source.c1) }));
     opts.announce?.(`${d.copy ? 'Copied' : 'Moved'} to ${rangeName(target)}`);
   }
 
@@ -4997,7 +5096,9 @@ export function createGrid(opts) {
       else wb.transaction('Resize column', () => { const before = new Map([[d.index, wb.colWidth(sheetId, d.index)]]); wb.setColWidth(sheetId, d.index, size); invalidateOffsets(); refitWrappedRows([d.index], before); });
     } else {
       const lines = selectedLines('row', d.index);
-      if (lines) wb.transaction('Resize rows', () => { for (const [from, to] of lines) for (let r = from; r <= to; r++) wb.setRowHeight(sheetId, r, size); });
+      // Every row of the sheet (Select All): the sheet's default height, not a height of their own for a million rows.
+      if (lines?.length === 1 && lines[0][0] === 0 && lines[0][1] >= bounds().rows - 1) wb.setDefaultLineSize(sheetId, 'row', size);
+      else if (lines) wb.transaction('Resize rows', () => { for (const [from, to] of lines) for (let r = from; r <= to; r++) wb.setRowHeight(sheetId, r, size); });
       else wb.setRowHeight(sheetId, d.index, size);
     }
   }
@@ -5200,13 +5301,20 @@ export function createGrid(opts) {
     const mod = isMod(e);
     const key = e.key;
     const dir = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[key];
+    // Extend Selection (F8) stretches the selection with every move, as Shift does: the jumps of Ctrl+arrow, Home,
+    // Ctrl+Home, Ctrl+End and PageUp/PageDown too, as in Excel, not the plain arrows alone.
+    const extending = e.shiftKey || keyMode === 'extend';
 
     // Ctrl+Alt+O selects the next chart, image or text box (Shift: the previous one), so they can be reached without a mouse.
     if (mod && e.altKey && e.code === 'KeyO') { e.preventDefault(); selectNextChart(e.shiftKey ? -1 : 1); return; }
     if (selectedChart && opts.onChartKey?.(e, selectedChart)) return; // a chart element takes typing (its title, for one)
-    if (selectedChart && mod) {
-      // Ctrl+C copies the chart itself, as a picture, rather than the cells behind it.
-      if (key.toLowerCase() === 'c' && !e.shiftKey && !e.altKey) { e.preventDefault(); opts.onCommand?.('copyChart', { id: selectedChart }); return; }
+    if (selectedChart && (mod || (IS_MAC && e.ctrlKey && !e.metaKey))) {
+      // Ctrl+C copies the chart itself, as a picture, rather than the cells behind it; Ctrl+D duplicates it, as in Excel.
+      if (mod && key.toLowerCase() === 'c' && !e.shiftKey && !e.altKey) { e.preventDefault(); opts.onCommand?.('copyChart', { id: selectedChart }); return; }
+      if (mod && e.code === 'KeyD' && !e.shiftKey && !e.altKey) { e.preventDefault(); opts.onCommand?.('duplicateChart', { id: selectedChart }); return; }
+      // The cells stay selected behind the object, out of sight: a chord that would fill, format, write into, hide,
+      // insert or delete them (Ctrl+R, Ctrl+B, Ctrl+;, Ctrl+9, Ctrl+-, Ctrl+Shift+$…) does nothing while it is selected.
+      if (OBJECT_IDLE_CHORDS.has(e.code) || (e.shiftKey ? OBJECT_IDLE_SHIFT_CHORDS : OBJECT_IDLE_PLAIN_CHORDS).has(e.code) || (e.altKey && e.code === 'KeyV')) { e.preventDefault(); return; }
     } else if (selectedChart) {
       // A selected chart takes the editing keys; the arrows nudge it (a whole cell with Shift).
       if (key === 'Delete' || key === 'Backspace') {
@@ -5220,6 +5328,8 @@ export function createGrid(opts) {
       if (key === 'Enter') { e.preventDefault(); opts.onCommand?.(safeLinkUrl(wb.chartById(sheetId, selectedChart)?.hyperlink) ? 'openDrawingLink' : wb.chartById(sheetId, selectedChart)?.type === 'image' ? 'replaceImage' : 'editChart', selectedChart); return; }
       if (key === 'Escape') { e.preventDefault(); selectedChart = null; schedule(); return; }
       if (dir && !e.altKey) { e.preventDefault(); if (selectedSet.size > 1) nudgeObjects(dir[0], dir[1]); else nudgeChart(selectedChart, dir[0], dir[1], e.shiftKey); return; }
+      // AutoSum (Alt+=), Repeat (F4) and a cell's drop-down (Alt+Down) are the hidden cells', not the object's.
+      if ((e.altKey && (key === '=' || key === '+' || e.code === 'Equal' || key === 'ArrowDown')) || (key === 'F4' && !e.shiftKey && !e.altKey)) { e.preventDefault(); return; }
       // Moving on or starting to type leaves the chart; Delete afterwards then clears cells, not the chart.
       if (key === 'Tab' || key === 'F2' || (key.length === 1 && !e.altKey)) { selectedChart = null; schedule(); }
     }
@@ -5233,6 +5343,10 @@ export function createGrid(opts) {
     // F8 extends the selection with the arrows and clicks; Shift+F8 adds ranges to it. Either again, or Escape, ends it.
     if (key === 'F8' && !mod && !e.altKey) { e.preventDefault(); setKeyMode(e.shiftKey ? (keyMode === 'add' ? null : 'add') : (keyMode === 'extend' ? null : 'extend')); return; }
     if (key === 'Escape' && keyMode) setKeyMode(null);
+    // End Mode is for the one move after End, as in Excel: any other key (typing, Enter, Tab, a chord) ends it,
+    // so an arrow pressed after an entry typed there steps rather than jumping to the edge of the data.
+    const endMove = (dir && !e.altKey && !mod) || ((key === 'Home' || key === 'End') && !mod) || ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(key);
+    if (keyMode === 'end' && !endMove) setKeyMode(null);
     if (dir && keyMode && !e.altKey && !mod) {
       e.preventDefault();
       const [dr, dc] = dir;
@@ -5242,13 +5356,18 @@ export function createGrid(opts) {
         const target = jumpFrom(from, dr, dc).active;
         setKeyMode(null);
         setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { grow: false, add: e.shiftKey });
-      } else if (keyMode === 'extend') {
+      } else if (keyMode === 'extend' || e.shiftKey) {
+        // Extend Selection, or Shift in Add to Selection: the range at the cursor stretches, the others stay.
         const target = stepFrom(S.single(sel.focus.r, sel.focus.c), dr, dc).active;
         setSelection(S.extendTo(sel, target.r, target.c), { add: true });
       } else {
-        // Add to Selection: the range so far stays selected and the cursor moves on alone.
-        addRange(S.selRange(sel, true));
+        // Add to Selection: the ranges so far stay selected and the cursor moves on alone, as in Excel, to where
+        // the next range is to begin. A cell it only passed over is not kept: each arrow kept the cell it left,
+        // so moving three cells along selected all three, and Shift+arrow moved on too instead of stretching.
+        const passing = addCursor;
+        if (!passing) addRange(S.selRange(sel, true));
         setSelection(stepFrom(S.single(sel.active.r, sel.active.c), dr, dc), { add: true });
+        addCursor = true;
       }
       return;
     }
@@ -5269,8 +5388,8 @@ export function createGrid(opts) {
       const [dr, dc] = dir;
       // Shift stretches the range last selected; the ranges added before it with Ctrl/Cmd+click stay, as in Excel.
       if (mod) {
-        const target = jumpFrom(e.shiftKey ? { ...sel, active: sel.focus } : sel, dr, dc).active;
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { grow: false, add: e.shiftKey });
+        const target = jumpFrom(extending ? { ...sel, active: sel.focus } : sel, dr, dc).active;
+        setSelection(extending ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { grow: false, add: extending });
       } else if (e.shiftKey) {
         const target = stepFrom(S.single(sel.focus.r, sel.focus.c), dr, dc).active;
         setSelection(S.extendTo(sel, target.r, target.c), { add: true });
@@ -5319,9 +5438,9 @@ export function createGrid(opts) {
         const s = sheet();
         const fr = s.frozenRows ? Math.min(s.frozenOrigin?.r || 0, s.rows - 1) + s.frozenRows : 0;
         const fc = s.frozenCols ? Math.min(s.frozenOrigin?.c || 0, s.cols - 1) + s.frozenCols : 0;
-        const row = (e.shiftKey ? sel.focus : sel.active).r;
+        const row = (extending ? sel.focus : sel.active).r;
         const target = visibleTarget(mod ? { r: fr, c: fc } : { r: row, c: fc }, mod ? 1 : 0, 1);
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { add: e.shiftKey });
+        setSelection(extending ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { add: extending });
         return;
       }
       case 'End': {
@@ -5330,7 +5449,7 @@ export function createGrid(opts) {
         if (!mod) { setKeyMode(keyMode === 'end' ? null : 'end'); return; }
         const used = wb.usedRange(sheetId) || { r2: 0, c2: 0 };
         const target = visibleTarget(mod ? { r: used.r2, c: used.c2 } : { r: sel.active.r, c: used.c2 }, mod ? -1 : 0, -1);
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { add: e.shiftKey });
+        setSelection(extending ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { add: extending });
         return;
       }
       case 'PageDown':
@@ -5347,13 +5466,13 @@ export function createGrid(opts) {
         const before = scrolled();
         const page = offsets.indexAt(before + (across ? viewport.clientWidth : viewport.clientHeight)) - offsets.indexAt(before + (across ? frozen.w : frozen.h)) - 1;
         const n = Math.max(1, page) * (key === 'PageDown' ? 1 : -1);
-        const origin = e.shiftKey ? sel.focus : sel.active;
+        const origin = extending ? sel.focus : sel.active;
         const target = across
           ? visibleTarget({ r: origin.r, c: clamp(origin.c + n, 0, b.cols - 1) }, 0, Math.sign(n))
           : visibleTarget({ r: clamp(origin.r + n, 0, b.rows - 1), c: origin.c }, Math.sign(n), 0);
         // The sheet scrolls by the page too, so the cell lands where the one it left was on screen.
         const onScreen = at(across ? origin.c : origin.r) - before;
-        setSelection(e.shiftKey ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { scroll: false, add: e.shiftKey });
+        setSelection(extending ? S.extendTo(sel, target.r, target.c) : S.single(target.r, target.c), { scroll: false, add: extending });
         if (across) windowsFor(null, target.c); else windowsFor(target.r, null);
         const next = Math.max(across ? -shift.x : -shift.y, at(across ? target.c : target.r) - onScreen);
         // A page past the lines laid out so far reaches the blank ones it shows, as scrolling there does.
@@ -5537,9 +5656,15 @@ export function createGrid(opts) {
         e.preventDefault();
         const rg = S.selRange(sel);
         const corners = [{ r: rg.r1, c: rg.c1 }, { r: rg.r1, c: rg.c2 }, { r: rg.r2, c: rg.c2 }, { r: rg.r2, c: rg.c1 }];
-        const at = corners.findIndex((p) => p.r === sel.active.r && p.c === sel.active.c);
-        const next = corners[(at + 1) % 4];
-        const focus = corners[(corners.indexOf(next) + 2) % 4];
+        // The corner the active cell is on, a merged active cell standing on every corner it covers. The next corner
+        // is the next one elsewhere: a one-column or one-row selection has two corners each in one place, and
+        // stepping to the next of the four left the active cell where it was.
+        const own = mergeAt(sel.active.r, sel.active.c);
+        const holds = (p) => (own ? p.r >= own.r1 && p.r <= own.r2 && p.c >= own.c1 && p.c <= own.c2 : p.r === sel.active.r && p.c === sel.active.c);
+        let i = corners.findIndex(holds);
+        for (let n = 0; n < 4; n++) { i = (i + 1) % 4; if (!holds(corners[i])) break; }
+        const next = corners[i];
+        const focus = corners[(i + 2) % 4];
         setSelection({ ...S.fromRange(rg, next), anchor: next, focus }, { scroll: true });
         return;
       }
@@ -5563,8 +5688,10 @@ export function createGrid(opts) {
     // Alt+/ searches the menus, as in Google Sheets.
     if (e.altKey && (key === '/' || e.code === 'Slash')) { e.preventDefault(); opts.onCommand?.('palette'); return; }
     // Any other printable key starts typing into the cell (checkboxes toggle instead). A chord
-    // with Ctrl, Alt or the command key is not typing, unless it is AltGr producing a character.
-    const chord = (e.ctrlKey || e.metaKey || e.altKey) && !e.getModifierState?.('AltGraph');
+    // with Ctrl, Alt or the command key is not typing, unless it is AltGr producing a character, or
+    // Option on a Mac, which is how a Mac types ©, €, π or ü: the Option chords the grid answers to
+    // have been taken above, and Option+G started no entry with © as it does in Excel for Mac.
+    const chord = (e.ctrlKey || e.metaKey || (e.altKey && !IS_MAC)) && !e.getModifierState?.('AltGraph');
     if (key.length === 1 && !chord) {
       e.preventDefault();
       if (wb.validationAt(sheetId, sel.active.r, sel.active.c)?.type === 'checkbox') return;
@@ -5962,7 +6089,13 @@ export function createGrid(opts) {
   rowClip.addEventListener('contextmenu', (e) => headerContextMenu(e, 'row'));
   // The finger that held a heading until its menu opened lifts over the menu: its click must not run the item there.
   for (const clip of [colClip, rowClip]) clip.addEventListener('touchend', (e) => { if (pressMenu) { pressMenu = false; e.preventDefault(); } }, { passive: false });
-  corner.addEventListener('click', () => { if (edit && !commitEdit()) return; setSelection(S.selectAll(bounds()), { scroll: false }); viewport.focus({ preventScroll: true }); });
+  corner.addEventListener('click', () => { if (edit && !commitEdit()) return; setSelection(wholeSheet(), { scroll: false }); viewport.focus({ preventScroll: true }); });
+  outlineLevels.addEventListener('pointerdown', (e) => { if (e.target.closest?.('.outline-level')) e.preventDefault(); });
+  outlineLevels.addEventListener('click', (e) => {
+    const level = e.target.closest?.('.outline-level');
+    if (!level || edit && !commitEdit()) return;
+    opts.onCommand?.('outlineLevel', { axis: level.dataset.axis, level: Number(level.dataset.level) });
+  });
 
   // The on-screen keyboard that opens as a cell is typed into shrinks the viewport from below, often over
   // that very cell: a viewport that got smaller during an edit brings the cell back into view.
@@ -5998,12 +6131,15 @@ export function createGrid(opts) {
     applyZoomFont(cs.fontFamily || 'system-ui');
   }
 
-  /** Room for the group brackets beside the row numbers and above the column letters. */
+  /**
+   * Room for the group brackets beside the row numbers and above the column letters: a column of brackets for
+   * each level, and one more, as Excel leaves it, for the last of the level buttons (1, 2, 3 …) in the corner.
+   */
   function applyOutlineGutter() {
     const rowDepth = wb.outlineDepth(sheetId, 'row');
     const colDepth = wb.outlineDepth(sheetId, 'col');
-    const gw = rowDepth ? rowDepth * OUTLINE_STEP + 8 : 0;
-    const gh = colDepth ? colDepth * OUTLINE_STEP + 8 : 0;
+    const gw = rowDepth ? (rowDepth + 1) * OUTLINE_STEP + 8 : 0;
+    const gh = colDepth ? (colDepth + 1) * OUTLINE_STEP + 8 : 0;
     const ruler = pageLayout ? PAGE_RULER : 0;
     // The headings' letters and numbers grow with the zoom (chrome.css), and so do the headings above
     // 100%, as Excel's do: at 400% a 20px heading cut its letters in half and a row number to its last
@@ -6016,6 +6152,32 @@ export function createGrid(opts) {
     root.style.setProperty('--col-header-h', `${colHeaderH}px`);
     root.style.setProperty('--outline-w', `${gw}px`);
     root.style.setProperty('--outline-h', `${gh}px`);
+    outlineLevelButtons(rowDepth, colDepth, gw, gh, ruler);
+  }
+
+  /**
+   * The level buttons in the corner, as Excel's: one per level and one past the deepest, which show the lines down
+   * to that level (1 the summary lines alone, the last every line). The row levels lie across the row gutter at
+   * the height of the column letters, the column levels down the column gutter above the row numbers, each over
+   * its level's column of brackets. Without headings there is no corner to hold them.
+   */
+  let outlineLevelsKey = '';
+  function outlineLevelButtons(rowDepth, colDepth, gw, gh, ruler) {
+    const band = colHeaderH - gh - ruler; // the column letters' height
+    const numbers = rowHeaderW - gw - ruler; // the row numbers' width
+    const key = showHeaders && (rowDepth || colDepth) ? [rowDepth, colDepth, gw, gh, ruler, band, numbers].join() : '';
+    if (key === outlineLevelsKey) return;
+    outlineLevelsKey = key;
+    const button = (axis, level, depth, left, top) => el('button.outline-level', {
+      type: 'button', tabindex: -1, dataset: { axis, level },
+      'aria-label': `Show ${axis === 'row' ? 'row' : 'column'} outline level ${level}`,
+      title: level > depth ? `Show every ${axis === 'row' ? 'row' : 'column'}` : `Show level ${level}`,
+      style: { left: `${left}px`, top: `${top}px` },
+    }, String(level));
+    const buttons = [];
+    if (key && rowDepth) for (let k = 1; k <= rowDepth + 1; k++) buttons.push(button('row', k, rowDepth, ruler + (k - 1) * OUTLINE_STEP + 4, ruler + gh + Math.round((band - 14) / 2)));
+    if (key && colDepth) for (let k = 1; k <= colDepth + 1; k++) buttons.push(button('col', k, colDepth, ruler + gw + Math.round((numbers - 14) / 2), ruler + (k - 1) * OUTLINE_STEP + 4));
+    outlineLevels.replaceChildren(...buttons);
   }
 
   /**
@@ -6171,6 +6333,19 @@ export function createGrid(opts) {
           // active cell moves, to a visible cell of the range if it has one, as when it was selected.
           setSelection({ active: sel.active, anchor: sel.anchor, focus: sel.focus }, { scroll: false, announce: false, add: true });
         }
+      }
+    }
+    // A block merged around the selection by anything but this grid (someone editing the workbook with you, the
+    // assistant, a script, an undo) left the active cell under it: an entry typed then went into a covered
+    // cell, kept but never shown. The selection takes in the block and the active cell moves to its anchor, as
+    // a selection made over it would. A block unmerged leaves the selection as it was.
+    if (!edit && (type === 'structure' || type === 'history') && sheet().merges.length) {
+      const m = mergeAt(sel.active.r, sel.active.c);
+      const shown = S.selRange(sel);
+      // Whole rows and columns are taken as they are (see setSelection); only their active cell moves off the block.
+      const grown = sel.scope ? shown : wb.expandToMerges(sheetId, shown);
+      if ((m && (m.r1 !== sel.active.r || m.c1 !== sel.active.c)) || grown.r1 < shown.r1 || grown.c1 < shown.c1 || grown.r2 > shown.r2 || grown.c2 > shown.c2) {
+        setSelection({ active: sel.active, anchor: sel.anchor, focus: sel.focus, ...(sel.scope ? { scope: sel.scope } : {}) }, { scroll: false, announce: false, add: true });
       }
     }
     if (resized?.length) refitResized(resized);
@@ -6422,7 +6597,15 @@ export function createGrid(opts) {
     selectedChart = null;
     chartView = null;
     windowAt = perSheet.get(id)?.windowAt || { r: 0, c: 0 };
+    // A sheet with a zoom of its own is laid out at it before its place is restored, as that place was kept at
+    // that zoom: zoomed afterwards (keeping the top-left cell), a sheet left at row 480 at 100% came back at
+    // row 960 when the sheet visited in between was at 50%.
+    const ownZoom = sheet()?.kind !== 'chart' ? sheet()?.viewZoom : null;
+    const nextZoom = Number.isFinite(ownZoom) ? Math.max(0.1, Math.min(4, Math.round(ownZoom * 100) / 100)) : userZoom;
+    const zoomed = nextZoom !== userZoom;
+    userZoom = nextZoom;
     rebuildOffsets();
+    if (zoomed) opts.onZoom?.(userZoom);
     const saved = perSheet.get(id) || savedSheetSelection();
     pendingOrigin = perSheet.has(id) ? null : sheet()?.viewOrigin || null;
     rendered.key = null;

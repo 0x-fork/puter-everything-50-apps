@@ -21,7 +21,7 @@
  * showErrorMessage preserves a disabled native alert independently of its style.
  */
 
-import { formatDate } from './format.js';
+import { formatDate, formatTime, formatGeneral, formatNumberText } from './format.js';
 import { numberOfText } from './condformat.js';
 import { tokenize } from './formula/tokenizer.js';
 import { parseRefText, isAbsoluteRef } from './refs.js';
@@ -290,12 +290,13 @@ export function checkValue(rule, value, resolveRange, evalFormula) {
       const n = typeof value === 'number' ? value : numberOfText(value);
       if (n == null || !Number.isFinite(n)) return { ok: false, message: rule.message || 'Enter a number' };
       if (rule.operator && rule.operator !== 'between') return compareValidation(n, rule) ? { ok: true } : { ok: false, message: rule.message || 'This number does not meet the comparison' };
-      if (rule.min != null && n < rule.min) return { ok: false, message: rule.message || `Enter a number of at least ${rule.min}` };
-      if (rule.max != null && n > rule.max) return { ok: false, message: rule.message || `Enter a number of at most ${rule.max}` };
+      if (rule.min != null && n < rule.min) return { ok: false, message: rule.message || `Enter a number of at least ${boundText(rule, rule.min)}` };
+      if (rule.max != null && n > rule.max) return { ok: false, message: rule.message || `Enter a number of at most ${boundText(rule, rule.max)}` };
       return { ok: true };
     }
     case 'text': {
-      const len = [...(typeof value === 'boolean' ? (value ? 'TRUE' : 'FALSE') : String(value))].length;
+      // A number counts the characters LEN counts in it: 0.1+0.2 is "0.3", not "0.30000000000000004".
+      const len = [...(typeof value === 'boolean' ? (value ? 'TRUE' : 'FALSE') : typeof value === 'number' ? formatNumberText(value) : String(value))].length;
       if (rule.operator && rule.operator !== 'between') return compareValidation(len, rule) ? { ok: true } : { ok: false, message: rule.message || 'This text length does not meet the comparison' };
       if (rule.min != null && len < rule.min) return { ok: false, message: rule.message || `Enter at least ${rule.min} character${rule.min === 1 ? '' : 's'}` };
       if (rule.max != null && len > rule.max) return { ok: false, message: rule.message || `Enter at most ${rule.max} character${rule.max === 1 ? '' : 's'}` };
@@ -327,18 +328,27 @@ export function checkValue(rule, value, resolveRange, evalFormula) {
   }
 }
 
+/** A rule's bound as the dialog takes it: a date as a date, a time as a clock time, a number in the regional format. */
+function boundText(rule, v) {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() && Number.isFinite(Number(v)) ? Number(v) : null;
+  if (n == null) return v ?? '';
+  if (rule.type === 'date' && n >= 0) return formatDate(n, 'iso');
+  if (rule.type === 'time' && n >= 0 && n < 1) return formatTime(n, true);
+  return formatGeneral(n);
+}
+
 export function describeValidation(rule) {
   if (rule.type === 'any') return 'Any value';
   if (['whole', 'time'].includes(rule.type) || rule.operator && rule.operator !== 'between') {
     const label = VALIDATION_TYPES.find(t => t.value === rule.type)?.label || rule.type;
     const operator = VALIDATION_OPERATORS.find(([op]) => op === (rule.operator || 'between'))?.[1] || 'Comparison';
-    return `${label}: ${operator.toLowerCase()} ${rule.min ?? ''}${['between', 'notBetween'].includes(rule.operator || 'between') ? ` and ${rule.max ?? ''}` : ''}`;
+    return `${label}: ${operator.toLowerCase()} ${boundText(rule, rule.min)}${['between', 'notBetween'].includes(rule.operator || 'between') ? ` and ${boundText(rule, rule.max)}` : ''}`;
   }
   if (rule.type === 'list') return `${isRangeSource(rule.source) ? `List from ${rule.source}` : `List: ${joinList(splitList(rule.source))}`}${rule.chips ? ' (colored chips)' : ''}`;
   if (rule.type === 'number') {
-    if (rule.min != null && rule.max != null) return `Number between ${rule.min} and ${rule.max}`;
-    if (rule.min != null) return `Number at least ${rule.min}`;
-    if (rule.max != null) return `Number at most ${rule.max}`;
+    if (rule.min != null && rule.max != null) return `Number between ${boundText(rule, rule.min)} and ${boundText(rule, rule.max)}`;
+    if (rule.min != null) return `Number at least ${boundText(rule, rule.min)}`;
+    if (rule.max != null) return `Number at most ${boundText(rule, rule.max)}`;
     return 'Any number';
   }
   if (rule.type === 'text') {

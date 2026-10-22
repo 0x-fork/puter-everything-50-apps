@@ -526,6 +526,13 @@
       write(this._with({ op: 'fill', to: addressOf(to._b) }));
       return to;
     },
+    /** Move the cells (contents, formatting and the formulas that point at them) so their top-left lands on `destination`, on the same sheet. */
+    moveTo: function (destination) {
+      var to = destination instanceof Range ? destination : this.getWorksheet().getRange(destination);
+      if (to._sheet !== this._sheet) fail('moveTo moves cells within their own worksheet.');
+      write(this._with({ op: 'move', to: addressOf(to.getCell(0, 0)._b) }));
+      return to.getCell(0, 0).getResizedRange(this.getRowCount() - 1, this.getColumnCount() - 1);
+    },
     /** Remove rows whose values repeat in the given columns (all by default). */
     removeDuplicates: function (columns, hasHeaders) {
       write(this._with({ op: 'dedupe', columns: columns == null ? null : columns.map(function (c) { return int(c, 'The column', 0); }), hasHeaders: !!hasHeaders }));
@@ -567,13 +574,14 @@
         setUnderline: flag('underline', 'setUnderline'),
         setStrikethrough: flag('strike', 'setStrikethrough'),
         setColor: function (value) { style(range, { color: color(value, 'The font colour') }); return this; },
-        /** The size in points. */
+        /** The size in points; null puts back the workbook's own. */
         setSize: function (points) {
-          if (typeof points !== 'number' || !(points >= 1 && points <= 409)) fail('The font size must be a number of points from 1 to 409.');
+          if (points !== null && (typeof points !== 'number' || !(points >= 1 && points <= 409))) fail('The font size must be a number of points from 1 to 409.');
           style(range, { size: points });
           return this;
         },
-        setName: function (name) { style(range, { font: String(name) }); return this; },
+        /** The font family; null puts back the workbook's own. */
+        setName: function (name) { style(range, { font: name === null ? null : String(name) }); return this; },
         getBold: function () { return styleRead(range, 'bold'); },
         getItalic: function () { return styleRead(range, 'italic'); },
         getUnderline: function () { return styleRead(range, 'underline'); },
@@ -583,11 +591,13 @@
         getName: function () { return styleRead(range, 'font'); },
       };
     },
-    /** "left", "center", "right" or "general". */
-    setHorizontalAlignment: function (a) { style(this._range, { align: edge(a, ['left', 'center', 'right', 'general'], 'The alignment') }); return this; },
+    /** "left", "center", "right" or "general"; or "fill", "justify", "centerContinuous" (across selection) or "distributed". */
+    setHorizontalAlignment: function (a) { style(this._range, { align: edge(a, ['left', 'center', 'right', 'general', 'fill', 'justify', 'centerContinuous', 'distributed'], 'The alignment') }); return this; },
     /** "top", "middle" or "bottom". */
     setVerticalAlignment: function (a) { style(this._range, { valign: edge(a, ['top', 'middle', 'bottom'], 'The vertical alignment') }); return this; },
     setWrapText: function (on) { style(this._range, { wrap: bool(on, 'setWrapText') }); return this; },
+    /** What long text does: "overflow" into empty cells beside it, "wrap" onto more lines, or "clip" at the cell's edge. */
+    setTextWrapping: function (mode) { var m = edge(mode, ['overflow', 'wrap', 'clip'], 'The text wrapping'); style(this._range, { wrap: m === 'wrap', clip: m === 'clip' }); return this; },
     /** Degrees from -90 to 90. */
     setTextRotation: function (deg) { if (typeof deg !== 'number' || deg < -90 || deg > 90) fail('The rotation must be from -90 to 90 degrees.'); style(this._range, { rot: deg }); return this; },
     setIndent: function (n) { style(this._range, { indent: int(n, 'The indent', 0) }); return this; },
@@ -596,12 +606,13 @@
     getWrapText: function () { return styleRead(this._range, 'wrap'); },
     /**
      * Borders on an edge: "all", "outline", "inside", "top", "bottom", "left", "right", "horizontal", "vertical", or
-     * "none" to remove them. Options: { style: "thin" | "medium" | "thick" | "dashed" | "dotted" | "double", color }.
+     * "none" to remove them. Options: { style: "thin" | "medium" | "thick" | "dashed" | "dotted" | "double" | "none", color };
+     * style "none" removes the borders on that edge alone.
      */
     setBorder: function (which, options) {
       var kind = BORDER_EDGES[edge(which || 'all', Object.keys(BORDER_EDGES), 'The border edge')];
       options = options || {};
-      var lineStyle = edge(options.style || 'thin', ['thin', 'medium', 'thick', 'dashed', 'dotted', 'double', 'hair'], 'The border style');
+      var lineStyle = edge(options.style || 'thin', ['thin', 'medium', 'thick', 'dashed', 'dotted', 'double', 'hair', 'none'], 'The border style');
       write(this._range._with({ op: 'borders', kind: kind, style: lineStyle, color: options.color == null ? null : color(options.color, 'The border colour') }));
       return this;
     },

@@ -7,8 +7,9 @@
  *   additive    + -
  *   multiply    * /
  *   power       ^
- *   unary       - + @
+ *   unary       - +
  *   postfix     %
+ *   implicit intersection @ (before %: @A1:A3% is (@A1:A3)%)
  *   intersection (space)
  *   range       :
  *
@@ -33,7 +34,7 @@ import { parseRefText } from '../refs.js';
 
 export { FormulaSyntaxError };
 
-export function parseFormula(src, { namePositions = false, tablePositions = false } = {}) {
+export function parseFormula(src, { namePositions = false, tablePositions = false, starts = false } = {}) {
   const tokens = tokenize(src);
   let pos = 0;
 
@@ -101,7 +102,8 @@ export function parseFormula(src, { namePositions = false, tablePositions = fals
     if (at('op', '-')) { next(); return { type: 'unary', op: '-', arg: unary() }; }
     if (at('op', '+')) { next(); return { type: 'unary', op: '+', arg: unary() }; }
     // @range: implicit intersection, the one value on the formula's own row or column (Excel writes it into saved formulas).
-    if (at('op', '@')) { next(); return { type: 'unary', op: '@', arg: unary() }; }
+    // It takes the reference beside it before a percent sign applies, as a file's SINGLE(A1:A3)% does: @A1:A3% in B2 is A2%.
+    if (at('op', '@')) { next(); return percents({ type: 'unary', op: '@', arg: at('op') ? unary() : intersection() }); }
     return postfix();
   }
 
@@ -127,17 +129,26 @@ export function parseFormula(src, { namePositions = false, tablePositions = fals
   const intersectionSpace = () => pos > 0 && peek() && /^[ \n]+$/.test(src.slice(tokens[pos - 1].end, peek().start));
 
   function postfix() {
+    return percents(intersection());
+  }
+
+  function intersection() {
     let node = referenceRange();
     while (isReference(node) && intersectionSpace() && ['ref', 'tref', 'name', 'lparen', 'error'].includes(peek().type)) {
       const start = peek().start, right = referenceRange();
       if (!isReference(right)) throw new FormulaSyntaxError('Expected an intersecting reference', start);
-      node = { type: 'intersection', left: node, right };
+      node = { type: 'intersection', left: node, right, ...(starts ? { start: node.start } : {}) };
     }
+    return node;
+  }
+
+  function percents(node) {
     while (at('op', '%')) { next(); node = { type: 'percent', arg: node }; }
     return node;
   }
 
   function referenceAtom() {
+    const start = peek()?.start;
     let node = primary();
     // An adjacent parenthesis calls a returned LAMBDA; a separating space
     // combines reference expressions, including parenthesized areas.
@@ -145,6 +156,8 @@ export function parseFormula(src, { namePositions = false, tablePositions = fals
       next();
       node = { type: 'apply', fn: node, args: callArguments() };
     }
+    // `starts`: where the text of each operand begins, for edits made to the formula's own text.
+    if (starts && node.start === undefined) node.start = start;
     return node;
   }
 
@@ -156,7 +169,7 @@ export function parseFormula(src, { namePositions = false, tablePositions = fals
       const colon = next();
       const right = referenceAtom();
       if (!isReference(right)) throw new FormulaSyntaxError('Expected a reference after ":"', colon.start);
-      node = { type: 'range', left: node, right };
+      node = { type: 'range', left: node, right, ...(starts ? { start: node.start } : {}) };
     }
     return node;
   }

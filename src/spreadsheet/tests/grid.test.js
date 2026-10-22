@@ -798,7 +798,7 @@ describe('outline groups', () => {
     wb.groupLines(id, 'row', 1, 3);
     await flush();
     expect(grid.el.style.getPropertyValue('--row-header-w')).not.toBe(before);
-    expect(grid.el.style.getPropertyValue('--outline-w')).toBe('20px');
+    expect(grid.el.style.getPropertyValue('--outline-w')).toBe('32px'); // a bracket column and one for the last level button
     const btn = grid.el.querySelector('.grid-rowhead .outline-btn');
     expect(btn).not.toBeNull();
     expect(btn.textContent).toBe('−');
@@ -1777,8 +1777,8 @@ describe('navigation across hidden cells', () => {
     key(grid.viewport, 'a', { ctrlKey: true, metaKey: true }); // the block of data around B3 first, the active cell kept
     expect(grid.range).toEqual({ r1: 0, c1: 0, r2: 2, c2: 1 });
     expect(grid.active).toEqual({ r: 2, c: 1 });
-    key(grid.viewport, 'a', { ctrlKey: true, metaKey: true }); // then the whole sheet, the active cell off the hidden column
-    expect(grid.active).toEqual({ r: 0, c: 1 });
+    key(grid.viewport, 'a', { ctrlKey: true, metaKey: true }); // then the whole sheet, the active cell kept where it was, as in Excel
+    expect(grid.active).toEqual({ r: 2, c: 1 });
     // A selection made only of hidden lines keeps its active cell, so Unhide still knows which lines are meant.
     wb.setHidden(id, 'row', [4, 5], true);
     grid.selectByName('5:6');

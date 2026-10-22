@@ -8610,7 +8610,9 @@ var SYLK = /*#__PURE__*/(function() {
 				case 'X': C = parseInt(record[rj].slice(1), 10)-1; C_seen_X = true; break;
 				case 'Y':
 					R = parseInt(record[rj].slice(1), 10)-1; if(!C_seen_X) C = 0;
-					for(j = arr.length; j <= R; ++j) arr[j] = [];
+					/* Puter Spreadsheet local patch: only the row named gets a list. Every row up to it got one, so a
+					 * file of thirty bytes naming row 99,999,999 made a hundred million and ran the tab out of memory. */
+					if(!arr[R]) arr[R] = [];
 					break;
 				case 'K':
 					val = record[rj].slice(1);
@@ -8668,7 +8670,7 @@ var SYLK = /*#__PURE__*/(function() {
 				case 'X': C = parseInt(record[rj].slice(1), 10)-1; ++F_seen; break;
 				case 'Y':
 					R = parseInt(record[rj].slice(1), 10)-1; /*C = 0;*/
-					for(j = arr.length; j <= R; ++j) arr[j] = [];
+					if(!arr[R]) arr[R] = []; /* Puter Spreadsheet local patch: see the cell record's */
 					break;
 				case 'M': Mval = parseInt(record[rj].slice(1), 10) / 20; break;
 				case 'F': break; /* ??? */
@@ -13277,9 +13279,24 @@ var rc_to_a1 = /*#__PURE__*/(function(){
 		if(rRel) R += rcbase.r; else --R;
 		return $1 + (cRel ? "" : "$") + encode_col(C) + (rRel ? "" : "$") + encode_row(R);
 	}
+	/* Puter Spreadsheet local patch: whole rows and columns (C2 is column B, C[-1]:C[1] the columns either
+	 * side, R[1] the next row) were left as they were, so =SUM(C2) and =VLOOKUP(RC1,C1:C3,2,FALSE) opened
+	 * as #NAME?; and string literals and quoted sheet names were rewritten as formulas, so ="RC Cola" and
+	 * a sheet 'R1C1 notes' changed. A cell reads as above; text between quotes is left alone. */
+	var rcanyregex = /(^|[^A-Za-z_])(?:R(\[?-?\d+\]|[1-9]\d*|)C(\[?-?\d+\]|[1-9]\d*|)|([RC])(\[-?\d+\]|[1-9]\d*|)(?::([RC])(\[-?\d+\]|[1-9]\d*|))?)(?![A-Za-z0-9_(])/g;
+	function rcline(axis, raw) {
+		var rel = raw.length == 0 || raw.charAt(0) == "[", n = raw.length == 0 ? 0 : parseInt(rel ? raw.slice(1, -1) : raw, 10) | 0;
+		if(axis == "C") return (rel ? "" : "$") + encode_col(rel ? n + rcbase.c : n - 1);
+		return (rel ? "" : "$") + encode_row(rel ? n + rcbase.r : n - 1);
+	}
+	function rcanyfunc($$, $1, $2, $3, $4, $5, $6, $7) {
+		if($4 === undefined) return rcfunc($$, $1, $2, $3);
+		if($6 && $6 != $4) return $$;
+		return $1 + rcline($4, $5) + ":" + rcline($4, $6 ? $7 : $5);
+	}
 	return function rc_to_a1(fstr/*:string*/, base/*:Cell*/)/*:string*/ {
 		rcbase = base;
-		return fstr.replace(rcregex, rcfunc);
+		return fstr.replace(/"(?:[^"]|"")*"|'(?:[^']|'')*'|[^"']+/g, function(part) { return part.charAt(0) == '"' || part.charAt(0) == "'" ? part : part.replace(rcanyregex, rcanyfunc); });
 	};
 })();
 
@@ -19180,6 +19197,11 @@ function process_style_xlml(styles, stag, opts) {
 }
 
 /* TODO: there must exist some form of OSP-blessed spec */
+/* Puter Spreadsheet local patch: the text of a rich string or a comment is all of its text, its references
+ * decoded once the tags are out. Only the text inside <Font> runs was kept, so a cell Excel wrote as
+ * <B>Total</B><Font html:Color="#FF0000"> due</Font> opened as " due", and a comment kept "&lt;" as typed;
+ * decoding before taking the tags out also took out text such as "<b>" written as "&lt;b&gt;". */
+function xlml_markup_text(xml/*:string*/)/*:string*/ { return unescapexml(xml.replace(/<[^<>]*>/g, "")); }
 function parse_xlml_data(xml, ss, data, cell/*:any*/, base, styles, csty, row, arrayf, o, date1904) {
 	var nf = "General", sid = cell.StyleID, S = {}; o = o || {};
 	var interiors = [];
@@ -19204,7 +19226,7 @@ function parse_xlml_data(xml, ss, data, cell/*:any*/, base, styles, csty, row, a
 			break;
 		case 'String':
 			cell.t = 's'; cell.r = xlml_fixstr(unescapexml(xml));
-			cell.v = (xml.indexOf("<") > -1 ? unescapexml(ss||xml).replace(/<[^<>]*>/g, "") : cell.r); // todo: BR etc
+			cell.v = (xml.indexOf("<") > -1 ? xlml_markup_text(xml) : cell.r); // todo: BR etc
 			break;
 		case 'DateTime':
 			if(xml.slice(-1) != "Z") xml += "Z";
@@ -19219,7 +19241,7 @@ function parse_xlml_data(xml, ss, data, cell/*:any*/, base, styles, csty, row, a
 		case 'Error': cell.t = 'e'; cell.v = RBErr[xml]; if(o.cellText !== false) cell.w = xml; break;
 		default:
 			if(xml == "" && ss == "") { cell.t = 'z'; }
-			else { cell.t = 's'; cell.v = xlml_fixstr(ss||xml); }
+			else { cell.t = 's'; cell.v = xml.indexOf("<") > -1 ? xlml_markup_text(xml) : xlml_fixstr(unescapexml(xml)); }
 			break;
 	}
 	safe_format_xlml(cell, nf, o, date1904);
@@ -19264,6 +19286,17 @@ function xlml_clean_comment(comment/*:any*/) {
 }
 
 /* TODO: Everything */
+/* Puter Spreadsheet local patch: a row's height and hidden state, read from an empty row (<Row .../>) as from
+ * one holding cells; an empty row's were not read. ss:Height is in points, as Excel writes it (15 for a
+ * standard row of 20 pixels). */
+function xlml_rowinfo(row, r, rowinfo) {
+	var rowobj = {};
+	if(row.AutoFitHeight == "0" || row.Height) {
+		rowobj.hpx = parseFloat(row.Height) * 4 / 3; rowobj.hpt = px2pt(rowobj.hpx);
+		rowinfo[r] = rowobj;
+	}
+	if(row.Hidden == "1") { rowobj.hidden = true; rowinfo[r] = rowobj; }
+}
 function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 	var opts = _opts || {};
 	make_ssf();
@@ -19291,13 +19324,16 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 		"Medium Time": table_fmt[18],
 		"Short Time": table_fmt[20],
 		"Currency": '"$"#,##0.00_);[Red]\\("$"#,##0.00\\)',
+		/* Puter Spreadsheet local patch: Euro Currency was missing and read as a code of its letters
+		 * ("1903uro Curr1903nc03"), and On/Off was given Yes/No's words. */
+		"Euro Currency": '"€"#,##0.00_);[Red]\\("€"#,##0.00\\)',
 		"Fixed": table_fmt[2],
 		"Standard": table_fmt[4],
 		"Percent": table_fmt[10],
 		"Scientific": table_fmt[11],
 		"Yes/No": '"Yes";"Yes";"No";@',
 		"True/False": '"True";"True";"False";@',
-		"On/Off": '"Yes";"Yes";"No";@'
+		"On/Off": '"On";"On";"Off";@'
 	}/*:any*/);
 
 
@@ -19316,7 +19352,7 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 	var comments/*:Array<Comment>*/ = [], comment/*:Comment*/ = ({}/*:any*/);
 	var cstys = [], csty, seencol = false;
 	var arrayf/*:Array<[Range, string]>*/ = [];
-	var rowinfo/*:Array<RowInfo>*/ = [], rowobj = {}, cc = 0, rr = 0;
+	var rowinfo/*:Array<RowInfo>*/ = [], cc = 0, rr = 0;
 	var Workbook/*:WBWBProps*/ = ({ Sheets:[], WBProps:{date1904:false} }/*:any*/), wsprops = {};
 	xlmlregex.lastIndex = 0;
 	str = str_remove_ng(str, "<!--", "-->");
@@ -19333,9 +19369,22 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 			else { ss = ""; dtag = xlml_parsexmltag(Rn[0]); didx = Rn.index + Rn[0].length; }
 			break;
 		case 'cell' /*case 'Cell'*/:
-			if(Rn[1]==='/'){
+			/* Puter Spreadsheet local patch: an empty cell (<Cell .../>) is read as one with a closing tag is.
+			 * Only its column was counted: a merged block's ss:MergeAcross was not, so the cells after an empty
+			 * merged heading landed that many columns to the left, and the block, its format, a formula with no
+			 * value cached (ss:Formula with no <Data>) and a comment on a cell with no value were all dropped. */
+			if(Rn[1]!=='/') {
+				cell = xlml_parsexmltagobj(Rn[0]);
+				if(cell.Index) c = +cell.Index - 1;
+				if(c < refguess.s.c) refguess.s.c = c;
+				if(c > refguess.e.c) refguess.e.c = c;
+				comments = [];
+			}
+			if(Rn[1]==='/' || Rn[0].slice(-2) === "/>"){
 				if(comments.length > 0) cell.c = comments;
-				if((!opts.sheetRows || opts.sheetRows > r) && cell.v !== void 0) {
+				var _stub = cell.t === void 0 && (cell.Formula != null || comments.length > 0 || cell.HRef || (opts.sheetStubs && cell.StyleID !== void 0));
+				if(_stub) parse_xlml_data("", "", {}, cell, {c:c,r:r}, styles, cstys[c], row, arrayf, opts, Workbook.WBProps.date1904);
+				if((!opts.sheetRows || opts.sheetRows > r) && (cell.v !== void 0 || _stub)) {
 					if(opts.dense) {
 						if(!cursheet["!data"][r]) cursheet["!data"][r] = [];
 						cursheet["!data"][r][c] = cell;
@@ -19355,13 +19404,6 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 				   covered cell made a block of whole columns (ss:MergeDown="1048575") cost millions
 				   of objects, and a whole-sheet block hang the read. */
 				if(cell.MergeAcross) c = cc + 1; else ++c;
-			} else {
-				cell = xlml_parsexmltagobj(Rn[0]);
-				if(cell.Index) c = +cell.Index - 1;
-				if(c < refguess.s.c) refguess.s.c = c;
-				if(c > refguess.e.c) refguess.e.c = c;
-				if(Rn[0].slice(-2) === "/>") ++c;
-				comments = [];
 			}
 			break;
 		case 'row' /*case 'Row'*/:
@@ -19371,17 +19413,21 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 				if(Rn[0].slice(-2) === "/>") {
 					row = xlml_parsexmltag(Rn[0]);
 					if(row.Index) r = +row.Index - 1;
+					xlml_rowinfo(row, r, rowinfo);
+				}
+				/* Puter Spreadsheet local patch: a row with ss:Span stands for that many more rows like it, which
+				 * the file leaves out; the rows after it were read that many rows too high. A long run of
+				 * spanned rows is filler, not layout, as the .ods reader judges repeated rows. */
+				var _rspan = Math.min(parseInt(row && row.Span, 10) || 0, 1048575 - r);
+				if(_rspan > 0) {
+					if(_rspan <= 1000 && rowinfo[r]) for(var _ri = 1; _ri <= _rspan; ++_ri) rowinfo[r + _ri] = rowinfo[r];
+					r += _rspan;
 				}
 				c = 0; ++r;
 			} else {
 				row = xlml_parsexmltag(Rn[0]);
 				if(row.Index) r = +row.Index - 1;
-				rowobj = {};
-				if(row.AutoFitHeight == "0" || row.Height) {
-					rowobj.hpx = parseInt(row.Height, 10); rowobj.hpt = px2pt(rowobj.hpx);
-					rowinfo[r] = rowobj;
-				}
-				if(row.Hidden == "1") { rowobj.hidden = true; rowinfo[r] = rowobj; }
+				xlml_rowinfo(row, r, rowinfo);
 			}
 			break;
 		case 'worksheet' /*case 'Worksheet'*/: /* TODO: read range from FullRows/FullColumns */
@@ -19440,14 +19486,21 @@ function parse_xlml_xml(d, _opts)/*:Workbook*/ {
 			if(Rn[1]==='/') break;
 			csty = xlml_parsexmltag(Rn[0]);
 			if(csty.Hidden) { csty.hidden = true; delete csty.Hidden; }
-			if(csty.Width) csty.wpx = parseInt(csty.Width, 10);
+			/* Puter Spreadsheet local patch: ss:Width is in points (Excel writes the standard column as 48 and
+			 * one of 129 pixels as 96.75), as ss:Height is; it was read as whole pixels. */
+			if(csty.Width) csty.wpx = Math.round(parseFloat(csty.Width) * 4 / 3);
 			if(!seencol && csty.wpx > 10) {
 				seencol = true; MDW = DEF_MDW; //find_mdw_wpx(csty.wpx);
 				for(var _col = 0; _col < cstys.length; ++_col) if(cstys[_col]) process_col(cstys[_col]);
 			}
 			if(seencol) process_col(csty);
-			cstys[(csty.Index-1||cstys.length)] = csty;
-			for(var i = 0; i < +csty.Span; ++i) cstys[cstys.length] = dup(csty);
+			/* Puter Spreadsheet local patch: a sheet has 16,384 columns. A column past them is not read, and a
+			 * span stops at the last: ss:Span="99999999" made a copy of the column for each, which ran the tab
+			 * out of memory, and an ss:Index that far made a list as long. */
+			var _cidx = csty.Index-1||cstys.length;
+			if(_cidx >= 16384) break;
+			cstys[_cidx] = csty;
+			for(var i = 0; i < +csty.Span && cstys.length < 16384; ++i) cstys[cstys.length] = dup(csty);
 			break;
 
 		case 'namedrange' /*case 'NamedRange'*/:
@@ -23451,8 +23504,10 @@ function parse_text_p_runs(text, textStyles, expected) {
 
 function parse_text_p(text/*:string*//*::, tag*/)/*:Array<any>*/ {
 	/* 6.1.2 White Space Characters */
+	/* Puter Spreadsheet local patch: only the four XML white space characters are trimmed, as ODF says; trim()
+	 * also took a no-break space ("Note:\u00a0") or an ideographic space (U+3000) off the text's ends. */
 	var fixed = text
-		.replace(/[\t\r\n]/g, " ").trim().replace(/ +/g, " ")
+		.replace(/[\t\r\n]/g, " ").replace(/^ +| +$/g, "").replace(/ +/g, " ")
 		/* Puter Spreadsheet local patch: the same elements written with a space before the slash, or a line
 		 * break written as an open and close tag, are well-formed XML too and were dropped with their whitespace. */
 		.replace(/<text:s\s*\/>/g," ")
@@ -23563,7 +23618,10 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			if(Rn[1]==='/') {
 				payload = parse_ods_format_text(str.slice(tidx, xlmlregex.lastIndex - Rn[0].length));
 				// NOTE: Excel has a different interpretation of "%%" and friends
-				if(payload == "%" && NFtag[0] == '<number:percentage-style') NF += "%";
+				/* Puter Spreadsheet local patch: the sign of a percentage is the % operator wherever it is in its text,
+				 * as LibreOffice writes " %" in France and Germany; quoted whole, 12,3 % was read as 0,1 %. */
+				var pctAt = NFtag[0] == '<number:percentage-style' ? payload.indexOf("%") : -1;
+				if(pctAt > -1 && payload.indexOf("%", pctAt + 1) == -1) NF += (pctAt > 0 ? ods_format_literal(payload.slice(0, pctAt)) : "") + "%" + (pctAt < payload.length - 1 ? ods_format_literal(payload.slice(pctAt + 1)) : "");
 				else NF += ods_format_literal(payload);
 			} else if(Rn[0].charAt(Rn[0].length-2) !== '/') {
 				tidx = xlmlregex.lastIndex;
@@ -23897,6 +23955,10 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 					range.s.r = range.s.c = 10000000; range.e.r = range.e.c = 0;
 					ws = ({}/*:any*/); if(opts.dense) ws["!data"] = []; merges = [];
 					rowinfo = []; colinfo = [];
+					/* Puter Spreadsheet local patch: an array formula's block is its own sheet's. The list was kept for
+					 * the whole file, so a value on a later sheet where an earlier sheet has an array formula was read
+					 * as part of that array, and opened blank. */
+					arrayf = [];
 					columnNumberFormats = []; columnCount = 0; rowNumberFormatName = null; columnStyleNames = []; rowStyleName = null;
 					intable = true;
 				}
@@ -24726,14 +24788,21 @@ function write_number_format_ods_section(nf/*:string*/, nfidx/*:string*/)/*:stri
 		/* percentages */
 		/* Local fix: preserve percentage grouping and the actual decimal count. */
 		/* A token boundary avoids retrying at every digit in long number formats. */
-		if((t=nf.match(/(?:^|[^#0,.])([#0][0#,]*)(|\.[0#]+)%/))) {
+		/* Puter Spreadsheet local patch: a regional format's percentage keeps its no-break space before the sign
+		 * (#,##0.0" "% for 12,3 % in France) or writes the sign first (%#,##0.0 for %12,3 in Turkey); either was
+		 * written as a plain number, the % left out, so LibreOffice showed 0,1 for 12,3 %. */
+		var lead = nf.match(/^%("[\u00a0\u202f]")?([#0][0#,]*)(|\.[0#]+)$/);
+		if(lead || (t=nf.match(/(?:^|[^#0,.])([#0][0#,]*)(|\.[0#]+)("[\u00a0\u202f]")?%/))) {
+			if(lead) t = [lead[0], lead[2], lead[3], lead[1]];
 			type = "percentage";
-			payload += writextag("number:number", null, {
+			var sign = "<number:text>" + (lead ? "%" + (t[3] ? t[3].slice(1, -1) : "") : (t[3] ? t[3].slice(1, -1) : "") + "%") + "</number:text>";
+			var digitsTag = writextag("number:number", null, {
 				"number:decimal-places": t[2] ? t[2].length - 1 : 0,
 				"number:min-decimal-places": (t[2].match(/0/g) || []).length,
 				"number:min-integer-digits": (t[1].match(/0/g) || []).length,
 				"number:grouping": t[1].indexOf(",") > -1 ? "true" : "false"
-			}) + "<number:text>%</number:text>";
+			});
+			payload += lead ? sign + digitsTag : digitsTag + sign;
 			break j;
 		}
 

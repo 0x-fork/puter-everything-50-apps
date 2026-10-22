@@ -1098,9 +1098,16 @@ export function currencyAffixes(value, loc = locale) {
       spacing = (leading ? parts.slice(at + 1, digits) : parts.slice(digits, at)).filter((p) => p.type === 'literal').map((p) => p.value).join('');
     }
   } catch { /* an Intl that does not know the currency keeps the label in front, as before */ }
-  const gap = spacing || keptApart;
+  // The label the regional format shows is the code's, so a saved file shows the amount as the grid does, where
+  // that label names this currency alone: US$ in Britain, $US in France, the ISO code held off by a no-break
+  // space (USD in Italy). A sign several currencies share (kr in Sweden, $ in Australia) leaves the portable
+  // label, which names the currency wherever the file is opened, and so does a mere wide form of the portable
+  // sign (￥ in Japan writes the ¥ Excel's own yen codes carry).
+  const shown = bareLabel(intlCurrencyLabel(loc, currency, 'symbol') || '');
+  const written = shown && shown.normalize('NFKC') !== label && codeLabelCurrency(shown, spacing) === currency ? shown : label;
+  const gap = spacing || (written === label ? keptApart : '');
   // Frozen: one object is shared by every caller for a currency and a regional format.
-  affixes = Object.freeze(leading ? { prefix: label + gap, suffix: '' } : { prefix: '', suffix: gap + label });
+  affixes = Object.freeze(leading ? { prefix: written + gap, suffix: '' } : { prefix: '', suffix: gap + written });
   currencyAffixCache.set(key, affixes);
   return affixes;
 }
@@ -1318,6 +1325,24 @@ function buildDateFormatCode(dateStyle, loc) {
   return out ? localeTag(loc) + out : american;
 }
 
+const percentLayoutCache = new Map();
+/** Where a regional format writes the percent sign, and the no-break space it keeps from the digits, if any. */
+function percentLayout(loc) {
+  let layout = percentLayoutCache.get(loc);
+  if (layout) return layout;
+  layout = { leading: false, spacing: '' };
+  try {
+    const parts = new Intl.NumberFormat(loc, { style: 'percent' }).formatToParts(1);
+    const at = parts.findIndex((p) => p.type === 'percentSign'), digits = parts.findIndex((p) => p.type === 'integer');
+    if (at >= 0 && digits >= 0) {
+      const between = (at < digits ? parts.slice(at + 1, digits) : parts.slice(digits + 1, at)).filter((p) => p.type === 'literal').map((p) => p.value).join('');
+      layout = { leading: at < digits, spacing: /^[\u00a0\u202f]$/.test(between) ? between : '' };
+    }
+  } catch { /* an Intl without the regional format writes the sign after the digits, as before */ }
+  percentLayoutCache.set(loc, layout);
+  return layout;
+}
+
 /** Our style → an Excel number format code, as the regional format `loc` writes dates and currency. */
 export function styleToNumFmt(style, loc = locale) {
   const fmt = style?.fmt || 'general';
@@ -1330,7 +1355,13 @@ export function styleToNumFmt(style, loc = locale) {
       const { prefix, suffix } = currencyAffixes(style?.cur, loc);
       return `${prefix ? `"${prefix}"` : ''}${digits}${suffix ? `"${suffix}"` : ''}`;
     }
-    case 'percent': return `${digits}%`;
+    case 'percent': {
+      // The sign where the regional format puts it, with the space it puts beside it (12,3 % in France and
+      // Germany, %12,3 in Turkey), so a saved file shows the percentage as the grid does.
+      const { leading, spacing } = percentLayout(loc);
+      const gap = spacing ? `"${spacing}"` : '';
+      return leading ? `%${gap}${digits}` : `${digits}${gap}%`;
+    }
     case 'date': return dateFormatCode(style?.dateStyle, loc);
     case 'time': return style?.sec ? 'hh:mm:ss' : 'hh:mm';
     case 'datetime': return `${dateFormatCode(style?.dateStyle, loc)} ${style?.sec ? 'hh:mm:ss' : 'hh:mm'}`;
@@ -1374,10 +1405,36 @@ const SPACING_RE = /[\s  ]/;
  * that holds it off the digits ("CHF "#,##0.00, #,##0.00" CHF"), since a bare "CHF"0.00 is a code this app
  * never writes and cannot show that way.
  */
+let regionalCodeLabels = null;
+/**
+ * The currency a code's bare label names, in whatever regional format the code is read: the portable label's,
+ * else that of a label a regional format on offer writes for one currency alone (US$ in Britain, $US in France,
+ * ₺ in Turkey). A sign several currencies share ($ in Australia, kr in Sweden) names none, so a code keeps
+ * naming the same currency wherever it is opened. An ISO code names its currency when `raw`, the label as the
+ * code quotes it, holds it off the digits with the no-break space a regional format writes (#,##0.00" USD" in
+ * Italy); typed with a plain space ("USD "0) it stays the custom code it is, shown as written.
+ */
+export function codeLabelCurrency(label, raw = '') {
+  const portable = CURRENCIES_BY_FORMAT_LABEL.get(label);
+  if (portable) return portable;
+  if (/^[\u00a0\u202f]|[\u00a0\u202f]$/.test(raw) && CURRENCIES.some(([cur]) => cur === label)) return label;
+  if (!regionalCodeLabels) {
+    const seen = new Map();
+    for (const [loc] of LOCALES) for (const [cur] of CURRENCIES) {
+      const shown = bareLabel(intlCurrencyLabel(loc, cur, 'symbol') || '');
+      if (!shown || CURRENCIES_BY_FORMAT_LABEL.has(shown) || /^[A-Z]{3}$/.test(shown)) continue;
+      if (!seen.has(shown)) seen.set(shown, new Set());
+      seen.get(shown).add(cur);
+    }
+    regionalCodeLabels = new Map([...seen].filter(([, curs]) => curs.size === 1).map(([shown, curs]) => [shown, [...curs][0]]));
+  }
+  return regionalCodeLabels.get(label);
+}
 function currencyForLabel(label, leading) {
-  const cur = CURRENCIES_BY_FORMAT_LABEL.get(bareLabel(label));
+  const cur = codeLabelCurrency(bareLabel(label), label);
   if (!cur) return undefined;
-  const needsSpace = currencyFormatLabel(cur) !== bareLabel(currencyFormatLabel(cur));
+  // Only the portable label of letters needs the space; a regional sign (₺ for TRY in Turkey) may sit tight.
+  const needsSpace = currencyFormatLabel(cur) !== bareLabel(currencyFormatLabel(cur)) && bareLabel(label) === bareLabel(currencyFormatLabel(cur));
   const spaced = SPACING_RE.test(leading ? label.at(-1) : label[0]);
   return !needsSpace || spaced ? cur : undefined;
 }
@@ -1387,6 +1444,8 @@ const SIMPLE_CODES = [
   /^General$/i,
   /^#,##0(\.0+)?$/, /^0(\.0+)?$/,
   /^(#,##)?0(\.0+)?%$/,
+  // The percentage as a regional format writes it, with its no-break space before the sign or the sign first.
+  /^(#,##)?0(\.0+)?"[\u00a0\u202f]"%$/, /^%(#,##)?0(\.0+)?$/,
   /^"[$€£¥]"(#,##)?0(\.0+)?$/, /^[$€£¥](#,##)?0(\.0+)?$/,
   /^0(\.0+)?E\+00$/,
   /^@$/,

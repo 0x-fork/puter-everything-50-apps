@@ -10,7 +10,7 @@ import { TABLE_STYLES } from '../core/tables.js';
 import { FUNCTION_NAMES } from '../core/formula/functions.js';
 import { functionCategories, MORE_CATEGORIES } from '../core/formula/categories.js';
 import { recentFunctionNames } from './recent-functions.js';
-import { normalizePrintSettings } from '../core/print-settings.js';
+import { effectivePrintSettings } from './print.js';
 import { drawRibbonGroups } from './ink.js';
 import { equationGalleryItems } from './equation.js';
 import { queryForTable } from '../core/queries.js';
@@ -68,7 +68,9 @@ const large = descriptor => ({ ...descriptor, large: true });
 const threadCmd = (label, glyph, cmd, { needs = null, toggle = false, ...extra } = {}) => ({ label, glyph, ariaLabel: extra.ariaLabel || label, ...extra,
   resolve: (menus, ctx) => {
     const f = ctx?.flags?.() || {};
-    return { label, cmd, disabled: !toggle && (!!f.editing || !!f.chartSheet || (needs ? !f[needs] : false)), checked: toggle ? !!f.commentsPane : undefined, shortcut: extra.shortcut };
+    // Grouped sheets: a comment belongs to one sheet's cell, so adding or deleting one waits, as the menus' does.
+    const grouped = !!f.grouped && GROUP_BLOCKED_COMMANDS.has(cmd);
+    return { label, cmd, disabled: !toggle && (!!f.editing || !!f.chartSheet || grouped || (needs ? !f[needs] : false)), hint: grouped ? GROUP_BLOCKED_HINT : undefined, checked: toggle ? !!f.commentsPane : undefined, shortcut: extra.shortcut };
   } });
 const NEW_COMMENT_KEY = `${MOD_KEY}+Shift+F2`;
 /** Commands that open a menu of their own, anchored on the button that ran them; those buttons announce the menu. */
@@ -100,9 +102,9 @@ const useInFormula = dyn('Use in Formula', 'tag', (menus, ctx) => {
   const items = [...new Set([...names, ...tables])].slice(0, 200).map(name => ({ label: name, cmd: 'useName', arg: name }));
   return items.length ? items : [{ label: 'No names defined', disabled: true }];
 });
-const printSettingsOf = ctx => ctx.wb.sheet(ctx.sheetId())?.printSettings || null;
-/** The settings in force: a sheet without its own page setup prints with the defaults (Normal margins, Letter, portrait). */
-const effectiveSettings = ctx => printSettingsOf(ctx) || normalizePrintSettings({});
+/** The settings in force: a sheet without its own page setup shows the one it prints with (see effectivePrintSettings). */
+const effectiveSettings = ctx => effectivePrintSettings(ctx.wb.sheet(ctx.sheetId()));
+const printSettingsOf = effectiveSettings;
 const pageSetupItem = (label, patch, isChecked, extra = {}) => (menus, ctx) => ({ label, cmd: 'pageSetup', arg: patch, radio: true, checked: !!isChecked(effectiveSettings(ctx)), ...extra });
 const MARGIN_PRESETS = [
   ['Normal', { top: 0.75, bottom: 0.75, left: 0.7, right: 0.7, header: 0.3, footer: 0.3 }, 'Top 0.75″ · Bottom 0.75″ · Left 0.7″ · Right 0.7″'],

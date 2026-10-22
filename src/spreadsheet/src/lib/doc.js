@@ -1,4 +1,5 @@
 import { workbookPathUri } from '../core/workbook-location.js';
+import { sheetKey } from '../core/refs.js';
 import { sheetFilters } from '../core/sheet-filters.js';
 /**
  * The open document: a Workbook plus where it lives on Puter and whether
@@ -36,6 +37,20 @@ import { storageScope, accountStorageKey, isAccountScope, isProvisionalScope } f
 import { optionState } from './option-state.js';
 
 const AUTOSAVE_MS = 1500;
+// Encoding a large book holds the page for a moment (about a second for 200,000 cells): its autosave waits for a pause
+// in what the user is doing (scrolling, typing, pointing) of this long, though never longer than the cap past its time.
+const LARGE_BOOK_CELLS = 50_000;
+const QUIET_MS = 1000;
+const QUIET_MAX_MS = 10_000;
+let lastInput = -Infinity;
+/** The user did something on the page (see QUIET_MS); the document listens for it itself. */
+export function noteUserInput() { lastInput = performance.now(); }
+let listening = false;
+function listenForInput() {
+  if (listening || typeof globalThis.addEventListener !== 'function') return;
+  listening = true;
+  for (const type of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchmove', 'scroll']) globalThis.addEventListener(type, noteUserInput, { capture: true, passive: true });
+}
 // The title row's AutoSave switch: off, edits wait for Save (the local draft still keeps them). Per device.
 const AUTOSAVE_KEY = 'spreadsheet:autosave';
 // A device that never flipped the switch saves as it goes unless the app's options say not to (Save ▸ AutoSave by default).
@@ -245,6 +260,23 @@ function draftVerdict(draft, remoteModified) {
   return draft.savedAt > remoteModified - LEGACY_DRAFT_SLACK_MS ? 'older' : 'stale';
 }
 
+/**
+ * A snapshot's book with each of its sheets under the id of the sheet it takes the place of (the one of the same name,
+ * or failing that the next in order), as the book that was open had them. A file read back gives every sheet a new id,
+ * and restored with those, a shared workbook sent the restore as every sheet deleted and another put in: the others
+ * could not delete the last sheet before the new ones arrived, and ended up with an old sheet beside the restored ones.
+ * With the ids kept, the restore reaches them as changes to the sheets they have.
+ */
+function keepSheetIds(json, wb) {
+  const free = wb.sheets.map((s) => ({ id: s.id, key: sheetKey(s.name) }));
+  const taken = (sheet) => { const i = free.findIndex((f) => f.key === sheetKey(sheet.name)); return i < 0 ? null : free.splice(i, 1)[0].id; };
+  const named = json.sheets.map(taken);
+  const ids = new Map(json.sheets.map((sheet, i) => [sheet.id, named[i] ?? free.shift()?.id]).filter(([from, to]) => from && to && from !== to));
+  if (!ids.size) return json;
+  // A sheet's id is a token of its own wherever the book names it (its sheets, the active sheet, custom views, reports).
+  return JSON.parse(JSON.stringify(json).replace(/"(s[0-9a-z]+)"/g, (m, id) => (ids.has(id) ? `"${ids.get(id)}"` : m)));
+}
+
 export class Doc extends EventTarget {
   constructor({ wb = null, name = UNTITLED, path = null, uid = null, trusted = true } = {}) {
     super();
@@ -275,6 +307,7 @@ export class Doc extends EventTarget {
     this._recoverableKey = null; // where that draft lives; it follows the document when its key changes
     this.recoverableMayBeOlder = false; // the file was written after those edits were made (or could not be checked)
     this._lastVersionAt = undefined; // when the newest snapshot was written; undefined until looked up
+    listenForInput();
     this._onChange = (e) => this._changed(e.detail?.type);
     this.wb.addEventListener('change', this._onChange);
     this._onSession = () => this._followStorageScope();
@@ -313,6 +346,18 @@ export class Doc extends EventTarget {
     } else {
       moveDraft(oldKey, to, this._draftRevision);
     }
+  }
+
+  /** Where the file lives on the drive, null until it is first saved; the book knows it too, for CELL("filename"). */
+  get path() {
+    return this._path;
+  }
+
+  set path(path) {
+    this._path = path;
+    // Saved under another name or moved, the book's CELL("filename") formulas name the new file once they are
+    // next calculated, as in Excel; nothing is calculated again for it, mid-save.
+    this.wb.filePath = path;
   }
 
   /** The file this document is: where it lives and its id on the drive, which the records kept for it are keyed by. */
@@ -480,11 +525,22 @@ export class Doc extends EventTarget {
     clearTimeout(this._timer);
     // Signing in later saves the pending edits; the view asks for it.
     if (!session.signedOut && autoSaveEnabled()) {
-      this._timer = setTimeout(() => this.save({ auto: true }).catch(() => {}), AUTOSAVE_MS);
+      this._timer = setTimeout(() => this._autoSave(), AUTOSAVE_MS);
       this._timerIsRetry = false;
     }
     clearTimeout(this._draftTimer);
     this._draftTimer = setTimeout(() => this.writeDraft(), draftMs());
+  }
+
+  /** The autosave an edit scheduled: at once for an ordinary book; for a large one, once the user pauses (see QUIET_MS). */
+  _autoSave(due = Date.now()) {
+    const cells = this.wb.sheets.reduce((n, sheet) => n + sheet.cells.size, 0);
+    const wait = cells > LARGE_BOOK_CELLS ? QUIET_MS - (performance.now() - lastInput) : 0;
+    if (wait > 0 && Date.now() - due < QUIET_MAX_MS) {
+      this._timer = setTimeout(() => this._autoSave(due), Math.min(wait, QUIET_MAX_MS - (Date.now() - due)));
+      return;
+    }
+    this.save({ auto: true }).catch(() => {});
   }
 
   /** Turn AutoSave on or off; turning it on saves what is waiting. */
@@ -757,7 +813,7 @@ export class Doc extends EventTarget {
     if (distrust) this.distrustExternal();
     // The record of edits (Show Changes) goes on through a restore, which is one more change to it.
     const changeHistory = this.wb.changeHistory;
-    this.wb.replaceWith(other.toJSON());
+    this.wb.replaceWith(keepSheetIds(other.toJSON(), this.wb));
     this.wb.changeHistory = changeHistory;
     recordStep(this.wb, 'structure', 'Restore version');
     this._changed('cells');

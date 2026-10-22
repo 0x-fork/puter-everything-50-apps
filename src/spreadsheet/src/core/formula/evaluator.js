@@ -149,14 +149,40 @@ function extentOf(v) {
  * and keeps a plain array ({1,2,3}, SEQUENCE(3)) exactly as it was — so only an array standing for
  * more rows or columns than it holds carries one.
  */
-function shaped(values, rows, cols, isTall, isWide) {
+function shaped(values, rows, cols, isTall, isWide, fill = null) {
   const out = { range: true, values };
   const h = values.length;
   const w = values[0]?.length || 0;
   if (rows > h || cols > w) out.extent = [Math.max(rows, h), Math.max(cols, w)];
   if (isTall) out.tall = true;
   if (isWide) out.wide = true;
+  if (isTall && !isWide && fill?.some((v) => v !== null)) out.fill = fill;
   return out;
+}
+
+/**
+ * The row a whole-column array stands for past the rows it holds: blank for the column itself, and
+ * for an array computed from one what its expression gives there (see shaped's fill), so that
+ * --(A:A="") paired with a longer column of another sheet is TRUE past A's data, not blank.
+ * Null when that row is blank; for anything but a whole-column array, undefined.
+ */
+const pastRow = (v) => (tall(v) && !wide(v) ? v.fill || null : undefined);
+
+/**
+ * What `v` holds in column c of a row past the rows it was read to, as a pairing reads it there: a value
+ * stands for every row, a single row repeats, a whole column gives its row past the data (pastRow), and
+ * any other array has no such row (MISSING).
+ */
+const MISSING = Symbol('missing');
+function pastValue(v, c) {
+  if (!isRange(v)) return v;
+  const { values } = v;
+  const cols = values[0]?.length || 0;
+  const oneCol = cols === 1 && !wide(v);
+  if (!oneCol && !wide(v) && c >= cols) return MISSING;
+  const past = pastRow(v);
+  if (past !== undefined) return past ? past[oneCol ? 0 : c] ?? null : null;
+  return values.length === 1 ? values[0][oneCol ? 0 : c] ?? null : MISSING;
 }
 
 function broadcast(a, b, fn) {
@@ -175,22 +201,32 @@ function broadcast(a, b, fn) {
   if (arrayBudget + rows * cols > ARRAY_BUDGET) { arrayBudget = ARRAY_BUDGET + 1; return err('#NUM!'); }
   arrayBudget += rows * cols;
   const out = [];
+  const pastA = pastRow(a), pastB = pastRow(b);
   for (let r = 0; r < rows; r++) {
     const row = [];
     for (let c = 0; c < cols; c++) {
-      const x = A[oneRowA ? 0 : r]?.[oneColA ? 0 : c];
-      const y = B[oneRowB ? 0 : r]?.[oneColB ? 0 : c];
+      const x = r >= ra && pastA ? pastA[oneColA ? 0 : c] : A[oneRowA ? 0 : r]?.[oneColA ? 0 : c];
+      const y = r >= rb && pastB ? pastB[oneColB ? 0 : c] : B[oneRowB ? 0 : r]?.[oneColB ? 0 : c];
       const missing = (!oneRowA && !tallA && r >= ra) || (!oneColA && !wideA && c >= ca) || (!oneRowB && !tallB && r >= rb) || (!oneColB && !wideB && c >= cb);
       row.push(missing ? err('#N/A') : fn(x ?? null, y ?? null));
     }
     out.push(row);
+  }
+  // The row the answer stands for past the rows read, where it stands for a whole column.
+  let fill = null;
+  if ((tallA || tallB) && !wideA && !wideB) {
+    fill = new Array(cols);
+    for (let c = 0; c < cols; c++) {
+      const x = pastValue(a, c), y = pastValue(b, c);
+      fill[c] = x === MISSING || y === MISSING ? err('#N/A') : fn(x ?? null, y ?? null);
+    }
   }
   // The extent of the operand whose shape decided each axis: paired with a whole column the result
   // stands for every row of it, however few of them were read.
   const ea = extentOf(a);
   const eb = extentOf(b);
   const axis = (i, oneA, oneB, read) => (oneA ? (eb?.[i] ?? read) : oneB ? (ea?.[i] ?? read) : Math.max(ea?.[i] ?? read, eb?.[i] ?? read));
-  return shaped(out, axis(0, oneRowA, oneRowB, rows), axis(1, oneColA, oneColB, cols), tallA || tallB, wideA || wideB);
+  return shaped(out, axis(0, oneRowA, oneRowB, rows), axis(1, oneColA, oneColB, cols), tallA || tallB, wideA || wideB, fill);
 }
 
 const isArray = (v) => isRange(v) && (v.values.length > 1 || (v.values[0]?.length || 0) > 1);
@@ -233,12 +269,16 @@ function finiteResult(v) {
     if (arrayBudget > ARRAY_BUDGET) return err('#NUM!');
   }
   const unfit = (x) => (typeof x === 'number' && !Number.isFinite(x)) || x === EMPTY;
+  const fit = (x) => (x === EMPTY ? null : unfit(x) ? err('#NUM!') : x);
   if (computed && v.values.some((row) => row.some(unfit))) {
-    return { ...v, values: v.values.map((row) => row.map((x) => (x === EMPTY ? null : unfit(x) ? err('#NUM!') : x))) };
+    return { ...v, values: v.values.map((row) => row.map(fit)), ...(v.fill ? { fill: v.fill.map(fit) } : {}) };
   }
+  if (computed && v.fill?.some(unfit)) return { ...v, fill: v.fill.map(fit) };
   return v;
 }
 const NOT_TAKEN = Symbol('not taken');
+// The defined names being worked out, each for the scope it was looked up in and the cell asking (see 'call').
+const expandingNames = new Set();
 
 function mapRange(v, fn) {
   const values = fullValues(v);
@@ -246,7 +286,9 @@ function mapRange(v, fn) {
   if (arrayBudget + values.length * (values[0]?.length || 0) > ARRAY_BUDGET) { arrayBudget = ARRAY_BUDGET + 1; return err('#NUM!'); }
   const out = values.map((row) => row.map((x) => fn(x ?? null)));
   const extent = extentOf(v);
-  return shaped(out, extent?.[0] ?? out.length, extent?.[1] ?? (out[0]?.length || 0), tall(v), wide(v));
+  const past = pastRow(v);
+  const fill = past === undefined ? null : Array.from({ length: out[0]?.length || 0 }, (_, c) => fn(past?.[c] ?? null));
+  return shaped(out, extent?.[0] ?? out.length, extent?.[1] ?? (out[0]?.length || 0), tall(v), wide(v), fill);
 }
 
 /**
@@ -272,6 +314,7 @@ function liftCall(def, args, ctx) {
     if (c !== 1 || wides[k]) { cols = cols === 1 ? c : Math.max(cols, c); colsExtent = Math.max(colsExtent, extent?.[1] ?? c); }
   });
   if (arrayBudget + rows * cols > ARRAY_BUDGET) { arrayBudget = ARRAY_BUDGET + 1; return err('#NUM!'); }
+  const pasts = args.map(pastRow);
   const out = new Array(rows);
   for (let r = 0; r < rows; r++) {
     const row = new Array(cols);
@@ -285,7 +328,7 @@ function liftCall(def, args, ctx) {
         const gc = g[0]?.length || 0;
         const oneRow = gr === 1 && !talls[k], oneCol = gc === 1 && !wides[k];
         if ((!oneRow && !talls[k] && r >= gr) || (!oneCol && !wides[k] && c >= gc)) { cell = err('#N/A'); break; }
-        const v = g[oneRow ? 0 : r]?.[oneCol ? 0 : c] ?? null;
+        const v = (r >= gr && pasts[k] ? pasts[k][oneCol ? 0 : c] : g[oneRow ? 0 : r]?.[oneCol ? 0 : c]) ?? null;
         // Errors in direct arguments stop the call, as for a scalar call, unless the function inspects them.
         if (!def.tolerant && isError(v)) cell = v;
         scalars[k] = v;
@@ -294,7 +337,18 @@ function liftCall(def, args, ctx) {
     }
     out[r] = row;
   }
-  return shaped(out, rowsExtent, colsExtent, talls.some(Boolean), wides.some(Boolean));
+  // The row the answer stands for past the rows read, where it stands for a whole column (see shaped).
+  const isTall = talls.some(Boolean), isWide = wides.some(Boolean);
+  let fill = null;
+  if (isTall && !isWide) {
+    fill = new Array(cols);
+    for (let c = 0; c < cols; c++) {
+      const scalars = args.map((a) => pastValue(a, c));
+      const stop = scalars.find((v) => v === MISSING || (!def.tolerant && isError(v)));
+      fill[c] = stop === MISSING ? err('#N/A') : stop !== undefined ? stop : scalar(def.fn(scalars, ctx));
+    }
+  }
+  return shaped(out, rowsExtent, colsExtent, isTall, isWide, fill);
 }
 
 /**
@@ -473,7 +527,9 @@ function evaluateLazy(name, def, thunks, ctx) {
         picked = picked ? broadcast(picked, taken, (p, t) => (p === NOT_TAKEN ? t : p)) : taken;
         if (isError(picked)) return picked;
       }
-      return { range: true, values: picked.values.map((row) => row.map((v) => (v === NOT_TAKEN ? err('#N/A') : v))) };
+      // The extent and whole-column flags of what the conditions were built from stay with the answer, as IF's keep them.
+      const taken = (v) => (v === NOT_TAKEN ? err('#N/A') : v);
+      return { ...picked, values: picked.values.map((row) => row.map(taken)), ...(picked.fill ? { fill: picked.fill.map(taken) } : {}) };
     }
   }
   if (name === 'SWITCH' && thunks.length) {
@@ -721,9 +777,20 @@ export function evaluate(node, ctx, final = false) {
         const definesLambda = named?.type === 'call' && named.name === 'LAMBDA';
         const depth = definesLambda ? (ctx.nameDepth || 0) : (ctx.nameDepth || 0) + 1;
         if (depth > 64) return err('#CYCLE!');
-        // A workbook definition is outside the caller's lexical scope.
-        // Retain its calling cell, but do not capture LET/LAMBDA bindings.
-        const value = evaluateFormula(named, { ...nameCtx, locals: undefined, omitted: undefined, nameDepth: depth });
+        // Such a name met again for the same cell while it is still being worked out reads itself, and is a cycle at
+        // once: left to the depth limit, Price = IF(ISNUMBER(Price),Price,0) worked itself out twice at each of 64
+        // levels, which never ended. A LAMBDA it answers with may call it again once it has been worked out.
+        const key = definesLambda ? null : `${String(nameCtx.nameScope ?? '').toLowerCase()}|${node.name}|${nameCtx.currentSheet}|${nameCtx.cell?.r},${nameCtx.cell?.c}`;
+        if (key && expandingNames.has(key)) return err('#CYCLE!');
+        if (key) expandingNames.add(key);
+        let value;
+        try {
+          // A workbook definition is outside the caller's lexical scope.
+          // Retain its calling cell, but do not capture LET/LAMBDA bindings.
+          value = evaluateFormula(named, { ...nameCtx, locals: undefined, omitted: undefined, nameDepth: depth });
+        } finally {
+          if (key) expandingNames.delete(key);
+        }
         if (node.bare) return value;
         // Called with arguments: the name must hold a LAMBDA.
         if (!isLambda(value)) return isError(value) ? value : err('#VALUE!');

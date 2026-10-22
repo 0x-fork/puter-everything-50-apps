@@ -79,12 +79,29 @@ export function scalar(v) {
 function information(predicate) {
   return {
     localeContext: false,
-    fn: ([value]) => isRange(value)
-      ? { range: true, values: value.values.map((row) => row.map((v) => predicate(v))) }
-      : predicate(value),
+    fn: ([value]) => isRange(value) ? informationArray(value, predicate) : predicate(value),
     tolerant: true,
     elementwise: true,
   };
+}
+
+/**
+ * ISNUMBER(A:A) and its kin over a whole column stand for every row of it, as A:A>0 does: the answer keeps the
+ * column's extent, and past the rows read holds what the test gives for a blank cell (ISBLANK's TRUE), so it pairs
+ * with a whole column of another sheet rather than answering #VALUE! for unequal shapes.
+ */
+function informationArray(value, predicate) {
+  const values = value.values.map((row) => row.map((v) => predicate(v)));
+  const isTall = value.ref ? value.ref.kind === 'cols' : !!value.tall;
+  const isWide = value.ref ? value.ref.kind === 'rows' : !!value.wide;
+  if (!isTall && !isWide) return { range: true, values };
+  const out = { range: true, values, extent: rangeShape(value), ...(isTall ? { tall: true } : {}), ...(isWide ? { wide: true } : {}) };
+  if (isTall && !isWide) {
+    const past = value.fill || [];
+    const fill = Array.from({ length: values[0]?.length || 0 }, (_, c) => predicate(past[c] ?? null));
+    if (fill.some((v) => v !== null)) out.fill = fill;
+  }
+  return out;
 }
 
 /** The UTF-16 offset of the `count`-th character of `text`, or null when the text is shorter. */
@@ -315,6 +332,34 @@ function rangeTotal(values) {
 const worksheetMean = (values) => worksheetSum(values) / values.length;
 
 /**
+ * The count, largest and smallest of the numbers of a family's rows so far, kept as rangeTotal keeps their sums: a
+ * running average, maximum or minimum filled down, =AVERAGE($B$1:B1), otherwise went over its whole range in every
+ * row. `answer` makes the function's value of them; undefined for anything but one range of such a family.
+ */
+const RANGE_STATS = new WeakMap(); // the first values array of a family → { counts, maxes, mins, errorRow, error }
+function runningStat(args, answer) {
+  const values = args.length === 1 && isRange(args[0]) && args[0].ref && !args[0].areas ? args[0].values : null;
+  const root = values && RANGE_PARENTS.get(values);
+  if (!root) return undefined;
+  let run = RANGE_STATS.get(root);
+  if (!run) RANGE_STATS.set(root, run = { counts: [0], maxes: [-Infinity], mins: [Infinity], errorRow: Infinity, error: null });
+  const { counts, maxes, mins } = run;
+  for (let r = counts.length - 1; r < values.length && run.errorRow >= values.length; r++) {
+    const row = values[r];
+    let count = counts[r], max = maxes[r], min = mins[r];
+    for (let c = 0; c < row.length; c++) {
+      const v = row[c];
+      if (typeof v === 'number') { count++; max = Math.max(max, v); min = Math.min(min, v); }
+      else if (isError(v) && run.errorRow === Infinity) { run.errorRow = r; run.error = v; }
+    }
+    counts.push(count); maxes.push(max); mins.push(min);
+  }
+  if (run.errorRow < values.length) return run.error;
+  const k = values.length;
+  return answer({ count: counts[k], max: maxes[k], min: mins[k] }, values);
+}
+
+/**
  * A function of the cells it is given that keeps the number it answers for a single range. A column measured against
  * one range, =B2-AVERAGE($B$2:$B$20000), a z-score's STDEV or =B2/COUNTA($B:$B) filled down, reads that range in
  * every row: the array read is shared within a calculation (and replaced by any change), so the answer for it is kept
@@ -534,6 +579,7 @@ export function criteriaMatcher(criteria) {
     if (typeof target === 'number') {
       const eq = (v) => { const n = criteriaNumber(v); return n != null && compareValues(n, target) === 0; };
       eq.numberKey = numberKey(target); // looked up in an index of the range's numbers (numberIndex)
+      eq.target = target;
       return eq;
     }
     return (v) => typeof v === typeof target && v === target;
@@ -585,7 +631,7 @@ export function criteriaMatcher(criteria) {
     };
     // A plain text key can be looked up in an index of the range (criteriaIndex) instead of tested cell by cell.
     if (op === '=' && !wildcard && !rhsIsNum && rhsBool == null && rhsText !== '') eq.key = rhsLower;
-    if (op === '=' && rhsIsNum) eq.numberKey = numberKey(rhsNum);
+    if (op === '=' && rhsIsNum) { eq.numberKey = numberKey(rhsNum); eq.target = rhsNum; }
     return op === '=' ? eq : (v) => !eq(v);
   }
   const compare = (v) => {
@@ -738,8 +784,65 @@ function orderRun(index, match, lo = 0, hi = index.numbers.length) {
   return [lo, hi];
 }
 
+/**
+ * A running count down a column, =COUNTIF($A$1:A1,A1) filled down, names a range in every row that repeats the rows
+ * of the one above (see noteRangeRows). Each is read once, so none was ever indexed, and 10,000 rows tested 50 million
+ * cells. The ranges of such a family share one index instead, grown by the rows each longer range adds; a range takes
+ * the positions inside its own rows. Text is indexed while it is plain letters, digits and spaces, as the direct
+ * lookup of criteriaIndex wants; a family past that is tested cell by cell as before.
+ */
+const familyIndexes = new WeakMap(); // the first values array of a family → { cols, rows, plainRows, text, numbers }
+function familyCriterion(match, values) {
+  const root = RANGE_PARENTS.get(values);
+  if (!root) return false;
+  const cols = values[0]?.length || 0;
+  let index = familyIndexes.get(root);
+  if (!index) familyIndexes.set(root, index = { cols, rows: 0, plainRows: Infinity, text: new Map(), numbers: new Map(), checked: new Map() });
+  if (index.cols !== cols) return false;
+  const add = (map, key, p) => { const list = map.get(key); if (list) list.push(p); else map.set(key, [p]); };
+  for (; index.rows < values.length; index.rows++) {
+    const row = values[index.rows];
+    if (row.length !== cols) { index.cols = -1; return false; }
+    for (let c = 0; c < cols; c++) {
+      const v = row[c];
+      if (v == null) continue;
+      const p = index.rows * cols + c;
+      if (index.plainRows === Infinity && (typeof v === 'string' || isError(v))) {
+        if (typeof v === 'string' && /^[ 0-9A-Za-z]*$/.test(v)) add(index.text, foldComparisonText(v), p);
+        else index.plainRows = index.rows;
+      }
+      const n = criteriaNumber(v);
+      if (n != null) add(index.numbers, numberKey(n), p);
+    }
+  }
+  const limit = values.length * cols;
+  const within = (list) => {
+    let lo = 0, hi = list.length;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (list[mid] < limit) lo = mid + 1; else hi = mid; }
+    return hi === list.length ? list : list.slice(0, hi);
+  };
+  if (match.numberKey !== undefined) {
+    const group = within(index.numbers.get(match.numberKey) || []);
+    const at = (p) => { const r = Math.floor(p / cols); return values[r][p - r * cols]; };
+    // A group holds the numbers alike to 15 digits, which the criterion still tells apart across a rounding boundary.
+    // How far each group has been found to match its last number throughout is kept, so each cell is tested once.
+    const known = index.checked.get(match.numberKey);
+    const verified = known?.target === match.target ? known.upto : 0;
+    let upto = Math.min(verified, group.length);
+    while (upto < group.length && match(at(group[upto]))) upto++;
+    if (upto > verified && upto === group.length) index.checked.set(match.numberKey, { target: match.target, upto });
+    match.positions = upto === group.length ? group : group.filter((p) => match(at(p)));
+  } else {
+    if (values.length > index.plainRows || !/^[ 0-9A-Za-z]*$/.test(match.key)) return false;
+    match.positions = within(index.text.get(match.key) || []);
+  }
+  match.cols = cols;
+  return true;
+}
+
 /** Points a criterion at the index of its range, when there is one: match.positions lists the cells that can match, as r*match.cols+c. */
 function indexCriterion(match, range) {
+  if ((match.numberKey !== undefined || match.key !== undefined) && familyCriterion(match, range.values)) return;
   if (match.numberKey !== undefined) {
     const index = numberIndex(range.values);
     if (!index) return;
@@ -828,11 +931,12 @@ function readWindow(range) {
 }
 
 /** `values` as a grid of exactly rows × cols, blank where it was read short; the grid itself when it already is. */
-function padGrid(values, rows, cols) {
+function padGrid(values, rows, cols, fill = null) {
   if (values.length === rows && (values[0]?.length || 0) === cols) return values;
   const out = new Array(rows);
   for (let r = 0; r < rows; r++) {
-    const row = values[r];
+    // Past the rows read, an array computed from a whole column holds what its expression gives for blank cells.
+    const row = values[r] ?? fill;
     if (row && row.length === cols) { out[r] = row; continue; }
     const full = new Array(cols);
     for (let c = 0; c < cols; c++) full[c] = row?.[c] ?? null;
@@ -863,7 +967,7 @@ function readAlike(ranges) {
   const windows = refs.map(readWindow);
   const rows = shapes.every((s) => s[0] === shapes[0][0]) ? Math.max(...windows.map((w) => w[0])) : null;
   const cols = shapes.every((s) => s[1] === shapes[0][1]) ? Math.max(...windows.map((w) => w[1])) : null;
-  return ranges.map((r) => (hasExtent(r) ? padGrid(r.values, rows ?? r.values.length, cols ?? (r.values[0]?.length || 0)) : r.values));
+  return ranges.map((r) => (hasExtent(r) ? padGrid(r.values, rows ?? r.values.length, cols ?? (r.values[0]?.length || 0), r.fill) : r.values));
 }
 
 /**
@@ -1221,7 +1325,8 @@ function alignWindows(ranges, axis) {
     const key = `${toRows},${toCols}`;
     let values = byWindow.get(key);
     if (!values) {
-      const blank = Object.freeze(new Array(toCols).fill(null));
+      // Past the rows read, an array computed from a whole column holds what its expression gives for blank cells.
+      const blank = r.fill?.length === toCols ? r.fill : Object.freeze(new Array(toCols).fill(null));
       values = new Array(toRows);
       for (let i = 0; i < toRows; i++) {
         const row = r.values[i];
@@ -1308,6 +1413,40 @@ function exactLookup(index, needle, last, fixedWidth) {
   return span ? span[end] : -1;
 }
 
+/**
+ * Where an exact needle first (or last) sits in a vector of a running family, =MATCH(A2,$A$1:A1,0) filled down
+ * (see familyCriterion): each range repeats the rows of the one above and is read once, so none was indexed
+ * and every row scanned its whole range. The family's ranges share one index of each column instead, grown by
+ * the rows each longer range adds, of numbers, booleans and text while the text is plain letters, digits and
+ * spaces (whose case alone sets them apart). Undefined when the vector is no such range or the needle no such value.
+ */
+const familyLookups = new WeakMap(); // the first values array of a family → Map(col → { rows, plainRows, text, exact })
+function familyExact(values, col, needle, last) {
+  const root = col >= 0 && RANGE_PARENTS.get(values);
+  if (!root || needle == null || needle !== needle) return undefined;
+  const plainNeedle = typeof needle === 'string' && /^[ 0-9A-Za-z]*$/.test(needle);
+  if (!plainNeedle && typeof needle !== 'number' && typeof needle !== 'boolean') return undefined;
+  let byCol = familyLookups.get(root);
+  if (!byCol) familyLookups.set(root, byCol = new Map());
+  let index = byCol.get(col);
+  if (!index) byCol.set(col, index = { rows: 0, plainRows: Infinity, text: new Map(), exact: new Map() });
+  const add = (map, key, i) => { const list = map.get(key); if (list) list.push(i); else map.set(key, [i]); };
+  for (; index.rows < values.length; index.rows++) {
+    const v = values[index.rows]?.[col];
+    if (typeof v === 'string') {
+      if (index.plainRows !== Infinity) continue;
+      if (/^[ 0-9A-Za-z]*$/.test(v)) add(index.text, v.toLowerCase(), index.rows); else index.plainRows = index.rows;
+    } else if ((typeof v === 'number' && v === v) || typeof v === 'boolean') add(index.exact, v, index.rows);
+  }
+  if (plainNeedle && values.length > index.plainRows) return undefined;
+  const list = plainNeedle ? index.text.get(needle.toLowerCase()) : index.exact.get(needle);
+  if (!list || list[0] >= values.length) return -1;
+  if (!last) return list[0];
+  let lo = 0, hi = list.length;
+  while (lo < hi) { const mid = (lo + hi) >>> 1; if (list[mid] < values.length) lo = mid + 1; else hi = mid; }
+  return list[lo - 1];
+}
+
 /** Whether an exact needle can be looked up in an index: text without wildcards, a number, or a boolean. */
 const indexable = (needle, wildcard) => !wildcard && (typeof needle === 'string' || typeof needle === 'number' || typeof needle === 'boolean');
 
@@ -1366,6 +1505,8 @@ function matchIndex(needle, values, mode, col = -1) {
   if (mode === 0) {
     const wildcard = typeof needle === 'string' && /[*?~]/.test(needle) ? wildcardMatcher(needle) : null;
     if (indexable(needle, wildcard)) {
+      const found = familyExact(values, col, needle, false);
+      if (found !== undefined) return found;
       const index = exactIndex(values, col);
       if (index) return exactLookup(index, needle, false, true);
     }
@@ -1423,6 +1564,8 @@ function xmatchIndex(needle, values, matchMode, searchMode, col = -1) {
     const wild = mm === 2 && typeof needle === 'string' && /[*?~]/.test(needle);
     const match = wild ? wildcardMatcher(needle) : null;
     if (indexable(needle, match)) {
+      const found = familyExact(values, col, needle, reverse);
+      if (found !== undefined) return found;
       const index = exactIndex(values, col);
       if (index) return exactLookup(index, needle, reverse, mm === 2);
     }
@@ -1612,6 +1755,8 @@ function workingDaysFrom(start, count, step, weekend, off) {
 /* ---------- The library ---------- */
 
 // Range values must not become function arguments: large inputs exceed the engine's call limit.
+/** An aggregate that answers one range of a running family from its kept statistics (see runningStat). */
+const running = (f, answer) => (args, ctx) => runningStat(args, answer) ?? f(args, ctx);
 const minimum = (list) => list.reduce((a, b) => Math.min(a, b), Infinity);
 const maximum = (list) => list.reduce((a, b) => Math.max(a, b), -Infinity);
 
@@ -1672,9 +1817,9 @@ export const FUNCTIONS = {
   LT: { localeContext: false, fn: relation((c) => c < 0) },
   LTE: { localeContext: false, fn: relation((c) => c <= 0) },
   SUM: { refArgs: true, fn: (args) => (args.length === 1 && isRange(args[0]) && args[0].ref && !args[0].areas ? rangeTotal(args[0].values) : sumOf(args)) },
-  AVERAGE: { refArgs: true, fn: num((l) => (l.length ? worksheetMean(l) : err('#DIV/0!'))) },
-  MIN: { refArgs: true, fn: num((l) => (l.length ? minimum(l) : 0)) },
-  MAX: { refArgs: true, fn: num((l) => (l.length ? maximum(l) : 0)) },
+  AVERAGE: { refArgs: true, fn: running(num((l) => (l.length ? worksheetMean(l) : err('#DIV/0!'))), (s, values) => (s.count ? rangeTotal(values) / s.count : err('#DIV/0!'))) },
+  MIN: { refArgs: true, fn: running(num((l) => (l.length ? minimum(l) : 0)), (s) => (s.count ? s.min : 0)) },
+  MAX: { refArgs: true, fn: running(num((l) => (l.length ? maximum(l) : 0)), (s) => (s.count ? s.max : 0)) },
   PRODUCT: { refArgs: true, fn: num(product) }, // nothing to multiply is 0
   MEDIAN: {
     refArgs: true, // a referenced text or boolean cell is skipped, whether the reference is one cell or a range
@@ -3599,6 +3744,12 @@ export const FUNCTIONS = {
       if (!keys.length) return err('#CALC!');
       const rowGroups = groupRows(keys);
       const colGroups = groupRows(cols);
+      // A pivot of more cells than a formula may build is refused before any of it is laid out: a column field of
+      // twenty thousand distinct values (an ID, a timestamp) beside five thousand row groups set aside 100 million
+      // cells, gigabytes and seconds on every calculation, to answer #NUM! in the end.
+      const outRows = 1 + rowGroups.length + (Math.trunc(rowDepth) !== 0 ? 1 : 0);
+      const outCols = nKeys + colGroups.length + (Math.trunc(colDepth) !== 0 ? 1 : 0);
+      if (outRows * outCols > STACK_LIMIT) return err('#NUM!');
       // Each row group's rows are put in a bucket per column group once, so a cell of the pivot,
       // and every comparison when sorting by one, reads its rows from the bucket rather than
       // filtering the row group through a set of the column's rows: that took 2.3 s for a pivot
@@ -5901,7 +6052,14 @@ export const FUNCTIONS = {
         case 'contents': { if (!ref) return err('#VALUE!'); const v = ctx.getValue(target.sheet, r, c); return v == null ? 0 : v; }
         // "b" is an empty cell alone; a formula's "" is text, "l", as ISBLANK of it is FALSE.
         case 'type': { if (!ref) return err('#VALUE!'); const v = ctx.getValue(target.sheet, r, c); return v == null ? 'b' : typeof v === 'string' ? 'l' : 'v'; }
-        case 'filename': return '';
+        // The file and the sheet as Excel writes them, /Documents/[Budget.xlsx]Sheet1, so the usual MID(CELL("filename",A1),
+        // FIND("]",CELL("filename",A1))+1,99) finds the sheet's name; empty for a book never saved, as in Excel.
+        case 'filename': {
+          const path = ctx.filePath?.();
+          if (!path) return '';
+          const slash = path.lastIndexOf('/');
+          return `${path.slice(0, slash + 1)}[${path.slice(slash + 1)}]${target.sheet || ctx.currentSheet}`;
+        }
         case 'format': case 'color': case 'parentheses': case 'protect': case 'width': {
           const info = ctx.cellFormat?.(target.sheet, r, c);
           if (!info) return err('#VALUE!');
@@ -7561,6 +7719,57 @@ function fixedDecimals(v, dec, grouping) {
   return dec > shown ? text + '0'.repeat(dec - shown) : text;
 }
 
+/** The POSIX classes PCRE and RE2 read inside brackets, [[:digit:]], as the ASCII ranges they stand for there. */
+const POSIX_CLASSES = {
+  alpha: 'A-Za-z', digit: '0-9', alnum: 'A-Za-z0-9', upper: 'A-Z', lower: 'a-z', xdigit: '0-9A-Fa-f', word: '\\w',
+  space: '\\t\\n\\v\\f\\r ', blank: ' \\t', punct: '!-\\/:-@\\[-`{-~', cntrl: '\\x00-\\x1f\\x7f', print: ' -~', graph: '!-~',
+};
+
+/**
+ * A pattern written for Excel's engine (PCRE) or Sheets' (RE2) in JavaScript's dialect, for what the two
+ * read alike and JavaScript reads otherwise or not at all: the anchors \A, \z and \Z, which it took for the
+ * letters A, z and Z, so REGEXTEST("abc","\Aabc\z") was FALSE; the POSIX classes inside brackets,
+ * [[:digit:]], which it took for a set of the characters [:digt and a following ]; and the named groups
+ * (?P<name>...) and (?P=name), which it refused; and a ] first in a set, []] or [^]], one of its characters
+ * there and the end of an empty set to JavaScript. Everything else is left as written.
+ */
+function javascriptPattern(p) {
+  if (!/\\[AzZ]|\[\^?\]|\[:|\(\?P[<=]/.test(p)) return p;
+  let out = '';
+  let inClass = false;
+  for (let i = 0; i < p.length; i++) {
+    const ch = p[i];
+    if (ch === '\\') {
+      const next = p[i + 1] ?? '';
+      i++;
+      if (!inClass && next === 'A') out += '(?<![\\s\\S])';
+      else if (!inClass && next === 'z') out += '(?![\\s\\S])';
+      else if (!inClass && next === 'Z') out += '(?=\\n?(?![\\s\\S]))';
+      else out += ch + next;
+      continue;
+    }
+    if (inClass) {
+      const posix = ch === '[' ? /^\[:([a-z]+):\]/.exec(p.slice(i)) : null;
+      if (posix && POSIX_CLASSES[posix[1]]) { out += POSIX_CLASSES[posix[1]]; i += posix[0].length - 1; continue; }
+      if (ch === ']') inClass = false;
+      out += ch;
+      continue;
+    }
+    if (ch === '[') {
+      inClass = true;
+      out += ch;
+      // A ] first in the set, after any ^, is one of its characters, not its end.
+      if (p[i + 1] === '^') out += p[++i];
+      if (p[i + 1] === ']') { out += '\\]'; i++; }
+      continue;
+    }
+    const named = ch === '(' ? /^\(\?P(?:<([A-Za-z_]\w*)>|=([A-Za-z_]\w*)\))/.exec(p.slice(i)) : null;
+    if (named) { out += named[1] ? `(?<${named[1]}>` : `\\k<${named[2]}>`; i += named[0].length - 1; continue; }
+    out += ch;
+  }
+  return out;
+}
+
 /**
  * A regular expression from a pattern argument, or #VALUE! when it does not compile, or when
  * `subject`, the text it is to run on, is longer than the pattern can be tried on in reasonable time.
@@ -7573,6 +7782,7 @@ function regex(pattern, flags = '', subject = '') {
     for (const f of m[1]) if (!flags.includes(f)) flags += f;
     p = p.slice(m[0].length);
   }
+  p = javascriptPattern(p);
   if (nestedRepeat(p)) return err('#VALUE!');
   // Two overlapping repeats, (\w+)\s*(\w+)=, tried from every position of a long cell cost the cube of its
   // length, hours at the longest: past the pattern's limit the text is refused as the pattern would be.

@@ -38,11 +38,15 @@ function inputOf(cell) {
   const v = cell.v;
   if (v == null) return null;
   if (typeof v === 'object') return v.error ?? null;
+  // Text that reads as a formula ("=1+1" pasted as text) goes with an apostrophe, as it would be typed to stay text.
+  if (typeof v === 'string' && /^'*=/.test(v)) return `'${v}`;
   return v;
 }
+/** Text kept from reading as a formula by apostrophes: typed as it is, which takes one off. */
+const quotedFormula = (v) => typeof v === 'string' && /^'+=/.test(v);
 /** Text that would not read back as itself when typed ("007", "1/2", "TRUE"). */
 function needsText(v) {
-  if (typeof v !== 'string' || v === '' || v.startsWith('=')) return false;
+  if (typeof v !== 'string' || v === '' || v.startsWith('=') || quotedFormula(v)) return false;
   try { return parseInput(v)?.v !== v; } catch { return false; }
 }
 
@@ -61,15 +65,18 @@ export function formatLines(range, patch, style = patch) {
       case 'underline': font(`setUnderline(${!!value})`); break;
       case 'strike': font(`setStrikethrough(${!!value})`); break;
       case 'color': font(`setColor(${value ? q(value) : 'null'})`); break;
-      case 'size': font(`setSize(${value ? Math.round(value * 3 / 4 * 2) / 2 : 9.75})`); break;
-      case 'font': font(`setName(${q(fontName(value) || 'Calibri')})`); break;
+      // No size or font of its own is the workbook's, which null puts back.
+      case 'size': font(`setSize(${value ? Math.round(value * 3 / 4 * 2) / 2 : 'null'})`); break;
+      case 'font': font(`setName(${value ? q(fontName(value) || 'Calibri') : 'null'})`); break;
       case 'bg': lines.push(value ? `${R}.getFormat().getFill().setColor(${q(value)});` : `${R}.getFormat().getFill().clear();`); break;
       case 'align': fmt(`setHorizontalAlignment(${q(value || 'general')})`); break;
       case 'valign': fmt(`setVerticalAlignment(${q(value || 'middle')})`); break;
-      case 'wrap': fmt(`setWrapText(${!!value})`); break;
+      // With "clip at the cell's edge" in the patch, the three ways of text wrapping are one call.
+      case 'wrap': if (!('clip' in patch)) fmt(`setWrapText(${!!value})`); break;
       case 'rot': fmt(`setTextRotation(${Number(value) || 0})`); break;
       case 'indent': fmt(`setIndent(${Number(value) || 0})`); break;
-      case 'clip': case 'nolink': break; // follow from the keys beside them
+      case 'clip': fmt(`setTextWrapping(${q(value ? 'clip' : (('wrap' in patch ? patch.wrap : style?.wrap) ? 'wrap' : 'overflow'))})`); break;
+      case 'nolink': break; // follows from the keys beside it
       default:
         if (NUMBER_FORMAT_KEYS.includes(key)) numberFormat = true;
         else unknown.push(key);
@@ -100,7 +107,7 @@ export function cellLines(cells) {
   for (const { r, c, value } of cells) grid[r - r1][c - c1] = value;
   const flat = grid.flat();
   const texts = flat.filter(needsText).length;
-  const formulas = flat.some((v) => typeof v === 'string' && v.startsWith('='));
+  const formulas = flat.some((v) => typeof v === 'string' && (v.startsWith('=') || quotedFormula(v)));
   const lines = [];
   const rows = (g) => `[${g.map((row) => `[${row.map(literal).join(', ')}]`).join(',\n    ')}]`;
   const target = `sheet.getRange(${q(rangeName({ r1, c1, r2, c2 }))})`;
@@ -110,6 +117,22 @@ export function cellLines(cells) {
     for (const cell of cells) if (needsText(cell.value)) lines.push(single(cell));
   } else lines.push(`${target}.setValues(${rows(grid)});`);
   return lines;
+}
+
+/**
+ * The rows of `range` that `skipRow` leaves in (those a filter shows), as ranges of consecutive rows: an edit made over
+ * a filtered range passes over the rows the filter hides, and a replay over the whole range would change them too.
+ */
+function shownBands(range, skipRow) {
+  const rg = normalizeRange(range);
+  if (!skipRow) return [rg];
+  const out = [];
+  for (let r = rg.r1; r <= rg.r2; r++) {
+    if (skipRow(r)) continue;
+    const last = out.at(-1);
+    if (last && last.r2 === r - 1) last.r2 = r; else out.push({ ...rg, r1: r, r2: r });
+  }
+  return out;
 }
 
 /** Runs of consecutive indices: [3, 4, 5, 9] → [[3, 5], [9, 9]]. */
@@ -167,7 +190,14 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
   }
 
   wrap('setInput', ([sheetId, r, c, text, opts = {}]) => {
-    const value = text == null || text === '' ? null : text;
+    let value = text == null || text === '' ? null : text;
+    // A number typed with more digits than a cell keeps (12345678901234567890) is stored to 15 of them, as Excel keeps
+    // it: written as typed, the replay would keep more, so the number the cell holds is written.
+    const now = wb.getCell(sheetId, r, c);
+    if (opts.typed && typeof value === 'string' && now?.f == null && typeof now?.v === 'number') {
+      const read = parseInput(value)?.v;
+      if (typeof read === 'number' && read !== now.v) value = now.v;
+    }
     const asText = opts.literal && typeof value === 'string';
     add(sheetId, [`sheet.getRange(${q(cellName(r, c))}).setValue(${literal(value)}${asText ? ', { asText: true }' : ''});`]);
     if (opts.style) add(sheetId, formatLines({ r1: r, c1: c, r2: r, c2: c }, opts.style, wb.styleAt(sheetId, r, c)));
@@ -179,7 +209,8 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
   });
   // A batch of cells written by any other route (paste, Flash Fill, decimal places…): the contents as they now
   // read, and the formatting that changed on them.
-  wrap('setCells', ([sheetId, entries], result, prior) => {
+  /** The cells `entries` ([{ r, c }]) as they now read, against `prior` (each one's cell before the edit). */
+  const changedCells = (sheetId, entries, prior) => {
     const values = [];
     const styled = [];
     entries.forEach(({ r, c }, i) => {
@@ -190,16 +221,27 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
     });
     add(sheetId, cellLines(values));
     if (styled.length) add(sheetId, styleDiffLines(styled));
-  }, { before: (sheetId, entries) => entries.map(({ r, c }) => wb.getCell(sheetId, r, c)) });
+  };
+  wrap('setCells', ([sheetId, entries], result, prior) => changedCells(sheetId, entries, prior),
+    { before: (sheetId, entries) => entries.map(({ r, c }) => wb.getCell(sheetId, r, c)) });
+  // Over a filtered range, the runs of rows the filter shows, one line each.
+  const bandLines = (range, skipRow, line) => {
+    const bands = shownBands(range, skipRow);
+    if (bands.length > MAX_CELL_LINES) return [`// Not recorded: a change to ${bands.length} runs of shown rows across ${address(range) || 'the sheet'}`];
+    return bands.flatMap(line);
+  };
   wrap('clearRange', ([sheetId, range, opts = {}]) => {
     const what = opts.contents === false ? 'formats' : opts.styles ? 'all' : 'contents';
-    add(sheetId, [`${rangeExpr(range)}.clear(${q(what)});`]);
+    add(sheetId, bandLines(range, opts.skipRow, (rg) => [`${rangeExpr(rg)}.clear(${q(what)});`]));
   });
-  wrap('applyStyle', ([sheetId, range, patch]) => add(sheetId, formatLines(normalizeRange(range), patch, { ...wb.styleAt(sheetId, range.r1, range.c1), ...patch })));
+  wrap('applyStyle', ([sheetId, range, patch, opts = {}]) => {
+    const style = { ...wb.styleAt(sheetId, range.r1, range.c1), ...patch };
+    add(sheetId, bandLines(range, opts.skipRow, (rg) => formatLines(rg, patch, style)));
+  });
   wrap('applyBorders', ([sheetId, range, kind, opts = {}]) => {
     const edge = BORDER_EDGE[kind];
     if (!edge) { add(sheetId, [`// Not recorded: border change on ${address(range) || 'the sheet'}`]); return; }
-    const options = edge === 'none' ? '' : `, { style: ${q(opts.style || 'thin')}${opts.color ? `, color: ${q(opts.color)}` : ''} }`;
+    const options = edge === 'none' ? '' : opts.remove ? ', { style: "none" }' : `, { style: ${q(opts.style || 'thin')}${opts.color ? `, color: ${q(opts.color)}` : ''} }`;
     add(sheetId, [`${rangeExpr(range)}.getFormat().setBorder(${q(edge)}${options});`]);
   });
   wrap('insertRows', ([sheetId, at, n = 1]) => add(sheetId, [`${rangeExpr(lineRange('row', at, at + n - 1))}.insert();`]));
@@ -213,13 +255,45 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
   });
   wrap('insertCells', ([sheetId, range, direction = 'down']) => add(sheetId, [`${rangeExpr(range)}.insert(${q(direction === 'right' ? 'right' : 'down')});`]));
   wrap('deleteCells', ([sheetId, range, direction = 'up']) => add(sheetId, [`${rangeExpr(range)}.delete(${q(direction === 'left' ? 'left' : 'up')});`]));
-  wrap('sortRangeBy', ([sheetId, range, keys, opts = {}]) => {
+  // A sort by fill colour, which the script's sort cannot make, is written as the cells it left.
+  const byColour = (keys) => keys?.some((k) => k.color !== undefined);
+  wrap('sortRangeBy', ([sheetId, range, keys, opts = {}], result, prior) => {
     const rg = normalizeRange(range);
+    if (byColour(keys)) {
+      if (prior) changedCells(sheetId, filledCells(sheetId, prior.box), prior.cells);
+      else add(sheetId, [`// Not recorded: sort by colour of ${address(rg) || 'the sheet'}`]);
+      return;
+    }
     const list = keys.map((k) => `{ column: ${k.col - rg.c1}, ascending: ${k.ascending !== false} }`).join(', ');
     add(sheetId, [`${rangeExpr(rg)}.sort([${list}]${opts.caseSensitive ? ', { matchCase: true }' : ''});`]);
-  });
-  wrap('fill', ([sheetId, source, target]) => add(sheetId, [`${rangeExpr(source)}.autoFill(${q(address(target))});`]));
+  }, { before: (sheetId, range, keys) => {
+    if (!byColour(keys)) return null;
+    // The block the sort can move: the range, cut to what the sheet holds.
+    const used = wb.usedRange(sheetId);
+    const rg = normalizeRange(range);
+    const box = used && { r1: rg.r1, c1: rg.c1, r2: Math.min(rg.r2, used.r2), c2: Math.min(rg.c2, used.c2) };
+    if (!box || box.r2 < box.r1 || box.c2 < box.c1 || (box.r2 - box.r1 + 1) * (box.c2 - box.c1 + 1) > MAX_BLOCK_CELLS) return null;
+    return { box, cells: filledCells(sheetId, box).map(({ r, c }) => wb.getCell(sheetId, r, c)) };
+  } });
+  // A fill the script's autoFill makes as it is; a copy instead of a series, or a count where the default copies
+  // (Ctrl while dragging), is written as the cells it left, which autoFill alone would fill the other way.
+  const filledCells = (sheetId, target) => { const out = []; for (let r = target.r1; r <= target.r2; r++) for (let c = target.c1; c <= target.c2; c++) out.push({ r, c }); return out; };
+  const plainFill = (opts) => opts?.series !== false && !opts?.invert;
+  wrap('fill', ([sheetId, source, target, opts], result, prior) => {
+    if (plainFill(opts)) { add(sheetId, [`${rangeExpr(source)}.autoFill(${q(address(target))});`]); return; }
+    if (!prior) { add(sheetId, [`// Not recorded: fill of ${address(target) || 'the sheet'}`]); return; }
+    changedCells(sheetId, filledCells(sheetId, normalizeRange(target)), prior);
+  }, { before: (sheetId, source, target, opts) => {
+    if (plainFill(opts)) return null;
+    const rg = normalizeRange(target);
+    if ((rg.r2 - rg.r1 + 1) * (rg.c2 - rg.c1 + 1) > MAX_BLOCK_CELLS) return null;
+    return filledCells(sheetId, rg).map(({ r, c }) => wb.getCell(sheetId, r, c));
+  } });
+  // A cut and paste or a drag of the selection border: the formulas that pointed at the cells follow them.
+  wrap('moveRange', ([sheetId, source, r0, c0]) => add(sheetId, [`${rangeExpr(source)}.moveTo(${q(cellName(r0, c0))});`]));
   wrap('mergeCells', ([sheetId, range]) => add(sheetId, [`${rangeExpr(range)}.merge();`]));
+  // Merge Across and Merge Down make several merges at once, one per row or column.
+  wrap('mergeBlocks', ([sheetId, ranges], merged) => add(sheetId, (ranges || []).filter((rg, i) => merged?.[i]).map((rg) => `${rangeExpr(normalizeRange(rg))}.merge();`)));
   wrap('unmergeCells', ([sheetId, range]) => add(sheetId, [`${rangeExpr(range)}.unmerge();`]));
   wrap('removeDuplicates', ([sheetId, range, opts = {}]) => {
     const rg = normalizeRange(range);
@@ -238,7 +312,14 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
     add(sheetId, runs(indices).map(([from, to]) => `${rangeExpr(lineRange(axis, from, to))}.${call}(${!!hidden});`));
   });
   wrap('setNote', ([sheetId, r, c, text]) => add(sheetId, [`sheet.getRange(${q(cellName(r, c))}).setNote(${q(text ?? '')});`]));
-  wrap('setLink', ([sheetId, r, c, url]) => add(sheetId, [`sheet.getRange(${q(cellName(r, c))}).setHyperlink(${q(url)});`]));
+  // A link given text to show writes that text first (setHyperlink keeps what the cell shows); one kept as a
+  // HYPERLINK formula is that formula.
+  wrap('setLink', ([sheetId, r, c, url], result, prior) => {
+    const now = wb.getCell(sheetId, r, c);
+    const lines = inputOf(now) !== inputOf(prior) ? cellLines([{ r, c, value: inputOf(now) }]) : [];
+    if (now?.f == null) lines.push(`sheet.getRange(${q(cellName(r, c))}).setHyperlink(${q(url)});`);
+    add(sheetId, lines);
+  }, { before: (sheetId, r, c) => wb.getCell(sheetId, r, c) });
   wrap('removeLink', ([sheetId, r, c]) => add(sheetId, [`sheet.getRange(${q(cellName(r, c))}).setHyperlink(null);`]));
   wrap('setFrozen', ([sheetId, rows, cols]) => add(sheetId, [`sheet.freezePanes(${rows | 0}, ${cols | 0});`]));
   wrap('setGridlines', ([sheetId, on]) => add(sheetId, [`sheet.showGridlines(${!!on});`]));
@@ -246,6 +327,12 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
     const table = wb.sheet(sheetId)?.tables.find((t) => t.id === id);
     add(sheetId, [`sheet.addTable(${q(address(range))}${table ? `, { name: ${q(table.name)}${table.style ? `, style: ${q(table.style)}` : ''} }` : ''});`]);
   });
+  // A table's totals row and Convert to Range, by the table's name (as it was before the call: a converted table is gone).
+  const tableName = (sheetId, id) => wb.sheet(sheetId)?.tables.find((t) => t.id === id)?.name ?? null;
+  wrap('setTableTotals', ([sheetId, , on], result, name) => add(sheetId, name ? [`(await workbook.getTable(${q(name)})).setShowTotals(${!!on});`] : []),
+    { before: (sheetId, id) => tableName(sheetId, id) });
+  wrap('deleteTable', ([sheetId], result, name) => add(sheetId, name ? [`(await workbook.getTable(${q(name)})).convertToRange();`] : []),
+    { before: (sheetId, id) => tableName(sheetId, id) });
   wrap('addChart', ([sheetId, chart]) => {
     if (chart?.range && CHART_TYPES.some(([t]) => t === chart.type)) {
       add(sheetId, [`sheet.addChart(${q(chart.type)}, ${q(address(chart.range))}${chart.title ? `, { title: ${q(chart.title)} }` : ''});`]);
@@ -351,11 +438,14 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
   function code() {
     const out = [];
     let current = startName;
+    // The sheet in front as recording began, by the name it has at this point of the script: renamed, its old name may
+    // be another sheet's by the time the first edit is written.
+    let start = startName;
     let declared = false;
     const use = (name) => {
       if (name == null) return;
       if (!declared) {
-        out.push(name === startName ? 'let sheet = workbook.getActiveWorksheet();' : `let sheet = workbook.getWorksheet(${q(name)});`);
+        out.push(name === start ? 'let sheet = workbook.getActiveWorksheet();' : `let sheet = workbook.getWorksheet(${q(name)});`);
         declared = true;
         current = name;
         return;
@@ -377,6 +467,8 @@ export function startRecorder(wb, { startSheet = wb.activeSheetId, name = 'Recor
         out.push(...action.lines);
         if (action.rename && action.rename[0] === current) current = action.rename[1];
         if (action.drop && action.drop === current) current = null;
+        if (action.rename && action.rename[0] === start) start = action.rename[1];
+        if (action.drop && action.drop === start) start = null;
       }
     }
     const body = out.length ? out : ['// Nothing was recorded.'];

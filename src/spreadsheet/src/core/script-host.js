@@ -39,6 +39,8 @@ export function scriptAddress(rg) {
   if (wholeRows(rg)) return `${rg.r1 + 1}:${rg.r2 + 1}`;
   return rangeName(rg);
 }
+/** The colour and style a side of a cell is drawn with: its own, or the cell's. */
+const pen = (st, side) => ({ bc: st[`${side}Border`]?.bc ?? st.bc ?? null, bs: st[`${side}Border`]?.bs ?? st.bs ?? 'thin' });
 const lineScope = (rg) => (wholeCols(rg) && wholeRows(rg) ? 'sheet' : wholeCols(rg) ? 'columns' : wholeRows(rg) ? 'rows' : undefined);
 
 /** A JS Date as the serial number a cell stores, and the format that shows it. */
@@ -104,6 +106,46 @@ export class ScriptHost {
     if (!used) return null;
     const r2 = Math.min(range.r2, used.r2), c2 = Math.min(range.c2, used.c2);
     return r2 < range.r1 || c2 < range.c1 ? null : { ...range, r2, c2 };
+  }
+
+  /** Rows and columns keep their sizes and visibility on a protected sheet: said so, rather than a change that did not happen. */
+  linesWritable(sheet) {
+    if (sheet.protected) this.fail(`${sheet.name} is protected; unprotect it before the script changes its rows or columns.`);
+  }
+
+  /**
+   * One side set on cells: the pens (colour and style) of the cells' other sides as they are. The workbook keeps one pen
+   * per cell unless a side has its own, so a red top border repainted a cell's black bottom one red; these are put back
+   * on the sides that had them (restorePens), as the ribbon and Format Cells leave a cell's other borders.
+   */
+  otherPens(sheet, range, kind) {
+    const SIDE = { top: 'bt', bottom: 'bb', left: 'bl', right: 'br' }[kind];
+    if (!SIDE || lineScope(range)) return null;
+    const rg = { ...range, r2: Math.min(range.r2, sheet.rows - 1), c2: Math.min(range.c2, sheet.cols - 1) };
+    const edge = kind === 'top' ? { ...rg, r2: rg.r1 } : kind === 'bottom' ? { ...rg, r1: rg.r2 } : kind === 'left' ? { ...rg, c2: rg.c1 } : { ...rg, c1: rg.c2 };
+    if (edge.r2 < edge.r1 || edge.c2 < edge.c1 || (edge.r2 - edge.r1 + 1) * (edge.c2 - edge.c1 + 1) > 20000) return null;
+    const out = [];
+    for (let r = edge.r1; r <= edge.r2; r++) for (let c = edge.c1; c <= edge.c2; c++) {
+      const st = this.wb.styleAt(sheet.id, r, c) || {};
+      const pens = Object.fromEntries(['bt', 'bb', 'bl', 'br'].filter((k) => k !== SIDE && st[k]).map((k) => [k, pen(st, k)]));
+      if (Object.keys(pens).length) out.push({ r, c, pens });
+    }
+    return out;
+  }
+
+  restorePens(sheet, kept) {
+    const entries = [];
+    for (const { r, c, pens } of kept || []) {
+      const cell = this.wb.getCell(sheet.id, r, c);
+      const st = this.wb.styleAt(sheet.id, r, c) || {};
+      const patch = {};
+      for (const [k, was] of Object.entries(pens)) {
+        const now = pen(st, k);
+        if (st[k] && (now.bc !== was.bc || now.bs !== was.bs)) patch[`${k}Border`] = { ...st[`${k}Border`], ...was };
+      }
+      if (Object.keys(patch).length) entries.push({ r, c, cell: { ...cell, v: cell?.v ?? null, f: cell?.f ?? null, s: { ...(cell?.s || {}), ...patch } } });
+    }
+    if (entries.length) this.wb.setCells(sheet.id, entries, 'Borders');
   }
 
   writable(sheet, range) {
@@ -174,7 +216,8 @@ const READS = {
     return this.grid(op, (sid, r, c) => {
       const cell = this.wb.getCell(sid, r, c);
       if (cell?.f != null) return `=${cell.f}`;
-      return scalar(cell?.v);
+      // A cell an array formula spills into holds no formula of its own: its value, as getValues gives it.
+      return scalar(cell?.v != null ? cell.v : this.wb.getValue(sid, r, c));
     });
   },
   texts(op) { return this.grid(op, (sid, r, c) => String(this.wb.getDisplay(sid, r, c) ?? '')); },
@@ -189,12 +232,16 @@ const READS = {
   },
   usedRange(op) {
     const sheet = this.sheetOf(op.sheet);
+    // Everything a cell holds, formatting as much as a value, on every side, as Office's getUsedRange() counts it.
     const bounds = op.valuesOnly ? dataBounds(this.wb, sheet.id) : (() => {
       const used = this.wb.usedRange(sheet.id);
-      if (!used) return null;
-      let r1 = used.r2, c1 = used.c2;
-      for (const key of sheet.cells.keys()) { const { r, c } = parseKey(key); if (r < r1) r1 = r; if (c < c1) c1 = c; }
-      return { r1, c1, r2: used.r2, c2: used.c2 };
+      // The workbook's used range starts at A1 and ends past spilled values: its far edge counts, the near one is the cells'.
+      let r1 = Infinity, c1 = Infinity, r2 = used ? used.r2 : -1, c2 = used ? used.c2 : -1;
+      for (const key of sheet.cells.keys()) {
+        const { r, c } = parseKey(key);
+        if (r < r1) r1 = r; if (c < c1) c1 = c; if (r > r2) r2 = r; if (c > c2) c2 = c;
+      }
+      return r2 < 0 ? null : { r1, c1, r2, c2 };
     })();
     return bounds ? scriptAddress(bounds) : null;
   },
@@ -234,10 +281,12 @@ function stylePatch(host, raw) {
   for (const [key, value] of Object.entries(raw)) {
     if (STYLE_FLAGS.includes(key)) patch[key] = value ? true : null;
     else if (key === 'wrap') { patch.wrap = value ? true : null; if (value) patch.clip = null; }
+    else if (key === 'clip') { patch.clip = value ? true : null; if (value) patch.wrap = null; }
     else if (key === 'bg' || key === 'color') {
       if (value != null && !HEX.test(String(value))) host.fail(`"${value}" is not a colour.`);
       patch[key] = value == null ? null : String(value).toLowerCase();
-    } else if (key === 'size') {
+    } else if (key === 'size' && value === null) patch.size = null;
+    else if (key === 'size') {
       const pt = Number(value);
       if (!(pt >= 1 && pt <= 409)) host.fail('The font size must be from 1 to 409 points.');
       patch.size = Math.round(pt * 4 / 3 * 100) / 100;
@@ -246,7 +295,7 @@ function stylePatch(host, raw) {
       if (value != null && !font) host.fail(`"${value}" is not a font name.`);
       patch.font = font;
     } else if (key === 'align') {
-      if (!['left', 'center', 'right', 'general'].includes(value)) host.fail(`"${value}" is not an alignment.`);
+      if (!['left', 'center', 'right', 'general', 'fill', 'justify', 'centerContinuous', 'distributed'].includes(value)) host.fail(`"${value}" is not an alignment.`);
       patch.align = value === 'general' ? null : value;
     } else if (key === 'valign') {
       if (!['top', 'middle', 'bottom'].includes(value)) host.fail(`"${value}" is not a vertical alignment.`);
@@ -348,10 +397,14 @@ const WRITES = {
     this.writable(sheet, range);
     const kinds = ['all', 'outer', 'inner', 'horizontal', 'vertical', 'top', 'bottom', 'left', 'right', 'none'];
     if (!kinds.includes(op.kind)) this.fail(`"${op.kind}" is not a border.`);
+    // Style "none" takes the borders off the edges named, and leaves the cells' other borders.
+    if (op.style === 'none') { this.wb.applyBorders(sheet.id, range, op.kind, { perSide: true, remove: true, scope: lineScope(range) }); return; }
     const style = op.style === 'hair' ? 'dotted' : op.style || 'thin';
     if (!BORDER_STYLES.some(([k]) => k === style)) this.fail(`"${op.style}" is not a border style.`);
     if (op.color != null && !HEX.test(op.color)) this.fail(`"${op.color}" is not a colour.`);
+    const keep = this.otherPens(sheet, range, op.kind);
     this.wb.applyBorders(sheet.id, range, op.kind, { color: op.color ?? null, style, scope: lineScope(range) });
+    this.restorePens(sheet, keep);
   },
   clear(op) {
     const { sheet, range } = this.rangeOf(op);
@@ -420,6 +473,15 @@ const WRITES = {
     this.wb.ensureSize(sheet.id, to.r2 + 1, to.c2 + 1);
     this.wb.fill(sheet.id, range, to);
   },
+  move(op) {
+    const { sheet, range } = this.rangeOf(op);
+    const found = typeof op.to === 'string' ? this.wb.rangeFromText(sheet.id, op.to) : null;
+    if (!found || found.sheetId !== sheet.id) this.fail(`"${op.to}" is not a cell on ${sheet.name}.`);
+    const at = normalizeRange(found.range);
+    if (at.r1 === range.r1 && at.c1 === range.c1) return;
+    this.writable(sheet, range);
+    if (!this.wb.moveRange(sheet.id, range, at.r1, at.c1)) this.fail(`${this.where(sheet, range)} could not be moved to ${cellName(at.r1, at.c1)}: it would leave the sheet, or the sheet, a table, merged cells or an array formula is in the way.`);
+  },
   dedupe(op) {
     const { sheet, range: asked } = this.rangeOf(op);
     const range = this.clipped(sheet, asked);
@@ -434,6 +496,7 @@ const WRITES = {
     // Unhide everything sample, which shows them on every sheet, failed on a workbook holding one.
     if (!op.hidden && this.sheetOf(op.sheet, { grid: false }).kind === 'chart') return;
     const { sheet, range } = this.rangeOf(op);
+    this.linesWritable(sheet);
     const axis = op.axis === 'col' ? 'col' : 'row';
     const [from, to] = axis === 'row' ? [range.r1, range.r2] : [range.c1, range.c2];
     if (op.hidden) {
@@ -448,8 +511,10 @@ const WRITES = {
     const { sheet, range } = this.rangeOf(op);
     const px = Number(op.px);
     if (!(px >= 0)) this.fail('A size must be a number of pixels.');
+    this.linesWritable(sheet);
     const axis = op.axis === 'col' ? 'col' : 'row';
-    const [from, to] = axis === 'col' ? [range.c1, range.c2] : [range.r1, Math.min(range.r2, Math.max(range.r1, (this.wb.usedRange(sheet.id)?.r2 ?? range.r1)))];
+    // Rows the range names, below the data too; only whole columns, which name every row, stop at the data's end.
+    const [from, to] = axis === 'col' ? [range.c1, range.c2] : [range.r1, wholeCols(range) ? Math.min(range.r2, Math.max(range.r1, (this.wb.usedRange(sheet.id)?.r2 ?? range.r1))) : range.r2];
     if (to - from + 1 > 20000) this.fail('At most 20,000 rows or columns can be sized at once.');
     for (let i = from; i <= to; i++) {
       if (px === 0) { this.wb.setHidden(sheet.id, axis, [i], true); continue; }
@@ -458,6 +523,7 @@ const WRITES = {
   },
   autofit(op) {
     const { sheet, range } = this.rangeOf(op);
+    this.linesWritable(sheet);
     const axis = op.axis === 'col' ? 'col' : 'row';
     const used = this.wb.usedRange(sheet.id);
     const [from, to] = axis === 'col' ? [range.c1, Math.min(range.c2, used?.c2 ?? range.c1)] : [range.r1, Math.min(range.r2, used?.r2 ?? range.r1)];
@@ -482,7 +548,11 @@ const WRITES = {
     const url = String(op.url ?? '').trim();
     if (!url) { this.wb.removeLink(sheet.id, range.r1, range.c1); return; }
     if (!/^(https?:\/\/|mailto:|#)/i.test(url)) this.fail('A link must start with http://, https://, mailto: or # (a place in the workbook).');
-    if (!this.wb.setLink(sheet.id, range.r1, range.c1, url)) this.fail(`The link could not be set on ${this.where(sheet, range)}.`);
+    // The cell keeps what it shows, as Office's setHyperlink does without a textToDisplay: given no text, the link
+    // wrote its address over the cell's value (a number a formula read became text, and the formula #VALUE!).
+    const shown = this.wb.getValue(sheet.id, range.r1, range.c1);
+    const label = ['number', 'boolean', 'string'].includes(typeof shown) ? shown : this.wb.getDisplay(sheet.id, range.r1, range.c1) || '';
+    if (!this.wb.setLink(sheet.id, range.r1, range.c1, url, label)) this.fail(`The link could not be set on ${this.where(sheet, range)}.`);
   },
   select(op) {
     const { sheet, range } = this.rangeOf(op);
@@ -577,7 +647,10 @@ const WRITES = {
   },
   tableTotals(op) {
     const { sheet, table } = this.tableOf(op.table);
-    if (!this.wb.setTableTotals(sheet.id, table.id, !!op.on) && !!table.totalsRow !== !!op.on) this.fail(`The totals row of ${table.name} could not be ${op.on ? 'shown' : 'hidden'}.`);
+    this.wb.setTableTotals(sheet.id, table.id, !!op.on);
+    // Read again: the workbook replaces a table it changes, so the one found above still has the row it had.
+    const now = this.wb.sheet(sheet.id)?.tables.find((t) => t.id === table.id);
+    if (!!now?.totalsRow !== !!op.on) this.fail(`The totals row of ${table.name} could not be ${op.on ? 'shown' : 'hidden'}.`);
   },
   tableConvert(op) {
     const { sheet, table } = this.tableOf(op.table);

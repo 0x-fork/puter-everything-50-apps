@@ -20,7 +20,7 @@ import { packedMoveReferences } from './packed-move-refs.js';
 import { copyNativeSparklines, mapPastedNativeSparklines, replacePastedNativeSparklines } from './native-sparkline-paste.js';
 import { copyValidations, mapPastedValidations, replaceValidations, moveValidations } from './validation-paste.js';
 import { NATIVE_ICON_SETS, nativeIconFor, nativeIconCount } from './native-icons.js';
-import { conditionalRuleGroups, conditionalGroupPieces, distinctConditionalRanges } from './conditional-groups.js';
+import { conditionalRuleGroups, conditionalGroupPieces, distinctConditionalRanges, splitRulePieces } from './conditional-groups.js';
 import { moveConditionalFormats, conditionalMoveBlocks } from './conditional-move.js';
 import { copyConditionalFormats, mapPastedConditionalFormats, replaceConditionalFormats } from './conditional-paste.js';
 import { BAR_FORMULAS, SCALE_FORMULAS, ICON_FORMULAS, conditionalThresholdIsFormula, conditionalThresholdFormula, conditionalFormulaFields, mapConditionalFormulas, conditionalPredicateField } from './conditional-scale.js';
@@ -84,7 +84,7 @@ import { parseFormula } from './formula/parser.js';
 import { ARRAY_BUDGET, evaluate, evaluateFormula, isVolatile, paramSpec, resetArrayBudget, withArrayBudget } from './formula/evaluator.js';
 import { FUNCTIONS, err, isError, isRange, scalar, compareStoredValues, toText, noteRangeRows, isNestedTotal } from './formula/functions.js';
 import { parseDelimited } from './tsv.js';
-import { splitPieces, detectDelimiter, DEFAULT_SPLIT } from './text-split.js';
+import { splitPieces, detectDelimiter, splitSourceText, DEFAULT_SPLIT } from './text-split.js';
 import { adjustFormula, adjustRefForInsert, adjustRefForInsertedLines, insertMap, adjustRefForDelete, adjustRefForDeletedLines, deleteMap, renameSheetInFormula, shiftFormula, resolveRelativeName, mapRelativeNameRef, isAbsoluteRef, mapFormulaRefs, parseRefText, refToText, MAX_ROW, MAX_COL, quoteSheet, sheetKey, sameSheetName } from './refs.js';
 import { headerlessTableColumns, normalizeTableHeaderState, headerlessInsertColumns, headerlessDeleteColumns, headerlessJoinColumns, headerlessResizeNames } from './table-header-row.js';
 import { tableStyle, tableRows, normalizeCustomTableStyle, customTableStyleAt, validateTableName, TABLE_NAME_RE, MAX_TABLE_NAME_LENGTH, parseTableSpec, resolveTableSpec, renderTableSpec, renameTableInFormula, tableColumnRenames, renameColumnsInFormula, tableRefsToA1, hasTableRefs, mapTableRefs, shiftTableColumns } from './tables.js';
@@ -523,6 +523,29 @@ function sortComparator(caseSensitive) {
   };
 }
 
+/**
+ * The comparison for each sort key: by value (sortComparator), or, for a key with a custom `list` (Jan, Feb, …
+ * Dec), by place in that list, as Excel's Order ▸ Custom List sorts: the entries the list names (in any case)
+ * first, in its order (reversed when descending), then the other values in ascending order, blanks last.
+ */
+function keyComparators(keys, caseSensitive) {
+  const byValue = sortComparator(caseSensitive);
+  return keys.map((k) => {
+    if (!Array.isArray(k.list) || !k.list.length) return (a, b) => byValue(a, b, k.ascending !== false);
+    const places = new Map();
+    k.list.forEach((item, i) => { const name = String(item).trim().toLowerCase(); if (!places.has(name)) places.set(name, i); });
+    const place = (v) => (typeof v === 'string' ? places.get(v.trim().toLowerCase()) : undefined);
+    const dir = k.ascending !== false ? 1 : -1;
+    return (a, b) => {
+      const pa = place(a), pb = place(b);
+      if (pa !== undefined && pb !== undefined) return (pa - pb) * dir;
+      if (pa !== undefined) return -1;
+      if (pb !== undefined) return 1;
+      return byValue(a, b, true);
+    };
+  });
+}
+
 /** One answer from an async source as a cell value: numbers and booleans as they are, text trimmed, nothing as blank. */
 function asyncCell(value) {
   if (typeof value === 'number' || typeof value === 'boolean') return value;
@@ -800,8 +823,8 @@ function lineStyle(raw) {
   return Object.keys(s).length ? (cloneCell({ v: null, f: null, s }).s ?? null) : null;
 }
 
-/** Objects whose range is just the cell they sit on (see normalizeChart), not data they plot. */
-const PLACED_DRAWING_TYPES = new Set(['image', 'text', 'smartart']);
+/** Objects whose range is just the cell they sit on (see normalizeChart and the controls' own), not data they plot. */
+const PLACED_DRAWING_TYPES = new Set(['image', 'text', 'smartart', 'slicer', 'timeline', 'scroll']);
 
 /** Keep fixed drawings in sheet coordinates, including after a drag supplied a cell anchor. */
 function absoluteDrawingAnchor(sheet, chart) {
@@ -1273,6 +1296,7 @@ export class Workbook extends EventTarget {
     this._blankKeys = null; // the cells read as blank while the outermost cell of a circle is calculated again (see _judgeCircles)
     this._astByCell = new WeakMap(); // cell → { f, ast }: filled-down formulas are all distinct strings, so the text cache alone thrashes
     this.externalAllowed = true; // may IMPORT* formulas and web images reach out? Off for files from elsewhere until allowed
+    this.filePath = null; // the drive path of the file the book is saved as, which its document keeps up to date (CELL("filename")); never saved
     this._externalBlocked = false; // a blocked request has been noticed this version
     this._depth = 0; // nested _compute calls in progress
     this._deepening = new Set(); // cells being evaluated bottom-up after a stack overflow
@@ -2445,7 +2469,12 @@ export class Workbook extends EventTarget {
       if (runs) cell.richText = runs;
       if (previous?.hyperlink) cell.hyperlink = previous.hyperlink;
     }
-    if (!sheet.tables.length) { this.setCells(sheetId, [{ r, c, cell }], label); return; }
+    if (!sheet.tables.length) {
+      // An entry under a filtered list joins it (see _autoExpandFilter), in the same step as the entry.
+      if (this._filterBelow(sheet, r, c)) this.transaction(label, () => { if (this.setCells(sheetId, [{ r, c, cell }], label)) this._autoExpandFilter(sheet, r, c, cell); });
+      else this.setCells(sheetId, [{ r, c, cell }], label);
+      return;
+    }
     // Inside a table: a renamed header rewrites the formulas that used the old column name.
     const table = this.tableAt(sheetId, r, c);
     const header = table && r === tableRows(table).header;
@@ -2469,6 +2498,7 @@ export class Workbook extends EventTarget {
       }
       if (table && !header) this._calculatedColumn(sheet, table, r, c, cell);
       this._autoExpandTable(sheet, r, c, cell);
+      this._autoExpandFilter(sheet, r, c, cell);
     });
   }
 
@@ -4328,7 +4358,10 @@ export class Workbook extends EventTarget {
     const w = src.c2 - src.c1 + 1;
     // A sheet a file brought in larger than the interactive caps keeps its own limits, as every other write door reads them.
     const limit = gridLimits(sheet);
-    if (r0 < 0 || c0 < 0 || r0 + h > limit.rows || c0 + w > limit.cols || h * w > 200000) return null;
+    // Whole columns (or rows) move whole, with the rules, validation and formatting that cover them, but only the cells
+    // they hold are walked: a million rows of one column were refused as too many cells to move.
+    const wholeCols = src.r1 === 0 && src.r2 >= limit.rows - 1, wholeRows = src.c1 === 0 && src.c2 >= limit.cols - 1;
+    if (r0 < 0 || c0 < 0 || r0 + h > limit.rows || c0 + w > limit.cols || (h * w > 200000 && !wholeCols && !wholeRows)) return null;
     const dst = { r1: r0, c1: c0, r2: r0 + h - 1, c2: c0 + w - 1 };
     // A refused cell write must not leave references, notes, or merges moved.
     if (this.lockedIn(sheetId, src) || this.lockedIn(sheetId, dst)) return null;
@@ -4355,10 +4388,12 @@ export class Workbook extends EventTarget {
     if (movingTables.some((t) => sheet.tables.some((o) => !inside(o.range) && overlaps(shifted(t.range), o.range)))) return null;
     // A 3D span (Sheet1:Two!A1) names the same cells on every sheet between two tabs, so one sheet's
     // moved block cannot take it along; it stays where it is.
-    const inSrc = (ref) => !ref.sheetEnd && ref.kind !== 'cols' && ref.kind !== 'rows' && ref.r1 >= src.r1 && ref.r2 <= src.r2 && ref.c1 >= src.c1 && ref.c2 <= src.c2;
+    // A whole-column (or row) reference is inside only whole columns (or rows) that move: B:B follows column B.
+    const lines = (ref) => (ref.kind !== 'cols' || wholeCols) && (ref.kind !== 'rows' || wholeRows);
+    const inSrc = (ref) => !ref.sheetEnd && lines(ref) && ref.r1 >= src.r1 && ref.r2 <= src.r2 && ref.c1 >= src.c1 && ref.c2 <= src.c2;
     // The cells the block lands on are gone, as in Excel: a reference wholly inside them that the block does not
     // carry (it is not wholly inside the block) shows #REF!. One only partly over them still names its cells.
-    const inDst = (ref) => !ref.sheetEnd && ref.kind !== 'cols' && ref.kind !== 'rows' && ref.r1 >= dst.r1 && ref.r2 <= dst.r2 && ref.c1 >= dst.c1 && ref.c2 <= dst.c2;
+    const inDst = (ref) => !ref.sheetEnd && lines(ref) && ref.r1 >= dst.r1 && ref.r2 <= dst.r2 && ref.c1 >= dst.c1 && ref.c2 <= dst.c2;
     // A relative defined name's offsets name different cells from every cell that uses it: only its wholly absolute references follow.
     const follow = (formula, ownerSheet, relativeName = false) => mapFormulaRefs(formula, (ref) => {
       const target = ref.sheet ?? ownerSheet;
@@ -4376,13 +4411,22 @@ export class Workbook extends EventTarget {
       this._setStyleResets(sheet, moveStyleResets(sheet.styleResets, src, dst), 'Move cells');
       const entries = new Map();
       const put = (r, c, cell) => entries.set(cellKey(r, c), { r, c, cell });
-      for (let r = src.r1; r <= src.r2; r++) for (let c = src.c1; c <= src.c2; c++) put(r, c, null);
-      for (let r = src.r1; r <= src.r2; r++) {
-        for (let c = src.c1; c <= src.c2; c++) {
-          const cell = cloneCell(sheet.cells.get(cellKey(r, c)));
-          if (cell?.f != null) cell.f = this._leaveTable(follow(cell.f, sheet.name), staying(r, c), staying(r + dr, c + dc));
-          put(r + dr, c + dc, cell);
-        }
+      const carry = (r, c) => {
+        const cell = cloneCell(sheet.cells.get(cellKey(r, c)));
+        if (cell?.f != null) cell.f = this._leaveTable(follow(cell.f, sheet.name), staying(r, c), staying(r + dr, c + dc));
+        put(r + dr, c + dc, cell);
+      };
+      if (wholeCols || wholeRows) {
+        // The cells stored in the block leave, those stored where it lands are replaced, and the block's own land.
+        const held = [...sheet.cells.keys()].map(parseKey);
+        const within = (box) => ({ r, c }) => r >= box.r1 && r <= box.r2 && c >= box.c1 && c <= box.c2;
+        const moving = held.filter(within(src));
+        for (const { r, c } of moving) put(r, c, null);
+        for (const { r, c } of held.filter(within(dst))) put(r, c, null);
+        for (const { r, c } of moving) carry(r, c);
+      } else {
+        for (let r = src.r1; r <= src.r2; r++) for (let c = src.c1; c <= src.c2; c++) put(r, c, null);
+        for (let r = src.r1; r <= src.r2; r++) for (let c = src.c1; c <= src.c2; c++) carry(r, c);
       }
       // Existing formulas and templates for future table rows must both
       // follow moved inputs. Source/destination cells are handled above.
@@ -4441,9 +4485,38 @@ export class Workbook extends EventTarget {
       if (sheet.charts.some(follows)) this._setCharts(sheet, sheet.charts.map((ch) => (follows(ch) ? { ...ch, range: shifted(ch.range) } : ch)), 'Move cells');
       this._moveScenarioCells(sheet, inside, shifted);
       this._rewriteRuleFormulas((formula, owner) => follow(formula, owner.name), 'Move cells', { conditional: false });
-      this._moveNativeSparklines(sheet, sheet, src, dst);
+      // Whole lines reach the sheet's edge, which the sheet need not grow to show: only as far as it already goes.
+      this._moveNativeSparklines(sheet, sheet, src, dst, wholeCols || wholeRows
+        ? { r2: wholeCols ? Math.min(dst.r2, sheet.rows - 1) : dst.r2, c2: wholeRows ? Math.min(dst.c2, sheet.cols - 1) : dst.c2 } : dst);
+      // The format of whole columns (or rows) goes with them, replacing the one where they land.
+      if (wholeCols) this._moveLineStyles(sheet, 'colStyles', src.c1, src.c2, dc);
+      if (wholeRows) this._moveLineStyles(sheet, 'rowStyles', src.r1, src.r2, dr);
     });
     return dst;
+  }
+
+  /** The default formats of lines `from`..`to` moved `delta` along, over those there, as one undo step of a move. */
+  _moveLineStyles(sheet, field, from, to, delta) {
+    const sheetId = sheet.id;
+    const next = new Map();
+    for (let i = from + delta; i <= to + delta; i++) next.set(i, sheet[field].get(i - delta));
+    for (let i = from; i <= to; i++) if (!next.has(i)) next.set(i, undefined);
+    const before = [], after = [];
+    for (const [i, st] of next) {
+      const prev = sheet[field].get(i);
+      if (sameJSON(prev ?? null, st ?? null)) continue;
+      before.push([i, prev]);
+      after.push([i, st]);
+    }
+    if (!after.length) return;
+    const apply = (list) => {
+      const live = this.sheet(sheetId);
+      if (!live) return;
+      for (const [i, st] of list) { if (st) live[field].set(i, cloneStyle(st)); else live[field].delete(i); }
+      this._changed('cells', live.id);
+    };
+    apply(after);
+    this._push({ label: 'Move cells', undo: () => apply(before), redo: () => apply(after) });
   }
 
   /** Scenario changing cells (and result cells) inside a moved block follow it, as one undo step of the move. */
@@ -4457,12 +4530,12 @@ export class Workbook extends EventTarget {
   /** Carry native sparkline destinations with a cut, retaining shared settings.
    * Source references have already followed the moved cells once. A group split
    * across sheets needs a new revision identity and explicit old-sheet bindings. */
-  _moveNativeSparklines(source, target, src, dst) {
+  _moveNativeSparklines(source, target, src, dst, bounds = dst) {
     const inside = (r, c, area) => r >= area.r1 && r <= area.r2 && c >= area.c1 && c <= area.c2;
     this._moveNativeSparklineCells(source, target, {
       destinationCell: (r, c) => inside(r, c, src) ? { r: r + dst.r1 - src.r1, c: c + dst.c1 - src.c1 } : null,
       targetCell: (r, c) => inside(r, c, dst),
-    }, dst);
+    }, bounds);
   }
 
   /** The caller has preflighted the complete packed cut before changing cells. */
@@ -4699,7 +4772,7 @@ export class Workbook extends EventTarget {
    * formula repeats (formulas shift); a numeric run continues its step;
    * text with a trailing number counts up.
    */
-  fill(sheetId, source, target, { series = true, invert = false } = {}) {
+  fill(sheetId, source, target, { series = true, invert = false, formats = true } = {}) {
     // invert (Ctrl/Cmd while dragging): a single number counts up instead of
     // repeating, and a run or text series repeats instead of continuing.
     const src = normalizeRange(source);
@@ -4954,6 +5027,7 @@ export class Workbook extends EventTarget {
         const next = replaceValidations(sheet.validations, mapPastedValidations(copied, h, w, r0, c0, { rows, cols }), entries, newId);
         if (next !== sheet.validations) this._setValidations(sheet, next, 'Fill');
       }
+      if (formats) this.fillConditionalFormats(sheetId, src, tgt, entries);
       // Rows filled under a table join it, whether the fill handle was dragged or double-clicked or Ctrl+D
       // pressed; the drag's own extendTableToCover call afterwards finds the table already grown. A fill
       // that wrote nothing (one a protected cell refused) grows no table. The whole target goes over, not
@@ -4961,6 +5035,26 @@ export class Workbook extends EventTarget {
       // Blank native anchors are real filled content even without scalar writes.
       if ((changed || nativeChanged) && tgt.r2 > src.r2) this.extendTableToCover(sheetId, { r1: tgt.r1, c1: tgt.c1, r2: tgt.r2, c2: tgt.c2 });
     });
+  }
+
+  /**
+   * Conditional formatting goes with a fill as the cells' other formatting does, as Excel's fill handle and Fill
+   * Down carry it: each copy of the source block lays down its rules over the filled cells (`cells`), in place of
+   * theirs, and cells filled with the rule they already have keep it (see replaceConditionalFormats).
+   */
+  fillConditionalFormats(sheetId, source, target, cells) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || !cells.length || !sheet.rules.length || this._gridLocked(sheet) || cells.some(({ r, c }) => this._protectedAt(sheet, r, c))) return;
+    const src = normalizeRange(source), tgt = normalizeRange(target);
+    const h = src.r2 - src.r1 + 1, w = src.c2 - src.c1 + 1;
+    const vertical = tgt.r2 - tgt.r1 + 1 > h || (tgt.c2 - tgt.c1 + 1 === w);
+    const lines = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+    const copied = copyConditionalFormats(sheet.rules, lines(src.r1, src.r2), lines(src.c1, src.c2), sheet.name);
+    const tile = (start, size, lo, hi) => { const first = start + Math.floor((lo - start) / size) * size; return [first, Math.ceil((hi - first + 1) / size)]; };
+    const [r0, rows] = vertical ? tile(src.r1, h, tgt.r1, tgt.r2) : [src.r1, 1];
+    const [c0, cols] = vertical ? [src.c1, 1] : tile(src.c1, w, tgt.c1, tgt.c2);
+    const next = replaceConditionalFormats(sheet.rules, mapPastedConditionalFormats(copied, h, w, r0, c0, { rows, cols }), cells, newId, sheet.name);
+    if (next !== sheet.rules) this._setRules(sheet, next, 'Fill');
   }
 
   /**
@@ -5203,8 +5297,9 @@ export class Workbook extends EventTarget {
 
   /**
    * Sort the rows of a range by one or more columns: keys = [{ col, ascending }]
-   * for values, or [{ col, color }] to bring rows with that fill to the top
-   * (ascending false sends them to the bottom).
+   * for values, [{ col, color }] to bring rows with that fill to the top
+   * (ascending false sends them to the bottom), or [{ col, list, ascending }]
+   * for the order of a custom list such as Jan, Feb, … Dec (see keyComparators).
    */
   /**
    * A row tool's range trimmed to a table's data rows: the header and totals
@@ -5303,10 +5398,10 @@ export class Workbook extends EventTarget {
       // A color key sorts rows with that fill first (0) and the rest after (1); a value key sorts by the cell's value.
       rows.push({ r, cells, keys: keys.map((k) => (k.color !== undefined ? (this._cellFill(sheet, r, k.col) === String(k.color).toLowerCase() ? 0 : 1) : this.getValue(sheetId, r, k.col))) });
     }
-    const compareKey = sortComparator(caseSensitive);
+    const compareKeys = keyComparators(keys, caseSensitive);
     rows.sort((a, b) => {
       for (let i = 0; i < keys.length; i++) {
-        const cmp = compareKey(a.keys[i], b.keys[i], keys[i].ascending !== false);
+        const cmp = compareKeys[i](a.keys[i], b.keys[i]);
         if (cmp) return cmp;
       }
       return a.r - b.r;
@@ -5368,7 +5463,8 @@ export class Workbook extends EventTarget {
 
   /**
    * Sort the columns of a range left to right by one or more rows:
-   * keys = [{ row, ascending }]. Each column's cells move together and
+   * keys = [{ row, ascending }], or [{ row, list, ascending }] for a custom list's
+   * order (see keyComparators). Each column's cells move together and
    * formulas shift with their column. Returns true when sorted, false when
    * the columns cannot change places (see rearrangeBlocker).
    */
@@ -5393,10 +5489,10 @@ export class Workbook extends EventTarget {
       for (let r = r1; r <= r2; r++) cells.push(cloneCell(sheet.cells.get(cellKey(r, c))));
       cols.push({ c, cells, keys: keys.map((k) => this.getValue(sheetId, k.row, c)) });
     }
-    const compareKey = sortComparator(caseSensitive);
+    const compareKeys = keyComparators(keys, caseSensitive);
     cols.sort((a, b) => {
       for (let i = 0; i < keys.length; i++) {
-        const cmp = compareKey(a.keys[i], b.keys[i], keys[i].ascending !== false);
+        const cmp = compareKeys[i](a.keys[i], b.keys[i]);
         if (cmp) return cmp;
       }
       return a.c - b.c;
@@ -5597,24 +5693,29 @@ export class Workbook extends EventTarget {
     const texts = [];
     for (let r = n.r1; r <= n.r2; r++) {
       const cell = sheet.cells.get(cellKey(r, c));
-      if (cell && cell.f == null && typeof cell.v === 'string') texts.push({ r, cell });
+      // Text, and a typed number by the digits of its value (see splitSourceText).
+      const text = splitSourceText(cell, typeof cell?.v === 'number' ? this.styleAt(sheetId, r, c) : cell?.s);
+      if (text != null) texts.push({ r, cell, text });
     }
     if (!texts.length) return {};
     let split;
     const options = delimiter && typeof delimiter === 'object' ? delimiter : null;
     if (options) {
-      split = texts.map(({ r, cell }) => ({ r, cell, parts: splitPieces(cell.v, { ...DEFAULT_SPLIT, ...options }) }));
+      split = texts.map(({ r, cell, text }) => ({ r, cell, parts: splitPieces(text, { ...DEFAULT_SPLIT, ...options }) }));
     } else {
       // The delimiter most rows contain wins; space is the last resort.
-      const delim = delimiter || detectDelimiter(texts.map((t) => t.cell.v));
+      const delim = delimiter || detectDelimiter(texts.map((t) => t.text));
       if (!delim) return {};
       // Quoted fields keep their delimiter: "Smith, John",42 splits into two. A line
       // break inside a cell (Alt+Enter) is part of its piece, not the row break it is
       // in pasted text: the breaks are hidden from the parser and put back in the pieces.
       const pieces = (text) => (parseDelimited(text.replace(/\r/g, '\u0001').replace(/\n/g, '\u0002'), delim)[0] || [])
         .map((piece) => piece.replace(/\u0001/g, '\r').replace(/\u0002/g, '\n'));
-      split = texts.map(({ r, cell }) => ({ r, cell, parts: delim === ' ' ? cell.v.trim().split(/\s+/) : pieces(cell.v) }));
+      split = texts.map(({ r, cell, text }) => ({ r, cell, parts: delim === ' ' ? text.trim().split(/\s+/) : pieces(text) }));
     }
+    // A number that does not split stays as it is, unrewritten: its digits read back would be the same number.
+    split = split.filter(({ cell, parts }) => typeof cell.v === 'string' || parts.length > 1);
+    if (!split.length) return {};
     const formats = options?.formats || [];
     const dest = options?.dest || { r: n.r1, c };
     const entries = [];
@@ -5634,7 +5735,7 @@ export class Workbook extends EventTarget {
     // Pieces past the last column (or row) would be dropped while the split was reported as written, so the split is refused.
     if (dest.c + cols > Math.max(sheet.cols, MAX_COLS) || dest.r + (n.r2 - n.r1) >= Math.max(sheet.rows, MAX_ROWS)) return { reason: 'room' };
     if (!entries.length) return {};
-    return { entries, rows: texts.length, cols };
+    return { entries, rows: split.length, cols };
   }
 
   /**
@@ -5699,15 +5800,14 @@ export class Workbook extends EventTarget {
     const seen = new Set();
     const kept = [];
     let removed = 0;
+    let changed = false;
+    let emptyGone = false;
     for (let r = start; r <= n.r2; r++) {
       const cells = [];
       const parts = [];
-      let blank = true;
       for (let c = n.c1; c <= n.c2; c++) {
         const cell = cloneCell(sheet.cells.get(cellKey(r, c)));
         cells.push(cell);
-        const v = cell && (cell.v != null || cell.f != null) ? this._compute(sheet, r, c) : null;
-        if (v != null && v !== '') blank = false;
         if (compare && !compare.has(c)) continue;
         // Rows match by the text they show: a date and its serial, or 1.5 and
         // 150%, are two values, while two cells that both read 0.3 are one.
@@ -5715,12 +5815,21 @@ export class Workbook extends EventTarget {
       }
       // Cell text can contain any delimiter, including control characters.
       // Keep column boundaries unambiguous so distinct rows are never deleted.
+      // Blank rows read the same as one another, so as in Excel the first of them stays and the rest go.
       const key = JSON.stringify(parts);
-      if (!blank && seen.has(key)) { removed++; continue; }
-      if (!blank) seen.add(key);
+      if (seen.has(key)) {
+        removed++;
+        // A blank row that goes changes nothing when it holds nothing at all and no kept row lies below it
+        // (the rows freed at the bottom, run through again): those alone are no duplicates removed.
+        if (table || cells.some((cell, j) => cell || sheet.notes.has(cellKey(r, n.c1 + j)) || sheet.comments.has(cellKey(r, n.c1 + j)))) changed = true;
+        else emptyGone = true;
+        continue;
+      }
+      seen.add(key);
+      if (emptyGone) changed = true;
       kept.push({ r, cells });
     }
-    if (!removed) return 0;
+    if (!removed || !changed) return 0;
     const entries = [];
     const notes = [];
     const keptRows = new Set(kept.map((row) => row.r));
@@ -5980,10 +6089,21 @@ export class Workbook extends EventTarget {
     }
     let clean = result;
     if (Number.isFinite(result)) {
-      const rounded = Number(result.toPrecision(12));
-      // Cleaning the input can undo convergence for sensitive formulas (for
-      // example A1-1e12). Keep it only if the formula still reaches the goal.
-      if (Number.isFinite(rounded) && rounded !== result && close(f(rounded))) clean = rounded;
+      // The answer is written with the fewest significant digits (12 at most) that still reach the goal, so
+      // =1/A1 set to 0.25 gives 4 rather than 3.99999999999. Cleaning the input can undo convergence for
+      // sensitive formulas (for example A1-1e12): a rounding is kept only if the formula still reaches the
+      // goal. A value rounded to more digits lies nearer the answer, so the digits are found by halving.
+      const reaches = (p) => { const r = Number(result.toPrecision(p)); return Number.isFinite(r) && close(f(r)) ? r : null; };
+      let best = reaches(12);
+      if (best !== null) {
+        let lo = 1, hi = 12;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          const r = reaches(mid);
+          if (r !== null) { best = r; hi = mid; } else lo = mid + 1;
+        }
+        clean = best;
+      }
     }
     if (original) sheet.cells.set(vKey, original); else sheet.cells.delete(vKey);
     this._invalidate();
@@ -6635,6 +6755,17 @@ export class Workbook extends EventTarget {
 
   _insert(sheetId, axis, at, n) {
     return this._insertLines(sheetId, axis, [{ at, n }]);
+  }
+
+  /**
+   * Insertions made one after another, each numbered as the ones before left the sheet, each below the lines the one
+   * before put in with a line already there above it, and none inside a table (a row there takes the table's
+   * calculated columns, one place at a time: see insertRowsAt), made at once (see _insertLines): the outcome of
+   * making them in turn, the sheet renumbered once.
+   */
+  _insertSequence(sheetId, axis, inserts) {
+    let before = 0;
+    return this._insertLines(sheetId, axis, inserts.map(({ at, n }) => { const point = { at: at - before, n }; before += n; return point; }));
   }
 
   /**
@@ -7313,6 +7444,7 @@ export class Workbook extends EventTarget {
       const cut = axis === 'row' ? { ...GRID_RANGE, r1: from, r2: from + count - 1 } : { ...GRID_RANGE, c1: from, c2: from + count - 1 };
       sheet.ignoredErrors = moveLineRangeFlags(removeRangeFlags(sheet.ignoredErrors, cut), axis, edges, map);
       const splitRule = (rule, field) => {
+        const original = rule, conditional = field === 'value';
         if (field === 'value') {
           rule = mapConditionalFormulas(rule, (f, key) => key === conditionalPredicateField(rule) ? f : renumber(f, sheet.name));
           field = conditionalPredicateField(rule) || field;
@@ -7333,12 +7465,20 @@ export class Workbook extends EventTarget {
         });
         const points = [...boundaries].sort((a, b) => a - b);
         const parts = [];
+        // The moved lines the rule already covers bring their own piece along; only those from outside it join it.
+        const before = Math.max(0, Math.min(from + count, origin[lo]) - from), after = Math.max(0, from + count - Math.max(from, origin[hi] + 1));
+        const own = count - before - after;
         for (let i = 0; i < points.length - 1; i++) {
           const old = { ...origin, [lo]: points[i], [hi]: points[i + 1] - 1 };
           const part = { ...rule, range: { ...origin, [lo]: map(old[lo]), [hi]: map(old[hi]) } };
-          // Lines landing inside the rule join it, as they join a reference they land inside of.
-          if (old[hi] === to - 1 && origin[hi] >= to) part.range[hi] += count;
           if (expression) part[field] = renumber(relative ? shiftFormula(formula, old.r1 - origin.r1, old.c1 - origin.c1) : formula, sheet.name);
+          // Lines landing inside the rule join it, as they join a reference they land inside of: those from before
+          // the rule land first, after the piece ahead of them, and those from after it last, before the piece behind.
+          if (old[hi] === to - 1 && origin[hi] >= to) part.range[hi] += own ? before : count;
+          if (own && after && old[lo] === to && origin[lo] < to) {
+            part.range[lo] -= after;
+            if (relative) part[field] = shiftFormula(part[field], axis === 'row' ? -after : 0, axis === 'col' ? -after : 0);
+          }
           parts.push(part);
         }
         parts.sort((a, b) => a.range[lo] - b.range[lo]);
@@ -7350,7 +7490,7 @@ export class Workbook extends EventTarget {
           if (joins) prev.range = { ...prev.range, [hi]: part.range[hi] };
           else merged.push(part);
         }
-        return merged.map((part, i) => (i ? { ...part, id: newId() } : part));
+        return (conditional ? splitRulePieces(original, merged) : merged).map((part, i) => (i ? { ...part, id: newId() } : part));
       };
       sheet.rules = sheet.rules.flatMap((rule) => splitRule(rule, 'value'));
       sheet.validations = sheet.validations.flatMap((rule) => splitRule(rule, 'source'));
@@ -7516,6 +7656,37 @@ export class Workbook extends EventTarget {
   }
 
 
+  /**
+   * Every row (axis 'row') or column of a sheet to one size, as Row Height… or Column Width… over the whole sheet
+   * sets it: the sheet's default size changes and the sizes lines had of their own go, in one step, as Excel writes a
+   * default height, rather than a million rows each given a size and an undo step of their own.
+   */
+  setDefaultLineSize(sheetId, axis, size) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._gridLocked(sheet) || !Number.isFinite(size)) return;
+    const row = axis === 'row';
+    const value = row ? Math.max(MIN_ROW_HEIGHT, Math.min(MAX_ROW_HEIGHT, Math.round(size))) : Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.round(size)));
+    const key = row ? 'defaultRowHeight' : 'defaultColWidth';
+    const sizes = (s) => (row ? s.rowHeights : s.colWidths);
+    const before = { size: sheet[key], sizes: [...sizes(sheet)], modes: row ? [...sheet.rowHeightModes] : [] };
+    if (before.size === value && !before.sizes.length && !before.modes.length) return;
+    const after = { size: value, sizes: [], modes: [] };
+    const apply = (state) => {
+      const live = this.sheet(sheetId);
+      if (!live) return;
+      live[key] = state.size;
+      sizes(live).clear();
+      for (const [i, v] of state.sizes) sizes(live).set(i, v);
+      if (row) {
+        live.rowHeightModes.clear();
+        for (const [i, v] of state.modes) live.rowHeightModes.set(i, v);
+      }
+      this._changed('layout', live.id);
+    };
+    apply(after);
+    this._push({ label: row ? 'Resize rows' : 'Resize columns', undo: () => apply(before), redo: () => apply(after) });
+  }
+
   /** Refresh derived auto-fit caches without creating edits or disturbing formula caches/history. */
   cacheAutoRowHeights(sheetId, heights) {
     const sheet = this.sheet(sheetId);
@@ -7629,6 +7800,30 @@ export class Workbook extends EventTarget {
     if (!p) return false;
     this._emit('protected', sheet.id, { range: p.range, description: p.description });
     return true;
+  }
+
+  /**
+   * Would clearing the contents of the range (Delete) be refused? As lockedIn, except that on a protected sheet the
+   * cells whose Locked box is off may be emptied, as they may be typed into: only a cell stored in the range that is
+   * not one of them refuses the clear (announced), as it refuses the write that clears it (see setCells).
+   */
+  contentsLockedIn(sheetId, range, skipRow = null) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet?.protected || sheet.externalCache || sheet.kind === 'chart') return this.lockedIn(sheetId, range);
+    const { r1, c1, r2, c2 } = normalizeRange(range);
+    const p = sheet.protectedRanges.find(({ range: g }) => g.r1 <= r2 && g.r2 >= r1 && g.c1 <= c2 && g.c2 >= c1);
+    if (p) { this._emit('protected', sheet.id, { range: p.range, description: p.description }); return true; }
+    const locked = (r, c) => !skipRow?.(r) && !this._unlockedCell(sheet, r, c);
+    // Whichever there are fewer of is walked, as clearing walks them: the range's cells, or the sheet's.
+    if ((r2 - r1 + 1) * (c2 - c1 + 1) < sheet.cells.size) {
+      for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) if (sheet.cells.has(cellKey(r, c)) && locked(r, c)) return this._locked(sheet);
+    } else {
+      for (const key of sheet.cells.keys()) {
+        const { r, c } = parseKey(key);
+        if (r >= r1 && r <= r2 && c >= c1 && c <= c2 && locked(r, c)) return this._locked(sheet);
+      }
+    }
+    return false;
   }
 
   /** Is any part of the range protected? The answer alone, with nothing announced: a dialog greying a control out beforehand asks this, lockedIn when it refuses. */
@@ -7881,6 +8076,27 @@ export class Workbook extends EventTarget {
       for (const g of list) for (let i = g.from; i <= g.to; i++) { if (collapsed) hidden.add(i); else hidden.delete(i); }
       if (sheetFilters(sheet).length) this._applyFilter(sheet);
     });
+  }
+
+  /**
+   * The outline's level buttons (1, 2, 3 …): show the lines down to `level` and hide the detail below it, as Excel
+   * does. Groups at that level or deeper collapse, the ones above it expand; level 1 shows only the summary lines
+   * outside every group, and the button past the deepest level shows every line. One undo step.
+   */
+  showOutlineLevel(sheetId, axis, level) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._gridLocked(sheet)) return false;
+    const key = axis === 'row' ? 'rows' : 'cols';
+    const groups = this.outlineGroups(sheetId, axis);
+    if (!groups.length || groups.every((g) => g.collapsed === (g.level >= level))) return false;
+    this._outlineStep(sheet, axis === 'row' ? 'Show row level' : 'Show column level', () => {
+      sheet.groups = { ...sheet.groups, [key]: groups.map(({ level: depth, ...g }) => ({ ...g, collapsed: depth >= level })) };
+      const hidden = axis === 'row' ? sheet.hiddenRows : sheet.hiddenCols;
+      const held = this._collapsedLines(sheet, key, 0, Infinity);
+      for (const g of groups) for (let i = g.from; i <= g.to; i++) { if (held.has(i)) hidden.add(i); else hidden.delete(i); }
+      if (sheetFilters(sheet).length) this._applyFilter(sheet);
+    });
+    return true;
   }
 
   /** Change a sheet's outline settings (see normalizeOutlineSettings); an undo step of its own. */
@@ -8336,7 +8552,7 @@ export class Workbook extends EventTarget {
       this._changed('structure', live.id);
     };
     apply(next);
-    this._push({ label: 'Sheet color', undo: () => apply(prev), redo: () => apply(next) });
+    this._push({ label: 'Sheet color', undo: () => apply(prev), redo: () => apply(next), changesSheets: true });
   }
 
   /** Freeze `rows` and `cols` from the current frozen origin (normally A1); 0 unfreezes. Freezing removes a split. */
@@ -8844,6 +9060,9 @@ export class Workbook extends EventTarget {
     if (this._locked(sheet)) return null;
     const copy = JSON.parse(JSON.stringify(ch));
     delete copy.id;
+    // The copy stands on its own: in the original's group it would be selected and moved with objects it was
+    // never grouped with, and lie apart from them in the stacking order a group keeps together.
+    delete copy.group;
     if (copy.type === 'slicer') delete copy.nativeName;
     // The copy sits 24 pixels down and right of the original, inside the sheet, and is anchored again to
     // the cell its corner now lies in, as a drag anchors what it moves: an object's anchor is the cell its
@@ -10226,7 +10445,7 @@ export class Workbook extends EventTarget {
       this._setRules(sheet, rules, label);
     }
     if (sheet.validations.some((v) => inside(v.range))) this._setValidations(sheet, sheet.validations.map((v) => (inside(v.range) ? { ...v, range: grown(v.range) } : v)), label);
-    const reads = (ch) => ch.type !== 'image' && ch.type !== 'smartart' && inside(ch.range);
+    const reads = (ch) => !PLACED_DRAWING_TYPES.has(ch.type) && inside(ch.range);
     // A chart with series of its own (one from an Excel file, or edited in Select Data) reads its references, not
     // its range: a series, category or label reference ending at the old last data row grows with the table too,
     // on whichever sheet the chart sits, as Excel's does.
@@ -10569,6 +10788,34 @@ export class Workbook extends EventTarget {
   }
 
   /**
+   * An entry typed in the row just under a worksheet filter's list, within its columns, joins the list, as a
+   * record added at the foot of a filtered list does in Excel: left out, its value was missing from the filter
+   * menu and a filter chosen afterwards left the row showing whatever it held. The row is not judged until the
+   * filter is next applied, so it stays in view as it is typed. A table's filter grows with its table.
+   */
+  _autoExpandFilter(sheet, r, c, cell) {
+    if (!cell || (cell.v == null && cell.f == null)) return;
+    const f = this._filterBelow(sheet, r, c);
+    if (!f) return;
+    const from = { ...f.range }, to = { ...f.range, r2: r };
+    const move = (a, b) => {
+      const live = this.sheet(sheet.id);
+      if (!live) return;
+      mapSheetFilters(live, (x) => (sameFilterRange(x, { range: a }) && !filterTable(live, x) ? { ...x, range: { ...b } } : x));
+      this._changed('layout', live.id);
+    };
+    move(from, to);
+    this._push({ label: 'Filter', undo: () => move(to, from), redo: () => move(from, to) });
+  }
+
+  /** The worksheet filter whose list (r, c) lies just under, within its columns, or null. */
+  _filterBelow(sheet, r, c) {
+    if (!sheet.filter && !sheet.otherFilters?.length) return null;
+    const f = sheetFilters(sheet).find((x) => r === x.range.r2 + 1 && c >= x.range.c1 && c <= x.range.c2 && !filterTable(sheet, x));
+    return f && !this.tableAt(sheet.id, r, c) ? f : null;
+  }
+
+  /**
    * Columns a table just grew over (a resize, typing beside it) need names of their own, as at creation:
    * a header an array formula spills into keeps the text it shows, a blank one takes the first free
    * ColumnN, a formula becomes the text it shows, and a name another column has is numbered (Qty, Qty2).
@@ -10829,7 +11076,9 @@ export class Workbook extends EventTarget {
   validateInput(sheetId, r, c, text) {
     const rule = this.validationAt(sheetId, r, c);
     if (!rule) return { ok: true, rule: null };
-    const { v, f } = parseInput(text);
+    // The entry is judged as the cell will hold it: 50 typed into a percent cell is 0.5, 00123 in a Text cell
+    // stays the text 00123, and 1/2 in a fraction cell is a half rather than January 2.
+    const { v = null, f = null } = typedDigits(cellFromInput(text, this.styleAt(sheetId, r, c)), text) || {};
     if (f != null) return { ok: true, rule }; // formulas are checked by their results
     const sheet = this.sheet(sheetId);
     return { ...checkValue(rule, v, (source) => this._resolveValidationSource(sheet, rule, source, r, c), (formula) => this.evalRuleFormula(sheetId, formula, rule.range, r, c, v)), rule };
@@ -13127,9 +13376,11 @@ export class Workbook extends EventTarget {
     };
     const ctx = {
       compatibilityVersion: this.calculationCompatibility.version,
+      filePath: () => this.filePath,
       referenceMode,
       fixedArray,
       currentSheet: sheet.name,
+      nameScope, // the scope its defined names are looked up in
       cell: { r, c },
       sheetExists: (name) => !!this.sheetByName(name),
       indirectSheetExists: (name) => { const sheet = this.sheetByName(name); return !!sheet && !sheet.externalCache; },
@@ -13282,6 +13533,7 @@ export class Workbook extends EventTarget {
         const longer = !kept && shorter !== undefined && shorter > ref.r2
           ? this._rangeCache.get(`${target.id}|${ref.r1},${ref.c1},${shorter},${ref.c2}`) : undefined;
         const repeats = !!longer && longer.length >= rows && longer[0]?.length === cols;
+        let parent = null;
         if (repeats) {
           // Not kept itself: the next one up is read from the longer one too, which kept too many shorter copies would evict.
           const last = LAST_CUT.get(longer);
@@ -13295,7 +13547,7 @@ export class Workbook extends EventTarget {
           // Worth it only while appending the missing rows costs no more than reading the range afresh.
           const blank = Object.freeze(new Array(cols).fill(null));
           out = kept.slice(); // the rows already read are shared, never written to
-          noteRangeRows(out, kept);
+          parent = kept; // noted as one family once its new rows prove settled (below)
           for (let rr = ref.r1 + kept.length; rr < ref.r1 + rows; rr++) {
             let row = blank;
             for (let cc = ref.c1; cc < ref.c1 + cols; cc++) {
@@ -13346,6 +13598,10 @@ export class Workbook extends EventTarget {
         }
         // Nor is one read while a circle is unsettled, since it may hold an answer that is withdrawn.
         if (!provisional && !this._hasDeferredSpills && !this._unsettled.length) {
+          // Only then does it join the family of the shorter range it carries on from, whose running totals and
+          // indexes it extends (see noteRangeRows): a row holding a cell still being calculated, or an answer a
+          // circle may yet withdraw, would stay in them for every longer range after it.
+          if (parent) noteRangeRows(out, parent);
           this._keepRange(cacheKey, out);
           // The longest of a family is the one a longer range carries on from; only its number is
           // held, so an array the budget has evicted simply leaves the next range to read afresh.
@@ -13842,6 +14098,7 @@ export class Workbook extends EventTarget {
       undo: () => { for (let i = entries.length - 1; i >= 0; i--) entries[i].undo(); },
       redo: () => { for (const e of entries) e.redo(); },
       snapshotCells: entries.reduce((cells, e) => cells + (e.snapshotCells || 0), 0),
+      ...(entries.some((e) => e.changesSheets) ? { changesSheets: true } : {}),
     };
     this._history.push(step);
     this._emit('history');
@@ -13862,7 +14119,12 @@ export class Workbook extends EventTarget {
   undoSteps(n) { let k = 0; while (k < n && this.undo()) k++; return k; }
   redoSteps(n) { let k = 0; while (k < n && this.redo()) k++; return k; }
 
+  /**
+   * A step that adds, removes, renames, moves, hides or recolors sheets is refused while the structure is protected,
+   * as the edit itself is; it stays, to be taken once the workbook is unprotected.
+   */
   undo() {
+    if (this._history.at(-1)?.changesSheets && this._structureLocked()) return false;
     const entry = this._history.pop();
     if (!entry) return false;
     this._snapshotCells -= entry.snapshotCells || 0;
@@ -13874,6 +14136,7 @@ export class Workbook extends EventTarget {
   }
 
   redo() {
+    if (this._future.at(-1)?.changesSheets && this._structureLocked()) return false;
     const entry = this._future.pop();
     if (!entry) return false;
     this._coalesce(() => entry.redo());
@@ -13934,6 +14197,7 @@ export class Workbook extends EventTarget {
       // The capture the first structural step opened closes with the transaction: the snapshot of the state before it.
       if (structural) { structural.before = this._settle(structural.capture); structural.capture = null; structural.entry.snapshotCells = structural.before.cells; }
       const steps = entries.length + (structural ? structural.steps - 1 : 0);
+      const changesSheets = entries.some((e) => e.changesSheets);
       // Steps recorded after the first structural one act on intermediate layouts; the
       // structural snapshots already hold their outcome, so they are not replayed.
       if (structural) entries = entries.slice(0, entries.indexOf(structural.entry) + 1);
@@ -13951,11 +14215,17 @@ export class Workbook extends EventTarget {
           // What the step holds: the structural snapshots and every cell-level step's before-and-after pair,
           // so a Replace all across a book's sheets is weighed like the single-sheet one (see _evictSnapshots).
           snapshotCells: entries.reduce((cells, e) => cells + (e.snapshotCells || 0), 0),
+          ...(changesSheets ? { changesSheets } : {}),
         };
         this._push(step);
       }
     }
     return result;
+  }
+
+  /** The workbook's structure as Protect Workbook locks it: its sheets, their order, names, visibility and tab colors. */
+  _sheetsShape() {
+    return this.sheets.map((s) => `${s.id}\u0000${s.name}\u0000${s.hidden ? 1 : 0}${s.veryHidden ? 1 : 0}\u0000${s.color || ''}`).join('\u0001');
   }
 
   /** Run a structural edit with snapshots, for undo, of the sheets it changes (see _capture). */
@@ -13977,11 +14247,14 @@ export class Workbook extends EventTarget {
       const outer = this._watchMoves;
       this._watchMoves = this._group.structural.watchMoves;
       try {
+        const shape = this._sheetsShape();
         const result = fn();
+        if (this._sheetsShape() !== shape) this._group.structural.entry.changesSheets = true;
         this._changed('structure');
         return result;
       } finally { this._watchMoves = outer; }
     }
+    const shape = this._sheetsShape();
     const capture = this._capture();
     const snap = { before: null, after: null };
     const watchMoves = [];
@@ -14006,6 +14279,7 @@ export class Workbook extends EventTarget {
       },
       redo: () => { this._restore(snap.after); this._replayWatchMoves(watchMoves, false); },
       snapshotCells: snap.before.cells,
+      ...(this._sheetsShape() !== shape ? { changesSheets: true } : {}),
     };
     this._push(step);
     return result;

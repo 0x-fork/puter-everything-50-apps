@@ -10,7 +10,7 @@ import { fillColorCss } from '../core/fill-color.js';
 import { el, fieldId, isComposing } from './dom.js';
 import { openModal, fieldAlert } from './modal.js';
 import { FORMATS, formatEntry, POINT_SIZES, ptToPx, pxToPt, FILL_COLORS, accountingCode, accountingOptions } from './toolbar.js';
-import { formatValue, currencyFormatLabel, currencyAffixes, currencyDecimals, FONTS, fontName, fontStack, fontKeyFor, borderCss, CURRENCIES, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, styleToNumFmt, cellCurrency, layoutAlign } from '../core/format.js';
+import { formatValue, currencyAffixes, codeLabelCurrency, currencyDecimals, localeInfo, FONTS, fontName, fontStack, fontKeyFor, borderCss, CURRENCIES, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, styleToNumFmt, cellCurrency, layoutAlign } from '../core/format.js';
 import { formatWithCode, formatCodeError, codeColor } from '../core/numfmt.js';
 import { BORDER_EDGES, readBorderEdges, penSignature } from './border-draft.js';
 import { orientationControl } from './orientation.js';
@@ -95,8 +95,7 @@ export function negativeStyleFor(code) {
   // whichever regional format wrote the code. Prefer distinct labels for new formats; still recognize
   // older codes that used the currency picker's short, sometimes shared symbols.
   const sym = (pre ?? post) == null ? null : (pre ?? post).trim();
-  const cur = sym == null ? null : CURRENCIES.find(([code]) => currencyFormatLabel(code).trim() === sym)?.[0]
-    || CURRENCIES.find(([, , symbol]) => symbol === sym)?.[0];
+  const cur = sym == null ? null : codeLabelCurrency(sym, pre ?? post) || CURRENCIES.find(([, , symbol]) => symbol === sym)?.[0];
   if (sym != null && !cur) return null;
   return {
     category: sym == null ? 'number' : 'currency', dec: decs ? decs.length : 0, group: digits === '#,##0', cur: cur || 'USD',
@@ -178,7 +177,9 @@ export function openFormatCellsDialog(ctx, { panel = 'number', style: draftStyle
   };
 
   /* ---- Number ---- */
-  const preview = el('div.numfmt-preview', { 'aria-live': 'polite' });
+  // A sample of the cell, so on paper as the other tabs' previews are: a code's [Black] or [Blue] section reads
+  // in the dark theme too, rather than as dark ink on the dialog's dark surface.
+  const preview = el('div.numfmt-preview.sheet-paper', { 'aria-live': 'polite' });
   const sample = value == null || value === '' ? 1234.5 : value;
   // A style without its own count shows two places in every category, percent included, except a currency without a minor
   // unit (the yen shows none), so the field reads what the preview and Apply use.
@@ -290,14 +291,18 @@ export function openFormatCellsDialog(ctx, { panel = 'number', style: draftStyle
   fontField.insertBefore(fontNameInput, fontField.querySelector('.select-wrap'));
   for (const option of fontList.options) option.style.fontFamily = fontStack(option.value) || '';
 
-  // Sizes are shown and typed in points (1 to 409); the draft keeps pixels.
-  const sizeInput = el('input.input', { type: 'text', inputmode: 'decimal', 'aria-label': 'Font size', autocomplete: 'off', value: String(sizePt),
+  // Sizes are shown and typed in points (1 to 409), with the regional decimal mark (10,5 in German) as the
+  // ribbon's Custom font size takes them; the draft keeps pixels.
+  const { decimal } = localeInfo();
+  const sizeText = (pt) => String(pt).replace('.', decimal);
+  const readSize = (text) => { const t = String(text).trim().replace(decimal, '.'); return /^\d+(?:\.\d+)?$/.test(t) ? Number(t) : NaN; };
+  const sizeInput = el('input.input', { type: 'text', inputmode: 'decimal', 'aria-label': 'Font size', autocomplete: 'off', value: sizeText(sizePt),
     oninput: () => {
-      const text = sizeInput.value.trim(), size = Number(text);
-      if (/^\d+(?:\.\d+)?$/.test(text) && size >= 1 && size <= 409) { font.size = size === sizePt ? font.size : ptToPx(size); sizeList.value = String(size); }
+      const size = readSize(sizeInput.value);
+      if (size >= 1 && size <= 409) { font.size = size === sizePt ? font.size : ptToPx(size); sizeList.value = String(size); }
     } });
-  const sizeField = select('Size', sizes.map(size => [size, String(size)]), sizePt, value => {
-    font.size = Number(value) === sizePt ? (style.size || 13) : ptToPx(Number(value)); sizeInput.value = value; clearFontError();
+  const sizeField = select('Size', sizes.map(size => [size, sizeText(size)]), sizePt, value => {
+    font.size = Number(value) === sizePt ? (style.size || 13) : ptToPx(Number(value)); sizeInput.value = sizeText(Number(value)); clearFontError();
   }, 8);
   const sizeList = sizeField.querySelector('select');
   sizeField.insertBefore(sizeInput, sizeField.querySelector('.select-wrap'));
@@ -594,8 +599,8 @@ export function openFormatCellsDialog(ctx, { panel = 'number', style: draftStyle
     // Invalid text must not silently apply the previous valid draft. Bring the field into view,
     // even if the user left the Font tab after typing it. Existing imported sizes remain untouched.
     const family = resolveFont(fontNameInput.value);
-    const sizeText = sizeInput.value.trim(), size = Number(sizeText);
-    const badSize = String(sizePt) !== sizeText && (!/^\d+(?:\.\d+)?$/.test(sizeText) || size < 1 || size > 409);
+    const size = readSize(sizeInput.value);
+    const badSize = sizeText(sizePt) !== sizeInput.value.trim() && !(size >= 1 && size <= 409);
     if (!family || badSize) {
       active = 'font'; syncTabs();
       return refuseFont(!family ? fontNameInput : sizeInput, !family ? 'Enter a font name of up to 255 characters.' : 'Enter a size from 1 to 409 points. Decimals are supported.');

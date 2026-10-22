@@ -63,11 +63,10 @@ import { createStatusBar } from '../ui/statusbar.js';
 import { createFindBar } from '../ui/findbar.js';
 import { openPrintDialog, currentPrintPrefs } from '../ui/printdialog.js';
 import { installSheetFontLoading } from '../ui/sheet-fonts.js';
-import { installPrintFallback, printFolder } from '../ui/print.js';
+import { installPrintFallback, printFolder, effectivePrintSettings } from '../ui/print.js';
 import { openNamesManager } from '../ui/names.js';
 import { openCreateNamesDialog } from '../ui/createnames.js';
 import { conditionalFormattingItems, openQuickRuleDialog, presetRule, clearRules } from '../ui/condformat-quick.js';
-import { normalizePrintSettings } from '../core/print-settings.js';
 import { rememberFunction } from '../ui/recent-functions.js';
 import { openInsertFunctionDialog, openFunctionArgumentsDialog } from '../ui/insertfunction.js';
 import { openConditionalFormatting } from '../ui/condformat.js';
@@ -119,6 +118,7 @@ import { toggleDetail } from '../core/outline-detail.js';
 import { openDatePicker } from '../ui/datepicker.js';
 import { openDedupeDialog } from '../ui/dedupedialog.js';
 import { openTextToColumnsDialog } from '../ui/textcolumnsdialog.js';
+import { splitSourceText } from '../core/text-split.js';
 import { openProtectedRanges } from '../ui/protect.js';
 import { openColumnStats } from '../ui/colstats.js';
 import { cellStyle } from '../core/cellstyles.js';
@@ -132,7 +132,7 @@ import { openEquationDialog, runInsertEquation } from '../ui/equation.js';
 import { openThemeEffectsMenu } from '../ui/theme-effects.js';
 import { openThemesMenu, openThemeColorsMenu, openThemeFontsMenu } from '../ui/themes.js';
 import { themedPreset, themedCellStylePatch, themedSeriesColors } from '../core/workbook-theme.js';
-import { chartData, textBoxText } from '../core/charts.js';
+import { chartData, textBoxText, placeAlong } from '../core/charts.js';
 import { chartSheetCommand } from '../core/chartsheet.js';
 import { openCellContextMenu } from '../ui/contextmenu.js';
 import { openMenu } from '../ui/menu.js';
@@ -595,9 +595,11 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       if (t.numeric && (numberOf(v1) == null || (t.args === 2 && numberOf(v2) == null))) return 'This condition needs numbers';
       return null;
     };
+    // The values the search box finds (all of them while it is empty): Select all and Clear act on these, as the
+    // list shows them, so "pen" then Clear unticks the pens rather than every value of the column.
+    const found = () => { const q = search.value.trim().toLowerCase(); return all.filter((v) => !q || v.value.toLowerCase().includes(q)); };
     const render = () => {
-      const q = search.value.trim().toLowerCase();
-      const matches = all.filter((v) => !q || v.value.toLowerCase().includes(q));
+      const matches = found();
       const shown = matches.slice(0, 300);
       // A note under the list: no matches, or a list cut short, so the values past the cap are known to exist.
       const note = !shown.length ? 'No matches' : shown.length < matches.length ? `Showing ${shown.length} of ${matches.length} values. Type to find the rest` : null;
@@ -635,8 +637,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       grid.focus();
     };
     const actions = el('div.filter-actions', {},
-      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = true; for (const v of all) selected.add(v.value); render(); } }, 'Select all'),
-      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = true; selected.clear(); render(); } }, 'Clear'),
+      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = true; for (const v of found()) selected.add(v.value); render(); } }, 'Select all'),
+      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = true; for (const v of found()) selected.delete(v.value); render(); } }, 'Clear'),
       el('div.grow'),
       el('button.btn.btn-primary.btn-sm', { type: 'button', onclick: apply }, 'Apply'));
 
@@ -1041,16 +1043,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
    * all or nothing, rather than the other ranges done and that one not.
    * The workbook's notice has named the cell then, and null says so.
    */
-  function eachRange(label, fn, { cap = true, skipRows = false, what = undefined, nativeScope = false } = {}) {
+  function eachRange(label, fn, { cap = true, skipRows = false, what = undefined, nativeScope = false, contents = false } = {}) {
     const { sheetId, ranges: selected } = styleTarget();
     const ranges = selected.map((rg) => (cap ? formatRange(rg, what) : rg));
     const runs = ranges.flatMap((rg) => shownRuns(rg, sheetId));
-    if (runs.some((rg) => wb.lockedIn(sheetId, nativeScope ? { ...rg,
-      ...(['columns', 'sheet'].includes(rg.scope) ? { r1: 0, r2: MAX_ROW } : {}),
-      ...(['rows', 'sheet'].includes(rg.scope) ? { c1: 0, c2: MAX_COL } : {}),
-    } : rg))) return null;
     const hidden = wb.sheet(sheetId)?.filterHidden;
     const skipRow = hidden?.size ? (r) => hidden.has(r) : null;
+    // Emptying cells (contents) is refused only by the cells it would change: on a protected sheet the unlocked ones may be emptied.
+    if (runs.some((rg) => (contents ? wb.contentsLockedIn(sheetId, rg, skipRow) : wb.lockedIn(sheetId, nativeScope ? { ...rg,
+      ...(['columns', 'sheet'].includes(rg.scope) ? { r1: 0, r2: MAX_ROW } : {}),
+      ...(['rows', 'sheet'].includes(rg.scope) ? { c1: 0, c2: MAX_COL } : {}),
+    } : rg)))) return null;
     const calls = skipRows ? ranges.map((rg) => () => fn(rg, skipRow, sheetId)) : runs.map((rg) => () => fn(rg, null, sheetId));
     if (!calls.length) return undefined;
     if (calls.length === 1) return calls[0]();
@@ -1078,26 +1081,35 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   function clearRulesAndMerges() {
     const { sheetId: sid, ranges } = styleTarget();
     const runs = ranges.flatMap((rg) => shownRuns(rg, sid));
-    clearRules(wb, sid, runs);
+    // Each grouped sheet loses its own rules there, as the clearing takes each one's formatting (unmerging already
+    // reaches the group): the active sheet's alone went, the others' highlights staying on their cleared cells.
+    for (const id of wb.sheetGroup?.includes(sid) ? wb.sheetGroup : [sid]) if (wb.sheet(id)?.kind !== 'chart') clearRules(wb, id, runs);
     for (const rg of runs) wb.unmergeCells(sid, rg);
   }
 
-  /** Remove the notes, or the links, of the selected cells: only cells that have one are visited. */
+  /**
+   * Remove the notes, or the links, of the selected cells shown: only cells that have one are visited. Grouped sheets each
+   * lose their own, as Clear takes each one's contents: the active sheet's alone were cleared, the others' left.
+   */
   function clearInSelection(kind) {
-    const sheet = wb.sheet(grid.sheetId);
-    if (!sheet) return;
-    const inside = (r, c) => grid.ranges.some((rg) => r >= rg.r1 && r <= rg.r2 && c >= rg.c1 && c <= rg.c2);
-    if (kind === 'notes') {
-      for (const key of [...sheet.notes.keys()]) {
-        const { r, c } = parseKey(key);
-        if (inside(r, c)) wb.setNote(sheet.id, r, c, null);
+    // The rows a filter hides are left alone, as clearing their contents leaves them: a hidden row lost its note.
+    const hidden = wb.sheet(grid.sheetId)?.filterHidden;
+    const inside = (r, c) => !hidden?.has(r) && grid.ranges.some((rg) => r >= rg.r1 && r <= rg.r2 && c >= rg.c1 && c <= rg.c2);
+    for (const id of wb.sheetGroup || [grid.sheetId]) {
+      const sheet = wb.sheet(id);
+      if (!sheet || sheet.kind === 'chart') continue;
+      if (kind === 'notes') {
+        for (const key of [...sheet.notes.keys()]) {
+          const { r, c } = parseKey(key);
+          if (inside(r, c)) wb.setNote(sheet.id, r, c, null);
+        }
+        comments.clearIn(sheet.id, inside);
+        continue;
       }
-      comments.clearIn(sheet.id, inside);
-      return;
-    }
-    for (const key of [...sheet.cells.keys()]) {
-      const { r, c } = parseKey(key);
-      if (inside(r, c) && wb.linkAt(sheet.id, r, c)) wb.removeLink(sheet.id, r, c);
+      for (const key of [...sheet.cells.keys()]) {
+        const { r, c } = parseKey(key);
+        if (inside(r, c) && wb.linkAt(sheet.id, r, c)) wb.removeLink(sheet.id, r, c);
+      }
     }
   }
 
@@ -1200,7 +1212,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       const texts = [];
       for (let r = run.r1; r <= run.r2; r++) {
         const cell = wb.getCell(sheetId, r, rg.c1);
-        if (cell && cell.f == null && typeof cell.v === 'string') texts.push({ r, v: cell.v });
+        const v = splitSourceText(cell, typeof cell?.v === 'number' ? wb.styleAt(sheetId, r, rg.c1) : cell?.s);
+        if (v != null) texts.push({ r, v });
       }
       if (!texts.length) continue;
       let delim = delimiter;
@@ -1336,6 +1349,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const sheet = wb.sheet(sid);
     return { rows: Math.max(sheet?.rows || 0, MAX_ROWS), cols: Math.max(sheet?.cols || 0, MAX_COLS) };
   };
+  /**
+   * Does a range take whole columns (axis 'col') or whole rows, as the grid judges them: running the grid's whole
+   * height or width. A block that merely ends on the last line laid out so far (row 100 of a new sheet) does not.
+   */
+  const wholeLines = (rg, axis, sid = grid.sheetId) => {
+    const b = sheetLimits(sid);
+    return axis === 'col' ? rg.r1 === 0 && rg.r2 >= b.rows - 1 : rg.c1 === 0 && rg.c2 >= b.cols - 1;
+  };
 
   /**
    * Why the workbook would not shift a block of cells aside, so the notice names what happened instead of
@@ -1441,7 +1462,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const used = wb.usedRange(grid.sheetId);
     let n = 0;
     for (const rg of grid.ranges) {
-      const box = cmd === 'fillDown' || cmd === 'fillRight' || !used ? rg
+      const box = cmd === 'fillDown' || cmd === 'fillRight' ? toUsedExtent(rg) : !used ? rg
         : { r1: Math.max(rg.r1, used.r1), c1: Math.max(rg.c1, used.c1), r2: Math.min(rg.r2, used.r2), c2: Math.min(rg.c2, used.c2) };
       if (box.r2 >= box.r1 && box.c2 >= box.c1) n += (box.r2 - box.r1 + 1) * (box.c2 - box.c1 + 1);
     }
@@ -1820,7 +1841,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
             value: String(ctx.style().rot || 0), confirmLabel: 'Rotate',
             validate: (v) => (/^-?\d{1,2}$/.test(v.trim()) && Math.abs(Number(v)) <= 90 ? null : 'Enter a whole number from -90 to 90'),
           });
-          if (text == null) return;
+          if (text == null) { keepFocus(); return; }
           deg = Number(text);
         }
         deg = Math.max(-90, Math.min(90, Math.round(Number(deg) || 0)));
@@ -1984,7 +2005,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       case 'clear':
         if (grid.editing) return;
-        eachRange('Clear', (rg, skipRow) => wb.clearRange(sheetId, rg, { contents: true, skipRow }), { cap: false, skipRows: true });
+        eachRange('Clear', (rg, skipRow) => wb.clearRange(sheetId, rg, { contents: true, skipRow }), { cap: false, skipRows: true, contents: true });
         keepFocus();
         return;
       case 'insertRows': {
@@ -1992,7 +2013,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!oneRange('insert rows')) return;
         const r = grid.range;
         // Whole columns selected: one row goes in at the active cell, not a sheet's worth.
-        const wholeCols = r.r1 === 0 && r.r2 >= wb.sheet(sheetId).rows - 1;
+        const wholeCols = wholeLines(r, 'col', sheetId);
         const n = wholeCols ? 1 : r.r2 - r.r1 + 1;
         const at = wholeCols ? grid.active.r + (arg === 'above' ? 0 : 1) : arg === 'above' ? r.r1 : r.r2 + 1;
         const before = selectionSnapshot();
@@ -2015,7 +2036,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!committed()) return;
         if (!oneRange('insert columns')) return;
         const r = grid.range;
-        const wholeRows = r.c1 === 0 && r.c2 >= wb.sheet(sheetId).cols - 1;
+        const wholeRows = wholeLines(r, 'row', sheetId);
         const n = wholeRows ? 1 : r.c2 - r.c1 + 1;
         const at = wholeRows ? grid.active.c + (arg === 'left' ? 0 : 1) : arg === 'left' ? r.c1 : r.c2 + 1;
         const before = selectionSnapshot();
@@ -2119,7 +2140,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // and whole columns are read for one as the sort dialog reads them; an
         // explicit selection keeps its first row only when that text row sits
         // over typed values, so a plain list of names sorts whole.
-        const wholeCols = range.r1 === 0 && range.r2 >= sheet.rows - 1;
+        const wholeCols = wholeLines(range, 'col', sheetId);
         // A toolbar click leaves the focus on its button: the grid takes it back once the command is done.
         let widened = false;
         if (single || wholeCols) {
@@ -2178,8 +2199,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // A group is one run of lines: several ranges are refused rather than the last one added grouped.
         if (!oneRange(cmd === 'group' ? 'group rows or columns' : 'ungroup rows or columns')) return;
         const r = grid.range;
-        const sheet = wb.sheet(sheetId);
-        const wholeCols = r.r1 === 0 && r.r2 >= sheet.rows - 1 && !(r.c1 === 0 && r.c2 >= sheet.cols - 1);
+        const wholeCols = wholeLines(r, 'col', sheetId) && !wholeLines(r, 'row', sheetId);
         const axis = arg === 'col' || arg === 'row' ? arg : wholeCols ? 'col' : 'row';
         const from = axis === 'row' ? r.r1 : r.c1;
         const to = axis === 'row' ? r.r2 : r.c2;
@@ -2206,6 +2226,12 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (arg) wb.toggleGroup(sheetId, arg.axis, arg.from, arg.to, arg.level);
         keepFocus();
         return;
+      case 'outlineLevel':
+        // The level buttons in the corner: the lines down to that level shown, the detail below it hidden.
+        if (!committed()) return;
+        if (arg) wb.showOutlineLevel(sheetId, arg.axis === 'col' ? 'col' : 'row', arg.level);
+        keepFocus();
+        return;
       case 'freeze': {
         // The entry goes in first, as for the other commands on lines: a formula showing another sheet to pick
         // references on froze that sheet, at the selection there.
@@ -2214,8 +2240,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         const a = grid.active;
         const rg = grid.range;
         // Whole columns (or rows) selected: freeze up to the active cell, not a sheet's worth.
-        const wholeCols = rg.r1 === 0 && rg.r2 >= sheet.rows - 1;
-        const wholeRows = rg.c1 === 0 && rg.c2 >= sheet.cols - 1;
+        const wholeCols = wholeLines(rg, 'col', sheetId);
+        const wholeRows = wholeLines(rg, 'row', sheetId);
         let rows = sheet.frozenRows;
         let cols = sheet.frozenCols;
         const r0 = rows ? sheet.frozenOrigin?.r || 0 : 0;
@@ -2317,9 +2343,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       }
       case 'editTableById': {
         // From the names manager: switch to the table's sheet, select it, and open its dialog.
+        // A very hidden sheet is not shown from the user interface, as in Excel; a hidden one the protected
+        // structure keeps hidden is not switched to, and the dialog must not open over the sheet in view.
         const t = wb.tableById(arg.sheetId, arg.id);
         if (!t) return;
+        const sheet = wb.sheet(arg.sheetId);
+        if (sheet.veryHidden) { toast(`${sheet.name} is very hidden, so its tables cannot be opened from here`, { icon: 'info', duration: 3500 }); return; }
         if (arg.sheetId !== wb.activeSheetId) wb.setActiveSheet(arg.sheetId);
+        if (arg.sheetId !== wb.activeSheetId) return;
         grid.setSelection(S.fromRange(t.range, { r: t.range.r1, c: t.range.c1 }));
         openTableDialog(ctx, { table: t });
         return;
@@ -2471,8 +2502,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!committed()) return;
         if (refusedByProtection('clear the outline')) return;
         const rg = grid.range;
-        const sheet = wb.sheet(sheetId);
-        const whole = (rg.r1 === rg.r2 && rg.c1 === rg.c2) || (rg.r1 === 0 && rg.c1 === 0 && rg.r2 >= sheet.rows - 1 && rg.c2 >= sheet.cols - 1);
+        const whole = (rg.r1 === rg.r2 && rg.c1 === rg.c2) || (wholeLines(rg, 'col', sheetId) && wholeLines(rg, 'row', sheetId));
         toast(clearOutline(wb, sheetId, whole ? null : rg) ? 'Outline cleared' : 'No outline here to clear', { icon: 'info' });
         keepFocus();
         return;
@@ -2539,7 +2569,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
             { separator: true },
             { label: 'Custom…', onSelect: async () => {
               const d = await promptDialog({ title: 'Split text', label: 'Separator', value: '', confirmLabel: 'Split', validate: (v) => (v.length ? null : 'Enter a separator') });
-              if (d != null) run('splitText', d);
+              if (d != null) run('splitText', d); else keepFocus();
             } },
             { label: 'Text to Columns…', icon: 'textToColumns', onSelect: () => run('splitTextDialog') },
           ],
@@ -2678,8 +2708,11 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
           value: String(current), confirmLabel: 'Resize',
           validate: (v) => (/^\d+$/.test(v) && Number(v) >= min && Number(v) <= max ? null : `Enter a number from ${min} to ${max}`),
         });
-        if (text == null) return;
+        // Cancelled, the keyboard goes back to the sheet as after a size given, not to the ribbon button that asked.
+        if (text == null) { keepFocus(); return; }
         const px = Number(text);
+        // Every row (or column) of the sheet: its default size, not a size of their own for a million rows.
+        if (wholeLines(r, isCol ? 'row' : 'col', sheetId)) { wb.setDefaultLineSize(sheetId, isCol ? 'col' : 'row', px); keepFocus(); return; }
         wb.transaction(isCol ? 'Resize columns' : 'Resize rows', () => {
           for (let i = from; i <= to; i++) {
             if (isCol) wb.setColWidth(sheetId, i, px);
@@ -2704,9 +2737,13 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // Every selected range (Ctrl/Cmd+click adds ranges) fills from its own first row or column, as one undo step.
         // A protected cell in any of them refuses the whole fill up front (the workbook's notice names it), as one
         // range holding such a cell is refused whole: all or nothing, not the other ranges filled and that one not.
-        if (grid.ranges.some((rg) => wb.lockedIn(sheetId, rg))) { keepFocus(); return; }
+        // Whole columns (or rows) fill down (or right) as far as the sheet's content goes, as the data commands take
+        // them: a million copies of the first row took a gigabyte for one column, and ran the page out of memory for a
+        // sheet selected whole with Ctrl+A. Up and left fill from the far end of the range, which clipping would move.
+        const ranges = cmd === 'fillDown' || cmd === 'fillRight' ? grid.ranges.map((rg) => toUsedExtent(rg, sheetId)) : grid.ranges;
+        if (ranges.some((rg) => wb.lockedIn(sheetId, rg))) { keepFocus(); return; }
         const direction = { fillDown: 'down', fillRight: 'right', fillUp: 'up', fillLeft: 'left' }[cmd];
-        wb.transaction('Fill', () => { for (const rg of grid.ranges) wb.fillDirection(sheetId, rg, direction); });
+        wb.transaction('Fill', () => { for (const rg of ranges) wb.fillDirection(sheetId, rg, direction); });
         keepFocus();
         return;
       }
@@ -2932,7 +2969,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
           return;
         }
         if (grid.editing) { insertFunction(name); return; }
-        if (refusedByProtection('enter a formula')) return;
+        // A locked cell refuses the formula as it refuses one typed (an unlocked one on a protected sheet takes it).
+        if (wb.lockedAt(sheetId, grid.active.r, grid.active.c)) return;
         rememberFunction(name);
         openFunctionArgumentsDialog(ctx, name, { apply: (call) => { if (grid.beginEdit({ text: `=${call}`, mode: 'inplace' }) !== false) grid.commitEdit(); keepFocus(); } });
         return;
@@ -2942,7 +2980,6 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // the editor opens with =SUM( so a range can be picked. Mid-edit the
         // chord inserts SUM( at the caret, never a formula into the cell behind.
         if (grid.editing) { insertFunction('SUM'); return; }
-        if (refusedByProtection('add a sum')) return;
         const { r, c } = grid.active;
         const isNum = (rr, cc) => typeof wb.getValue(sheetId, rr, cc) === 'number';
         let rr = r - 1;
@@ -3232,9 +3269,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       }
       case 'viewMode':
-        // Normal, Page Layout or Page Break Preview, for the sheet in view (each sheet keeps its own and saves it).
-        if (wb.sheet(grid.sheetId)?.kind === 'chart' || (grid.editing && !grid.commitEdit())) return;
-        wb.setSheetViewMode(grid.sheetId, arg === 'pageBreak' || arg === 'pageLayout' ? arg : 'normal');
+        // Normal, Page Layout or Page Break Preview, for the sheet in view (each sheet keeps its own and saves it), and
+        // for every grouped worksheet, as Excel switches the group.
+        if (wb.sheet(grid.sheetId)?.kind === 'chart' || !committed()) return;
+        for (const id of settingSheets()) wb.setSheetViewMode(id, arg === 'pageBreak' || arg === 'pageLayout' ? arg : 'normal');
         refreshPageView(true);
         notify(); keepFocus();
         return;
@@ -3405,13 +3443,21 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // Shapes and icons go on the sheet as pictures at the active cell, each beside the last, the newest selected.
         if (!committed() || refusedByProtection('insert a picture')) return;
         const pictures = cmd === 'insertShape' ? [shapeSvg(arg)] : (Array.isArray(arg) ? arg : [arg]).map((n) => iconSvg(n));
+        // Each is anchored to the cell its own corner lies in, so it moves with that cell's column as the columns
+        // before it come and go, rather than with the active cell's, several columns to its left.
         let dx = 4, id = null;
+        const placed = pictures.filter(Boolean).map((p) => {
+          const col = placeAlong((c) => wb.colWidth(sheetId, c), MAX_COL + 1, grid.active.c, dx, 1);
+          dx += p.w + 8;
+          return { p, c: col.index, dx: col.offset };
+        });
+        const sheet = wb.sheet(sheetId), last = Math.max(grid.active.c, ...placed.map((at) => at.c));
+        if (last >= sheet.cols) wb.ensureSize(sheetId, sheet.rows, last + 1);
         wb.transaction(cmd === 'insertShape' ? 'Insert shape' : 'Insert icons', () => {
-          for (const p of pictures.filter(Boolean)) {
+          for (const { p, c, dx: offset } of placed) {
             // A shape stretches to any proportions as it is resized, as Excel's do; an icon keeps its own.
-            id = wb.addChart(sheetId, { type: 'image', src: svgDataUrl(p.svg), title: p.label || 'Icon', anchor: { ...grid.active }, dx, dy: 4, w: p.w, h: p.h,
+            id = wb.addChart(sheetId, { type: 'image', src: svgDataUrl(p.svg), title: p.label || 'Icon', anchor: { r: grid.active.r, c }, dx: offset, dy: 4, w: p.w, h: p.h,
               ...(cmd === 'insertShape' ? { lockAspect: false } : {}) }) || id;
-            dx += p.w + 8;
           }
         });
         if (id) grid.selectChart(id);
@@ -3419,14 +3465,13 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       }
       case 'symbolDialog':
         // Mid-entry the symbol goes in at the caret, on the entry's own sheet, whatever sheet is showing.
-        if (!grid.editing && refusedByProtection('insert a symbol')) return;
+        if (!grid.editing && wb.lockedAt(sheetId, grid.active.r, grid.active.c)) return;
         openSymbolDialog(ctx);
         return;
       case 'insertSymbol': {
         // Insert ▸ Symbol: at the caret of the entry being typed, or at the end of the active cell's contents in a new edit.
         if (!arg) return;
         if (grid.editing) { grid.insertText(String(arg)); grid.focusEditor(); return; }
-        if (refusedByProtection('insert a symbol')) return;
         const cell = wb.getCell(sheetId, grid.active.r, grid.active.c);
         const current = cell?.f != null ? `=${cell.f}` : cell?.v != null ? wb.getDisplay(sheetId, grid.active.r, grid.active.c) : '';
         grid.beginEdit({ text: `${current}${arg}`, mode: 'inplace' });
@@ -3437,7 +3482,6 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // nothing typed yet starts a formula with it, as a function picked there does.
         if (!arg) return;
         if (grid.editing) { grid.insertText(`${grid.editState?.text ? '' : '='}${arg}`); grid.focusEditor(); return; }
-        if (refusedByProtection('enter a formula')) return;
         grid.beginEdit({ text: `=${arg}`, mode: 'inplace' });
         return;
       }
@@ -3489,7 +3533,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!committed() || !arg || typeof arg !== 'object') return;
         wb.transaction('Page setup', () => {
           for (const id of settingSheets()) {
-            const current = wb.sheet(id).printSettings || normalizePrintSettings({});
+            const current = effectivePrintSettings(wb.sheet(id));
             wb.setPrintSettings(id, { ...current, ...arg, margins: { ...current.margins, ...(arg.margins || {}) } });
           }
         });
@@ -3514,7 +3558,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
           statusBar?.announce('Page break removed');
         } else {
           const next = insertBreaks(settings, at);
-          if (!wb.setPageBreaks(sheetId, next, 'Insert page break')) { toast('A page already starts at the selected cell', { icon: 'info' }); keepFocus(); return; }
+          // A sheet without a page setup of its own takes the one it prints with, the break added.
+          const placed = sheet.printSettings ? wb.setPageBreaks(sheetId, next, 'Insert page break')
+            : wb.setPrintSettings(sheetId, { ...effectivePrintSettings(sheet), rowBreaks: next.rows, colBreaks: next.cols }, 'Insert page break');
+          if (!placed) { toast('A page already starts at the selected cell', { icon: 'info' }); keepFocus(); return; }
           statusBar?.announce('Page break inserted');
         }
         refreshPageView(true);
@@ -3536,7 +3583,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!arg) return;
         const sheet = wb.sheet(grid.sheetId), area = pageBreaks(wb, grid.sheetId)?.area;
         if (!sheet || !area) return;
-        const current = sheet.printSettings || normalizePrintSettings({});
+        const current = effectivePrintSettings(sheet);
         const next = moveAreaEdge(area, arg.edge, arg.to);
         wb.setPrintSettings(grid.sheetId, { ...current, areas: [next, ...current.areas.slice(1)] }, 'Print area');
         statusBar?.announce(`Print area set to ${selectionName(next)}`);
@@ -3560,7 +3607,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!committed()) return;
         const sheet = wb.sheet(sheetId);
         if (sheet.kind === 'chart') return;
-        const current = sheet.printSettings || normalizePrintSettings({});
+        const current = effectivePrintSettings(sheet);
         if (arg === 'clear') {
           if (!current.areas.length) { toast('There is no print area to clear', { icon: 'info' }); keepFocus(); return; }
           wb.setPrintSettings(sheetId, { ...current, areas: [] });
@@ -3773,8 +3820,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       case 'showDetail': case 'hideDetail': {
         if (!committed()) return;
-        const sheet = wb.sheet(sheetId), rg = grid.range;
-        const wholeColumns = rg.r1 === 0 && rg.r2 >= sheet.rows - 1 && !(rg.c1 === 0 && rg.c2 >= sheet.cols - 1);
+        const rg = grid.range;
+        const wholeColumns = wholeLines(rg, 'col', sheetId) && !wholeLines(rg, 'row', sheetId);
         if (!toggleDetail(wb, sheetId, { active: grid.active, wholeColumns }, cmd === 'showDetail')) toast(`No outline group to ${cmd === 'showDetail' ? 'show' : 'hide'} here`, { icon: 'info' });
         keepFocus();
         return;
@@ -4687,6 +4734,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     }
     e.preventDefault();
     if (wb.sheet(grid.sheetId)?.kind === 'chart') { statusBar?.announce('Choose a worksheet to paste cells'); return; }
+    if (pasteBehindObject()) { grid.consumePlainPaste(); return; }
     pasteAndOffer(text, html, grid.consumePlainPaste() ? 'values' : 'all');
   }
 
@@ -4759,6 +4807,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     return body !== '' && !/[\t\r\n]/.test(body);
   }
 
+  /** The rows and columns a paste of the clipboard writes once (transposed, when it is), or null when its text does not say. */
+  function pastedBlock(text, internal, transpose) {
+    const rows = internal ? clip.cells : text ? parseClipboard(text) : null;
+    const h = rows?.length || 0, w = h ? clipboardWidth(rows) : 0;
+    if (!h || !w) return null;
+    return transpose ? { h: w, w: h } : { h, w };
+  }
+
   function applyPaste(text, options = {}) {
     if (wb.sheet(grid.sheetId)?.kind === 'chart') { statusBar?.announce('Choose a worksheet to paste cells'); return; }
     if (!oneRange('paste into')) return; // a paste lands in one range; several selected would take it in the last alone
@@ -4779,7 +4835,20 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (whole.r2 >= MAX_ROW || whole.c2 >= MAX_COL) {
       const extent = wb.sheet(grid.sheetId), used = wb.usedRange(grid.sheetId);
       const reach = (lo, hi, max, size, usedEnd) => (hi >= max ? Math.max(lo, size - 1, usedEnd ?? lo) : hi);
-      const clipped = { ...whole, r2: reach(whole.r1, whole.r2, MAX_ROW, extent.rows, used?.r2), c2: reach(whole.c1, whole.c2, MAX_COL, extent.cols, used?.c2) };
+      let clipped = { ...whole, r2: reach(whole.r1, whole.r2, MAX_ROW, extent.rows, used?.r2), c2: reach(whole.c1, whole.c2, MAX_COL, extent.cols, used?.c2) };
+      // The block tiles only as it would over the whole lines, whose length is a multiple of it or not (Excel's rule),
+      // never because the part laid out so far is: column A's 50 rows copied onto column C went in twice over a new
+      // sheet's 100 rows. Tiling, the lines cut short take whole repeats; not tiling, the block goes in once.
+      const block = special.insert ? null : pastedBlock(text, internal, special.transpose);
+      if (block) {
+        const { h, w } = block;
+        const th = whole.r2 - whole.r1 + 1, tw = whole.c2 - whole.c1 + 1;
+        const limit = sheetLimits(grid.sheetId);
+        const repeat = (lo, hi, n, end) => Math.min(end - 1, lo + Math.ceil((hi - lo + 1) / n) * n - 1);
+        clipped = th % h === 0 && tw % w === 0 && (th > h || tw > w)
+          ? { ...clipped, r2: repeat(clipped.r1, clipped.r2, h, limit.rows), c2: repeat(clipped.c1, clipped.c2, w, limit.cols) }
+          : { ...clipped, r2: Math.min(limit.rows - 1, clipped.r1 + h - 1), c2: Math.min(limit.cols - 1, clipped.c1 + w - 1) };
+      }
       grid.setSelection(S.fromRange(clipped, { ...grid.active }), { scroll: false });
     }
     const label = internal && clip.cut && mode === 'all' ? 'Move cells' : pasteLabel(special);
@@ -5162,6 +5231,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const read = await readClipboard();
     if (!read) return;
     if (read.picture) { insertPastedImage(read.picture); return; }
+    if (pasteBehindObject()) return;
     const external = !isInternal(read.text, read.html);
     const go = (paste) => { pasteAndOffer(read.text, read.html, paste); grid.focus(); };
     openPasteSpecialDialog({ external, onPaste: go, onPasteLink: () => go({ link: true }), onClose: () => keepFocus() });
@@ -5224,8 +5294,20 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const read = await readClipboard();
     if (!read) return;
     if (read.picture) { insertPastedImage(read.picture); return; }
+    if (pasteBehindObject()) return;
     pasteAndOffer(read.text, read.html, paste ?? mode ?? (valuesOnly ? 'values' : 'all'));
     grid.focus();
+  }
+
+  /**
+   * Cells pasted while a chart, picture or other object is selected would land in the cells selected behind it,
+   * out of sight (the chart's own data, just after inserting it): the paste is refused, and said so.
+   */
+  function pasteBehindObject() {
+    if (!grid.selectedChart) return false;
+    toast('Select the cells to paste into', { icon: 'info', duration: 2500 });
+    keepFocus();
+    return true;
   }
 
   /**
@@ -5490,6 +5572,22 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         target = { r, c: range.c1 };
       }
       if (!wb.canEnsureSize(grid.sheetId, target.r + 1, target.c + 1)) { toast('There is no room beside the selection for the result', { icon: 'info' }); return; }
+      // Several columns each get their own result in the row under them, as Excel's AutoSum gives each column its
+      // total: one =SUM(A1:C5) under the first column added the three columns together.
+      if (!acrossRow && arg.c1 < arg.c2) {
+        const totals = [];
+        for (let cc = arg.c1; cc <= arg.c2; cc++) totals.push({ r: target.r, c: cc, text: `=${name}(${rangeName({ ...arg, c1: cc, c2: cc })})` });
+        const empty = totals.every(({ r: tr, c: tc }) => { const cell = wb.getCell(grid.sheetId, tr, tc); return !cell || (cell.v == null && cell.f == null); });
+        if (empty) {
+          const row = { r1: target.r, c1: arg.c1, r2: target.r, c2: arg.c2 };
+          if (wb.lockedIn(grid.sheetId, row)) return;
+          if (totals.some(({ r: tr, c: tc, text }) => !allowedByRule(wb.validateInput(grid.sheetId, tr, tc, text)))) return;
+          wb.transaction(`Insert ${name}`, () => { for (const { r: tr, c: tc, text } of totals) wb.setInput(grid.sheetId, tr, tc, text); });
+          grid.setSelection(S.fromRange(row, { r: target.r, c: arg.c1 }));
+          grid.focus();
+          return;
+        }
+      }
       guess = rangeName(arg);
       const existing = wb.getCell(grid.sheetId, target.r, target.c);
       if (!existing || (existing.v == null && existing.f == null)) {
@@ -6343,7 +6441,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   const sheetViewMode = () => wb.sheet(grid.sheetId)?.viewMode || 'normal';
   const pageLayout = createPageLayout({
     wb, fileName: () => doc.name, filePath: () => printFolder(P.resolvedAbsolutePath(doc.path)), redraw: () => grid.redraw(), focusGrid: () => grid.focus(),
-    commit: (id, patch) => { wb.setPrintSettings(id, { ...(wb.sheet(id).printSettings || normalizePrintSettings({})), ...patch }); notify(); },
+    commit: (id, patch) => { wb.setPrintSettings(id, { ...effectivePrintSettings(wb.sheet(id)), ...patch }); notify(); },
   });
   let pageViewKey = null;
   let pageLayoutKey = null;

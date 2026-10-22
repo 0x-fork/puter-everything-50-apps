@@ -152,7 +152,7 @@ export const SAMPLE_SCRIPTS = [
 async function main(workbook) {
   const sheet = workbook.getActiveWorksheet();
   let range = workbook.getSelectedRange();
-  if (range.getCellCount() === 1) range = await sheet.getUsedRange();
+  if (range.getCellCount() === 1) range = await sheet.getUsedRange(true);
   if (!range) { console.log('The sheet is empty.'); return; }
   const values = await range.getValues();
   const seen = new Map();
@@ -197,7 +197,7 @@ async function main(workbook) {
     code: `/** Add a Total row under the data, summing every column of numbers. */
 async function main(workbook) {
   const sheet = workbook.getActiveWorksheet();
-  const used = await sheet.getUsedRange();
+  const used = await sheet.getUsedRange(true);
   if (!used) { console.log('The sheet is empty.'); return; }
   const values = await used.getValues();
   const first = used.getCell(0, 0);
@@ -232,7 +232,8 @@ async function main(workbook) {
   // Inside the formula's quotes, a double quote in a name is written twice: in the link and in the label alike.
   const quoted = (text) => text.replace(/"/g, '""');
   for (const sheet of workbook.getWorksheets()) {
-    if (sheet.getName() === name) continue;
+    // By the sheet found, not the name asked for: getWorksheet matches any case, so it may be "contents".
+    if (sheet.getName() === contents.getName()) continue;
     const target = "'" + sheet.getName().replace(/'/g, "''") + "'!A1";
     rows.push([\`=HYPERLINK("#\${quoted(target)}", "\${quoted(sheet.getName())}")\`, sheet.getVisible() ? 'Yes' : 'No']);
   }
@@ -253,14 +254,17 @@ async function main(workbook) {
     code: `/** Bold, shade and freeze the first row of the active sheet's data. */
 async function main(workbook) {
   const sheet = workbook.getActiveWorksheet();
-  const used = await sheet.getUsedRange();
+  const used = await sheet.getUsedRange(true);
   if (!used) { console.log('The sheet is empty.'); return; }
   const header = used.getRow(0);
   const format = header.getFormat();
   format.getFont().setBold(true);
   format.getFill().setColor('#e2e8f0');
   format.setBorder('bottom', { style: 'medium' });
-  sheet.freezeRows(used.getRowIndex() + 1);
+  // Panes hold at most 50 frozen rows: a header further down is styled, and left to scroll.
+  const rows = used.getRowIndex() + 1;
+  if (rows > 50) { console.log(\`Styled \${header.getAddress()}; it is too far down to freeze (at most 50 rows can be frozen).\`); return; }
+  sheet.freezeRows(rows);
   console.log(\`Styled \${header.getAddress()} and froze it.\`);
 }
 `,
@@ -272,13 +276,15 @@ async function main(workbook) {
     code: `/** Delete the rows of the data that hold nothing at all. */
 async function main(workbook) {
   const sheet = workbook.getActiveWorksheet();
-  const used = await sheet.getUsedRange();
+  const used = await sheet.getUsedRange(true);
   if (!used) { console.log('The sheet is empty.'); return; }
   const values = await used.getValues();
+  // A formula that shows nothing ("") still holds something: its row is not blank.
+  const formulas = await used.getFormulas();
   let removed = 0;
   // From the bottom up, so each deletion leaves the rows still to check where they were.
   for (let r = values.length - 1; r >= 0; r--) {
-    if (values[r].every((v) => v === null || v === '')) {
+    if (values[r].every((v) => v === null || v === '') && formulas[r].every((f) => f === null || f === '')) {
       used.getRow(r).getEntireRow().delete();
       removed++;
     }

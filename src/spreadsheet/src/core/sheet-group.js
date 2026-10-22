@@ -29,7 +29,7 @@ import { cellKey, parseKey } from './cell.js';
 /** Edits made again, with the same arguments, on every grouped sheet. */
 export const GROUP_REPEATED = [
   'insertRows', 'insertCols', 'deleteRows', 'deleteCols', 'deleteLines', 'insertCells', 'deleteCells',
-  'setColWidth', 'setRowHeight', 'mergeCells', 'unmergeCells', 'setHidden', 'groupLines', 'ungroupLines',
+  'setColWidth', 'setRowHeight', 'setDefaultLineSize', 'mergeCells', 'unmergeCells', 'setHidden', 'groupLines', 'ungroupLines',
   'applyStyle', 'applyBorders', 'toggleStyle', 'clearRange', 'transformText', 'pasteOperation', 'removeLink', 'formulasToValues',
   'fill', 'fillDirection', 'fillSeries',
 ];
@@ -54,7 +54,7 @@ export const GROUP_BLOCKED_COMMANDS = new Set([
   'insertSparklines', 'editSparkline', 'groupSparklines', 'clearSparklines',
   'insertChart', 'quickChart', 'chart', 'insertChartSheet', 'insertTextBox', 'smartArt', 'insertImage', 'insertImagePuter', 'insertImageUrl',
   'shapesMenu', 'insertShape', 'iconsDialog', 'insertIcons', 'wordArtMenu', 'insertEquation', 'drawTool',
-  'note', 'link', 'newComment', 'replyComment',
+  'note', 'deleteNote', 'link', 'newComment', 'replyComment', 'deleteComment',
   'protectSheet', 'protectRanges', 'freeze', 'split', 'renameSheet', 'moveOrCopySheet', 'copySheetTo', 'duplicateSheet',
   'dataForm', 'autoOutline', 'clearOutline', 'outlineSettings',
 ]);
@@ -79,6 +79,23 @@ function styleChanges(prev, next) {
   const out = new Map();
   for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (!sameValue(a[k], b[k])) out.set(k, b[k]);
   return out;
+}
+
+/** What the workbook says when it refuses an edit outright (see _locked, _arrayRefused). */
+const REFUSALS = new Set(['protected', 'array-edit', 'pivot-edit', 'merge-paste']);
+
+/**
+ * Run `fn`, an edit of sheet `sheetId`, and tell whether the workbook refused it there: it said so for that sheet
+ * and changed nothing. Some edits (Clear, the fill handle) say a refusal without returning false.
+ */
+function refusable(wb, sheetId, fn) {
+  let said = false;
+  const hear = (e) => { if (REFUSALS.has(e.detail?.type) && e.detail.sheetId === sheetId) said = true; };
+  const version = wb.version;
+  wb.addEventListener('change', hear);
+  let result;
+  try { result = fn(); } finally { wb.removeEventListener('change', hear); }
+  return { result, refused: said && wb.version === version };
 }
 
 /**
@@ -171,8 +188,8 @@ export function installSheetGroups(Workbook) {
       const locked = others.map((id) => this.sheet(id)).find((sheet) => sheet?.protected);
       if (locked) { this._locked(locked); return false; }
       return this.transaction(groupLabel(name), () => this._withoutGroup(() => {
-        const result = original.call(this, sheetId, ...rest);
-        if (result === false) return result;
+        const { result, refused } = refusable(this, sheetId, () => original.call(this, sheetId, ...rest));
+        if (result === false || refused) return result;
         // A 3D reference over several of the grouped sheets follows the edit once, not once for each of them.
         const edited = [this.sheet(sheetId)?.name];
         for (const id of others) {
@@ -300,7 +317,7 @@ export function installSheetGroups(Workbook) {
 
 const LABELS = {
   insertRows: 'Insert rows', insertCols: 'Insert columns', deleteRows: 'Delete rows', deleteCols: 'Delete columns', deleteLines: 'Delete',
-  insertCells: 'Insert cells', deleteCells: 'Delete cells', setColWidth: 'Resize columns', setRowHeight: 'Resize rows', mergeCells: 'Merge cells', unmergeCells: 'Unmerge cells',
+  insertCells: 'Insert cells', deleteCells: 'Delete cells', setColWidth: 'Resize columns', setRowHeight: 'Resize rows', setDefaultLineSize: 'Resize', mergeCells: 'Merge cells', unmergeCells: 'Unmerge cells',
   setHidden: 'Hide', groupLines: 'Group', ungroupLines: 'Ungroup', applyStyle: 'Format', applyBorders: 'Borders', toggleStyle: 'Format', clearRange: 'Clear', removeLink: 'Remove link',
   setInput: 'Edit cell', pasteCells: 'Paste', pasteValues: 'Paste', pasteLiteralValues: 'Paste', pasteStyles: 'Paste formatting', pasteOperation: 'Paste',
   pasteEntries: 'Paste', fill: 'Fill', fillInput: 'Fill', fillDirection: 'Fill', fillSeries: 'Fill series', formulasToValues: 'Formulas to values', transformText: 'Change text',

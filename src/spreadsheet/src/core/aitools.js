@@ -30,6 +30,7 @@ import { upperName } from './formula/tokenizer.js';
 import { dataBounds } from './aiformula.js';
 import { cellFromInput } from './workbook.js';
 import { getThread } from './comments.js';
+import { tableRows } from './tables.js';
 
 /** A request the workbook refused, in words the model can act on. */
 export class ToolError extends Error {}
@@ -339,9 +340,9 @@ export function filledCells(wb, sheetId, range) {
   return n;
 }
 
-/** How many cells of a range have a note: the user's writing, as much as a value is. */
-function notesIn(wb, sheetId, range) {
-  const notes = wb.sheet(sheetId)?.notes;
+/** How many cells of a range have a note (or, with `kind` 'comments', a comment thread): the user's writing, as much as a value is. */
+function notesIn(wb, sheetId, range, kind = 'notes') {
+  const notes = wb.sheet(sheetId)?.[kind];
   if (!notes?.size) return 0;
   let n = 0;
   for (const key of notes.keys()) {
@@ -366,6 +367,28 @@ function spillsHit(wb, sheetId, range, writes = () => true) {
     if (!(inRange && writes(anchor.r, anchor.c))) anchors.set(cellKey(anchor.r, anchor.c), anchor);
   }
   return [...anchors.values()];
+}
+
+/**
+ * The table data cells, outside the block written, of the columns a write's formulas land in: a new formula typed into
+ * a table's calculated column is written down the whole column, as Excel overwrites it. Each with its formula now.
+ */
+function calculatedColumnCells(wb, sheetId, range, planned) {
+  const out = [];
+  const seen = new Set();
+  for (const { r, c, input } of planned) {
+    if (typeof input !== 'string' || !input.startsWith('=')) continue;
+    const table = wb.tableAt?.(sheetId, r, c);
+    if (!table || seen.has(`${table.id}|${c}`)) continue;
+    seen.add(`${table.id}|${c}`);
+    const rows = tableRows(table);
+    if (r < rows.dataStart || r > rows.dataEnd) continue;
+    for (let rr = rows.dataStart; rr <= rows.dataEnd; rr++) {
+      if (rr >= range.r1 && rr <= range.r2) continue;
+      out.push({ r: rr, c, f: wb.getCell(sheetId, rr, c)?.f ?? null });
+    }
+  }
+  return out;
 }
 
 /** What a write did to the spills it landed on, for the model: which formulas now show #SPILL!. */
@@ -407,7 +430,8 @@ function formulaLines(wb, sheetId, range, limit = 400) {
       run = null;
     };
     for (let r = range.r1; r <= range.r2; r++) {
-      const f = wb.getCell(sheetId, r, c)?.f;
+      // A formula the sheet's protection hides stays hidden from the model too, as from the formula bar.
+      const f = wb.formulaHiddenAt?.(sheetId, r, c) ? null : wb.getCell(sheetId, r, c)?.f;
       if (f == null) { flush(); continue; }
       if (run && r === run.r2 + 1 && shiftFormula(run.f, r - run.r1, 0) === f) { run.r2 = r; continue; }
       flush();
@@ -441,7 +465,9 @@ function formatLines(wb, sheetId, range, limit = 150) {
 function readRange(wb, args, env) {
   const { sheetId, range: asked } = resolveRange(wb, args.range, env.sheetId());
   const name = wb.sheet(sheetId).name;
-  const data = withinData(wb, sheetId, asked);
+  // Whole columns (or rows) from where their data begins: A:Z over data from row 300 read 96 empty rows from A1, each
+  // read "cut short" and pointing on to the next.
+  const data = dataOfLines(wb, sheetId, asked);
   if (!data) return `${qualified(wb, sheetId, asked)} is empty.`;
   const width = data.c2 - data.c1 + 1;
   const maxRows = Math.max(1, Math.floor(MAX_READ_CELLS / width));
@@ -449,7 +475,6 @@ function readRange(wb, args, env) {
   const lines = [`\t${Array.from({ length: shown.c2 - shown.c1 + 1 }, (_, i) => colName(shown.c1 + i)).join('\t')}`];
   let size = lines[0].length;
   for (let r = shown.r1; r <= shown.r2; r++) {
-    if (wb.isRowHidden?.(sheetId, r) && filledCells(wb, sheetId, { r1: r, c1: shown.c1, r2: r, c2: shown.c2 }) === 0) continue;
     const cells = [];
     for (let c = shown.c1; c <= shown.c2; c++) cells.push(clip(plain(wb.getDisplay(sheetId, r, c))));
     if (!cells.some((t) => t !== '')) continue;
@@ -540,9 +565,20 @@ function calculate(wb, args, env) {
   const long = typeof shown === 'string' && shown.length > MAX_CALC_TEXT;
   return {
     value: clipped(shown, MAX_CALC_TEXT),
-    ...(typeof value === 'number' ? { display: formatValue(value, {}) } : {}),
+    ...(typeof value === 'number' ? { display: formatValue(value, impliedStyle(wb, sheet.id, body)) } : {}),
     ...(long ? { note: `The text is ${shown.length.toLocaleString('en-US')} characters long; only the first ${MAX_CALC_TEXT.toLocaleString('en-US')} are shown.` } : {}),
   };
+}
+
+/**
+ * The format the result would show in, typed into a cell with none of its own: =MAX(B:B) over a column of dates reads
+ * as a date and =A2*B2 over prices as money, as on the sheet. Shown as a bare number, the latest order date came back
+ * as 45293, which the model was left to turn into a date itself or to report as it was.
+ */
+function impliedStyle(wb, sheetId, body) {
+  const cell = { f: body, s: null };
+  wb._applyImpliedStyle?.(sheetId, cell);
+  return cell.s || {};
 }
 
 function explainedError(wb, v) {
@@ -583,7 +619,7 @@ function find(wb, args) {
     keys.sort((a, b) => a.r - b.r || a.c - b.c);
     for (const { r, c } of keys) {
       const cell = sheet.cells.get(cellKey(r, c));
-      const hay = args.in_formulas ? (cell.f != null ? `=${cell.f}` : '') : wb.getDisplay(sheet.id, r, c);
+      const hay = args.in_formulas ? (cell.f != null && !wb.formulaHiddenAt?.(sheet.id, r, c) ? `=${cell.f}` : '') : wb.getDisplay(sheet.id, r, c);
       if (!hay || !fold(hay).includes(needle)) continue;
       if (matches.length >= MAX_FIND) { more = true; break; }
       matches.push({ cell: qualified(wb, sheet.id, { r1: r, c1: c, r2: r, c2: c }), text: clip(plain(hay), 120) });
@@ -601,10 +637,21 @@ function find(wb, args) {
 /* ---------- Writing ---------- */
 
 /** Refuse a change to cells the sheet or a protected range locks, before anything is written. */
-function assertWritable(wb, sheetId, range) {
+function assertWritable(wb, sheetId, range, { contents = false } = {}) {
   const sheet = wb.sheet(sheetId);
-  if (wb.isProtected(sheetId)) throw new ToolError(`${sheet.name} is protected. The user can unprotect it from the sheet tab's menu.`);
-  if (range && wb.isLockedIn(sheetId, range)) throw new ToolError(`Part of ${qualified(wb, sheetId, range)} is a protected range and cannot be changed.`);
+  // New contents for cells formatted as unlocked go in on a protected sheet (a form's fields), as the user types them.
+  const unlocked = contents && range && wb.isProtected(sheetId) && unlockedCells(wb, sheetId, range);
+  if (wb.isProtected(sheetId) && !unlocked) throw new ToolError(`${sheet.name} is protected. The user can unprotect it from the sheet tab's menu.`);
+  const inProtectedRange = (rg) => (sheet.protectedRanges || []).some(({ range: g }) => g.r1 <= rg.r2 && g.r2 >= rg.r1 && g.c1 <= rg.c2 && g.c2 >= rg.c1);
+  if (range && (unlocked ? inProtectedRange(normalizeRange(range)) : wb.isLockedIn(sheetId, range))) throw new ToolError(`Part of ${qualified(wb, sheetId, range)} is a protected range and cannot be changed.`);
+}
+
+/** Is every cell of a (writable-sized) range formatted as unlocked? */
+function unlockedCells(wb, sheetId, range) {
+  const { r1, c1, r2, c2 } = normalizeRange(range);
+  if ((r2 - r1 + 1) * (c2 - c1 + 1) > MAX_WRITE_CELLS) return false;
+  for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) if (wb.styleAt(sheetId, r, c)?.locked !== false) return false;
+  return true;
 }
 
 /** The errors a block's formulas now show, with the workbook's own explanation of each. */
@@ -670,33 +717,53 @@ function writeCells(wb, args, env) {
   const range = { r1: start.r1, c1: start.c1, r2: start.r1 + rows.length - 1, c2: start.c1 + width - 1 };
   if (rows.length * width > MAX_WRITE_CELLS) throw new ToolError(`At most ${MAX_WRITE_CELLS} cells per call; write in smaller blocks, or use fill_formula for a repeated formula.`);
   if (!wb.canEnsureSize(sheetId, range.r2 + 1, range.c2 + 1)) throw new ToolError('The block runs past the edge of the sheet.');
-  assertWritable(wb, sheetId, range);
+  assertWritable(wb, sheetId, range, { contents: true });
   if (wb.arrayEditBlocked(sheetId, range)) throw new ToolError(`${qualified(wb, sheetId, range)} crosses part of an array formula's result. Write around it, or replace the whole array.`);
   const refused = [];
   const planned = [];
   let reached = false;
+  let kept = 0;
+  const hidden = []; // cells under a merged cell's top-left one
   rows.forEach((row, i) => row.forEach((value, j) => {
     const input = inputFor(value);
     if (input === undefined) return;
     const r = range.r1 + i;
     const c = range.c1 + j;
+    // A merged cell shows its top-left cell alone: a value written under the rest of it would be stored where no one
+    // sees it, so those cells are left out, as a paste leaves them, and said to be.
+    const merge = wb.mergeAt?.(sheetId, r, c);
+    if (merge && (merge.r1 !== r || merge.c1 !== c)) {
+      if (input !== '') hidden.push(`${cellName(r, c)} (inside the merged cell ${rangeName(merge)}; write to ${cellName(merge.r1, merge.c1)})`);
+      return;
+    }
     const verdict = typeof input === 'string' ? wb.validateInput(sheetId, r, c, input) : wb.validateValue?.(sheetId, r, c, input) ?? { ok: true };
     if (!verdict.ok && verdict.rule?.strict !== false) { refused.push(`${cellName(r, c)} (${verdict.message || 'not allowed by its validation rule'})`); return; }
     if (typeof input === 'string' && input.startsWith('=') && reachesOut(wb, input.slice(1))) reached = true;
+    // A cell written back with what it already holds (a block the model read and rewrites) is left as it is: written
+    // again, it lost the link and the mixed formatting of its text that it had, though nothing was asked about.
+    const cell = wb.getCell(sheetId, r, c);
+    if (holds(cell) && (typeof input === 'string' ? keepsValue(wb, sheetId, r, c, cell, input) : cell.f == null && cell.v === input)) { kept++; return; }
     planned.push({ r, c, input });
   }));
-  if (!planned.length) throw new ToolError(refused.length ? `Nothing was written: ${refused.slice(0, 5).join('; ')}.` : 'Every value was null, so nothing was written.');
+  if (!planned.length && kept && !refused.length && !hidden.length) return { written: qualified(wb, sheetId, range), cells: 0, unchanged: kept };
+  if (!planned.length) throw new ToolError(refused.length || hidden.length ? `Nothing was written: ${[...refused, ...hidden].slice(0, 5).join('; ')}.` : 'Every value was null, so nothing was written.');
   const note = reachingNote(env, reached);
   const written = new Set(planned.filter(({ input }) => input !== '').map(({ r, c }) => cellKey(r, c)));
   const hit = spillsHit(wb, sheetId, range, (r, c) => written.has(cellKey(r, c)));
+  const column = calculatedColumnCells(wb, sheetId, range, planned);
   wb.ensureSize(sheetId, range.r2 + 1, range.c2 + 1);
   wb.transaction('AI edit', () => { for (const { r, c, input } of planned) writeOne(wb, sheetId, r, c, input); });
+  // The rows of a calculated column the write rewrote beyond its own block, which the model must know of.
+  const rewrote = column.filter(({ r, c, f }) => (wb.getCell(sheetId, r, c)?.f ?? null) !== f).map(({ r, c }) => cellName(r, c));
   const errors = formulaErrors(wb, sheetId, range);
   const blocked = blockedSpills(wb, sheetId, hit);
   return {
     written: qualified(wb, sheetId, range),
     cells: planned.length,
+    ...(kept ? { unchanged: kept } : {}),
     ...(refused.length ? { refused_by_validation: refused.slice(0, 10) } : {}),
+    ...(hidden.length ? { not_written_inside_merged_cells: hidden.slice(0, 10) } : {}),
+    ...(rewrote.length ? { calculated_column: `The formula went into a table's calculated column, so it was written to the column's other rows as well: ${rewrote.length} more cell${rewrote.length === 1 ? '' : 's'} (${rewrote.slice(0, 6).join(', ')}${rewrote.length > 6 ? ', …' : ''}).` } : {}),
     ...(errors.length ? { formula_errors: errors } : {}),
     ...(blocked.length ? { spills_blocked: blocked.slice(0, 8) } : {}),
     ...(note ? { note } : {}),
@@ -710,16 +777,30 @@ function fillFormula(wb, args, env) {
   const cells = (range.r2 - range.r1 + 1) * (range.c2 - range.c1 + 1);
   if (cells > MAX_WRITE_CELLS) throw new ToolError(`At most ${MAX_WRITE_CELLS} cells per call.`);
   try { parseFormula(text.slice(1)); } catch (e) { throw new ToolError(`The formula could not be read: ${e?.message || 'syntax error'}.`); }
-  assertWritable(wb, sheetId, range);
+  assertWritable(wb, sheetId, range, { contents: true });
   if (wb.arrayEditBlocked(sheetId, range)) throw new ToolError(`${qualified(wb, sheetId, range)} crosses part of an array formula's result.`);
   if (!wb.canEnsureSize(sheetId, range.r2 + 1, range.c2 + 1)) throw new ToolError('The range runs past the edge of the sheet.');
   const note = reachingNote(env, reachesOut(wb, text.slice(1)));
   const hit = spillsHit(wb, sheetId, range);
   wb.ensureSize(sheetId, range.r2 + 1, range.c2 + 1);
+  // The fill passes over rows a filter hides and the cells under a merged cell's top-left one, as the user's own fill
+  // does: the count says what was filled, and what was left out is said, or the model takes the column for complete.
+  const hiddenRows = wb.sheet(sheetId).filterHidden;
+  let filtered = 0, merged = 0;
+  for (let r = range.r1; r <= range.r2; r++) {
+    if (hiddenRows?.has(r)) { filtered++; continue; }
+    for (let c = range.c1; c <= range.c2; c++) if (wb._coveredByMerge?.(sheetId, r, c)) merged++;
+  }
+  const skipped = filtered * (range.c2 - range.c1 + 1) + merged;
   wb.transaction('AI edit', () => wb.fillInput(sheetId, range, text, { r: range.r1, c: range.c1 }));
   const errors = formulaErrors(wb, sheetId, range);
   const blocked = blockedSpills(wb, sheetId, hit);
-  return { filled: qualified(wb, sheetId, range), cells, ...(errors.length ? { formula_errors: errors } : {}), ...(blocked.length ? { spills_blocked: blocked.slice(0, 8) } : {}), ...(note ? { note } : {}) };
+  const left = [filtered && `${filtered} row${filtered === 1 ? '' : 's'} hidden by a filter`, merged && `${merged} cell${merged === 1 ? '' : 's'} inside merged cells`].filter(Boolean);
+  return {
+    filled: qualified(wb, sheetId, range), cells: cells - skipped,
+    ...(left.length ? { left_out: `${left.join(' and ')} ${skipped === 1 ? 'was' : 'were'} not filled, as a fill passes over them.` } : {}),
+    ...(errors.length ? { formula_errors: errors } : {}), ...(blocked.length ? { spills_blocked: blocked.slice(0, 8) } : {}), ...(note ? { note } : {}),
+  };
 }
 
 function clearRange(wb, args, env) {
@@ -785,6 +866,12 @@ function formatCells(wb, args, env) {
   const borders = args.borders;
   if (borders != null && !['all', 'outer', 'inner', 'none'].includes(borders)) throw new ToolError('borders must be all, outer, inner or none.');
   if (!Object.keys(patch).length && borders == null) throw new ToolError('No formatting was given.');
+  // Cells past the sheet's present size are formatted as written cells are: the sheet grows to them (a new sheet's 100
+  // rows formatted B95:B105 as far as B100 alone, and A150 not at all). Whole lines are formatted as lines, below.
+  if (!lineScope(range)) {
+    if (!wb.canEnsureSize(sheetId, range.r2 + 1, range.c2 + 1)) throw new ToolError('The range runs past the edge of the sheet.');
+    wb.ensureSize(sheetId, range.r2 + 1, range.c2 + 1);
+  }
   // Whole columns and rows are formatted as lines (the way the toolbar formats them), not cell by cell.
   wb.transaction('AI edit', () => {
     if (Object.keys(patch).length) wb.applyStyle(sheetId, range, patch);
@@ -1215,7 +1302,12 @@ export function describeCall(wb, name, args = {}, env) {
       const n = rows.reduce((sum, row) => sum + (Array.isArray(row) ? row.filter((v) => v !== null && v !== undefined).length : 0), 0);
       const writes = (r, c) => { const v = rows[r - range.r1]?.[c - range.c1]; return v !== null && v !== undefined && v !== ''; };
       const spills = range && start.s != null ? spillsHit(wb, start.s, range, writes).length : 0;
-      const detail = [replaced && `Replaces ${holding(replaced)}.`, spills && blocksSpills(spills)].filter(Boolean).join(' ');
+      // A formula into a table's calculated column may be written down the whole column: its other rows holding formulas are named.
+      const formulas = [];
+      if (range && start.s != null) rows.forEach((row, i) => (Array.isArray(row) ? row : []).forEach((v, j) => formulas.push({ r: range.r1 + i, c: range.c1 + j, input: v })));
+      const column = range && start.s != null ? calculatedColumnCells(wb, start.s, range, formulas).filter(({ f }) => f != null).length : 0;
+      const detail = [replaced && `Replaces ${holding(replaced)}.`, column && `It goes into a table's calculated column, so it may replace the formulas in ${plural(column, 'other row')} of that column too.`,
+        spills && blocksSpills(spills)].filter(Boolean).join(' ');
       return { label: `Write ${plural(n, 'cell')} to ${range ? qualified(wb, start.s, range) : start.text}`, destructive: !!detail, detail: detail || null };
     }
     case 'fill_formula': {
@@ -1246,8 +1338,9 @@ export function describeCall(wb, name, args = {}, env) {
       const data = range && range.r1 >= 0 ? filled(s, range) : 0;
       // The notes in them go too: removing a note on its own asks, and so does removing it with its row.
       const notes = range && range.r1 >= 0 ? notesIn(wb, s, range) : 0;
+      const threads = range && range.r1 >= 0 ? notesIn(wb, s, range, 'comments') : 0;
       const which = rows ? `row${n === 1 ? '' : 's'} ${lineNumber(args.start_row)}${n > 1 ? `–${lineNumber(args.start_row) + n - 1}` : ''}` : `column${n === 1 ? '' : 's'} ${String(args.start_column).toUpperCase()}${n > 1 && range ? `–${colName(range.c2)}` : ''}`;
-      const removes = [data && `${plural(data, 'cell')} of data`, notes && plural(notes, 'note')].filter(Boolean);
+      const removes = [data && `${plural(data, 'cell')} of data`, notes && plural(notes, 'note'), threads && plural(threads, 'comment thread')].filter(Boolean);
       return { label: `Delete ${which} on ${sheetName(args.sheet)}`, destructive: removes.length > 0, detail: removes.length ? `Removes ${removes.join(' and ')}.` : null };
     }
     case 'sort_range': return { label: `Sort ${at(args.range).text}` };

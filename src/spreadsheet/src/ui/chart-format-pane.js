@@ -9,7 +9,7 @@
  */
 import { el, isComposing } from './dom.js';
 import { icon } from './icons.js';
-import { activeChart, isChartObject } from './chart-actions.js';
+import { activeChart, isChartObject, ringCountOf } from './chart-actions.js';
 import { elementLabel } from './chart-ribbon.js';
 import { chartData, chartTitles, CHART_DISPLAY_UNITS } from '../core/charts.js';
 import { chartElementPatch, dataLabelPositions, elementFormatPatch, isPieChart } from '../core/chart-design.js';
@@ -235,7 +235,7 @@ export function createChartUi(ctx) {
   let ownChange = false;
   const apply = (patch, label = 'Format chart') => { if (patch) { ownChange = true; ctx.run('chart', { action: 'patch', patch, label }); } };
   const controlKey = n => n?.getAttribute?.('aria-label') || (n?.closest?.('label') ? `label:${n.closest('label').textContent}` : n?.tagName === 'SUMMARY' ? `summary:${n.textContent}` : null);
-  const format = opts => { const chart = activeChart(ctx); if (chart) apply(elementFormatPatch(chart, paneKey, opts)); };
+  const format = opts => { const chart = activeChart(ctx); if (chart) apply(elementFormatPatch(chart, paneKey, { ...opts, rings: ringCountOf(ctx.wb, ctx.sheetId(), chart) })); };
 
   function section(title, ...content) {
     return el('details.chart-pane-section', { open: true }, el('summary', {}, title), el('div.chart-pane-fields', {}, ...content.flat().filter(Boolean)));
@@ -283,9 +283,19 @@ export function createChartUi(ctx) {
       xAxis: a.axisStyles?.x?.color, yAxis: a.axisStyles?.y?.color, y2Axis: a.axisStyles?.y2?.color,
       'gridlines-x': a.gridlineStyles?.x?.color, 'gridlines-y': a.gridlineStyles?.y?.color,
     };
-    const seriesColor = seriesIndex != null ? chart.colors?.[+seriesIndex] : null;
+    const lineWidths = {
+      chartArea: a.borderWidth, plotArea: a.plotStrokeWidth, xAxis: a.axisStyles?.x?.width, yAxis: a.axisStyles?.y?.width, y2Axis: a.axisStyles?.y2?.width,
+      'gridlines-x': a.gridlineStyles?.x?.width, 'gridlines-y': a.gridlineStyles?.y?.width,
+    };
+    // A slice shows its category's colour; a ring of a doughnut of several series, its own colour first.
+    const pointIndex = /^point:\d+:(\d+)$/.exec(key)?.[1];
+    const ringColor = pointIndex != null && chart.type === 'donut' && ringCountOf(ctx.wb, ctx.sheetId(), chart) > 1
+      ? (a.pointColors?.[+seriesIndex] || []).find(p => p.index === +pointIndex)?.color : null;
+    const seriesColor = pointIndex != null && isPieChart(chart) ? ringColor ?? chart.colors?.[+pointIndex] : seriesIndex != null ? chart.colors?.[+seriesIndex] : null;
     const fill = fills[key] ?? seriesColor;
     const line = lines[key] ?? (seriesIndex != null ? (isPieChart(chart) ? a.pie?.stroke : a.bars?.[+seriesIndex]?.stroke ?? a.lines?.[+seriesIndex]?.color) : null);
+    const seriesLine = a.lines?.[+seriesIndex] || a.lineDefault;
+    const width = lineWidths[key] ?? (seriesIndex != null ? (isPieChart(chart) ? a.pie?.strokeWidth : a.bars?.[+seriesIndex]?.strokeWidth ?? (lineOnly ? seriesLine?.width : null)) : null);
     const parts = [];
     if (!lineOnly && !/^(xTitle|yTitle|dataLabels)/.test(key)) {
       const kind = fill === 'none' ? 'none' : fill ? 'solid' : 'auto';
@@ -299,7 +309,9 @@ export function createChartUi(ctx) {
         choice(lineOnly && seriesIndex != null ? 'Line' : 'Border', kind, [['auto', 'Automatic'], ['none', lineOnly ? 'No line' : 'No line'], ['solid', 'Solid line']],
           v => format({ outline: v === 'none' ? 'none' : v === 'solid' ? (line && line !== 'none' ? line : '#595959') : null })),
         kind === 'solid' || (lineOnly && seriesIndex != null) ? color('Line Color', line && line !== 'none' ? line : '#4472c4', v => format({ outline: v })) : null,
-        number('Width (pt)', null, v => { if (v != null && v >= 0) format({ outlineWidth: Math.round(v * 4 / 3 * 100) / 100 }); }, { min: 0, max: 20, step: 0.25, placeholder: '' }));
+        // The width the line is drawn at, in points as Excel gives it; a title's or legend's border keeps no width of its own.
+        key === 'title' || key === 'legend' ? null : number('Width (pt)', Number.isFinite(width) ? Math.round(width * 3 / 4 * 100) / 100 : null,
+          v => { if (v != null && v >= 0) format({ outlineWidth: Math.round(v * 4 / 3 * 100) / 100 }); }, { min: 0, max: 20, step: 0.25, placeholder: '' }));
     }
     return parts.length ? section('Fill & Line', parts) : null;
   }
