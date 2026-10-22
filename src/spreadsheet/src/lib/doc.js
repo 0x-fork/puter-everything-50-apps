@@ -195,6 +195,8 @@ const draftMs = () => {
   return Number.isFinite(s) && s > 1 ? Math.min(s, 3600) * 1000 : 600;
 };
 export const UNTITLED = 'Untitled spreadsheet';
+/** What Save a copy answers when Puter's Save dialog was cancelled: nothing was written, and nothing is wrong. */
+export const CANCELLED = Symbol('cancelled');
 /** How long a shared workbook waits after its last change before its owner's browser writes the .xlsx file. */
 const SHARED_FILE_MS = 15_000;
 export const SIGN_IN_TO_SAVE = 'Sign in to Puter to save this spreadsheet';
@@ -372,6 +374,14 @@ export class Doc extends EventTarget {
 
   get isXlsxPath() {
     return !!this.path && /\.xlsx$/i.test(this.path);
+  }
+
+  /**
+   * Does the next save make a new file where the user picks it, in Puter's Save dialog (see P.asksWhereToSave)?
+   * A book with no file yet, or one opened from a file that is not an .xlsx, does inside the desktop.
+   */
+  get asksWhereToSave() {
+    return !this.collab && (!this.path || !this.isXlsxPath) && P.asksWhereToSave();
   }
 
   get fileName() {
@@ -609,6 +619,10 @@ export class Doc extends EventTarget {
       if (!auto) throw new Error(SHARED_FILE);
       return false;
     }
+    // A new file goes where the user puts it, which an AutoSave or a retry would ask unbidden: the edits wait in
+    // this browser's draft for Save, as they wait with AutoSave off.
+    const asked = this.asksWhereToSave;
+    if (asked && auto) return false;
     try {
       // A failed check cannot establish that overwriting is safe. Keep the
       // edits dirty and use the normal save-error/retry path in that case.
@@ -659,14 +673,17 @@ export class Doc extends EventTarget {
         // ("..", a lone space) would make the nameless dotfile ".xlsx": it is untitled instead.
         const base = this.path ? Doc.nameFor(this.path) : this.name;
         const fileName = P.ensureXlsx(P.sanitizeName(base) || UNTITLED);
-        // A file from elsewhere on the drive (a .csv double-clicked on the desktop, say) gets its .xlsx beside
-        // it, where whoever opened it looks for it; anything else gets one in the app folder.
-        dir = besideDir(this.path) ?? P.FOLDER;
-        target = dir === P.FOLDER ? `${P.FOLDER}/${await P.uniqueName(fileName)}` : `${dir}/${fileName}`;
-        // A first write whose answer was lost may have made its file all the same: that file is written again,
-        // rather than found taken and a second one made beside it.
-        const lost = this._lostWrite;
-        if (lost && await this._landed(lost)) ({ target, dir } = lost);
+        if (asked) target = fileName; // the name the dialog offers
+        else {
+          // A file from elsewhere on the drive (a .csv double-clicked on the desktop, say) gets its .xlsx beside
+          // it, where whoever opened it looks for it; anything else gets one in the app folder.
+          dir = besideDir(this.path) ?? P.FOLDER;
+          target = dir === P.FOLDER ? `${P.FOLDER}/${await P.uniqueName(fileName)}` : `${dir}/${fileName}`;
+          // A first write whose answer was lost may have made its file all the same: that file is written again,
+          // rather than found taken and a second one made beside it.
+          const lost = this._lostWrite;
+          if (lost && await this._landed(lost)) ({ target, dir } = lost);
+        }
       }
       // The book is encoded once per version: a retry after a failed write, or a save forced after a
       // conflict, sends the bytes already built instead of building the whole book again on the main thread.
@@ -679,7 +696,14 @@ export class Doc extends EventTarget {
       const reuse = fresh && target === this._lostWrite?.target;
       // Kept until a write is answered, for the retry to recognize (see _landed).
       const attempt = (at) => { this._lostWrite = blob.size <= COMPARE_MAX_BYTES ? { target: at, dir, blob } : null; };
-      try {
+      if (asked) {
+        // Puter's Save dialog writes the file where the user picks it, asking before it replaces one. Cancelled,
+        // nothing is written and the edits stay where they were, in the book and its draft.
+        written = await P.saveFileAs(blob, target);
+        if (!written) { this._setStatus(this.wb.dirty ? 'unsaved' : 'saved'); return false; }
+        target = written.path;
+        dir = target.slice(0, target.lastIndexOf('/'));
+      } else try {
         attempt(target);
         written = await P.writeFile(target, blob, { dedupe: fresh && !reuse });
       } catch (e) {
@@ -786,7 +810,8 @@ export class Doc extends EventTarget {
   async _saveVersion(label) {
     // Already inside the write queue; a first save must not enqueue itself. A CSV or other
     // foreign file gets its .xlsx first, so the snapshot lands in that file's history.
-    if (!this.path || !this.isXlsxPath) await this._doSave(false);
+    // The Save dialog cancelled (see asksWhereToSave), there is no file to keep a version of: null says so.
+    if (!this.path || !this.isXlsxPath) { if (!await this._doSave(false)) return null; }
     const blob = await workbookToXlsx(this.wb);
     const entry = await saveVersion(this.file, blob, label);
     this._lastVersionAt = entry.at;
@@ -940,7 +965,11 @@ export class Doc extends EventTarget {
     return moved;
   }
 
-  /** Save a copy under a new name in the app folder and switch to it. */
+  /**
+   * Save a copy and switch to it: where the user picks, in Puter's Save dialog, with `newName` offered (see
+   * P.asksWhereToSave); elsewhere under that name in the app folder. Resolves an error to show, null once
+   * saved, or CANCELLED.
+   */
   saveAs(newName) {
     return this._enqueueWrite(() => this._saveAs(newName));
   }
@@ -948,11 +977,14 @@ export class Doc extends EventTarget {
   async _saveAs(newName) {
     const clean = P.sanitizeName(newName).replace(/\.xlsx$/i, '');
     if (!clean) return 'Enter a name';
-    const target = `${P.FOLDER}/${clean}.xlsx`;
-    try {
-      if (await P.fileExists(target)) return 'A file with that name already exists';
-    } catch (e) {
-      return P.failureText(e, 'Could not save a copy');
+    const asked = P.asksWhereToSave();
+    let target = `${P.FOLDER}/${clean}.xlsx`;
+    if (!asked) {
+      try {
+        if (await P.fileExists(target)) return 'A file with that name already exists';
+      } catch (e) {
+        return P.failureText(e, 'Could not save a copy');
+      }
     }
     clearTimeout(this._timer);
     const version = this.wb.version;
@@ -960,7 +992,16 @@ export class Doc extends EventTarget {
     let written;
     try {
       const blob = await workbookToXlsx(this.wb);
-      written = await P.writeFile(target, blob, { overwrite: false });
+      if (asked) {
+        // The dialog writes the copy, asking before it replaces a file of that name.
+        written = await P.saveFileAs(blob, `${clean}.xlsx`);
+        if (!written) {
+          this._setStatus(this.wb.dirty ? 'unsaved' : 'saved');
+          if (this.wb.dirty) this._changed('cells');
+          return CANCELLED;
+        }
+        target = written.path;
+      } else written = await P.writeFile(target, blob, { overwrite: false });
       this.remoteModified = modifiedMs(written) ?? modifiedMs(await P.statFile(target).catch(() => null)) ?? Date.now();
       this.remoteSize = blob.size;
       this._written = blob.size <= COMPARE_MAX_BYTES ? blob : null;
@@ -978,7 +1019,7 @@ export class Doc extends EventTarget {
     this.uid = written?.uid || written?.id || null; // another file, with its own decision
     this.viewOnly = false; // the copy is the user's own
     this.roomFile = false;
-    this.name = clean;
+    this.name = asked ? Doc.nameFor(this.path) : clean; // the dialog may have been given another name
     this._lastVersionAt = undefined;
     this._moveDraft(oldKey);
     recordExternal({ path: this.path, uid: this.uid }, this._storageScope, this.wb.externalAllowed);

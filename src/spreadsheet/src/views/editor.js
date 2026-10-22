@@ -154,7 +154,7 @@ import { openShortcuts } from '../ui/shortcuts.js';
 import { session } from '../lib/session.js';
 import * as P from '../lib/puter.js';
 import { trackEvent } from '../lib/analytics.js';
-import { VIEW_ONLY, autoSaveEnabled } from '../lib/doc.js';
+import { VIEW_ONLY, CANCELLED, autoSaveEnabled } from '../lib/doc.js';
 import { cellName, colName, normalizeRange, rangeName, parseRange, parseCellRef, parseKey } from '../core/cell.js';
 import { parseRefText, selectionName, MAX_ROW, MAX_COL } from '../core/refs.js';
 import { formatValue, todaySerial, formatDate, fontStack, indentWidth, parseInput, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, cellCurrency, currencyDecimals, localeInfo, editText, hasDecimalPlaces } from '../core/format.js';
@@ -5660,6 +5660,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       if (!await session.signIn() || destroyed) return false;
       if (grid.editing && !grid.commitEdit()) return false;
     }
+    // A new file is saved where the user puts it, in Puter's Save dialog (see doc.asksWhereToSave). On the way
+    // out leaving is offered beside it, the draft keeping the edits: the dialog alone would be no way out but saving.
+    const asked = wb.dirty && doc.asksWhereToSave;
+    if (asked && leaving) {
+      if (abandoned) return true;
+      const choice = await unsavedLeaveDialog(doc.draftKept !== false);
+      if (destroyed) return false;
+      if (choice === 'leave') { abandoned = true; return true; }
+      if (choice !== 'save') { keepFocus(); return false; }
+      if (grid.editing && !grid.commitEdit()) return false;
+    }
     // This flush's own marker: "Overwrite with mine" and "Try again" run another flush, which installs
     // one of its own, and this one must leave that in place on the way out — cleared, the conflict that
     // flush's save raises lands in the dialog that cannot leave, after the navigation was already refused.
@@ -5669,7 +5680,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (leaving && abandoned && doc.hasPendingWrites) return true;
     try {
       if (leaving) leavingSave = mine;
-      let saved = await (leaving ? whileSaving(doc.save()) : doc.save());
+      // The Save dialog is the user's to take time over: no "Still saving" question is put while it is open.
+      let saved = await (leaving && !asked ? whileSaving(doc.save()) : doc.save());
       if (saved === LEAVE_NOW) { abandoned = true; return true; }
       if (saved === STAY) { keepFocus(); return false; }
       while (saved) {
@@ -5776,6 +5788,21 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     });
   }
 
+  /** A new spreadsheet, never saved, is left: save it (Puter's Save dialog asks where), keep editing, or leave (the local draft keeps the edits). */
+  function unsavedLeaveDialog(kept) {
+    return new Promise((resolve) => {
+      const content = el('div', {},
+        el('p.modal-text', {}, kept
+          ? `"${doc.name}" is not saved to Puter yet. Save it where you choose, or leave: your edits stay on this device, and can be recovered from Unsaved spreadsheets on the home screen.`
+          : `"${doc.name}" is not saved to Puter yet, and this browser could not keep a copy of it either. Save it where you choose, or leave and lose it.`),
+        el('div.row.row-end', { style: { flexWrap: 'wrap' } },
+          el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Keep editing'),
+          el(`button.btn${kept ? '' : '.btn-danger'}`, { type: 'button', onclick: () => { resolve('leave'); modal.close(); } }, kept ? 'Leave' : 'Leave without saving'),
+          el('button.btn.btn-primary', { type: 'button', onclick: () => { resolve('save'); modal.close(); } }, 'Save…')));
+      const modal = openModal({ title: 'Save before leaving?', content, onClose: () => resolve('stay') });
+    });
+  }
+
   /** The save failed on the way out: leave (the local draft keeps the edits), keep editing, or try again. */
   function saveFailedDialog(reason, kept) {
     return new Promise((resolve) => {
@@ -5852,14 +5879,15 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   async function saveAs() {
     if (grid.editing && !grid.commitEdit()) return;
     if (session.signedOut && (!await session.signIn() || destroyed)) return;
-    const name = await promptDialog({
+    // Inside Puter its Save dialog asks for the name and the folder; elsewhere the copy goes in the app folder, named here.
+    const name = P.asksWhereToSave() ? `${doc.name} copy` : await promptDialog({
       title: 'Save a copy', label: 'Name', value: `${doc.name} copy`, confirmLabel: 'Save copy',
       hint: `Saved to ${P.FOLDER}/ in your Puter cloud. You will continue in the copy.`,
       validate: (v) => (fileBaseName(v) ? null : 'Enter a name'),
     });
     if (name == null) return;
     const err = await doc.saveAs(name);
-    if (destroyed) return;
+    if (destroyed || err === CANCELLED) return;
     if (err) toast(err, { icon: 'alert' });
     else {
       toast('Copy saved', { icon: 'cloud' });
@@ -6138,7 +6166,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   // Beside the name while several sheets are grouped: what is typed lands on all of them.
   const groupBadge = el('span.doc-group-badge', { hidden: true, title: 'Several sheets are grouped: edits apply to each of them. Click a sheet outside the group, or right-click a tab, to ungroup.' }, '[Group]');
   // A plain status while signed in; without a session it is the button that starts the sign-in and the save.
-  const status = el('button.save-status', { type: 'button', 'aria-live': 'polite', disabled: true, onclick: () => { if (session.signedOut) run('save'); } });
+  const status = el('button.save-status', { type: 'button', 'aria-live': 'polite', disabled: true, onclick: () => { if (session.signedOut || doc.asksWhereToSave) run('save'); } });
   const searchBtn = el('button.icon-btn.desktop-only', { type: 'button', html: icon('search', 20), 'aria-label': 'Search the menus', title: `Search the menus (${MOD_KEY}+Shift+P)`, onclick: () => run('palette') });
   const avatar = el('button.icon-btn.user-btn', {
     type: 'button', 'aria-label': 'Account menu', 'aria-haspopup': 'menu',
@@ -6198,7 +6226,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       status.setAttribute('aria-label', noCopy ? 'Not saved, and this browser could not keep a copy. Sign in to Puter to save this spreadsheet' : 'Not saved. Sign in to Puter to save this spreadsheet');
       return;
     }
-    status.disabled = true;
+    // A new file waits for Save, which asks where it goes (see doc.asksWhereToSave): AutoSave does not write it,
+    // so the pill says it is not saved yet, rather than that changes are on their way, and is the Save.
+    const unplaced = doc.status === 'unsaved' && doc.asksWhereToSave;
+    status.disabled = !unplaced;
     status.removeAttribute('aria-label');
     const map = {
       saved: ['cloud', 'Saved'],
@@ -6211,6 +6242,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     };
     // Shared only to view: said at rest, and in place of a save that was refused (not while offline, which passes).
     if (doc.viewOnly && (doc.status === 'saved' || doc.status === 'error')) map[doc.status] = ['eye', doc.status === 'saved' ? 'View only' : 'View only · Not saved'];
+    if (unplaced) map.unsaved = ['clock', 'Not saved yet'];
     const [ic, base] = map[doc.status] || map.saved;
     // Unsaved edits are normally copied into this browser's draft; when they could not be (the book
     // outgrew local storage), the pill says so, since a closed tab would then lose them.
@@ -6218,7 +6250,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const label = noCopy ? `${base}. This browser could not keep a copy` : base;
     status.className = `save-status ${doc.status}`;
     status.replaceChildren(el('span', { html: icon(ic, 14, 2), className: ic === 'spinner' ? 'spin' : '' }), el('span.save-label', {}, label));
-    status.title = doc.error ? `${label}: ${doc.error}` : doc.viewOnly ? `${label}: ${VIEW_ONLY}` : (doc.path ? `${label} · ${doc.path}` : label);
+    status.title = doc.error ? `${label}: ${doc.error}` : doc.viewOnly ? `${label}: ${VIEW_ONLY}` : unplaced ? `${label}. Save (${MOD_KEY}+S) to choose where it goes in Puter` : (doc.path ? `${label} · ${doc.path}` : label);
   }
 
   function refreshTitle() {
@@ -6643,7 +6675,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (grid.editing) grid.commitEdit();
     if (doc.status === 'saved' && !doc.hasPendingWrites && !grid.editing) return;
     doc.writeDraft();
-    doc.save().catch(() => {});
+    // A new file waits for Puter's Save dialog, which is not to be opened by a page on its way out: the draft keeps it.
+    if (!doc.asksWhereToSave) doc.save().catch(() => {});
     e.preventDefault();
     e.returnValue = '';
   };

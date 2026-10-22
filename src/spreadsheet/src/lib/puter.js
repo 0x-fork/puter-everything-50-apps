@@ -434,16 +434,24 @@ export async function pickFile({ accept = IMPORT_EXTENSIONS } = {}) {
 }
 
 /**
- * Puter's Save dialog with content. The SDK writes the file itself.
- * When the user cancels, the SDK's promise never settles, so callers must
- * not block UI on this.
+ * Is a new file saved where the user picks it, in Puter's Save dialog? Inside the desktop, yes: a relative
+ * path lands in the app's own data folder, which the user never sees. On the open web the app folder stands.
+ */
+export function asksWhereToSave() {
+  return isApp() && canSaveFiles();
+}
+
+/**
+ * Puter's Save dialog with content: the desktop writes the file where the user picks it (asking before it
+ * replaces one) and grants this app access to it. Resolves the file, or null when the dialog is cancelled:
+ * the SDK's promise itself never settles then, and `undefinedOnCancel` does (an SDK without it never settles).
  */
 export async function saveFileAs(blob, suggestedName) {
   if (!canSaveFiles()) return null;
-  const item = await sdk().ui.showSaveFilePicker(blob, suggestedName);
+  const pending = sdk().ui.showSaveFilePicker(blob, suggestedName);
+  const item = await (pending?.undefinedOnCancel ?? pending);
   if (!item) return null;
-  trackExport(suggestedName, 'puter');
-  return { path: item.path, name: item.name || displayName(item.path) };
+  return { ...item, path: item.path, name: item.name || displayName(item.path), uid: item.uid || item.id || null };
 }
 
 /* ---------- Sharing ---------- */

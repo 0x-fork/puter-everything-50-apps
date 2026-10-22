@@ -65,15 +65,15 @@ it('tracks actual cloud saves and copies, skipping failed and unchanged saves', 
   ]);
 });
 
-it('tracks an export only after the Puter picker writes a file', async () => {
-  puter.ui.showSaveFilePicker = vi.fn().mockRejectedValueOnce(new Error('disk full')).mockResolvedValueOnce(null)
-    .mockResolvedValueOnce({ name: 'Renamed private file.csv', path: '/private.csv' });
+it('counts no export for Puter\'s save dialog, which saves files rather than exporting them', async () => {
+  const saved = { name: 'Renamed private file.xlsx', path: '~/Desktop/Renamed private file.xlsx', uid: 'u-9' };
+  const answered = Promise.resolve(saved);
+  puter.ui.showSaveFilePicker = vi.fn().mockReturnValueOnce(Object.assign(new Promise(() => {}), { undefinedOnCancel: Promise.resolve(undefined) }))
+    .mockReturnValueOnce(Object.assign(answered, { undefinedOnCancel: answered }));
   const blob = new Blob(['secret']);
-  await expect(P.saveFileAs(blob, 'Private.csv')).rejects.toThrow('disk full');
-  expect(await P.saveFileAs(blob, 'Private.csv')).toBeNull();
+  expect(await P.saveFileAs(blob, 'Private.xlsx')).toBeNull();
+  expect(await P.saveFileAs(blob, 'Private.xlsx')).toMatchObject(saved);
   expect(plausible).not.toHaveBeenCalled();
-  await P.saveFileAs(blob, 'Private.csv');
-  expect(plausible.mock.calls).toEqual([['Spreadsheet Exported', { props: { format: 'csv', method: 'puter' } }]]);
 });
 
 it('tracks a browser export after starting the download', () => {
