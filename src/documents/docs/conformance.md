@@ -24011,27 +24011,29 @@ the reader, save and reopen the package editable. Browser exports from `tests/br
 (`tests/fixtures/pictures/make_fixture.py`) validate with `tools/check-docx-schema.py`. Schema validity does not
 establish layout fidelity: effects, artistic filters and tight wrapping are approximations.
 
-## Retained link targets, list-level borders and picture nvPr
+## Retained link targets, list-level paragraph properties and picture nvPr
 
-Existing documents opened read-only because of three declarations (issue #69).
-Each now opens for editing.
+Existing documents opened read-only because of these declarations (issue #69),
+and the preview dropped the affected lists' bullets. Each now opens for editing.
 
 | Feature | Specification basis | Supported subset and evidence |
 | --- | --- | --- |
 | Unopenable hyperlink targets | ECMA-376 Part 1 §§15.3, 17.16.22 `r:id`, 21.1.2.3.5 `hlinkClick`; Part 2 relationship `Target` (a URI reference) | A text or DrawingML (`wp:docPr`/`pic:cNvPr`) hyperlink whose External relationship target is not an absolute HTTP(S), mailto or tel address — relative paths, `file:` links, other schemes, unescaped spaces, backslashes or stray `%` — is kept as a link marked `retainedTarget`. Its relationship and target bytes are preserved through edits, splits and save; reused or newly allocated relationships copy the target verbatim. The editor never opens it: Open link is hidden in the link dialog and disabled in the context menu, Ctrl/Cmd+click reports that it can't be opened, and hover omits the open hint. Applying the dialog with the address unchanged keeps it; a new address must be a supported one, after which the link is ordinary. HTML/Markdown/mail exports continue to drop non-web hrefs. Missing, duplicate, internal or wrong-type relationships and `docLocation` remain rejected. |
-| List-level paragraph borders | §17.9 `lvl`, §17.9.23 numbering `pPr` (CT_PPrBase), §17.3.1.24 `pBdr`, §17.3.4 `CT_Border`; §17.7.2 style hierarchy | `w:pBdr` in a numbering level's `w:pPr` is read with the paragraph border reader (sides, styles, widths, spacing, colors including theme colors). Each side joins the list paragraph's border cascade at the level's position: for style-applied numbering the paragraph style's sides win, for direct numbering the level's sides win over the style, and direct paragraph sides (including `nil`) always win. Layout, painting and joining follow ordinary paragraph borders. The numbering part is preserved unchanged; a list definition authored from a bordered level (Bullets/Numbering dialogs) writes the borders into the generated level in CT_PPrBase order (before `w:ind`). Borders are discarded with the level's other paragraph geometry when its label references a deeper level. Shadowed or malformed level borders make only that level unavailable, as for other numbering errors. |
+| List-level paragraph properties | §17.9 `lvl`, §17.9.23 numbering `pPr` (CT_PPrBase); §17.3.1 paragraph properties `pBdr` (§17.3.1.24), `shd`, `spacing`, `jc`, `keepNext`, `keepLines`, `pageBreakBefore`, `widowControl`, `mirrorIndents` (§17.3.1.18), `suppressAutoHyphens`, `suppressLineNumbers`; §17.7.2 style hierarchy | Besides indents, tabs and contextual spacing, a level's `w:pPr` may carry borders, shading, spacing (before/after, line units, auto spacing, line and rule), alignment, keep-with-next, keep-lines, page-break-before, widow control, mirrored indents and hyphenation/line-number suppression. They are read with the paragraph property reader and validated as paragraph formatting. Each property, each spacing attribute group (before, after, line) and each border side joins the list paragraph's cascade at the level's position: for style-applied numbering the paragraph style's declarations win, for direct numbering the level wins over the style, and direct paragraph properties and edits always win. The numbering part is preserved; a list definition authored from an imported level (Bullets/Numbering dialogs) re-emits that level's declared properties verbatim, in CT_PPrBase order around the dialog-owned tabs/indents. These properties are discarded with the level's geometry when its label references a deeper level. Other level pPr children (for example `textAlignment`, `outlineLvl`, `framePr`, `bidi`) still prevent editing; the read-only preview now reports and ignores only that property and keeps the list's markers, indents and other properties instead of dropping the list. |
 | `nvPr` in `pic:nvPicPr` | §20.2.2.4 `nvPicPr` (CT_PictureNonVisual: `cNvPr`, `cNvPicPr` only); PresentationML `p:nvPr` | Some producers append a PresentationML-style `nvPr` (in the `pic` or `p` namespace) after `pic:cNvPicPr`. It has no WordprocessingML meaning; one such element is accepted and retained uninterpreted in the drawing shell. A duplicate or misplaced `nvPr`, or one whose content carries relationship (`r:`) attributes, remains rejected because copying it could leave dangling references. The element is outside the transitional schema, so documents carrying it do not pass XSD validation of `document.xml`, before or after editing. |
 
 Independent fixture: `tests/fixtures/list-borders-retained-links/combined.docx`,
 generated by original `tools/list_borders_retained_links_fixture.py` using only the
 Python standard library with fixed ZIP timestamps and an original 8×8 PNG. It
-contains bordered list levels with direct, style and nested cases, a picture with
+contains list levels with borders, spacing, alignment and keep-with-next in direct,
+style and nested cases, a picture with
 `<pic:nvPr/>` and a relative docPr link, and relative, `file:` and web text links.
 Unit regressions (`tests/list-borders-retained-links.test.js`, plus updated
 hyperlink, drawing-hyperlink, control-hyperlink and hyperlink-recovery tests) cover
-the cascade, layout frames, byte-identical untouched export, edits/reopen with the
+the cascade, edits outranking a level, preview markers with a remaining
+unsupported level property, layout frames, byte-identical untouched export, edits/reopen with the
 retained relationships and unchanged numbering part, replacing a retained target,
-generated-level pBdr serialization and the remaining `nvPr` guards. Browser
+generated-level property serialization and the remaining `nvPr` guards. Browser
 regressions (`tests/browser/list-borders-retained-links.spec.js`,
 `tests/browser/hyperlinks.spec.js`) open the fixture editable, check the link dialog,
 edit, download and reopen. `check:conformance` validates the exported numbering and
@@ -24039,7 +24041,7 @@ relationship parts; `document.xml` fails only on the producer's `pic:nvPr`, as t
 source does.
 
 Remaining gaps: retained destinations are not resolved or opened (no relative
-document base, file system or custom protocol handling); level borders on
-generated levels drop source attributes other than CT_Border's; no claim of
-reference-application pixel equivalence for list borders.
+document base, file system or custom protocol handling); level properties outside
+the subset above remain unsupported; no claim of reference-application pixel
+equivalence for list paragraph properties.
 

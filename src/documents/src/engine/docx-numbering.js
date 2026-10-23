@@ -18,8 +18,7 @@ import { strToU8 } from 'fflate';
 import { emptyNumbering, NUMBER_FORMATS } from './numbering.js';
 import { relatedPartPath } from './docx-relationships.js';
 import { writeFontProperties } from './docx-fonts.js';
-import { readParagraphBorders } from './docx-paragraph-borders.js';
-import { checkedParagraphBorders } from './paragraph-borders.js';
+import { LEVEL_PARAGRAPH_ELEMENTS } from './numbering-paragraph.js';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -36,6 +35,9 @@ const integer = (value, fallback, maximum = 2147483647) => {
   return Number(value);
 };
 const on = node => node && !['0', 'false', 'off'].includes(val(node));
+// CT_PPrBase order (Part 4 §A.1) of the properties a numbering level's pPr may carry here.
+const LEVEL_PPR_ORDER = ['keepNext', 'keepLines', 'pageBreakBefore', 'widowControl', 'suppressLineNumbers', 'pBdr', 'shd', 'tabs', 'suppressAutoHyphens', 'spacing', 'ind', 'contextualSpacing', 'mirrorIndents', 'jc'];
+const LEVEL_PPR = ['ind', 'tabs', 'contextualSpacing', ...LEVEL_PARAGRAPH_ELEMENTS];
 const guarded = fn => { try { return fn(); } catch (error) { return { error: error.message }; } };
 
 function readLegacy(level) {
@@ -58,7 +60,7 @@ function readLegacy(level) {
   return ['1', 'true', 'on'].includes(enabled) ? { ...(indent !== undefined ? { indent } : {}), space: space ?? 0 } : undefined;
 }
 
-export function readNumbering(parts, readGeometry, readColor, readFonts, onError = null) {
+export function readNumbering(parts, readGeometry, readColor, readFonts, onError = null, readParagraph = null) {
   const result = emptyNumbering();
   const path = relatedPartPath(parts, 'numbering');
   if (!path) return result;
@@ -76,10 +78,18 @@ export function readNumbering(parts, readGeometry, readColor, readFonts, onError
     const alignment = { start: 'left', end: 'right' }[val(child(node, 'lvlJc'))] || val(child(node, 'lvlJc')) || 'left';
     const suffix = val(child(node, 'suff')) || 'tab';
     if (!['left', 'center', 'right'].includes(alignment) || !['tab', 'space', 'nothing'].includes(suffix)) throw new Error('Unsupported numbering alignment or suffix.');
-    const pPr = child(node, 'pPr');
-    for (const n of children(pPr)) if (n.namespaceURI !== W || !['pBdr', 'ind', 'tabs', 'contextualSpacing'].includes(n.localName)) throw new Error(`Unsupported numbering paragraph property: ${n.localName}.`);
-    // Level borders (§17.9.23 pPr, §17.3.1.24 pBdr) join the list's paragraphs' border cascade.
-    const borders = child(pPr, 'pBdr') ? readParagraphBorders(pPr, readColor) : undefined;
+    let pPr = child(node, 'pPr');
+    const unsupported = children(pPr).filter(n => n.namespaceURI !== W || !LEVEL_PPR.includes(n.localName));
+    if (unsupported.length) {
+      const messages = [...new Set(unsupported.map(n => `Unsupported numbering paragraph property: ${n.localName}.`))];
+      if (!onError) throw new Error(messages[0]);
+      // The read-only preview keeps the list and its other properties; only these are ignored.
+      for (const message of messages) onError(new Error(message));
+      pPr = pPr.cloneNode(true);
+      for (const n of children(pPr)) if (n.namespaceURI !== W || !LEVEL_PPR.includes(n.localName)) n.remove();
+    }
+    // Spacing, alignment, borders… (§17.9.23 pPr) join the list paragraphs' cascade.
+    const paragraph = pPr && readParagraph ? readParagraph(pPr) : {};
     const rPr = child(node, 'rPr'), markerStyle = { ...readFonts?.(rPr) };
     for (const n of children(rPr)) {
       if (n.namespaceURI !== W || !['rFonts', 'lang', 'b', 'i', 'bCs', 'iCs', 'szCs', 'caps', 'smallCaps', 'strike', 'dstrike', 'color', 'sz', 'u', 'shd', 'vertAlign', 'position', 'spacing', 'w', 'kern'].includes(n.localName)) throw new Error(`Unsupported numbering symbol formatting: ${n.localName}.`);
@@ -119,7 +129,7 @@ export function readNumbering(parts, readGeometry, readColor, readFonts, onError
     const legacy = readLegacy(node);
     return { index, start: integer(val(child(node, 'start')), 0, 1000000), format, text, alignment, suffix,
       restart: integer(val(child(node, 'lvlRestart')), undefined, 9), legal: !!on(child(node, 'isLgl')),
-      styleId: val(child(node, 'pStyle')), geometry: readGeometry(pPr), ...(borders ? { paragraphBorders: borders } : {}), markerStyle, ...(symbol ? { symbol } : {}), ...(legacy ? { legacy } : {}) };
+      styleId: val(child(node, 'pStyle')), geometry: readGeometry(pPr), ...(Object.keys(paragraph).length ? { paragraph, paragraphXml: serialize(pPr) } : {}), markerStyle, ...(symbol ? { symbol } : {}), ...(legacy ? { legacy } : {}) };
   });
   // An ambiguous ID invalidates that identity, not every unrelated list. Keep
   // all source nodes for style-link ambiguity checks; never pick a duplicate.
@@ -303,27 +313,25 @@ export function writeNumbering(parts, numbering) {
     }
     node.append(make('lvlJc', level.alignment));
     const pPr = make('pPr'), g = level.geometry;
-    if (level.paragraphBorders) {
-      const borders = make('pBdr');
-      for (const [side, border] of Object.entries(checkedParagraphBorders(level.paragraphBorders))) {
-        const node = make(side, border.style);
-        for (const [attr, next] of Object.entries({ sz: border.size, space: border.space, color: border.color, frame: border.frame ? '1' : '0', shadow: border.shadow ? '1' : '0', ...border.theme })) node.setAttributeNS(W, 'w:' + attr, String(next));
-        borders.append(node);
-      }
-      if (borders.children.length) pPr.append(borders);
+    // A level derived from an imported one keeps its other paragraph properties
+    // as declared; the dialogs edit only its geometry, written below.
+    if (level.paragraph && level.paragraphXml) {
+      const source = xml(level.paragraphXml).documentElement;
+      if (source.namespaceURI === W && source.localName === 'pPr') for (const n of children(source)) if (n.namespaceURI === W && LEVEL_PARAGRAPH_ELEMENTS.includes(n.localName)) pPr.append(doc.importNode(n, true));
     }
+    const place = property => pPr.insertBefore(property, children(pPr).find(n => LEVEL_PPR_ORDER.indexOf(n.localName) > LEVEL_PPR_ORDER.indexOf(property.localName)) || null);
     if (g.tabs?.length) {
       const tabs = make('tabs');
       for (const t of g.tabs) { const tab = make('tab', t.numberingOnly ? 'num' : t.alignment); tab.setAttributeNS(W, 'w:pos', String(t.position)); tabs.append(tab); }
-      pPr.append(tabs);
+      place(tabs);
     }
     if (['indentLeft', 'indentRight', 'firstLine'].some(k => k in g)) {
       const ind = make('ind');
       for (const [key, attr] of [['indentLeft', 'left'], ['indentRight', 'right']]) if (key in g) ind.setAttributeNS(W, `w:${attr}`, String(g[key]));
       if ('firstLine' in g) ind.setAttributeNS(W, g.firstLine < 0 ? 'w:hanging' : 'w:firstLine', String(Math.abs(g.firstLine)));
-      pPr.append(ind);
+      place(ind);
     }
-    if ('contextualSpacing' in level.geometry) pPr.append(make('contextualSpacing', level.geometry.contextualSpacing ? '1' : '0'));
+    if ('contextualSpacing' in level.geometry) place(make('contextualSpacing', level.geometry.contextualSpacing ? '1' : '0'));
     if (pPr.children.length) node.append(pPr);
     const rPr = make('rPr');
     for (const [key, tag] of [['bold', 'b'], ['italic', 'i'], ['capitalization', 'caps'], ['strikethrough', 'strike'], ['color', 'color'], ['characterSpacing', 'spacing'], ['textScale', 'w'], ['kerning', 'kern'], ['baselineShift', 'position'], ['fontSize', 'sz'], ['underline', 'u'], ['shading', 'shd'], ['verticalAlign', 'vertAlign']]) if (key in level.markerStyle || key === 'underline' && ('underlineStyle' in level.markerStyle || 'underlineColor' in level.markerStyle)) {

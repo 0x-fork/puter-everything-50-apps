@@ -1,4 +1,4 @@
-"""Original OOXML control for list-level borders, picture nvPr and unopenable link targets.
+"""Original OOXML control for list-level paragraph properties, picture nvPr and unopenable link targets.
 
 Uses only Python's standard library; no desktop application or document engine is required.
 ZIP timestamps are fixed so the output is reproducible.
@@ -47,15 +47,16 @@ def item(text, num, level, extra=''):
 PICTURE = f'''<w:r><w:drawing><wp:inline><wp:extent cx="457200" cy="457200"/><wp:docPr id="1" name="Picture 1"><a:hlinkClick r:id="drawingLink"/></wp:docPr><a:graphic><a:graphicData uri="{PIC}"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture 1"/><pic:cNvPicPr/><pic:nvPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="image1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'''
 
 
-def level(index, borders, left):
-    return f'<w:lvl w:ilvl="{index}"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%{index + 1}."/><w:lvlJc w:val="left"/><w:pPr><w:pBdr>{borders}</w:pBdr><w:ind w:left="{left}" w:hanging="360"/></w:pPr></w:lvl>'
+def level(index, borders, left, before='', spacing='', after=''):
+    """`before`, `spacing` and `after` are pPr content around pBdr and ind, in CT_PPrBase order."""
+    return f'<w:lvl w:ilvl="{index}"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%{index + 1}."/><w:lvlJc w:val="left"/><w:pPr>{before}<w:pBdr>{borders}</w:pBdr>{spacing}<w:ind w:left="{left}" w:hanging="360"/>{after}</w:pPr></w:lvl>'
 
 
 def main():
     body = p(run('List level borders'))
     body += item('Bordered item one', 1, 0)
     body += item('Nested bordered item', 1, 1)
-    body += item('Direct border override', 1, 0, '<w:pBdr><w:bottom w:val="nil"/></w:pBdr>')
+    body += item('Direct border override', 1, 0, '<w:pBdr><w:bottom w:val="nil"/></w:pBdr><w:spacing w:after="0"/>')
     body += p(run('Style list item'), '<w:pStyle w:val="BorderedList"/>')
     body += p(PICTURE)
     for key in ['relative', 'file', 'web']:
@@ -64,11 +65,11 @@ def main():
     numbering = (
         f'<w:numbering xmlns:w="{W}">'
         '<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="multilevel"/>'
-        + level(0, '<w:bottom w:val="single" w:sz="6" w:space="1" w:color="2F5496"/>', 720)
-        + level(1, '<w:left w:val="double" w:sz="12" w:space="4" w:color="C00000"/>', 1440)
+        + level(0, '<w:bottom w:val="single" w:sz="6" w:space="1" w:color="2F5496"/>', 720, spacing='<w:spacing w:before="120" w:after="60" w:line="360" w:lineRule="auto"/>')
+        + level(1, '<w:left w:val="double" w:sz="12" w:space="4" w:color="C00000"/>', 1440, after='<w:jc w:val="center"/>')
         + '</w:abstractNum>'
         '<w:abstractNum w:abstractNumId="1"><w:multiLevelType w:val="singleLevel"/>'
-        + level(0, '<w:left w:val="single" w:sz="8" w:space="4" w:color="00B050"/><w:bottom w:val="dotted" w:sz="4" w:space="1" w:color="00B050"/>', 720)
+        + level(0, '<w:left w:val="single" w:sz="8" w:space="4" w:color="00B050"/><w:bottom w:val="dotted" w:sz="4" w:space="1" w:color="00B050"/>', 720, before='<w:keepNext/>', spacing='<w:spacing w:before="240" w:after="240"/>')
         + '</w:abstractNum>'
         '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>'
     )
@@ -76,7 +77,7 @@ def main():
         f'<w:styles xmlns:w="{W}">'
         '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
         '<w:style w:type="paragraph" w:styleId="BorderedList"><w:name w:val="Bordered List"/><w:basedOn w:val="Normal"/>'
-        '<w:pPr><w:numPr><w:numId w:val="2"/></w:numPr><w:pBdr><w:left w:val="single" w:sz="4" w:space="4" w:color="000000"/></w:pBdr></w:pPr></w:style>'
+        '<w:pPr><w:numPr><w:numId w:val="2"/></w:numPr><w:pBdr><w:left w:val="single" w:sz="4" w:space="4" w:color="000000"/></w:pBdr><w:spacing w:before="0"/></w:pPr></w:style>'
         '</w:styles>'
     )
     rels = [f'<Relationship Id="styles" Type="{R}/styles" Target="styles.xml"/>', f'<Relationship Id="numbering" Type="{R}/numbering" Target="numbering.xml"/>', f'<Relationship Id="image1" Type="{R}/image" Target="media/image1.png"/>']

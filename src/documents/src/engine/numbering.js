@@ -1,4 +1,5 @@
 import { normalizeTabStops } from './paragraph-geometry.js';
+import { applyLevelParagraph } from './numbering-paragraph.js';
 
 export const emptyNumbering = () => ({ abstracts: {}, instances: {} });
 export const NUMBER_FORMATS = ['bullet', 'decimal', 'decimalZero', 'lowerLetter', 'upperLetter', 'lowerRoman', 'upperRoman', 'none'];
@@ -50,15 +51,9 @@ export function listGeometry(p, numbering, plain) {
   geometry = mergeGeometry(geometry, context?.direct);
   const result = { ...plain, ...geometry };
   for (const key of ['indentLeft', 'indentRight', 'firstLine', 'tabs', 'contextualSpacing']) if (key in (p.formatOverrides || {})) result[key] = p.formatOverrides[key];
-  // Level borders take the same place in the cascade as the level's indents:
-  // below the paragraph style unless numbering is direct, and always below
-  // direct borders. Each side inherits independently.
-  if (level.paragraphBorders) {
-    const kept = new Set([...(list.direct ? [] : context?.borderSides?.style || []), ...(context?.borderSides?.direct || []), ...Object.keys(p.formatOverrides?.paragraphBorders || {})]);
-    result.paragraphBorders = { ...plain.paragraphBorders };
-    for (const [side, border] of Object.entries(level.paragraphBorders)) if (!kept.has(side)) result.paragraphBorders[side] = border;
-  }
-  return result;
+  // The level's other paragraph properties (spacing, alignment, borders…) take
+  // the same place in the cascade as its indents.
+  return applyLevelParagraph(result, level.paragraph, context?.paragraph, list.direct, p.formatOverrides);
 }
 
 function numeral(value, format) {

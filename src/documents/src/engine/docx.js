@@ -82,6 +82,7 @@ import { isPageBasedCellPosition, isCellRelativePosition } from './positioned-im
 import { documentBlocks } from './tables.js';
 import { emptyStyles, resolveStyledParagraph, resolveCharacterRun, styleProperties, paragraphRunStyle, styleRun } from './styles.js';
 import { resolvedFormat, geometryPatch, checkedRunFormat, PARAGRAPH_FLAGS } from './formatting.js';
+import { levelParagraphPatch } from './numbering-paragraph.js';
 import { UnsupportedDocumentError } from './errors.js';
 export { UnsupportedDocumentError } from './errors.js';
 import { parseXml as xml, wordText } from './docx-xml.js';
@@ -182,6 +183,11 @@ function paragraphProperties(pPr, inherited = {}, readColor) {
   if (suppressedNumbers !== undefined) result.suppressLineNumbers = suppressedNumbers;
   result.spacing = mergeSpacing(result.spacing, readParagraphSpacing(pPr));
   return result;
+}
+
+// A numbering level's own paragraph properties, validated as a paragraph would be.
+function levelParagraphReader(readColor) {
+  return pPr => { const patch = levelParagraphPatch(paragraphProperties(pPr, {}, readColor)); resolvedFormat(patch); return patch; };
 }
 
 function numberingReference(pPr, inherited = {}, inTableStyle = false) {
@@ -1224,7 +1230,7 @@ export class DocxPackage {
     styles.openTypeFeatures = attempt(() => readOpenTypeFeatures(settings?.documentElement, pageSettings.compatibilityMode), false);
     const tocHyperlinkRuns = preview ? projectCachedFieldResults(body, styles) : new WeakSet();
     let numbering;
-    try { numbering = readNumbering(parts, node => geometryPatch(paragraphProperties(node, {}, readColor), true), readColor, readFonts, preview ? error => recordPreviewIssue(issues, error) : null); } catch (e) { if (preview) { recordPreviewIssue(issues, e); numbering = emptyNumbering(); } else throw e instanceof UnsupportedDocumentError ? e : new UnsupportedDocumentError(e.message); }
+    try { numbering = readNumbering(parts, node => geometryPatch(paragraphProperties(node, {}, readColor), true), readColor, readFonts, preview ? error => recordPreviewIssue(issues, error) : null, levelParagraphReader(readColor)); } catch (e) { if (preview) { recordPreviewIssue(issues, e); numbering = emptyNumbering(); } else throw e instanceof UnsupportedDocumentError ? e : new UnsupportedDocumentError(e.message); }
     const checkMarkers = paragraphs => {
       const report = error => recordPreviewIssue(issues, error);
       try { listMarkers(paragraphs, numbering, preview ? report : null); }

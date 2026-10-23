@@ -14,6 +14,7 @@ import { checkedVerticalAlign, checkedBaselineShift } from './vertical-align.js'
 import { normalizeColor } from './colors.js';
 import { PARAGRAPH_FORMAT, RUN_FORMAT, resolvedFormat, geometryPatch, checkedRunFormat, clearAutomaticSpacing } from './formatting.js';
 import { levelFor, NumberingDefinitionError } from './numbering.js';
+import { levelParagraphPatch } from './numbering-paragraph.js';
 import { builtinOutlineLevel } from './outline.js';
 import { mergeSpacing, checkedLineSpacing } from './line-spacing.js';
 import { conditionalStyleGroups } from './table-style-regions.js';
@@ -157,9 +158,9 @@ export function resolveStyledParagraph(p, styles, numbering, options) {
   const numberingIndex = chain.findLastIndex(s => s.reference?.numId !== undefined);
   const split = Math.max(0, numberingIndex);
   const chainGeometry = entries => geometryPatch(entries.reduce((properties, s) => mergeProperties(properties, s.properties), {}));
-  // Border sides declared by the paragraph style chain or directly; numbering level borders fill the rest.
-  const borderSides = { style: Object.keys(chain.reduce((properties, s) => mergeProperties(properties, s.properties), {}).paragraphBorders || {}), direct: Object.keys(context.properties.paragraphBorders || {}) };
-  p.listContext = { base: geometryPatch(base), style: chainGeometry(chain), afterNumbering: chainGeometry(chain.slice(split)), direct: geometryPatch(context.properties), borderSides };
+  // Numbering levels' other paragraph properties resolve against the same three layers.
+  const paragraph = { base: levelParagraphPatch(base), style: levelParagraphPatch(chain.reduce((properties, s) => mergeProperties(properties, s.properties), {})), direct: levelParagraphPatch(context.properties) };
+  p.listContext = { base: geometryPatch(base), style: chainGeometry(chain), afterNumbering: chainGeometry(chain.slice(split)), direct: geometryPatch(context.properties), paragraph };
   if (!p.listChanged) {
     const inheritedReference = Object.assign({}, styles.defaults.reference, ...tableChain.map(s => s.reference), ...chain.map(s => s.reference));
     const ref = { ...inheritedReference, ...context.reference };
