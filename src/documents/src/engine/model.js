@@ -1456,7 +1456,7 @@ export class TextDocument {
       }
     }
     const link = existing ? { ...existing.link, id: hyperlinkId() } : { id: hyperlinkId() };
-    delete link.fieldId;
+    delete link.fieldId; delete link.retainedTarget;
     delete link.target; delete link.anchor; Object.assign(link, destination);
     if (Object.hasOwn(destination, 'anchor')) {
       let offset = 0;

@@ -6,7 +6,7 @@ const folder = 'tests/fixtures/hyperlink-recovery/';
 test('rejected hyperlink destinations retain body, cell and header content', async ({ page }, info) => {
   test.setTimeout(180000);
   await page.goto('/playground.html', { waitUntil: 'domcontentloaded' });
-  const inputs = Object.fromEntries(['healthy', 'location', 'missing', 'unsafe'].map(name => [name, [...readFileSync(`${folder}${name}.docx`)]]));
+  const inputs = Object.fromEntries(['healthy', 'location', 'missing'].map(name => [name, [...readFileSync(`${folder}${name}.docx`)]]));
   const results = await page.evaluate(async inputs => {
     const { openCanvasDocument } = await import('/src/engine/open-document.js');
     const { CanvasEditor } = await import('/src/engine/canvas-editor.js');
@@ -22,7 +22,7 @@ test('rejected hyperlink destinations retain body, cell and header content', asy
           fragments: l.fragments.map(f => ({ text: f.text, x: f.x, width: f.width, bold: f.bold })) })) };
       editor.destroy(); host.remove();
     }
-    return ['location', 'missing', 'unsafe'].map(name => ({ name,
+    return ['location', 'missing'].map(name => ({ name,
       editableControl: !rendered.healthy.readOnly, readOnly: rendered[name].readOnly,
       tables: rendered[name].tables, errors: rendered[name].errors,
       samePixels: JSON.stringify(rendered[name].pixels) === JSON.stringify(rendered.healthy.pixels),

@@ -49,6 +49,18 @@ function check(n, ns, names) {
     seen.add(c.localName);
   }
 }
+// Some producers append a PresentationML-style nvPr to pic:nvPicPr, outside
+// CT_PictureNonVisual (§20.2.2.4). It has no WordprocessingML meaning, so it is
+// retained uninterpreted in the drawing shell, unless it references package parts.
+const PML = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+function nonvisualPicture(nv) {
+  const extra = children(nv).filter(c => [PIC, PML].includes(c.namespaceURI) && c.localName === 'nvPr');
+  if (!extra.length) return nv;
+  if (extra.length > 1 || children(nv).at(-1) !== extra[0]) fail('unsupported or duplicate nvPr');
+  if ([extra[0], ...extra[0].getElementsByTagName('*')].some(n => [...n.attributes].some(a => a.namespaceURI === R))) fail('related parts in non-visual properties');
+  const copy = nv.cloneNode(true); copy.lastElementChild.remove();
+  return copy;
+}
 function integer(n, name, required = false) {
   const value = n?.getAttribute(name);
   if (value === null || value === undefined) { if (required) fail(`missing ${name}`); return 0; }
@@ -387,7 +399,7 @@ export function imageReader(parts, assets, readParagraph, readSchemeColor, readS
     }
     if (data?.getAttribute('uri') !== PIC) fail('non-picture DrawingML'); check(data, PIC, ['pic']);
     const pic = child(data, PIC, 'pic'); if (!pic) fail('missing picture'); check(pic, PIC, ['nvPicPr', 'blipFill', 'spPr']);
-    const nv = child(pic, PIC, 'nvPicPr'); check(nv, PIC, ['cNvPr', 'cNvPicPr']);
+    const nv = child(pic, PIC, 'nvPicPr'); check(nonvisualPicture(nv), PIC, ['cNvPr', 'cNvPicPr']);
     const nvPr = child(nv, PIC, 'cNvPr'), nvPic = child(nv, PIC, 'cNvPicPr');
     if (!nvPr || !nvPic || !nvPr.hasAttribute('name')) fail('missing non-visual picture properties');
     // Inner-picture links are retained, but only wp:docPr links are active.

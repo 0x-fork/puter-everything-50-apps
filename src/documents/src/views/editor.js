@@ -1495,7 +1495,11 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       paragraphs: pkg.paragraphs, pageSettings: pkg.pageSettings, numbering: pkg.numbering, styles: pkg.styles, tables: pkg.tables, pageStories: pkg.pageStories, comments: pkg.comments, trackChanges: pkg.trackRevisions, assets: pkg.assets, drawingLayouts: pkg.drawingLayouts, images, readOnly: !!pkg.readOnly,
       onChange: () => { if (!reopening) { designVersions.redo = []; if (created.session.history.length >= 100) designVersions.undo = []; } labelHistory(); doc.changed(); update(); updateStatus(); proofing.changed(true); reviewTools.changed(); },
       onSelection: () => { update(); proofing.selectionChanged(); reviewTools.selectionChanged(); }, onSave: save, onError: error, onLink: editHyperlink,
-      onOpenLink: target => window.open(checkedHyperlinkTarget(target), '_blank', 'noopener,noreferrer'),
+      onOpenLink: target => {
+        // Imported destinations outside web, email and phone addresses (file paths, relative links) stay in the document unopened.
+        try { checkedHyperlinkTarget(target); } catch { error(new Error('This link points to a file or address that can’t be opened from here. It is kept in the document.')); return; }
+        window.open(target, '_blank', 'noopener,noreferrer');
+      },
       // The account menu's typing settings, read at each keystroke so a change applies at once.
       correctTyping: (before, typed, { list }) => (autocorrectEnabled() && (listMarker(before, typed, list) || correction(before, typed))) || (capitalizeSentencesEnabled() && sentenceCapital(before, typed)) || null,
       linkTyping: (text, end) => autolinkEnabled() ? linkCandidateBefore(text, end) : null,

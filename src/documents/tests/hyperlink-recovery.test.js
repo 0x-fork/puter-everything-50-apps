@@ -13,7 +13,6 @@ const source = name => readFileSync(`tests/fixtures/hyperlink-recovery/${name}.d
 it.each([
   ['location', 'hyperlink document locations'],
   ['missing', 'hyperlink relationship'],
-  ['unsafe', 'hyperlink target'],
 ])('preserves mixed hyperlink contents when the destination cannot be used: %s', async (name, issue) => {
   const bytes = source(name);
   await expect(DocxPackage.open(bytes)).rejects.toThrow(issue);
@@ -40,4 +39,13 @@ it.each([
 it('keeps the supported mixed-content control editable', async () => {
   const pkg = await DocxPackage.open(source('healthy'));
   expect(pkg.readOnly).not.toBe(true);
+});
+
+it('keeps an unopenable destination as an editable, unopened link', async () => {
+  const bytes = source('unsafe'), pkg = await DocxPackage.open(bytes);
+  expect(pkg.readOnly).not.toBe(true);
+  const doc = new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets);
+  const linked = doc.paragraphs.flatMap(p => p.runs).filter(run => run.link);
+  expect(linked.length).toBeGreaterThan(0);
+  for (const run of linked) expect(run.link).toMatchObject({ target: 'javascript:alert(1)', retainedTarget: true });
 });

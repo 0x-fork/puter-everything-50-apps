@@ -114,15 +114,27 @@ test('typing inside links extends them while typing at either edge and past para
   await choose(input, 'Xc', true); await input.press('Enter'); await page.keyboard.insertText('New'); await choose(input, 'New'); await expect((await onTab(page, 'insert')).getByRole('button', { name: 'Insert or edit link', exact: true })).toHaveAttribute('aria-pressed', 'false');
 });
 
-test('previews broken, nested and active-script links as read-only with the original available', async ({ page }) => {
+test('previews broken and nested links as read-only with the original available', async ({ page }) => {
   await page.goto('/playground.html'); await showAllTools(page); const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(/^A small beginning/); const text = await input.inputValue();
-  for (const kind of ['empty', 'nested', 'missing', 'script', 'CDATA']) {
+  for (const kind of ['empty', 'nested', 'missing', 'CDATA']) {
     const parts = unzipSync(readFileSync('public/fixtures/hyperlinks.docx'));
-    if (kind === 'script') parts['word/_rels/document.xml.rels'] = strToU8(strFromU8(parts['word/_rels/document.xml.rels']).replace('https://example.com/guide?q=one%20two&amp;lang=en#section', 'javascript:alert(1)'));
-    else if (kind === 'CDATA') parts['word/document.xml'] = strToU8(strFromU8(parts['word/document.xml']).replace('</w:hyperlink>', '<![CDATA[unmodelled]]></w:hyperlink>'));
+    if (kind === 'CDATA') parts['word/document.xml'] = strToU8(strFromU8(parts['word/document.xml']).replace('</w:hyperlink>', '<![CDATA[unmodelled]]></w:hyperlink>'));
     else { const xml = strFromU8(parts['word/document.xml']); parts['word/document.xml'] = strToU8(kind === 'empty' ? xml.replace(/(<w:hyperlink r:id=")[^"]+/, '$1') : kind === 'missing' ? xml.replace(/(<w:hyperlink r:id=")[^"]+/, '$1missing') : xml.replace('</w:hyperlink>', '<w:hyperlink/></w:hyperlink>')); }
     await openReadOnlyPreview(page, { name: `${kind}-link.docx`, mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from(zipSync(parts)) });
   }
+});
+
+test('keeps an active-script destination editable without offering to open it', async ({ page }) => {
+  await page.goto('/playground.html'); await showAllTools(page);
+  const parts = unzipSync(readFileSync('public/fixtures/hyperlinks.docx'));
+  parts['word/_rels/document.xml.rels'] = strToU8(strFromU8(parts['word/_rels/document.xml.rels']).replace('https://example.com/guide?q=one%20two&amp;lang=en#section', 'javascript:alert(1)'));
+  await page.getByLabel('Open DOCX file').setInputFiles({ name: 'script-link.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from(zipSync(parts)) });
+  const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(/^External hyperlinks/); await expect(input).toHaveJSProperty('readOnly', false);
+  await choose(input, 'Read the guide', true); await dialog(page, input);
+  await expect(page.getByRole('textbox', { name: 'Link address', exact: true })).toHaveValue('javascript:alert(1)');
+  await expect(page.getByRole('dialog').getByRole('button', { name: 'Open link', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toContainText('can’t be opened here');
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click(); await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
 test('combining marks and emoji joins remain one linked caret position during native text input', async ({ page }) => {

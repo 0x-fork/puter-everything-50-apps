@@ -33,9 +33,12 @@ export function hyperlinkReader(parts, sourcePart = 'word/document.xml') {
     const matches = children(rels.documentElement).filter(r => r.getAttribute('Id') === sourceId);
     const rel = matches[0];
     if (matches.length !== 1 || rel.namespaceURI !== REL || rel.localName !== 'Relationship' || rel.getAttribute('Type') !== `${R}/hyperlink` || rel.getAttribute('TargetMode') !== 'External') throw new UnsupportedDocumentError('missing, duplicate or unsupported hyperlink relationship');
+    // Part 2 relationships permit any URI reference. A destination the editor
+    // cannot open (a relative or file path, unescaped spaces) is kept verbatim.
     const target = rel.getAttribute('Target');
-    try { checkedHyperlinkTarget(target); } catch (e) { throw new UnsupportedDocumentError(`hyperlink target: ${e.message}`); }
-    return { ...common, target, sourceId };
+    let retainedTarget = false;
+    try { checkedHyperlinkTarget(target); } catch { retainedTarget = true; }
+    return { ...common, target, sourceId, ...(retainedTarget ? { retainedTarget } : {}) };
   };
 }
 
@@ -62,7 +65,8 @@ export function hyperlinkWriter(parts, paragraphs, doc, sourcePart = 'word/docum
   const relationFor = new Map(); let changed = false, number = 0;
   for (const link of links) {
     if (internalHyperlink(link)) continue;
-    checkedHyperlinkTarget(link.target);
+    if (!link.retainedTarget) checkedHyperlinkTarget(link.target);
+    else if (typeof link.target !== 'string' || !link.target) throw new Error('Missing hyperlink target.');
     const original = entries.find(r => r.getAttribute('Id') === link.sourceId);
     let id = original?.getAttribute('Type') === `${R}/hyperlink` && original.getAttribute('TargetMode') === 'External' && original.getAttribute('Target') === link.target ? link.sourceId : byTarget.get(link.target);
     if (!id) {

@@ -18,6 +18,8 @@ import { strToU8 } from 'fflate';
 import { emptyNumbering, NUMBER_FORMATS } from './numbering.js';
 import { relatedPartPath } from './docx-relationships.js';
 import { writeFontProperties } from './docx-fonts.js';
+import { readParagraphBorders } from './docx-paragraph-borders.js';
+import { checkedParagraphBorders } from './paragraph-borders.js';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -75,7 +77,9 @@ export function readNumbering(parts, readGeometry, readColor, readFonts, onError
     const suffix = val(child(node, 'suff')) || 'tab';
     if (!['left', 'center', 'right'].includes(alignment) || !['tab', 'space', 'nothing'].includes(suffix)) throw new Error('Unsupported numbering alignment or suffix.');
     const pPr = child(node, 'pPr');
-    for (const n of children(pPr)) if (n.namespaceURI !== W || !['ind', 'tabs', 'contextualSpacing'].includes(n.localName)) throw new Error(`Unsupported numbering paragraph property: ${n.localName}.`);
+    for (const n of children(pPr)) if (n.namespaceURI !== W || !['pBdr', 'ind', 'tabs', 'contextualSpacing'].includes(n.localName)) throw new Error(`Unsupported numbering paragraph property: ${n.localName}.`);
+    // Level borders (§17.9.23 pPr, §17.3.1.24 pBdr) join the list's paragraphs' border cascade.
+    const borders = child(pPr, 'pBdr') ? readParagraphBorders(pPr, readColor) : undefined;
     const rPr = child(node, 'rPr'), markerStyle = { ...readFonts?.(rPr) };
     for (const n of children(rPr)) {
       if (n.namespaceURI !== W || !['rFonts', 'lang', 'b', 'i', 'bCs', 'iCs', 'szCs', 'caps', 'smallCaps', 'strike', 'dstrike', 'color', 'sz', 'u', 'shd', 'vertAlign', 'position', 'spacing', 'w', 'kern'].includes(n.localName)) throw new Error(`Unsupported numbering symbol formatting: ${n.localName}.`);
@@ -115,7 +119,7 @@ export function readNumbering(parts, readGeometry, readColor, readFonts, onError
     const legacy = readLegacy(node);
     return { index, start: integer(val(child(node, 'start')), 0, 1000000), format, text, alignment, suffix,
       restart: integer(val(child(node, 'lvlRestart')), undefined, 9), legal: !!on(child(node, 'isLgl')),
-      styleId: val(child(node, 'pStyle')), geometry: readGeometry(pPr), markerStyle, ...(symbol ? { symbol } : {}), ...(legacy ? { legacy } : {}) };
+      styleId: val(child(node, 'pStyle')), geometry: readGeometry(pPr), ...(borders ? { paragraphBorders: borders } : {}), markerStyle, ...(symbol ? { symbol } : {}), ...(legacy ? { legacy } : {}) };
   });
   // An ambiguous ID invalidates that identity, not every unrelated list. Keep
   // all source nodes for style-link ambiguity checks; never pick a duplicate.
@@ -299,6 +303,15 @@ export function writeNumbering(parts, numbering) {
     }
     node.append(make('lvlJc', level.alignment));
     const pPr = make('pPr'), g = level.geometry;
+    if (level.paragraphBorders) {
+      const borders = make('pBdr');
+      for (const [side, border] of Object.entries(checkedParagraphBorders(level.paragraphBorders))) {
+        const node = make(side, border.style);
+        for (const [attr, next] of Object.entries({ sz: border.size, space: border.space, color: border.color, frame: border.frame ? '1' : '0', shadow: border.shadow ? '1' : '0', ...border.theme })) node.setAttributeNS(W, 'w:' + attr, String(next));
+        borders.append(node);
+      }
+      if (borders.children.length) pPr.append(borders);
+    }
     if (g.tabs?.length) {
       const tabs = make('tabs');
       for (const t of g.tabs) { const tab = make('tab', t.numberingOnly ? 'num' : t.alignment); tab.setAttributeNS(W, 'w:pos', String(t.position)); tabs.append(tab); }

@@ -32,7 +32,7 @@ import { deviceTableBorders, deviceTableFillRects } from './border-device-layout
 import { paragraphBackgrounds, paintOnParagraphBackground } from './paragraph-backgrounds.js';
 import { paintParagraphBackgrounds } from './canvas-paragraph-backgrounds.js';
 import { hyperlinkAtPoint } from './hyperlink-hit.js';
-import { internalHyperlink, hyperlinkLabel } from './hyperlinks.js';
+import { internalHyperlink, hyperlinkLabel, openableHyperlink } from './hyperlinks.js';
 import { paintUnderline } from './canvas-underlines.js';
 import { paintText, paintTextShadows } from './canvas-paint-text.js';
 import { strikeSpans } from './strikethrough.js';
@@ -980,7 +980,7 @@ export class CanvasEditor {
   openHyperlink(link = this.model.hyperlink?.link) {
     if (!link) return;
     if (internalHyperlink(link)) { this.goToBookmark(this.model.bookmarks.find(b => b.name === link.anchor)?.id); return; }
-    if (link.history) this.visitedLinks.add(link.target);
+    if (link.history && openableHyperlink(link)) this.visitedLinks.add(link.target);
     this.onOpenLink(link.target);
   }
   setHyperlink(target, text, { appearance = false } = {}) {
@@ -1141,8 +1141,9 @@ export class CanvasEditor {
     if (this.imageInteraction.move(e)) return;
     if (!this.dragging) {
       this.point(e, false);
-      this.pages.title = this.pointLink ? `${this.pointLink.link.tooltip || hyperlinkLabel(this.pointLink.link)} (Ctrl/Cmd+click to open)` : '';
-      this.pages.style.cursor = this.pointLink && (e.ctrlKey || e.metaKey) ? 'pointer' : '';
+      const openable = this.pointLink && openableHyperlink(this.pointLink.link);
+      this.pages.title = this.pointLink ? `${this.pointLink.link.tooltip || hyperlinkLabel(this.pointLink.link)}${openable ? ' (Ctrl/Cmd+click to open)' : ''}` : '';
+      this.pages.style.cursor = openable && (e.ctrlKey || e.metaKey) ? 'pointer' : '';
       return;
     }
     this.dragTo(e);

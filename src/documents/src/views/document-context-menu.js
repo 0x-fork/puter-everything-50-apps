@@ -1,7 +1,7 @@
 import { MOD_KEY } from '../ui/dom.js';
 import { openMenu } from '../ui/menu.js';
 import { bodyFieldRanges } from '../engine/body-fields.js';
-import { internalHyperlink } from '../engine/hyperlinks.js';
+import { internalHyperlink, openableHyperlink } from '../engine/hyperlinks.js';
 
 /** The kinds of place a right-click can land on, most specific first. */
 export const CONTEXTS = ['image', 'shape', 'link', 'field', 'list', 'table', 'text'];
@@ -66,7 +66,7 @@ export function openDocumentMenu({ event, behind, selectBehind, engine, pkg, w, 
     const link = engine.model.hyperlink?.link;
     group([
       { label: 'Edit link…', icon: 'link', shortcut: `${MOD_KEY}+K`, disabled: !editable, onSelect: () => x.editLink() },
-      { label: 'Open link', onSelect: () => engine.openHyperlink() },
+      { label: 'Open link', disabled: !!link && !openableHyperlink(link), onSelect: () => engine.openHyperlink() },
       link && !internalHyperlink(link) && link.target && { label: 'Copy link', icon: 'copy', onSelect: () => navigator.clipboard?.writeText(link.target).catch(() => {}) },
       { label: 'Remove link', icon: 'unlink', disabled: !editable, onSelect: () => engine.removeHyperlink() },
     ]);

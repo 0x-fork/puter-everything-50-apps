@@ -5,7 +5,7 @@ import {unzipSync,zipSync,strToU8,strFromU8} from 'fflate';
 import {DocxPackage,W} from '../src/engine/docx.js';
 import {TextDocument} from '../src/engine/model.js';
 import {contentControlRanges} from '../src/engine/content-controls.js';
-import {hyperlinkRanges} from '../src/engine/hyperlinks.js';
+import {hyperlinkRanges,openableHyperlink} from '../src/engine/hyperlinks.js';
 let dom;beforeAll(()=>{dom=new JSDOM();globalThis.DOMParser=dom.window.DOMParser;globalThis.XMLSerializer=dom.window.XMLSerializer;});afterAll(()=>dom.window.close());
 const source=readFileSync('public/fixtures/control-hyperlinks.docx');
 const model=p=>new TextDocument(p.paragraphs,p.pageSettings,p.numbering,p.styles,p.tables,p.assets);
@@ -44,7 +44,13 @@ it('replaces a linked placeholder as a whole while preserving its destination',a
  const[p,d]=await open();choose(d,'[Email]');d.select(d.range[0]+2);d.replace('New text');expect(d.text).not.toContain('[Email]');expect(counts(d)).toBe(2);expect(links(d).find(r=>r[0]==='New text')[1]).toBe('mailto:hello@example.com');
  expect(model(await DocxPackage.open(await save(p,d))).text).toBe(d.text);d.undo();sameParts(await save(p,d),p.parts);
 });
-it.each(['missing','script','nested','empty','grapheme'])('rejects %s links inside controls before editing',async kind=>{
+it('retains an unopenable link destination inside a control verbatim',async()=>{
+ const parts=unzipSync(source);parts['word/_rels/document.xml.rels']=strToU8(strFromU8(parts['word/_rels/document.xml.rels']).replace('mailto:hello@example.com','javascript:alert(1)'));
+ const p=await DocxPackage.open(zipSync(parts)),d=model(p);expect(p.readOnly).not.toBe(true);
+ const link=d.paragraphs.flatMap(q=>q.runs).find(r=>r.link?.target==='javascript:alert(1)').link;expect(link.retainedTarget).toBe(true);expect(openableHyperlink(link)).toBe(false);
+ sameParts(await save(p,d),p.parts);
+});
+it.each(['missing','nested','empty','grapheme'])('rejects %s links inside controls before editing',async kind=>{
  const parts=unzipSync(source),root=xml(source),link=nodes(nodes(root,'sdt')[0],'hyperlink')[0];
  if(kind==='missing')link.setAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships','r:id','absent');
  if(kind==='nested')link.append(link.cloneNode(true));

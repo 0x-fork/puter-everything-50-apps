@@ -1972,7 +1972,7 @@ import gate and adds an internal destination mode to its link dialog.
 | Feature | Specification basis | Supported subset and evidence |
 | --- | --- | --- |
 | Link structure | ECMA-376 Part 1 §§17.16.22 `hyperlink`, 15.3 Hyperlinks, 22.8.2.1 `ST_RelationshipId`; Part 4 transitional namespaces | Read direct paragraph/cell `w:hyperlink` wrappers containing supported `w:r` text, tabs, line/page breaks and inline pictures. Keep link identity outside character formatting. Preserve distinct adjacent wrappers even when they share a target. Nested links, fields, revisions, bookmarks, content controls, empty wrappers and unknown wrapper attributes reject before attaching a save handler. Proofing hints follow the existing paragraph preservation policy. |
-| External relationships | §§15.3, 17.16.22 `r:id`; ECMA-376 Part 2 relationship mechanism | Require one matching document relationship of transitional `/hyperlink` type with `TargetMode="External"`. Supported destinations are absolute HTTP(S), mailto and tel addresses; retain spelling, percent escapes, query and fragment. Reject missing/duplicate/wrong-type relations, package-internal targets, relative addresses, other schemes, whitespace, backslashes, invalid escapes and lone surrogates. Do not fetch destinations on import or export. Reuse matching relationships, append new IDs for changed targets, and preserve unused/source relationships. Image/style and hyperlink relationship writers compose without overwriting each other's additions. |
+| External relationships | §§15.3, 17.16.22 `r:id`; ECMA-376 Part 2 relationship mechanism | Require one matching document relationship of transitional `/hyperlink` type with `TargetMode="External"`. Openable destinations are absolute HTTP(S), mailto and tel addresses; retain spelling, percent escapes, query and fragment. Reject missing/duplicate/wrong-type relations and package-internal targets. Other targets (relative addresses, other schemes, whitespace, backslashes, invalid escapes) are retained verbatim but never opened; see “Retained link targets, list-level borders and picture nvPr” below. Do not fetch destinations on import or export. Reuse matching relationships, append new IDs for changed targets, and preserve unused/source relationships. Image/style and hyperlink relationship writers compose without overwriting each other's additions. |
 | Wrapper attributes | §17.16.22 `anchor`, `docLocation`, `history`, `tgtFrame`, `tooltip`; §22.9.2.7 `ST_OnOff` | With `r:id`, retain and ignore `anchor` as specified. Retain `tgtFrame`; the editor has no HTML frameset and opens explicitly invoked links in a new context. Display tooltip on hover, falling back to the target. Validate history's on/off lexical values and record invoked history-enabled targets for the current editor session. Nonempty `docLocation` and bookmark-only links reject. Do not synthesize fragments from either attribute. |
 | Editing | Original editor policy, with §17.16.22 wrappers on export | Ctrl/Cmd+K and an accessible toolbar dialog insert a link around selected text or insert text at an empty caret. At a caret in or immediately after a link, edit/remove the entire contiguous wrapper; range actions affect only the selection. Keep source text and run formatting intact when linking/unlinking. Typing strictly inside a link extends it; ordinary edge typing is unlinked. Replacing text wholly inside one wrapper retains the link; crossing its boundary clears the replacement's link. Paragraph splits retain existing linked prefixes/suffixes, while newly inserted multiline text is unlinked. Undo/redo restores text, links, selections and formatting together. |
 | Grapheme boundaries | Original caret policy; §17.16.22 supported subset | Link boundaries must coincide with editable grapheme boundaries. Reject imported wrappers that divide one combining sequence or joined emoji between different links/plain text; differently formatted runs within one wrapper may divide a cluster. During text edits, a newly joined cluster follows the link of its first character, so a combining mark typed after a linked base stays with that base. Preserve original UTF-16 source text and grapheme caret stops. |
@@ -24010,3 +24010,36 @@ the reader, save and reopen the package editable. Browser exports from `tests/br
 (`test-results/pictures-exports/`) and the independent fixture `tests/fixtures/pictures/pictures.docx`
 (`tests/fixtures/pictures/make_fixture.py`) validate with `tools/check-docx-schema.py`. Schema validity does not
 establish layout fidelity: effects, artistic filters and tight wrapping are approximations.
+
+## Retained link targets, list-level borders and picture nvPr
+
+Existing documents opened read-only because of three declarations (issue #69).
+Each now opens for editing.
+
+| Feature | Specification basis | Supported subset and evidence |
+| --- | --- | --- |
+| Unopenable hyperlink targets | ECMA-376 Part 1 §§15.3, 17.16.22 `r:id`, 21.1.2.3.5 `hlinkClick`; Part 2 relationship `Target` (a URI reference) | A text or DrawingML (`wp:docPr`/`pic:cNvPr`) hyperlink whose External relationship target is not an absolute HTTP(S), mailto or tel address — relative paths, `file:` links, other schemes, unescaped spaces, backslashes or stray `%` — is kept as a link marked `retainedTarget`. Its relationship and target bytes are preserved through edits, splits and save; reused or newly allocated relationships copy the target verbatim. The editor never opens it: Open link is hidden in the link dialog and disabled in the context menu, Ctrl/Cmd+click reports that it can't be opened, and hover omits the open hint. Applying the dialog with the address unchanged keeps it; a new address must be a supported one, after which the link is ordinary. HTML/Markdown/mail exports continue to drop non-web hrefs. Missing, duplicate, internal or wrong-type relationships and `docLocation` remain rejected. |
+| List-level paragraph borders | §17.9 `lvl`, §17.9.23 numbering `pPr` (CT_PPrBase), §17.3.1.24 `pBdr`, §17.3.4 `CT_Border`; §17.7.2 style hierarchy | `w:pBdr` in a numbering level's `w:pPr` is read with the paragraph border reader (sides, styles, widths, spacing, colors including theme colors). Each side joins the list paragraph's border cascade at the level's position: for style-applied numbering the paragraph style's sides win, for direct numbering the level's sides win over the style, and direct paragraph sides (including `nil`) always win. Layout, painting and joining follow ordinary paragraph borders. The numbering part is preserved unchanged; a list definition authored from a bordered level (Bullets/Numbering dialogs) writes the borders into the generated level in CT_PPrBase order (before `w:ind`). Borders are discarded with the level's other paragraph geometry when its label references a deeper level. Shadowed or malformed level borders make only that level unavailable, as for other numbering errors. |
+| `nvPr` in `pic:nvPicPr` | §20.2.2.4 `nvPicPr` (CT_PictureNonVisual: `cNvPr`, `cNvPicPr` only); PresentationML `p:nvPr` | Some producers append a PresentationML-style `nvPr` (in the `pic` or `p` namespace) after `pic:cNvPicPr`. It has no WordprocessingML meaning; one such element is accepted and retained uninterpreted in the drawing shell. A duplicate or misplaced `nvPr`, or one whose content carries relationship (`r:`) attributes, remains rejected because copying it could leave dangling references. The element is outside the transitional schema, so documents carrying it do not pass XSD validation of `document.xml`, before or after editing. |
+
+Independent fixture: `tests/fixtures/list-borders-retained-links/combined.docx`,
+generated by original `tools/list_borders_retained_links_fixture.py` using only the
+Python standard library with fixed ZIP timestamps and an original 8×8 PNG. It
+contains bordered list levels with direct, style and nested cases, a picture with
+`<pic:nvPr/>` and a relative docPr link, and relative, `file:` and web text links.
+Unit regressions (`tests/list-borders-retained-links.test.js`, plus updated
+hyperlink, drawing-hyperlink, control-hyperlink and hyperlink-recovery tests) cover
+the cascade, layout frames, byte-identical untouched export, edits/reopen with the
+retained relationships and unchanged numbering part, replacing a retained target,
+generated-level pBdr serialization and the remaining `nvPr` guards. Browser
+regressions (`tests/browser/list-borders-retained-links.spec.js`,
+`tests/browser/hyperlinks.spec.js`) open the fixture editable, check the link dialog,
+edit, download and reopen. `check:conformance` validates the exported numbering and
+relationship parts; `document.xml` fails only on the producer's `pic:nvPr`, as the
+source does.
+
+Remaining gaps: retained destinations are not resolved or opened (no relative
+document base, file system or custom protocol handling); level borders on
+generated levels drop source attributes other than CT_Border's; no claim of
+reference-application pixel equivalence for list borders.
+

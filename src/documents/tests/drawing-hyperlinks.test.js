@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate';
 import { DocxPackage } from '../src/engine/docx.js';
 import { TextDocument } from '../src/engine/model.js';
-import { hyperlinkRanges } from '../src/engine/hyperlinks.js';
+import { hyperlinkRanges, openableHyperlink } from '../src/engine/hyperlinks.js';
 import { hyperlinkAtPoint } from '../src/engine/hyperlink-hit.js';
 import { layoutDocument } from '../src/engine/layout.js';
 import { pageGeometry } from '../src/engine/page-settings.js';
@@ -91,10 +91,12 @@ it.each([
   await expect(DocxPackage.open(alter(doc=>fn(link(doc))))).rejects.toThrow(/drawing/);
 });
 
-it.each(['javascript:alert(1)','file:///C:/private','https://example.com/%ZZ'])('rejects unsafe or malformed drawing targets %s',async target=>{
+it.each(['javascript:alert(1)','file:///C:/private','https://example.com/%ZZ','../Shared Documents/plan.docx'])('retains unopenable drawing targets verbatim: %s',async target=>{
   const bytes=alter((doc,parts)=>{
     const rels=xml(parts['word/_rels/document.xml.rels']);[...rels.documentElement.children].find(n=>n.getAttribute('Id')==='probeOuter').setAttribute('Target',target);
     parts['word/_rels/document.xml.rels']=strToU8(new XMLSerializer().serializeToString(rels));
   });
-  await expect(DocxPackage.open(bytes)).rejects.toThrow(/drawing hyperlink/);
+  const pkg=await DocxPackage.open(bytes);expect(pkg.readOnly).not.toBe(true);
+  const image=pkg.paragraphs.flatMap(p=>p.runs).find(r=>r.image?.hyperlink?.target===target).image;
+  expect(image.hyperlink).toMatchObject({sourceId:'probeOuter',retainedTarget:true});expect(openableHyperlink(image.hyperlink)).toBe(false);
 });

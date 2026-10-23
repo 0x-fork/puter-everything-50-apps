@@ -1,6 +1,6 @@
 import { el } from '../ui/dom.js';
 import { openPopover } from '../ui/popover.js';
-import { checkedHyperlinkTarget, internalHyperlink } from '../engine/hyperlinks.js';
+import { checkedHyperlinkTarget, internalHyperlink, openableHyperlink } from '../engine/hyperlinks.js';
 import { hrefForToken } from '../lib/linkify.js';
 
 export function openHyperlink({ link, bookmarks = [], insert, apply, remove, open, anchor, focusFirst = true }) {
@@ -16,19 +16,22 @@ export function openHyperlink({ link, bookmarks = [], insert, apply, remove, ope
   kind.addEventListener('change', update); update();
   const text = insert ? el('input.input', { 'aria-label': 'Link text', placeholder: 'Use the link address' }) : null;
   const error = el('p.field-error', { role: 'alert', hidden: true });
+  const retained = !!link && !openableHyperlink(link);
   const content = el('form', { onsubmit: e => {
     e.preventDefault();
     // A typed "example.com" or "joe@example.com" links as it would when typed in the document.
     const typed = target.value.trim();
+    // An imported address this editor can't open stays as it is when left unchanged.
+    if (retained && kind.value === 'address' && typed === link.target) { modal.close(); return; }
     const destination = kind.value === 'bookmark' ? { anchor: JSON.parse(bookmark.value) } : hrefForToken(typed) || typed;
     try { if (typeof destination === 'string') checkedHyperlinkTarget(destination); } catch (e) { error.textContent = e.message; error.hidden = false; target.setAttribute('aria-invalid', 'true'); target.focus(); return; }
     modal.close(); apply(destination, text?.value || (typeof destination === 'string' ? typed : destination.anchor || 'Start of document'));
   } },
   el('label.field', {}, el('span.field-label', {}, 'Destination'), kind), addressField, bookmarkField,
   text ? el('label.field', {}, el('span.field-label', {}, 'Text'), text) : null,
-  el('p.field-hint', {}, 'Paste a web or email address, or choose a bookmark in this document.'), error,
+  el('p.field-hint', {}, retained ? 'This link points to a file or address that can’t be opened here. It is kept as it is unless you change it.' : 'Paste a web or email address, or choose a bookmark in this document.'), error,
   el('div.row.row-end', {},
-    link ? el('button.btn.btn-ghost', { type: 'button', onclick: () => { if (internalHyperlink(link)) modal.close(); open(); } }, 'Open link') : null,
+    link && !retained ? el('button.btn.btn-ghost', { type: 'button', onclick: () => { if (internalHyperlink(link)) modal.close(); open(); } }, 'Open link') : null,
     link ? el('button.btn.btn-ghost', { type: 'button', onclick: () => { modal.close(); remove(); } }, 'Remove link') : null,
     el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Cancel'),
     el('button.btn.btn-primary', { type: 'submit' }, 'Apply')));

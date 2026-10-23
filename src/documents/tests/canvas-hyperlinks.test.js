@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { unzipSync, zipSync, strToU8, strFromU8 } from 'fflate';
 import { DocxPackage, createDocx, W } from '../src/engine/docx.js';
 import { TextDocument, paragraph } from '../src/engine/model.js';
-import { checkedHyperlinkTarget, hyperlinkRanges } from '../src/engine/hyperlinks.js';
+import { checkedHyperlinkTarget, hyperlinkRanges, openableHyperlink } from '../src/engine/hyperlinks.js';
 import { hyperlinkAtPoint } from '../src/engine/hyperlink-hit.js';
 import { layoutDocument, caretRect, hitTest, selectionRects } from '../src/engine/layout.js';
 import { pageGeometry } from '../src/engine/page-settings.js';
@@ -127,6 +127,11 @@ it.each([
   ['CDATA text',n=>n.append(n.ownerDocument.createCDATASection('unmodelled'))],
 ])('rejects unsupported %s before editable open',async(label,change)=>{await expect(DocxPackage.open(revise('word/document.xml',xml=>change(links(xml)[0])))).rejects.toThrow();});
 
-it.each(['missing','duplicate','internal','wrong type','unsafe target'])('rejects %s hyperlink relationships',async kind=>{
-  await expect(DocxPackage.open(revise('word/_rels/document.xml.rels',xml=>{const r=[...xml.documentElement.children].find(n=>n.getAttribute('Type')===R+'/hyperlink');if(kind==='missing')r.remove();if(kind==='duplicate')r.after(r.cloneNode(true));if(kind==='internal')r.removeAttribute('TargetMode');if(kind==='wrong type')r.setAttribute('Type',R+'/image');if(kind==='unsafe target')r.setAttribute('Target','javascript:alert(1)');}))).rejects.toThrow(/hyperlink/);
+it.each(['missing','duplicate','internal','wrong type'])('rejects %s hyperlink relationships',async kind=>{
+  await expect(DocxPackage.open(revise('word/_rels/document.xml.rels',xml=>{const r=[...xml.documentElement.children].find(n=>n.getAttribute('Type')===R+'/hyperlink');if(kind==='missing')r.remove();if(kind==='duplicate')r.after(r.cloneNode(true));if(kind==='internal')r.removeAttribute('TargetMode');if(kind==='wrong type')r.setAttribute('Type',R+'/image');}))).rejects.toThrow(/hyperlink/);
+});
+it('keeps an unopenable relationship target as an editable, unopened link',async()=>{
+  const p=await DocxPackage.open(revise('word/_rels/document.xml.rels',xml=>{for(const r of [...xml.documentElement.children].filter(n=>n.getAttribute('Type')===R+'/hyperlink'))r.setAttribute('Target','javascript:alert(1)');}));
+  expect(p.readOnly).not.toBe(true);const d=model(p),link=hyperlinkRanges(d.paragraphs)[0].link;
+  expect(link).toMatchObject({target:'javascript:alert(1)',retainedTarget:true});expect(openableHyperlink(link)).toBe(false);
 });

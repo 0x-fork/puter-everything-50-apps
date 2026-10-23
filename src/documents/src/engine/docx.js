@@ -1224,7 +1224,7 @@ export class DocxPackage {
     styles.openTypeFeatures = attempt(() => readOpenTypeFeatures(settings?.documentElement, pageSettings.compatibilityMode), false);
     const tocHyperlinkRuns = preview ? projectCachedFieldResults(body, styles) : new WeakSet();
     let numbering;
-    try { numbering = readNumbering(parts, node => geometryPatch(paragraphProperties(node), true), readColor, readFonts, preview ? error => recordPreviewIssue(issues, error) : null); } catch (e) { if (preview) { recordPreviewIssue(issues, e); numbering = emptyNumbering(); } else throw e instanceof UnsupportedDocumentError ? e : new UnsupportedDocumentError(e.message); }
+    try { numbering = readNumbering(parts, node => geometryPatch(paragraphProperties(node, {}, readColor), true), readColor, readFonts, preview ? error => recordPreviewIssue(issues, error) : null); } catch (e) { if (preview) { recordPreviewIssue(issues, e); numbering = emptyNumbering(); } else throw e instanceof UnsupportedDocumentError ? e : new UnsupportedDocumentError(e.message); }
     const checkMarkers = paragraphs => {
       const report = error => recordPreviewIssue(issues, error);
       try { listMarkers(paragraphs, numbering, preview ? report : null); }

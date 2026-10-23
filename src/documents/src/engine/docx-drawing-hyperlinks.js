@@ -28,9 +28,11 @@ export function readDrawingHyperlink(node, relationships, { inactive = false } =
   const matches = [...(relationships?.documentElement?.children || [])].filter(r => r.getAttribute('Id') === sourceId);
   const rel = matches[0];
   if (!sourceId || matches.length !== 1 || rel.namespaceURI !== REL || rel.localName !== 'Relationship' || rel.getAttribute('Type') !== `${R}/hyperlink` || rel.getAttribute('TargetMode') !== 'External') fail('missing, duplicate or unsupported relationships');
+  // As for text links, a destination the editor cannot open is kept verbatim.
   const target = rel.getAttribute('Target');
-  try { checkedHyperlinkTarget(target); } catch (e) { fail(e.message); }
-  return { id: hyperlinkId(), sourceId, target, tooltip: node.getAttribute('tooltip') || '', history: !['false','0'].includes(value('history')) };
+  let retainedTarget = false;
+  try { checkedHyperlinkTarget(target); } catch { retainedTarget = true; }
+  return { id: hyperlinkId(), sourceId, target, tooltip: node.getAttribute('tooltip') || '', history: !['false','0'].includes(value('history')), ...(retainedTarget ? { retainedTarget } : {}) };
 }
 
 // Allocate edited destinations before the text hyperlink writer reads this part.
@@ -41,7 +43,8 @@ export function drawingHyperlinkWriter(parts, images, sourcePart = 'word/documen
   let rels;
   for (const image of changed) {
     if (!image.hyperlink) continue;
-    const target = checkedHyperlinkTarget(image.hyperlink.target);
+    const target = image.hyperlink.retainedTarget ? image.hyperlink.target : checkedHyperlinkTarget(image.hyperlink.target);
+    if (typeof target !== 'string' || !target) throw new Error('Missing hyperlink target.');
     rels ||= parts[path] ? parseXml(parts[path]) : parseXml(`<Relationships xmlns="${REL}"/>`);
     const entries = [...rels.documentElement.children];
     let rel = entries.find(r => r.getAttribute('Type') === `${R}/hyperlink` && r.getAttribute('TargetMode') === 'External' && r.getAttribute('Target') === target);

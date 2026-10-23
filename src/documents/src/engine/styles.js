@@ -157,7 +157,9 @@ export function resolveStyledParagraph(p, styles, numbering, options) {
   const numberingIndex = chain.findLastIndex(s => s.reference?.numId !== undefined);
   const split = Math.max(0, numberingIndex);
   const chainGeometry = entries => geometryPatch(entries.reduce((properties, s) => mergeProperties(properties, s.properties), {}));
-  p.listContext = { base: geometryPatch(base), style: chainGeometry(chain), afterNumbering: chainGeometry(chain.slice(split)), direct: geometryPatch(context.properties) };
+  // Border sides declared by the paragraph style chain or directly; numbering level borders fill the rest.
+  const borderSides = { style: Object.keys(chain.reduce((properties, s) => mergeProperties(properties, s.properties), {}).paragraphBorders || {}), direct: Object.keys(context.properties.paragraphBorders || {}) };
+  p.listContext = { base: geometryPatch(base), style: chainGeometry(chain), afterNumbering: chainGeometry(chain.slice(split)), direct: geometryPatch(context.properties), borderSides };
   if (!p.listChanged) {
     const inheritedReference = Object.assign({}, styles.defaults.reference, ...tableChain.map(s => s.reference), ...chain.map(s => s.reference));
     const ref = { ...inheritedReference, ...context.reference };

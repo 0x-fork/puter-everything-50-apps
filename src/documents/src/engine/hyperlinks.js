@@ -22,6 +22,16 @@ export function checkedHyperlinkTarget(target) {
   return target; // Preserve the relationship's spelling, escaping and fragment.
 }
 
+/**
+ * Whether a link can be opened from the editor. Imported relationship targets
+ * outside the supported schemes (relative paths, file links, unescaped
+ * spaces…) are retained as the document's data, but never opened.
+ */
+export const openableHyperlink = link => {
+  if (internalHyperlink(link)) return true;
+  try { checkedHyperlinkTarget(link?.target); return true; } catch { return false; }
+};
+
 export function hyperlinkRanges(paragraphs) {
   const result = []; let offset = 0;
   for (const p of paragraphs) {
