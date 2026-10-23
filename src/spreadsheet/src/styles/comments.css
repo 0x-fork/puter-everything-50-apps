@@ -92,6 +92,7 @@ textarea.input.cmt-reply { min-height: 32px; }
 }
 .cmt-cell:hover { color: var(--ink); }
 .cmt-pane-empty { margin: auto; max-width: 240px; text-align: center; color: var(--ink-2); }
+.cmt-pane-empty-icon { display: flex; justify-content: center; }
 .cmt-pane-empty p { margin: 6px 0 0; }
 .cmt-pane-hint { font-size: 12px; color: var(--ink-3); }
 

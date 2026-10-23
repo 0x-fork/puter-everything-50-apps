@@ -338,7 +338,7 @@ export function createComments(ctx, host) {
     const cells = threadCells(wb, sheetId);
     if (!cells.length) {
       list.replaceChildren(el('div.cmt-pane-empty', {},
-        el('span', { html: icon('comment', 32) }),
+        el('span.cmt-pane-empty-icon', { html: icon('comment', 32) }),
         el('p', {}, 'No comments on this sheet yet.'),
         el('p.cmt-pane-hint', {}, 'Select a cell and choose New Comment to start a conversation.')));
       return;
