@@ -81,6 +81,7 @@ import { openCustomizeKeyboard } from './customize-keyboard.js';
 import { MARKUP_VIEWS } from './review.js';
 import { documentHtml, documentMarkdown, documentPlainText } from '../lib/document-export.js';
 import { recentFiles } from '../lib/recent.js';
+import { madeFiles, withMade } from '../lib/made.js';
 import { listVersions } from '../lib/versions.js';
 import { publishPage, findSite, unpublishPage } from '../lib/publish.js';
 import { listCustomTemplates } from '../lib/customtemplates.js';
@@ -882,7 +883,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     },
     recentDocuments: cloud ? async () => {
       if (session.signedOut) return [];
-      return recentFiles(await P.listFiles(), { exclude: doc.path }).map(f => ({ name: Doc.nameFor(f.path), path: f.path, when: relativeTime(f.modified) }));
+      // Documents saved elsewhere on the drive through Puter's Save dialog are recent too.
+      const [folder, made] = await Promise.all([P.listFiles(), madeFiles().catch(() => [])]);
+      return recentFiles(withMade(folder, made), { exclude: doc.path }).map(f => ({ name: Doc.nameFor(f.path), path: f.path, when: relativeTime(f.modified) }));
     } : null,
     openRecent: path => openPath?.(path),
     documentLocation: () => ({ location: local ? 'This device' : doc.path ? `Puter › ${doc.path.replace(/^(?:\/[^/]+|~)\//, '')}` : 'Puter (not saved yet)' }),
@@ -1060,7 +1063,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     setProperties: patch => { if (!pkg || pkg.readOnly || failed) return false; pkg.coreAuthor = session.username || pkg.coreAuthor; const changed = pkg.setCoreProperties(patch); if (changed) { doc.changed(); updateStatus(); } return changed; },
     statistics: () => { if (!engine) return null; const stats = documentStatisticsOf(engine.session.body?.text ?? engine.model.text); return { pages: engine.layout.pageCount, ...stats }; },
     location: () => editorCommands.documentLocation().location, size: () => doc.size,
-    versions: cloud && versioning.enabled ? () => (doc.path ? listVersions(doc.path) : Promise.resolve([])) : null,
+    versions: cloud && versioning.enabled ? () => (doc.path ? listVersions(doc.path, { uid: doc.uid }) : Promise.resolve([])) : null,
     versionsAvailable: () => !!doc.path,
     // A version that could not be written says so, as the Version History pane does.
     saveVersionNow: () => doc.saveVersionNow().then(v => { if (!v) throw new Error('The version could not be saved.'); toast('Version saved'); }).catch(e => { if (!destroyed) error(e); }),
@@ -1103,7 +1106,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     openVersionHistory: cloud && versioning.enabled ? () => versionHistory.open() : null,
     publish: canPublish() || (cloud && publishing.enabled && P.canHost()) ? async () => {
       await ready; if (!engine || failed) throw new Error('The document is not open.');
-      if (!doc.path) { await save(); if (!doc.path) throw new Error('Save the document first.'); }
+      // A template or other file whose edits go to a new .docx (inside the Puter desktop, where Save puts it) is
+      // published as that .docx, as a new document is: the page then follows the file the edits are saved in.
+      if (!doc.path || doc.waitsForPlace) { await save(); if (!doc.path || doc.waitsForPlace) throw new Error('Save the document first.'); }
       engine.finishComposition();
       const html = exportBody(() => documentHtml(engine.model, { title: title.value || 'Document' }));
       return publishPage(doc.path, title.value || 'Document', html, { existing: await findSite(doc.path) });

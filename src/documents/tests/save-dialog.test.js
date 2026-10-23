@@ -29,6 +29,13 @@ function installPuter({ env = 'app', picker = true, cancelAware = true } = {}) {
     stat: vi.fn(async (path) => { if (!files.has(path)) throw notFound(); return { path, modified: clock }; }),
     read: vi.fn(async (path) => { if (!files.has(path)) throw notFound(); return files.get(path); }),
     readdir: vi.fn(async () => []),
+    rename: vi.fn(async (path, name) => {
+      if (!files.has(path)) throw notFound();
+      const target = `${path.slice(0, path.lastIndexOf('/') + 1)}${name}`;
+      if (files.has(target)) throw new Error('A file with that name already exists');
+      files.set(target, files.get(path)); files.delete(path);
+      return { path: target, name, modified: ++clock };
+    }),
   };
   const ui = {};
   if (picker) {
@@ -216,6 +223,130 @@ describe('the first save inside the Puter desktop', () => {
     dialogs[0].save('Late.docx');
     await settle();
     expect(doc.path).toBe('~/Desktop/Untitled document.docx');
+    doc.destroy();
+  });
+
+  it('counts a dialog closed without an answer (Esc, its close button) as cancelled once the desktop hands the focus back', async () => {
+    const doc = Doc.blank();
+    doc.attach(async () => docx('v1'));
+    doc.changed();
+    let settled = false;
+    const closed = doc.save().then((saved) => { settled = true; return saved; });
+    await settle();
+    const focus = (source = window) => window.dispatchEvent(new MessageEvent('message', { data: { msg: 'focus' }, source }));
+    // A focus the desktop sent before it put the dialog up, and messages from anywhere else, are not the dialog closing.
+    focus();
+    await vi.advanceTimersByTimeAsync(P.DIALOG_FOCUS_MS);
+    window.dispatchEvent(new MessageEvent('message', { data: { msg: 'focus' } }));
+    window.dispatchEvent(new MessageEvent('message', { data: { msg: 'click' }, source: window }));
+    await settle();
+    expect(settled).toBe(false);
+    // Esc in Puter's dialog: the desktop closes it without a word to the app, and gives the window the focus back.
+    focus();
+    expect(await closed).toBe(false);
+    expect(doc.choosingPlace).toBe(false);
+    expect(doc.path).toBeNull();
+    expect(doc.status).toBe('unsaved');
+    doc.destroy();
+  });
+
+  it('a saved file is not taken for a cancel by the focus that follows it', async () => {
+    const doc = Doc.blank();
+    doc.attach(async () => docx('v1'));
+    doc.changed();
+    const saving = doc.save();
+    await settle();
+    await vi.advanceTimersByTimeAsync(P.DIALOG_FOCUS_MS);
+    // The desktop answers with the file, then closes its dialog and gives the window the focus back.
+    dialogs[0].save();
+    window.dispatchEvent(new MessageEvent('message', { data: { msg: 'focus' }, source: window }));
+    expect(await saving).toBe(true);
+    expect(doc.path).toBe('~/Desktop/Untitled document.docx');
+    doc.destroy();
+  });
+
+  it('gives a file named without .docx in the dialog the extension, and autosaves to it from then on', async () => {
+    const doc = Doc.blank();
+    let content = docx('v1');
+    doc.attach(async () => content);
+    doc.changed();
+    const saving = doc.save();
+    await settle();
+    // The whole name was typed over, extension and all.
+    dialogs[0].save('Notes');
+    expect(await saving).toBe(true);
+    expect(doc.path).toBe('~/Desktop/Notes.docx');
+    expect(doc.name).toBe('Notes');
+    expect(files.has('~/Desktop/Notes')).toBe(false);
+    expect(doc.waitsForPlace).toBe(false);
+    content = docx('v2');
+    doc.changed();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    expect(files.get('~/Desktop/Notes.docx')).toBe(content);
+    expect(dialogs).toHaveLength(1);
+    doc.destroy();
+  });
+
+  it('keeps a name without .docx when the name with it is taken, and still autosaves to that file', async () => {
+    files.set('~/Desktop/Notes.docx', docx('someone else\'s'));
+    const doc = Doc.blank();
+    let content = docx('v1');
+    doc.attach(async () => content);
+    doc.changed();
+    const saving = doc.save();
+    await settle();
+    dialogs[0].save('Notes');
+    expect(await saving).toBe(true);
+    expect(doc.path).toBe('~/Desktop/Notes');
+    content = docx('v2');
+    doc.changed();
+    expect(doc.waitsForPlace).toBe(false);
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+    expect(files.get('~/Desktop/Notes')).toBe(content);
+    expect(files.get('~/Desktop/Notes.docx')).not.toBe(content);
+    // Save writes there too, without asking again.
+    content = docx('v3');
+    doc.changed();
+    expect(await doc.save()).toBe(true);
+    expect(files.get('~/Desktop/Notes')).toBe(content);
+    expect(dialogs).toHaveLength(1);
+    doc.destroy();
+  });
+
+  it('Save a Copy of a document open read-only copies the file as it is', async () => {
+    const original = docx('unsupported content, kept as is');
+    files.set('~/Desktop/Odd.docx', original);
+    // A read-only preview attaches no exporter: nothing on screen may be written over the file.
+    const doc = new Doc({ name: 'Odd', path: '~/Desktop/Odd.docx', blob: original });
+    const copying = doc.saveCopy();
+    await settle();
+    expect(dialogs[0].blob).toBe(original);
+    expect(dialogs[0].suggestedName).toBe('Odd copy.docx');
+    dialogs[0].save();
+    expect(await copying).toBeNull();
+    expect(doc.path).toBe('~/Desktop/Odd copy.docx');
+    expect(files.get('~/Desktop/Odd copy.docx')).toBe(original);
+    expect(doc.status).toBe('saved');
+    doc.destroy();
+  });
+
+  it('counts only the time in the dialog as the user\'s, not a stalled connection after it answered', async () => {
+    let release;
+    // The room memory lives in the cloud: a stalled connection holds the step after the dialog.
+    puter.kv = { del: vi.fn(() => new Promise((resolve) => { release = resolve; })), get: async () => null, set: async () => {} };
+    const doc = Doc.blank();
+    doc.attach(async () => docx('v1'));
+    doc.changed();
+    const saving = doc.save();
+    await settle();
+    expect(doc.choosingPlace).toBe(true);
+    dialogs[0].save();
+    await vi.waitFor(() => expect(puter.kv.del).toHaveBeenCalled());
+    // Leaving now reports a slow save after a while, rather than waiting on the user for ever.
+    expect(doc.choosingPlace).toBe(false);
+    expect(doc.path).toBeNull();
+    release();
+    expect(await saving).toBe(true);
     doc.destroy();
   });
 

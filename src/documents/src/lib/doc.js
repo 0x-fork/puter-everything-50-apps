@@ -25,6 +25,7 @@ import { movePublication, unpublishAt } from './publish.js';
 import { moveStar } from './starred.js';
 import { forgetRoom, moveRoom } from '../collab/room-memory.js';
 import { HANWORD_IMPORTABLE, decodeTextFile, importHanword, importKind, toInsertPayload } from './importers.js';
+import { rememberMade, forgetMade } from './made.js';
 
 export const AUTOSAVE_MS = 1500;
 export const MAX_AUTOSAVE_MS = 30000;
@@ -56,11 +57,30 @@ export function needsUnloadWarning(doc) {
   return doc.dirty || doc.status === 'saving' || !!doc._saving;
 }
 
+/**
+ * A file Puter's Save dialog wrote under a name without ".docx" ("Notes", "Plan v1.2") gets it, as a word
+ * processor's Save adds it. When that name is taken the file keeps the name the user gave it.
+ */
+async function withDocxExtension(item) {
+  const name = `${P.displayName(item.path)}.docx`;
+  const target = `${item.path.slice(0, item.path.lastIndexOf('/') + 1)}${name}`;
+  try {
+    if (await P.fileExists(target)) return item;
+    await P.renameFile(item.path, name);
+    return { ...item, path: target, name };
+  } catch (e) {
+    console.warn('[documents] could not add .docx to the saved file', e);
+    return item;
+  }
+}
+
 export class Doc extends EventTarget {
-  constructor({ name = UNTITLED, path = null, blob = null, dirty = false, template = null, pendingImport = null, importInfo = null, modified = null } = {}) {
+  constructor({ name = UNTITLED, path = null, uid = null, blob = null, dirty = false, template = null, pendingImport = null, importInfo = null, modified = null } = {}) {
     super();
     this.name = name;
     this.path = path;
+    /** The file's id on the drive, which names the version history of a file outside the app folder; null when unknown. */
+    this.uid = uid;
     /** The file's time stamp as this window last saw it (from writing it, or given at opening); null when unknown. Another window's write changes it. */
     this._remoteModified = modified ?? null;
     /** Template id to lay out once the engine is ready (new documents only). */
@@ -104,7 +124,8 @@ export class Doc extends EventTarget {
 
   /** Editable .docx target; other extensions are saved as a fresh .docx. */
   get isDocxPath() {
-    return !!this.path && /\.docx$/i.test(this.path);
+    // A file the user named in Puter's Save dialog is the document's own, whatever its name ends with.
+    return !!this.path && (/\.docx$/i.test(this.path) || this.path === this._placedAs);
   }
 
   /** Wire the engine's export function. Fires a pending first save for imports. */
@@ -293,6 +314,7 @@ export class Doc extends EventTarget {
         // A template or other non-docx source stays where it was: the new file is a copy of it.
         const copy = !!this.path;
         this.path = target;
+        this.uid = null; // a new file, in the app folder, whose history goes by its name
         this.name = Doc.nameFor(target);
         this._emitPath({ copy });
       }
@@ -340,7 +362,7 @@ export class Doc extends EventTarget {
   /** Leave a version snapshot when one is due. Never affects the save status. */
   _snapshot(blob) {
     if (!versioning.enabled || !this.path || this._snapshotting) return;
-    this._snapshotting = snapshotIfDue(this.path, blob, this.lastVersionAt, { meta: this.versionMeta?.() })
+    this._snapshotting = snapshotIfDue(this.path, blob, this.lastVersionAt, { meta: this.versionMeta?.(), uid: this.uid })
       .then((t) => { this.lastVersionAt = t; })
       .catch((e) => { console.warn('[documents] version snapshot failed', e); })
       .finally(() => { this._snapshotting = null; });
@@ -352,7 +374,7 @@ export class Doc extends EventTarget {
     return this._withFileLock(async () => {
       if (!this.path) return null;
       if (this._snapshotting) await this._snapshotting;
-      const v = await saveVersion(this.path, await this.toBlob(), { meta: { ...this.versionMeta?.(), ...meta } });
+      const v = await saveVersion(this.path, await this.toBlob(), { meta: { ...this.versionMeta?.(), ...meta }, uid: this.uid });
       if (v) this.lastVersionAt = v.time;
       return v;
     });
@@ -380,7 +402,7 @@ export class Doc extends EventTarget {
         if (this._snapshotting) await this._snapshotting;
         const current = await this.toBlob();
         checkCurrent();
-        const recovery = await saveVersion(path, current);
+        const recovery = await saveVersion(path, current, { uid: this.uid });
         if (!recovery) throw new Error('Could not keep a recovery version');
         this.lastVersionAt = recovery.time;
         checkCurrent();
@@ -473,6 +495,7 @@ export class Doc extends EventTarget {
     }
     // The star on the home screen follows the file, as a rename there does; left behind, the next listing drops it.
     moveStar(this.path, target);
+    forgetMade(this.path, target);
     await moveRoom(this.path, target);
     if (versioning.enabled) await renameVersions(this.path, target);
     // A published page stays up under its address; its record follows the
@@ -497,9 +520,12 @@ export class Doc extends EventTarget {
     return this.dirty && !!this.exporter && this.writes !== false && !this._deleted && this._needsPlace();
   }
 
-  /** Whether Puter's Save dialog is open for this document, so a save waiting on it is waiting on the user. */
+  /**
+   * Whether Puter's Save dialog is open for this document, so a save waiting on it is waiting on the user. Not the
+   * export before it, nor the writes after it: a connection that stalls there is a save taking too long.
+   */
   get choosingPlace() {
-    return !!this._choosing;
+    return !!this._dialogOpen;
   }
 
   /**
@@ -522,19 +548,35 @@ export class Doc extends EventTarget {
       try {
         if (this._ready) await this._ready;
         version = this.version;
-        blob = await this.exporter();
-        item = await P.saveFileAs(blob, suggestedName);
+        // A document open read-only has no exporter: its copy is the file's own bytes, untouched.
+        blob = await this.toBlob();
+        this._dialogOpen = true;
+        try { item = await P.saveFileAs(blob, suggestedName); }
+        finally { this._dialogOpen = false; }
       } catch (e) {
         this._setStatus('error', e?.message || String(e));
         throw e;
       }
       if (!item || this._deleted) return null;
+      // Puter's dialog keeps the name as typed. Without the extension ("Notes") the file would count as a source to
+      // copy from, as a template does: nothing would autosave to it, and every Save would ask again.
+      if (!/\.docx$/i.test(item.path)) item = await withDocxExtension(item);
+      // The dialog answers with a path from the home folder (~/Desktop/Report.docx) and no time stamp. The file
+      // as the drive has it gives the spelling the home screen's listing uses, so its star, room and reading
+      // position stay with it there, and the time stamp that arms the check for another window's writes.
+      const st = await P.statFile(item.path).catch(() => null);
+      const path = st?.path?.startsWith('/') && P.displayName(st.path) === P.displayName(item.path) ? st.path : item.path;
+      if (this._deleted) return null;
+      // Listed on the home screen with the app folder's own documents, though it was saved elsewhere.
+      rememberMade({ path, uid: st?.uid || st?.id || item.uid || null });
       await this._withFileLock(async () => {
         // A new file under the name of one that was shared and deleted is not that document: it must not rejoin its room.
-        await forgetRoom(item.path);
-        this._remoteModified = item.modified ?? null;
-        this.path = item.path;
-        this.name = Doc.nameFor(item.path);
+        await forgetRoom(path);
+        this._remoteModified = st?.modified ?? item.modified ?? null;
+        this.path = path;
+        this._placedAs = path;
+        this.uid = st?.uid || st?.id || item.uid || null;
+        this.name = Doc.nameFor(path);
         this.size = blob?.size ?? this.size;
         this.lastSaved = Date.now();
         this.lastVersionAt = undefined;
@@ -596,6 +638,7 @@ export class Doc extends EventTarget {
       await forgetRoom(target);
       this.size = blob?.size ?? this.size;
       this.path = target;
+      this.uid = null;
       this.name = clean;
       this.lastSaved = Date.now();
       this.lastVersionAt = undefined;
@@ -627,7 +670,7 @@ export class Doc extends EventTarget {
   async remove() {
     return this._withFileLock(async () => {
       if (!this.path) return;
-      const path = this.path;
+      const path = this.path, uid = this.uid;
       clearTimeout(this._timer);
       this._timer = null;
       try {
@@ -639,7 +682,8 @@ export class Doc extends EventTarget {
         this.path = null;
         this.savedVersion = this.version;
         this._setStatus('saved');
-        if (versioning.enabled) await deleteVersions(path);
+        if (versioning.enabled) await deleteVersions(path, { uid });
+        forgetMade(path);
         await forgetRoom(path);
         // Nothing is left to update the page from; a page nobody can take down must not stay online.
         if (publishing.enabled) unpublishAt(path).catch((e) => console.warn('[documents] the published page could not be taken down', e));
@@ -660,7 +704,7 @@ export class Doc extends EventTarget {
       P.readFile(path), P.prepareDocumentPaths(),
     ]);
     if (HANWORD_IMPORTABLE.test(path)) return Doc.fromImportFile(new File([blob], P.displayName(path)));
-    return new Doc({ name: Doc.nameFor(path), path, blob, modified: stat?.modified });
+    return new Doc({ name: Doc.nameFor(path), path, uid: stat?.uid || stat?.id || null, blob, modified: stat?.modified });
   }
 
   /** Convert before opening: Hanword originals always become fresh DOCX copies. */
