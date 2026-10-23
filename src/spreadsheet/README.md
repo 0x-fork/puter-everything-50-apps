@@ -123,7 +123,8 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   combo (columns with a line, which can read against its own axis on the
   right when the two series differ in scale), histogram (with a chosen bin count),
   waterfall, radar, and bubble (a third column sizes the points) charts
-  drawn from a range with detected headers and categories (hidden and
+  drawn from a range with detected headers and categories (or from ranges
+  selected together over the same rows, such as Month and Total; hidden and
   filtered-out rows and columns are left out unless the chart's Include
   hidden cells option is on), stacked or 100% stacked, with optional value labels, axis titles, linear
   trendlines, a color of your choice per series, the legend below, above, or
@@ -428,7 +429,9 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   sheet as live `SUMIFS`/`COUNTIFS` formulas (over a table, they name its
   columns and follow it as it grows), with an optional filter field whose
   value sits in a dropdown cell above the table — pick a value, or "(All)",
-  and the whole table re-filters; Goal seek, which finds the
+  and the whole table re-filters; Refresh (Alt+F5) or Refresh All
+  (Ctrl+Alt+F5) builds such a pivot table again over its source as it now
+  is, taking in categories added since; Goal seek, which finds the
   input value that makes a formula reach a wanted result; and Column stats,
   a profile of a column (counts, sum, average, median, spread, the most
   frequent values, and a distribution).
@@ -566,12 +569,15 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   evenly, groups, ungroups and regroups them (a group moves, orders and
   aligns as one, and is saved as a native group), and rotates or flips
   pictures, shapes and text boxes by quarter turns; Snap to Grid and Snap to
-  Shape line up objects as they are dragged (Alt places one freely).
+  Shape line up objects as they are dragged or resized (Alt places one freely,
+  or with both off lines it up with the cells, as in Excel), and
+  Shift held while dragging a corner keeps an object's proportions (while
+  dragging the object, it moves straight across or down).
   Shift- or Cmd/Ctrl-click selects several objects, which then drag, nudge
   with the arrow keys and delete together. The Selection Pane lists every
   object on the sheet, front first and groups with their members, with an
   eye to hide or show each (Show All, Hide All), a double-click or F2 to
-  rename one, and rows that drag to restack; hidden objects do not print,
+  rename one, Delete to remove those picked, and rows that drag to restack; hidden objects do not print,
   and names, hidden state and order travel in the `.xlsx`.
 - **Multiple sheets**: add, rename, duplicate, reorder, color, hide, protect,
   and delete sheets from the tab bar, the Insert menu's Sheet submenu, or the
@@ -681,7 +687,8 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   and table styling print as they show on screen. The home list sorts by last
   modified, name, or size, searches the names without their extensions, keeps
   its "2 min ago" times current, and files opened from elsewhere on the drive are
-  kept in a "Recently opened" strip on this device. Inside the Puter desktop the app registers for
+  kept in a "Recently opened" strip on this device. Inside the Puter desktop, spreadsheets saved where
+  you chose in Puter's Save dialog are listed with the rest, wherever they are moved. The app registers for
   "Open with" so double-clicking a spreadsheet opens it here.
 - **Regional formats**: pick how numbers and dates are written and read
   (account menu): `1.234,50` and `28.8.2026` in German, day-first dates in
@@ -874,7 +881,7 @@ regenerate the PNG/ICO favicons, Apple touch icon, and standard/maskable install
   and so can the edits kept for a file deleted since — also when another
   spreadsheet has been saved under its name meanwhile, which neither takes
   those edits for its own nor writes over them.
-  Local drafts, print settings, and recently opened file lists are scoped to the signed-in
+  Local drafts, print settings, and the lists of recently opened files and of those saved outside the app folder are scoped to the signed-in
   Puter account. Older, unscoped browser records are retained but are not
   automatically offered to an account because their owner cannot be verified.
 - **Copy several ranges**: ranges added with Ctrl/Cmd+click copy together
@@ -990,6 +997,7 @@ src/
     drafts.js         unsaved edits kept in the browser until the file holds them
     versions.js       version history snapshots under Spreadsheets/.versions
     recent.js         recently opened files (KV), for the home screen
+    made.js           spreadsheets the app saved outside its folder (Puter's Save dialog), for the home screen
     session.js        sign-in state (nobody, or who) and settings
   ui/                 grid, toolbar, formula bar, sheet tabs, the menu bar
                       (menubar.js), popover menus with submenus (menu.js), the

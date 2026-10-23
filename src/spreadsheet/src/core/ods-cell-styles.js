@@ -12,6 +12,8 @@ const hexOf = (color) => (typeof color === 'string' ? (HEX.test(color) ? color.t
 const escape = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const attrs = (map) => Object.entries(map).map(([k, v]) => ` ${k}="${escape(v)}"`).join('');
 const pt = (px) => `${Math.round(px * 0.75 * 100) / 100}pt`;
+// An indent level as a length: the 10pt (0.353cm) LibreOffice's Increase Indent adds, so its levels and these match.
+const INDENT_POINTS = 10;
 
 // Line widths as LibreOffice writes Excel's border weights.
 const BORDER_WIDTH = { thin: '0.74pt', medium: '1.76pt', thick: '2.49pt', dashed: '0.74pt', dotted: '0.74pt', double: '2.01pt' };
@@ -27,9 +29,18 @@ function borderValue(style, side) {
   return `${BORDER_WIDTH[bs]} ${line} ${hexOf(edge.bc) || '#000000'}`;
 }
 
-/** Whether a style paints a cell with nothing in it: a fill or a border, which an .ods keeps for a blank cell. */
+/**
+ * Whether a style paints a cell with nothing in it: a fill or a border, which an .ods keeps for a blank cell.
+ * So does a blank cell's protection other than the default, the input cell of a protected form left unlocked.
+ */
 export function odsCellPaints(style) {
-  return !!style && typeof style === 'object' && (!!hexOf(style.bg) || SIDES.some(([side]) => !!style[side]));
+  return !!style && typeof style === 'object' && (!!hexOf(style.bg) || SIDES.some(([side]) => !!style[side]) || !!cellProtect(style));
+}
+
+/** A style's protection as table-cell-properties' style:cell-protect, or null for the default (locked, formula shown). */
+function cellProtect(style) {
+  const locked = style.locked !== false, hidden = style.formulaHidden === true;
+  return locked && !hidden ? null : !hidden ? 'none' : locked ? 'protected formula-hidden' : 'formula-hidden';
 }
 
 /**
@@ -47,15 +58,20 @@ export function odsCellStyleProperties(style) {
   }
   if (style.wrap) cell['fo:wrap-option'] = 'wrap';
   if (style.shrink) cell['style:shrink-to-fit'] = 'true';
+  const protect = cellProtect(style);
+  if (protect) cell['style:cell-protect'] = protect;
   if (['top', 'middle', 'bottom'].includes(style.valign)) cell['style:vertical-align'] = style.valign;
   if (Number.isFinite(style.rot) && style.rot !== 0 && Math.abs(style.rot) <= 90) cell['style:rotation-angle'] = String(style.rot < 0 ? 360 + style.rot : style.rot);
   // Justify is the paragraph's own; Excel's Center Across Selection, Distributed and Fill go as the side they are laid out against.
   const align = style.align === 'justify' ? 'justify' : layoutAlign(style.align);
+  // An indent sets text in from the left edge, the one edge LibreOffice indents from: not for a cell aligned right or centred.
+  const indent = Number.isFinite(style.indent) && style.indent > 0 && !['center', 'right'].includes(align) ? Math.min(250, Math.floor(style.indent)) : 0;
   if (['left', 'center', 'right', 'justify'].includes(align)) {
     // Without a fixed source LibreOffice aligns by the value's type and ignores fo:text-align.
     cell['style:text-align-source'] = 'fix';
     paragraph['fo:text-align'] = { left: 'start', center: 'center', right: 'end', justify: 'justify' }[align];
   }
+  if (indent) paragraph['fo:margin-left'] = `${indent * INDENT_POINTS}pt`;
   Object.assign(text, textAttributes(style));
   return element('table-cell-properties', cell) + element('paragraph-properties', paragraph) + element('text-properties', text);
 }
@@ -167,6 +183,10 @@ export function odsCellStyle(props) {
   }
   if (String(props['wrap-option'] ?? '').toLowerCase() === 'wrap') s.wrap = true;
   if (String(props['shrink-to-fit'] ?? '').toLowerCase() === 'true') s.shrink = true;
+  // Protection: none, hidden-and-protected, or protected and formula-hidden in any combination (protected alone is the default).
+  const protect = String(props['cell-protect'] ?? '').toLowerCase().split(/\s+/);
+  if (protect.includes('none') || (protect.includes('formula-hidden') && !protect.includes('protected'))) s.locked = false;
+  if (protect.includes('formula-hidden') || protect.includes('hidden-and-protected')) s.formulaHidden = true;
   const valign = String(props['vertical-align'] ?? '').toLowerCase();
   if (['top', 'middle', 'bottom'].includes(valign)) s.valign = valign;
   const angle = Number(props['rotation-angle']);
@@ -179,5 +199,8 @@ export function odsCellStyle(props) {
     const align = { start: 'left', left: 'left', center: 'center', end: 'right', right: 'right', justify: 'justify' }[String(props['text-align'] ?? '').toLowerCase()];
     if (align) s.align = align;
   }
+  // LibreOffice's indent is the paragraph's left margin, a length; this app's is a count of levels.
+  const indent = Math.round(points(props['margin-left']) / INDENT_POINTS);
+  if (indent > 0 && !['center', 'right'].includes(s.align)) s.indent = Math.min(250, indent);
   return Object.keys(s).length ? s : null;
 }

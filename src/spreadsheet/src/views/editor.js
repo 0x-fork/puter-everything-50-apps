@@ -5,13 +5,13 @@ import { openSparklineCreateDialog } from '../ui/sparklinecreatedialog.js';
 import { openSlicerDialog } from '../ui/slicerdialog.js';
 import { openInsertSlicersDialog } from '../ui/insertslicers.js';
 import { openInsertTimelineDialog, openTimelineSettingsDialog } from '../ui/inserttimeline.js';
-import { deleteTimeline } from '../core/timeline.js';
+import { deleteObjectsWithTimelines, deleteTimeline } from '../core/timeline.js';
 import { openTableResizeDialog } from '../ui/tableresize.js';
 import { setTableHeaderRow, setTableFilterButton, tableFilterButtonOn } from '../core/table-header-row.js';
 import { nativePivotAt, tableSlicerProblem } from '../core/slicer-insert.js';
 import { slicerClipboard, readSlicerClipboard } from '../ui/slicer.js';
 import { slicerItems } from '../core/slicer.js';
-import { filterValueIdentity } from '../core/sheet-filters.js';
+import { filterValueIdentity, filterTable } from '../core/sheet-filters.js';
 import { openScrollDialog } from '../ui/scrolldialog.js';
 import { scrollControlValue, scrollControlTarget } from '../core/scroll-control.js';
 import { scrollControlClipboard, readScrollControlClipboard } from '../ui/scroll-control.js';
@@ -113,7 +113,8 @@ import { isCellPicture } from '../core/cell-picture.js';
 import { pictureIsPlain } from '../core/picture-format.js';
 import { linkedPictureTarget, rangePicture } from '../core/range-picture.js';
 import { refreshAll as refreshAllQueries, refreshQuery as refreshOneQuery, queryById, queryForTable } from '../core/queries.js';
-import { clearSheetFilters, reapplySheetFilters } from '../core/advanced-filter.js';
+import { clearSheetFilters, reapplySheetFilters, sheetHasFiltering } from '../core/advanced-filter.js';
+import { refreshPivot, refreshablePivotSheets, hasPivotDefinition } from '../core/pivot.js';
 import { toggleDetail } from '../core/outline-detail.js';
 import { openDatePicker } from '../ui/datepicker.js';
 import { openDedupeDialog } from '../ui/dedupedialog.js';
@@ -159,7 +160,7 @@ import { cellName, colName, normalizeRange, rangeName, parseRange, parseCellRef,
 import { parseRefText, selectionName, MAX_ROW, MAX_COL } from '../core/refs.js';
 import { formatValue, todaySerial, formatDate, fontStack, indentWidth, parseInput, MAX_DECIMAL_PLACES, AUTOMATIC_FORMAT, cellCurrency, currencyDecimals, localeInfo, editText, hasDecimalPlaces } from '../core/format.js';
 import { stepCodeDecimals } from '../core/numfmt.js';
-import { maxLineWidth, cellLayoutText, tabularDigits } from '../core/textfit.js';
+import { maxLineWidth, cellLayoutText, tabularDigits, heightForLines } from '../core/textfit.js';
 import { toDelimited, parseClipboard, parseDelimited } from '../core/tsv.js';
 import { detectDelimiter, workbookFromFile, rangeToCsv, CSV_MIME } from '../core/io.js';
 import { cellsToHtml, copyMergeLayout, parseHtmlClipboard, cellsFromHtmlRows, isOwnHtmlClipboard } from '../core/clipboard.js';
@@ -521,6 +522,9 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const chosen = (text) => named.has(identity(text)) || selectedByKey.has(identity(text));
     const selected = new Set(current?.values ? [...listed].filter(chosen) : listed);
     let valuesChanged = false; // a checkbox, Select all or Clear was used, so the value list is what Apply stores
+    // A box used since the search last changed. Until one is, a search narrows the choice to the values it finds, as
+    // Excel's does: typing "pen" and pressing Enter keeps the pens, where every value stayed ticked and Apply cleared the filter.
+    let touchedSinceSearch = false;
     const dataRange = { r1: f.range.r1 + 1, c1: f.range.c1, r2: f.range.r2, c2: f.range.c2 };
 
     const search = el('input.input', { type: 'search', placeholder: 'Search values', 'aria-label': 'Search values', autocomplete: 'off' });
@@ -598,6 +602,13 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     // The values the search box finds (all of them while it is empty): Select all and Clear act on these, as the
     // list shows them, so "pen" then Clear unticks the pens rather than every value of the column.
     const found = () => { const q = search.value.trim().toLowerCase(); return all.filter((v) => !q || v.value.toLowerCase().includes(q)); };
+    /** The values Apply keeps: the ticked ones, less those a search left out while no box has been used since (a search finding nothing narrows nothing). */
+    const kept = () => {
+      const matches = touchedSinceSearch || !search.value.trim() ? [] : found();
+      if (!matches.length) return selected;
+      const shown = new Set(matches.map((v) => v.value));
+      return new Set([...selected].filter((v) => shown.has(v)));
+    };
     const render = () => {
       const matches = found();
       const shown = matches.slice(0, 300);
@@ -605,14 +616,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       const note = !shown.length ? 'No matches' : shown.length < matches.length ? `Showing ${shown.length} of ${matches.length} values. Type to find the rest` : null;
       listEl.replaceChildren(...shown.map(({ value, count }) => {
         const id = `fv-${Math.random().toString(36).slice(2, 8)}`;
-        const input = el('input', { type: 'checkbox', id, checked: selected.has(value), onchange: () => { valuesChanged = true; if (input.checked) selected.add(value); else selected.delete(value); updateSummary(); } });
+        const input = el('input', { type: 'checkbox', id, checked: selected.has(value), onchange: () => { valuesChanged = touchedSinceSearch = true; if (input.checked) selected.add(value); else selected.delete(value); updateSummary(); } });
         // The blank cells are listed as (Blanks); a cell whose text is exactly that is quoted to tell it apart.
         return el('label.filter-value', { for: id }, input, el('span.filter-value-text', {}, value === '' ? '(Blanks)' : value === '(Blanks)' ? '"(Blanks)"' : value), el('span.filter-count', {}, String(count)));
       }), ...(note ? [el('div.menu-header', {}, note)] : [])); // replaceChildren would print a bare `false`
       updateSummary();
     };
-    const updateSummary = () => { summary.textContent = `${selected.size} of ${all.length} selected`; };
-    search.addEventListener('input', render);
+    const updateSummary = () => { summary.textContent = `${kept().size} of ${all.length} selected`; };
+    search.addEventListener('input', () => { touchedSinceSearch = false; render(); });
     search.addEventListener('keydown', (e) => { if (isComposing(e) || navigate(e)) return; e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); } if (e.key === 'Escape') menu.close(); });
     listEl.addEventListener('keydown', (e) => { if (navigate(e)) return; if (e.key !== 'Escape' && e.key !== 'Tab') e.stopPropagation(); });
 
@@ -630,15 +641,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // Equal to and Not equal to take the number when the text reads as one, and the text itself otherwise.
         const raw = (v) => { const n = t.numeric || t.value === 'eq' || t.value === 'neq' ? numberOf(v) : null; return n != null ? n : v; };
         wb.setFilterCriteria(sheetId, c, { op: t.value, value: t.args >= 1 ? raw(condValue.value) : undefined, value2: t.args >= 2 ? raw(condValue2.value) : undefined });
-      } else if (!current?.color || valuesChanged) { // Apply with the values untouched keeps a colour filter as it is
-        if (all.every((v) => selected.has(v.value))) wb.setFilterCriteria(sheetId, c, null);
-        else wb.setFilterCriteria(sheetId, c, { values: [...selected], ...(current?.caseSensitive === false ? { caseSensitive: false } : {}) });
+      // Apply with the values untouched keeps a colour filter as it is, and a condition kept from a file (a Top 10).
+      } else if ((!current?.color && current?.native == null) || valuesChanged || kept() !== selected) {
+        const keep = kept();
+        if (all.every((v) => keep.has(v.value))) wb.setFilterCriteria(sheetId, c, null);
+        else wb.setFilterCriteria(sheetId, c, { values: [...keep], ...(current?.caseSensitive === false ? { caseSensitive: false } : {}) });
       }
       grid.focus();
     };
     const actions = el('div.filter-actions', {},
-      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = true; for (const v of found()) selected.add(v.value); render(); } }, 'Select all'),
-      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = true; for (const v of found()) selected.delete(v.value); render(); } }, 'Clear'),
+      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = touchedSinceSearch = true; for (const v of found()) selected.add(v.value); render(); } }, 'Select all'),
+      el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { valuesChanged = touchedSinceSearch = true; for (const v of found()) selected.delete(v.value); render(); } }, 'Clear'),
       el('div.grow'),
       el('button.btn.btn-primary.btn-sm', { type: 'button', onclick: apply }, 'Apply'));
 
@@ -733,7 +746,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
             // input only when it still matches the particular label selected.
             const literal = typed || /^[=']/.test(options[i])
               || !checkValue({ type: 'list', source: [options[i]] }, parseInput(options[i]).v).ok;
-            wb.setInput(sheetId, r, c, values[i], { literal });
+            // A number reads in the cell as the list showed it: a cell of no number format of its own takes the
+            // source cell's, so a date picked as 2024-01-15 does not land as the serial 45306.
+            const format = typed ? wb.listOptionFormat(sheetId, rule, values[i], r, c) : null;
+            wb.setInput(sheetId, r, c, values[i], { literal, ...(format ? { style: format } : {}) });
             grid.focus();
           },
         };
@@ -810,7 +826,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const unmark = (e) => { if (e.target === blamed) clearError(); };
     // Where the link goes: a web address, a place on a sheet, or a named range.
     const hasSheets = (ref) => ref && wb.sheetByName(ref.sheet) && (!ref.sheetEnd || wb.sheetByName(ref.sheetEnd));
-    const namedRanges = wb.names.filter((n) => hasSheets(wb.parseNamedRef(n.ref)));
+    // The names the Name Manager shows: not the hidden ones that keep a pivot table's or Solver's workings.
+    const namedRanges = wb.names.filter((n) => !n.hidden && hasSheets(wb.parseNamedRef(n.ref)));
     const internal = existing && existing.url.startsWith('#') ? existing.url.slice(1) : null;
     const parsedInternal = internal ? wb.parseNamedRef(internal) : null;
     // A sheet picker cannot represent both endpoints of a span. Keep its
@@ -877,7 +894,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Cancel'),
         el('button.btn.btn-primary', { type: 'submit' }, existing ? 'Save' : 'Insert')));
     // Starts on the address for an existing link or a cell with text, else on the text; through openModal, whose screen-size guard keeps a phone's keyboard down.
-    const modal = openModal({ title: existing ? 'Edit link' : 'Insert link', content, initialFocus: existing || labelNow ? urlInput : textInput });
+    // Cancelled, it gives the keyboard back to the sheet, as when it is saved, not to the ribbon button it was opened from.
+    const modal = openModal({ title: existing ? 'Edit link' : 'Insert link', content, initialFocus: existing || labelNow ? urlInput : textInput, onClose: () => keepFocus() });
   }
 
   function openNoteDialog() {
@@ -901,7 +919,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Cancel'),
         el('button.btn.btn-primary', { type: 'submit' }, existing ? 'Save' : 'Add note')));
     area.addEventListener('keydown', (e) => { if (isComposing(e)) return; if (e.key === 'Enter' && isMod(e)) submit(e); });
-    const modal = openModal({ title: existing ? 'Edit note' : 'Add note', content, initialFocus: area });
+    const modal = openModal({ title: existing ? 'Edit note' : 'Add note', content, initialFocus: area, onClose: () => keepFocus() });
     area.setSelectionRange(area.value.length, area.value.length); // the caret after the note, where the field took the focus
   }
 
@@ -969,6 +987,31 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   function dataRange(fallback = wb.usedRange(grid.sheetId)) {
     if (!S.isSingle(grid.selection)) return toUsedExtent(grid.range);
     return wb.dataRegion(grid.sheetId, grid.active.r, grid.active.c) || fallback;
+  }
+
+  /**
+   * Whether the list at a cell shows a filter, as Data ▸ Filter reads it: a table's filter whose buttons are hidden
+   * (Table Design ▸ Filter Button off, or the one a slicer added) is shown as off, since the command shows them.
+   */
+  function filterShownAt(sheetId, r, c) {
+    const filter = wb.filterAt(sheetId, r, c);
+    const table = filter && filterTable(wb.sheet(sheetId), filter);
+    return !!filter && (!table || tableFilterButtonOn(wb, sheetId, table));
+  }
+  ctx.filterShownAt = filterShownAt;
+
+  /**
+   * The rows a sort from one cell takes: the table or the filtered list the cell is in, whole, as Excel sorts
+   * them, and otherwise the block of data around it (see dataRange). Read as a block, a list with a blank row
+   * inside it was sorted only down to that row, while its filter menu's Sort A to Z sorted all of it.
+   */
+  function sortBlock() {
+    if (!S.isSingle(grid.selection)) return dataRange();
+    const { r, c } = grid.active;
+    const table = wb.tableAt(grid.sheetId, r, c);
+    if (table) return table.range;
+    const filter = wb.filterAt(grid.sheetId, r, c);
+    return filter ? toUsedExtent(filter.range) : dataRange();
   }
 
   /**
@@ -1163,12 +1206,33 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
   }
 
   function growFontRows(sid, tallest) {
-    // Grow rows that can no longer show the text; never shrink or unhide them.
+    // Rows that can no longer show the text grow; a hidden row is never unhidden. A row someone sized keeps its
+    // height as theirs and is only grown. A row nobody sized (at the default height, or fitted automatically)
+    // stays automatic and is fitted to its text, so it shrinks again when the font is made smaller, as Excel's
+    // rows do: marked as sized by hand, a row grown for 28 point text kept that height back at 11 point.
+    const sheet = wb.sheet(sid);
+    const automatic = [];
+    // A row at the default height is someone's size where the default is: Row Height... over the whole sheet sets
+    // the default (30px, say) rather than every row's height, and fitted as automatic a row given 12 point text
+    // shrank from 30px to 21. The default a sheet starts with is a line of its Normal font, or a few pixels more.
+    const spare = sheet.defaultRowHeight - heightForLines(1, wb.normalStyle?.size || 13);
+    const byDefault = spare >= 0 && spare <= 4;
     for (const [r, px] of tallest) {
-      const needed = Math.ceil(px * 1.35) + 8;
-      if (!wb.isHidden(sid, 'row', r) && wb.rowHeight(sid, r) < needed) wb.setRowHeight(sid, r, needed, { auto: wb.sheet(sid).rowHeightModes.get(r) === 'auto' });
+      if (wb.isHidden(sid, 'row', r)) continue;
+      const mode = sheet.rowHeightModes.get(r);
+      if (sid === grid.sheetId && (mode === 'auto' || (byDefault && mode == null && !sheet.rowHeights.has(r)))) { automatic.push(r); continue; }
+      const needed = heightForLines(1, px);
+      if (wb.rowHeight(sid, r) < needed) wb.setRowHeight(sid, r, needed, { auto: mode === 'auto' });
+    }
+    automatic.sort((a, b) => a - b);
+    for (let i = 0; i < automatic.length;) {
+      let j = i;
+      while (j + 1 < automatic.length && automatic[j + 1] === automatic[j] + 1) j++;
+      grid.autoFitRows(automatic[i], automatic[j], { force: true });
+      i = j + 1;
     }
   }
+
 
   function nativeFontSizeRanges(sizeAt) {
     const tallest = new Map();
@@ -1286,11 +1350,11 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const sheet = wb.sheet(sheetId);
     return {
       templates: !!templateDoc, pick: P.canPickFiles(), share: P.canShare(), mail: mailer.available(), ai: P.canAI(), aiPanel: !!aiPanel?.isOpen, saving: P.isApp() && P.canSaveFiles(),
-      fullscreen: !!document.fullscreenEnabled, isFullscreen: isFullscreen(), filter: !!wb.filterAt(sheetId, grid.active.r, grid.active.c),
+      fullscreen: !!document.fullscreenEnabled, isFullscreen: isFullscreen(), filter: filterShownAt(sheetId, grid.active.r, grid.active.c),
       hasFormula: cell?.f != null, hasTable: !!wb.tableAt(sheetId, r, c), table: wb.tableAt(sheetId, r, c),
       tableFilterButton: tableFilterButtonOn(wb, sheetId, wb.tableAt(sheetId, r, c)), pivotReport: !!nativePivotAt(wb, sheetId, r, c), hasNote: !!wb.getNote(sheetId, r, c), hasLink: !!wb.linkAt(sheetId, r, c),
       languagePane: languagePane?.open ? languagePane.mode : null,
-      hasComment: !!sheet?.comments?.has(`${r},${c}`), hasComments: !!sheet?.comments?.size, commentsPane: !!ctx.comments?.paneOpen, queriesPane: !!queriesPane?.open, changesPane: !!changesPane?.open, hasQueries: !!wb.queries?.length,
+      hasComment: !!sheet?.comments?.has(`${r},${c}`), hasComments: !!sheet?.comments?.size, commentsPane: !!ctx.comments?.paneOpen, queriesPane: !!queriesPane?.open, changesPane: !!changesPane?.open, hasQueries: !!wb.queries?.length, pivotRefreshable: hasPivotDefinition(wb, sheetId),
       // Automate: the Code Editor is open, actions are being recorded, a script is running.
       scriptsPane: !!automate?.paneOpen, recording: !!automate?.recording, scriptRunning: !!automate?.running,
       chartSheet: sheet?.kind === 'chart',
@@ -1336,7 +1400,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     const sheet = wb.sheet(sheetId);
     const visible = wb.visibleSheets;
     const at = visible.findIndex((s) => s.id === sheetId);
-    return { only: visible.length <= 1, first: at <= 0, last: at < 0 || at >= visible.length - 1, protected: !!sheet?.protected, holdsWork: !!sheet && sheetHoldsWork(sheet) };
+    return { only: visible.length <= 1, first: at <= 0, last: at < 0 || at >= visible.length - 1, protected: !!sheet?.protected, holdsWork: !!sheet && sheetHoldsWork(sheet), locked: !!wb.structureProtected };
   }
 
   /**
@@ -1516,7 +1580,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (cmd === 'copy' && (chartSheet || grid.selectedChart)) { return run('copyChart', { id: grid.selectedChart || wb.sheet(grid.sheetId).charts[0]?.id }); }
     if (cmd === 'cut' && grid.selectedChart) return; // Drawing cut is unsupported; never cut the cells behind it.
     if (chartSheet && ['editChart', 'deleteChart', 'duplicateChart'].includes(cmd) && !arg) arg = grid.selectedChart || wb.sheet(grid.sheetId).charts[0]?.id;
-    if (chartSheet && cmd === 'deleteChart' && !['image', 'text'].includes(wb.chartById(grid.sheetId, arg)?.type)) return run('deleteSheet', grid.sheetId);
+    if (chartSheet && cmd === 'deleteChart' && !['image', 'text'].includes(wb.chartById(grid.sheetId, arg?.id || arg)?.type)) return run('deleteSheet', grid.sheetId);
     if (chartSheet && cmd === 'zoomFit') { wb.setSheetView(grid.sheetId, { zoomToFit: true }); grid.refresh(); notify(); return; }
     // The sheet a command acts on. A command that commits an open edit before acting reads it again after
     // the commit (`committed`): a formula may have been showing another sheet to pick references on, and
@@ -1903,8 +1967,16 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!nativeFormatRanges((sid, ranges) => formatNativePivotStyleAndBorders(wb, new Map([[sid, ranges]]), pivotPatch, pivotBorders,
           { maxCells: MAX_FORMAT_CELLS, defaultSize: 13 }), { cap: false })) {
           wb.transaction(`Cell style: ${preset.label}`, () => eachRange('Cell style', (rg, _, sid) => {
-            wb.applyStyle(sid, rg, patchFor(sid));
+            const patch = patchFor(sid);
+            wb.applyStyle(sid, rg, patch);
             for (const b of borders) wb.applyBorders(sid, rg, b.kind, b);
+            // A style that sets a larger size (Title, Heading) grows the rows it would no longer fit, as the font
+            // size commands do; past the sheet's last used row there is no text to make room for.
+            if (patch.size > 0) {
+              const tallest = new Map();
+              for (let r = rg.r1, last = Math.min(rg.r2, wb.usedRange(sid)?.r2 ?? -1); r <= last; r++) tallest.set(r, patch.size);
+              growFontRows(sid, tallest);
+            }
           }, { cap: false, nativeScope: true }));
         }
         keepFocus();
@@ -2144,7 +2216,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         // A toolbar click leaves the focus on its button: the grid takes it back once the command is done.
         let widened = false;
         if (single || wholeCols) {
-          range = single ? dataRange() : wb.usedRange(sheetId);
+          range = single ? sortBlock() : wb.usedRange(sheetId);
           if (!range) { toast('Nothing to sort', { icon: 'info' }); keepFocus(); return; }
         } else {
           // Data right beside the selection would stay put while the selection's rows moved: offer the whole block.
@@ -2280,6 +2352,22 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (refusedByProtection('change the filter')) return;
         const sheet = wb.sheet(sheetId);
         const filter = wb.filterAt(sheetId, grid.active.r, grid.active.c);
+        const table = filter && filterTable(sheet, filter);
+        if (table) {
+          // A table keeps its filter, as Table Design ▸ Filter Button keeps it: Data ▸ Filter shows its buttons again,
+          // or hides them and shows every row. Removed outright, the filter took the table's slicers with it (each
+          // read that its column was unavailable and the workbook could no longer be saved), and buttons hidden from
+          // Table Design could not be brought back from here.
+          const on = tableFilterButtonOn(wb, sheetId, table);
+          wb.transaction(on ? 'Remove filter' : 'Filter', () => {
+            if (on && Object.keys(filter.criteria).length) wb._setFilter(sheet, { ...filter, criteria: {} }, 'Remove filter', { target: filter });
+            const problem = setTableFilterButton(wb, sheetId, table.id, !on);
+            if (problem) toast(problem, { icon: 'info', duration: 3000 });
+          });
+          if (tableFilterButtonOn(wb, sheetId, table) !== on) toast(on ? 'Filter removed' : 'Filter added. Use the buttons in the header row', { icon: 'filter' });
+          keepFocus();
+          return;
+        }
         if (filter) { wb.activateFilter(sheetId, filter); wb.clearFilter(sheetId); toast('Filter removed', { icon: 'filter' }); keepFocus(); return; }
         if (!oneRange('create a filter')) return;
         const range = dataRange();
@@ -2293,7 +2381,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       case 'sortDialog': {
         if (!committed()) return;
         if (!oneRange('sort')) return;
-        let range = dataRange();
+        let range = sortBlock();
         if (!range) { toast('Nothing to sort', { icon: 'info' }); return; }
         // An explicit selection with data beside it is offered the whole block, as the quick sort offers it.
         const block = !S.isSingle(grid.selection) && sortExpansion(wb, sheetId, range);
@@ -2665,7 +2753,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         if (!committed()) return;
         if (refusedByProtection('remove duplicates')) return;
         if (!oneRange('remove duplicates')) return;
-        let range = dataRange();
+        // From one cell of a table the whole table is checked (less its totals row), as Excel takes it; the block
+        // around the cell stopped at a blank row inside it.
+        const inTable = S.isSingle(grid.selection) && wb.tableAt(sheetId, grid.active.r, grid.active.c);
+        let range = inTable ? { ...inTable.range, r2: inTable.range.r2 - (inTable.totalsRow ? 1 : 0) } : dataRange();
         if (!range) { toast('Nothing to check', { icon: 'info' }); return; }
         // Data beside an explicit selection would stay put while the selection's duplicates went and the rows
         // below them moved up: the whole block is offered first, as for a sort.
@@ -2840,7 +2931,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
             el('table.details-table', {}, el('tbody', {},
               fact('Name', doc.name), fact('Location', doc.path || 'Not saved yet'), fact('Size', size), fact('Last saved', when),
               fact('Sheets', String(wb.sheets.length)), fact('Cells with content', cells.toLocaleString()), fact('Formulas', formulas.toLocaleString()),
-              fact('Named ranges', String(wb.names.length)), fact('Tables', String(wb.tableNames().length)), fact('Functions available', String(FUNCTION_NAMES.length)))),
+              fact('Named ranges', String(wb.names.filter((n) => !n.hidden).length)), fact('Tables', String(wb.tableNames().length)), fact('Functions available', String(FUNCTION_NAMES.length)))),
             el('table.details-table.details-sheets', {},
               el('thead', {}, el('tr', {}, el('th', {}, 'Sheet'), el('th.num', {}, 'Cells'), el('th.num', {}, 'Formulas'), el('th.num', {}, 'Charts'), el('th.num', {}, 'Tables'))),
               el('tbody', {}, ...rows))),
@@ -3158,7 +3249,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         const text = cmd === 'insertDate' ? formatDate(todaySerial(), 'iso') : `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
         const { r, c } = grid.active;
         if (grid.editing) grid.insertText(text);
-        else if (allowedByRule(wb.validateInput(sheetId, r, c, text), text)) wb.setInput(sheetId, r, c, text);
+        else if (allowedByRule(wb.validateInput(sheetId, r, c, text), text)) {
+          // Today's date (or the time) goes in as if typed: a column at its default width widens to show it, in the
+          // same step, rather than leaving ### where the date is, as Excel's Ctrl+; does.
+          wb.transaction(cmd === 'insertDate' ? 'Insert date' : 'Insert time', () => {
+            wb.setInput(sheetId, r, c, text);
+            grid.widenForEntry(r, c);
+          });
+        }
         keepFocus();
         return;
       }
@@ -3298,7 +3396,11 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         keepFocus();
         return;
       }
-      case 'watchWindow': watchWindow.toggle(); return;
+      case 'watchWindow':
+        watchWindow.toggle();
+        // At the foot of the grid, where a phone's assistant sheet covers it (see the task panes below).
+        if (watchWindow.open && aiPanel?.coversGrid) aiPanel.close({ focusGrid: false });
+        return;
       case 'accessibility': accessibilityPane.toggle(); return;
       case 'quickTotal': {
         // Quick Analysis ▸ Totals: formulas in the row below the selection, or the column to its right.
@@ -3395,7 +3497,7 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         notify();
         return;
       case 'deleteObjects':
-        if (Array.isArray(arg) && wb.deleteObjects(sheetId, arg)) statusBar?.announce(`${arg.length} objects deleted`);
+        if (Array.isArray(arg) && deleteObjectsWithTimelines(wb, sheetId, arg)) statusBar?.announce(`${arg.length} objects deleted`);
         keepFocus();
         return;
       case 'addWatch': {
@@ -3769,11 +3871,35 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       case 'blankQuery': if (!committed()) return; blankQuery(ctx, editQuery); return;
       case 'powerQueryEditor': if (!committed()) return; editQuery(ctx, { queryId: typeof arg === 'string' ? arg : null }); return;
       case 'queriesPane': queriesPane.toggle(); notify(); return;
+      case 'refreshPivot': {
+        // Refresh on a sheet holding a pivot table built here: built again over its source as it now is (refreshPivot).
+        if (!committed()) return;
+        let res = refreshPivot(wb, sheetId);
+        if (res.changed) {
+          // The block has been cleared, typed over or filled with other data since the table was built: it is
+          // rebuilt there only when asked, as what is there now would be replaced.
+          const replace = await confirmDialog({ title: 'Refresh PivotTable', message: 'The PivotTable on this sheet has been cleared or changed since it was built. Refreshing builds it again in its old place and replaces what is there now. Refresh anyway?', confirmLabel: 'Replace', cancelLabel: 'Cancel', danger: true });
+          if (destroyed) return;
+          if (!replace) { keepFocus(); return; }
+          res = refreshPivot(wb, sheetId, { replaceChanged: true });
+        }
+        if (res.overwrite) {
+          const replace = await confirmDialog({ title: 'Refresh PivotTable', message: 'The refreshed PivotTable is larger and would replace the contents of cells beside it. Replace them?', confirmLabel: 'Replace', cancelLabel: 'Cancel', danger: true });
+          if (destroyed) return;
+          if (!replace) { keepFocus(); return; }
+          res = refreshPivot(wb, sheetId, { force: true, replaceChanged: true });
+        }
+        toast(res.error || `PivotTable refreshed: ${res.rows.toLocaleString()} row${res.rows === 1 ? '' : 's'}`, { icon: res.error ? 'alert' : 'refresh', duration: res.error ? 4000 : 2000 });
+        keepFocus();
+        return;
+      }
       case 'refreshQuery': {
         // Table Design ▸ Refresh, or a query named by id: the query behind the table at the active cell is run again.
         if (!committed()) return;
         const a = grid.active;
         const table = wb.tableAt(sheetId, a.r, a.c);
+        // On a sheet holding a pivot table built here, Refresh builds it again, as PivotTable Analyze ▸ Refresh does.
+        if (typeof arg !== 'string' && !table && hasPivotDefinition(wb, sheetId)) { await run('refreshPivot'); return; }
         const query = typeof arg === 'string' ? queryById(wb, arg) : table && queryForTable(wb, sheetId, table.id);
         if (!query) { toast(table ? 'This table was not loaded by a query' : 'Select a cell in a table loaded by a query', { icon: 'info' }); return; }
         if (!await allowQuerySources([query]) || destroyed) return;
@@ -3786,28 +3912,54 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       }
       case 'refreshAll': {
-        // Data ▸ Refresh All: every query is run again and its table rewritten, then every formula is recalculated.
-        if (!wb.queries?.length) { await run('recalc'); return; }
+        // Data ▸ Refresh All: every query is run again and its table rewritten, then every pivot table built here is
+        // built again over its source (refreshPivot; one that cannot be is said and left), and every formula is recalculated.
+        const refreshPivots = () => {
+          const failed = [];
+          let refreshed = 0;
+          for (const id of refreshablePivotSheets(wb)) {
+            const out = refreshPivot(wb, id);
+            if (out.error) failed.push({ name: wb.sheet(id).name, error: out.error }); else refreshed++;
+          }
+          return { refreshed, failed };
+        };
+        if (!wb.queries?.length) {
+          if (!refreshablePivotSheets(wb).length) { await run('recalc'); return; }
+          if (!committed()) return;
+          const pivots = refreshPivots();
+          wb.recalculate();
+          grid.refresh();
+          toast(pivots.failed.length ? `${pivots.failed[0].name}: ${pivots.failed[0].error}` : `Refreshed ${pivots.refreshed} PivotTable${pivots.refreshed === 1 ? '' : 's'} and recalculated`, { icon: pivots.failed.length ? 'alert' : 'reset', duration: pivots.failed.length ? 5000 : 2000 });
+          keepFocus();
+          return;
+        }
         if (!committed()) return;
         if (!await allowQuerySources(wb.queries) || destroyed) return;
         toast('Refreshing…', { icon: 'spinner', duration: 1500 });
         const res = await refreshAllQueries(wb, queryIo(ctx));
         if (destroyed) return;
-        fitQueryTables(ctx, wb.queries.filter((q) => !res.failed.some((f) => f.name === q.name)));
+        // The pivot tables after the queries, so a pivot over a query's table takes in what the query loaded.
+        const pivots = refreshPivots();
+        const queriesFailed = res.failed;
+        res.failed = [...queriesFailed, ...pivots.failed];
+        fitQueryTables(ctx, wb.queries.filter((q) => !queriesFailed.some((f) => f.name === q.name)));
         wb.recalculate();
         imported.clear();
         wb.clearAsyncCache();
         grid.refresh();
-        queriesPane.noteResults(res.failed);
-        toast(res.failed.length ? `${res.failed.length} of ${res.failed.length + res.refreshed} queries could not be refreshed: ${res.failed[0].name}: ${res.failed[0].error}`
-          : `Refreshed ${res.refreshed} quer${res.refreshed === 1 ? 'y' : 'ies'} and recalculated`, { icon: res.failed.length ? 'alert' : 'reset', duration: res.failed.length ? 6000 : 2000 });
+        queriesPane.noteResults(queriesFailed);
+        const total = res.refreshed + pivots.refreshed + res.failed.length;
+        const pivotsDone = pivots.refreshed ? ` and ${pivots.refreshed} PivotTable${pivots.refreshed === 1 ? '' : 's'}` : '';
+        toast(res.failed.length ? `${res.failed.length} of ${total} could not be refreshed: ${res.failed[0].name}: ${res.failed[0].error}`
+          : `Refreshed ${res.refreshed} quer${res.refreshed === 1 ? 'y' : 'ies'}${pivotsDone} and recalculated`, { icon: res.failed.length ? 'alert' : 'reset', duration: res.failed.length ? 6000 : 2000 });
         keepFocus();
         return;
       }
       case 'clearFilters':
         if (!committed()) return;
         if (refusedByProtection('change the filter')) return;
-        toast(clearSheetFilters(wb, sheetId) ? 'Filters cleared' : 'Nothing is filtered on this sheet', { icon: 'filter' });
+        // The list at the active cell, as Excel clears the current range; from outside every list, all of them.
+        toast(clearSheetFilters(wb, sheetId, grid.active) ? 'Filters cleared' : `Nothing is filtered ${sheetHasFiltering(wb, sheetId) ? 'in this list' : 'on this sheet'}`, { icon: 'filter' });
         keepFocus();
         return;
       case 'reapplyFilters':
@@ -3859,23 +4011,21 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         keepFocus(); return;
       }
       case 'insertChart': {
-        // Insert ▸ Chart…: the Insert Chart dialog, on Recommended Charts or on the family asked for.
+        // Insert ▸ Chart…: the Insert Chart dialog, on Recommended Charts or on the family asked for. Ranges
+        // selected together are charted together, as in Excel (see chartSource).
         if (!committed()) return;
-        if (!oneRange('insert a chart')) return;
         const family = typeof arg === 'string' ? { donut: 'pie', bubble: 'scatter' }[arg] || arg : null;
         return runChartAction(ctx, family ? { action: 'insertDialog', family } : { action: 'recommended' });
       }
       case 'quickChart': {
         // Alt+F1: the default chart of the selection, on the sheet beside it.
         if (!committed()) return;
-        if (!oneRange('insert a chart')) return;
         insertExcelChart(ctx);
         return;
       }
       case 'insertChartSheet': {
         // F11: the default chart of the selection on a chart sheet of its own.
         if (!committed()) return;
-        if (!oneRange('insert a chart')) return;
         insertChartSheet(ctx);
         return;
       }
@@ -3894,8 +4044,12 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       }
       case 'insertTextBox': if (!committed()) return; openTextBoxDialog(ctx); return;
       case 'deleteChart': {
-        const id = arg || grid.selectedChart;
+        const id = arg?.id || arg || grid.selectedChart;
         if (!id) return;
+        // One of several objects selected, or of a group, deletes them all, as the Delete key does; a dialog's
+        // Delete (`only`: Edit text box, Equation) deletes the one object it edits.
+        const selected = grid.selectedCharts || [];
+        if (!arg?.only && selected.length > 1 && selected.includes(id)) { run('deleteObjects', selected); return; }
         const kind = wb.chartById(sheetId, id)?.type;
         if (kind === 'timeline') { if (!deleteTimeline(wb, sheetId, id)) return; }
         else if (!wb.deleteChart(sheetId, id)) return;
@@ -3904,8 +4058,10 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
         return;
       }
       case 'duplicateChart': {
-        const id = wb.duplicateChart(sheetId, arg?.id || arg || grid.selectedChart);
-        if (id) { grid.selectChart(id); toast('Duplicated. Drag the copy where you want it', { icon: 'duplicate', duration: 2200 }); }
+        // One of several objects selected, or of a group, duplicates them all (whole groups), as in Excel.
+        const id = arg?.id || arg || grid.selectedChart, selected = grid.selectedCharts || [];
+        const copies = id ? wb.duplicateObjects(sheetId, selected.includes(id) ? selected : [id]) : [];
+        if (copies.length) { grid.selectCharts(copies); toast(copies.length > 1 ? 'Duplicated. Drag the copies where you want them' : 'Duplicated. Drag the copy where you want it', { icon: 'duplicate', duration: 2200 }); }
         keepFocus();
         return;
       }
@@ -5346,17 +5502,17 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
    * from the cells beside them. { entries, examples, rows }: the cells to fill, how many examples taught it, and
    * the rows looked at ({ r, target }).
    */
-  function flashFillPlan(sheetId, r, c) {
-    const region = wb.dataRegion(sheetId, r, c) || { r1: r, c1: c, r2: r, c2: c };
+  const flashFillShown = (sheetId, r, c) => { const v = wb.getValue(sheetId, r, c); return v == null || (typeof v === 'object') ? null : wb.getDisplay(sheetId, r, c); };
+  const flashFillTarget = (sheetId, r, c) => { const cell = wb.getCell(sheetId, r, c); return cell?.v != null || cell?.f != null ? flashFillShown(sheetId, r, c) : null; };
+  /** Whether a cell is one of Flash Fill's examples: an entry of its own that shows something. */
+  const flashFillExample = (sheetId, r, c) => { const target = flashFillTarget(sheetId, r, c); return target != null && target !== ''; };
+  function flashFillPlan(sheetId, r, c, region = wb.dataRegion(sheetId, r, c)) {
+    region ||= { r1: r, c1: c, r2: r, c2: c };
     const area = { r1: region.r1, r2: region.r2, c1: Math.min(region.c1, c - 1 >= 0 ? c - 1 : c), c2: Math.max(region.c2, c) };
     const cols = [];
     for (let cc = area.c1; cc <= area.c2; cc++) if (cc !== c) cols.push(cc);
-    const shown = (rr, cc) => { const v = wb.getValue(sheetId, rr, cc); return v == null || (typeof v === 'object') ? null : wb.getDisplay(sheetId, rr, cc); };
     const rows = [];
-    for (let rr = area.r1; rr <= area.r2; rr++) {
-      const target = wb.getCell(sheetId, rr, c);
-      rows.push({ r: rr, sources: cols.map((cc) => shown(rr, cc)), target: target?.v != null || target?.f != null ? shown(rr, c) : null });
-    }
+    for (let rr = area.r1; rr <= area.r2; rr++) rows.push({ r: rr, sources: cols.map((cc) => flashFillShown(sheetId, rr, cc)), target: flashFillTarget(sheetId, rr, c) });
     // A header above the examples fits no pattern: try again without the first row before giving up.
     let filled = flashFill(rows), from = 0;
     if (!filled && rows.length > 1) { filled = flashFill(rows.slice(1)); from = 1; }
@@ -5376,7 +5532,12 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     if (!appOption('autoFlashFill') || grid.sheetId !== sheetId || r < 1) return;
     const above = wb.getCell(sheetId, r - 1, c);
     if (above?.v == null || above.f != null || typeof wb.getValue(sheetId, r, c) !== 'string') return;
-    const { entries, examples, rows } = flashFillPlan(sheetId, r, c);
+    // Only a cell below the one just typed can be offered, and only while the cell under it is still empty. A row
+    // added at the foot of a list, or an entry changed inside a filled column, is neither: the plan below reads every
+    // cell of the list (200 ms over 20,000 rows) and was worked out after every such entry only to be thrown away.
+    const region = wb.dataRegion(sheetId, r, c);
+    if (!region || region.r2 <= r || flashFillExample(sheetId, r + 1, c)) return;
+    const { entries, examples, rows } = flashFillPlan(sheetId, r, c, region);
     // The examples must be the column's first entries, the one just typed the last of them, with only blanks below.
     const typed = rows.filter((row) => row.target != null && row.target !== '').map((row) => row.r);
     if (examples < 2 || !entries.length || typed.at(-1) !== r || typed.some((rr, i) => i && rr !== typed[i - 1] + 1) || entries.some((e) => e.r < r)) return;
@@ -5788,13 +5949,22 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
     });
   }
 
-  /** A new spreadsheet, never saved, is left: save it (Puter's Save dialog asks where), keep editing, or leave (the local draft keeps the edits). */
+  /**
+   * A new spreadsheet, never saved, is left: save it (Puter's Save dialog asks where), keep editing, or leave (the local
+   * draft keeps the edits). A file of another kind opened from the drive (a .csv) is on Puter already, and its draft is
+   * kept under its address, offered again when it is opened, not listed under Unsaved spreadsheets.
+   */
   function unsavedLeaveDialog(kept) {
     return new Promise((resolve) => {
+      const file = doc.path ? P.displayName(doc.path) : null;
       const content = el('div', {},
-        el('p.modal-text', {}, kept
-          ? `"${doc.name}" is not saved to Puter yet. Save it where you choose, or leave: your edits stay on this device, and can be recovered from Unsaved spreadsheets on the home screen.`
-          : `"${doc.name}" is not saved to Puter yet, and this browser could not keep a copy of it either. Save it where you choose, or leave and lose it.`),
+        el('p.modal-text', {}, file
+          ? (kept
+            ? `Your changes to "${file}" are not saved yet: they are saved as a new .xlsx file, where you choose. Save it, or leave: your changes stay on this device, and are offered again when you open ${file} here.`
+            : `Your changes to "${file}" are not saved yet: they are saved as a new .xlsx file, where you choose. This browser could not keep a copy of them either: save it, or leave and lose them.`)
+          : kept
+            ? `"${doc.name}" is not saved to Puter yet. Save it where you choose, or leave: your edits stay on this device, and can be recovered from Unsaved spreadsheets on the home screen.`
+            : `"${doc.name}" is not saved to Puter yet, and this browser could not keep a copy of it either. Save it where you choose, or leave and lose it.`),
         el('div.row.row-end', { style: { flexWrap: 'wrap' } },
           el('button.btn.btn-ghost', { type: 'button', onclick: () => modal.close() }, 'Keep editing'),
           el(`button.btn${kept ? '' : '.btn-danger'}`, { type: 'button', onclick: () => { resolve('leave'); modal.close(); } }, kept ? 'Leave' : 'Leave without saving'),
@@ -5872,7 +6042,8 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       try { await doc.save(); } catch (e) { toast(e?.message || 'Could not save the spreadsheet', { icon: 'alert', duration: 4000 }); return false; }
       if (destroyed) return false;
     }
-    if (!doc.path) { toast('Save the spreadsheet first, then share it', { icon: 'info' }); return false; }
+    // Puter's Save dialog cancelled (see doc.asksWhereToSave), there is no file, or only the .csv the edits never reach.
+    if (!doc.path || !doc.isXlsxPath) { toast('Save the spreadsheet first, then share it', { icon: 'info' }); return false; }
     return true;
   }
 
@@ -5994,8 +6165,13 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
           statusBar?.announce(`Picture placed in ${cellName(anchor.r, anchor.c)}`);
         }
       } else if (replaceId) {
-        if (!wb.chartById(sheetId, replaceId)) return;
-        wb.updateChart(sheetId, replaceId, { src, title: f.name }, 'Replace image');
+        const old = wb.chartById(sheetId, replaceId);
+        if (!old) return;
+        // The new picture takes the old one's place and frame, as Change Picture does: whole (the old crop was a part
+        // of the old picture) and in its own proportions, as large as fits in the frame from its top-left corner.
+        const scale = Math.min(old.w / width, old.h / height);
+        wb.updateChart(sheetId, replaceId, { src, title: f.name, srcRect: null, fillRect: null,
+          ...(Number.isFinite(scale) && scale > 0 ? { w: Math.max(1, Math.round(width * scale)), h: Math.max(1, Math.round(height * scale)) } : {}) }, 'Replace image');
         toast('Image replaced', { icon: 'image', duration: 1600 });
       } else {
         // Fit large pictures to a sensible on-sheet size; they keep their proportions.
@@ -6423,11 +6599,14 @@ export function editorView({ doc, goHome, openPath, newDoc, templateDoc, importF
       aiPanel?.el,
       aiPanel?.rail));
   // The task panes over the grid take turns: opening one closes whichever other was open, so none hides another.
+  // On a phone the assistant is a sheet over the grid too, drawn over the panes: it goes down for one, which
+  // otherwise opened unseen beneath it.
   const taskPanes = [accessibilityPane, languagePane, changesPane, selectionPane, queriesPane, smartArtPane];
   for (const pane of taskPanes) {
     const show = pane.show.bind(pane);
     pane.show = (...args) => {
       for (const other of taskPanes) if (other !== pane && other.open) other.hide();
+      if (aiPanel?.coversGrid) aiPanel.close({ focusGrid: false });
       return show(...args);
     };
   }

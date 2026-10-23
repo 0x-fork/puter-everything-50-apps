@@ -15,6 +15,7 @@ import { CHART_TYPES } from './charts.js';
 import { TABLE_STYLES } from './tables.js';
 import { formulaReachesOut } from './reaches-out.js';
 import { dataBounds } from './aiformula.js';
+import { heightForLines } from './textfit.js';
 
 /** A request the workbook refused, with the script line that made it. */
 export class ScriptOpError extends Error {
@@ -158,14 +159,17 @@ export class ScriptHost {
   /** Carry out a batch of writes as one step. A refused one throws a ScriptOpError; those before it stand. */
   apply(ops) {
     if (!Array.isArray(ops)) return;
-    this.wb.transaction('Run script', () => {
+    // A script writes on the worksheet it names alone, as Office Scripts do: with that sheet grouped with others
+    // (several tabs selected), each write landed on the same cells of every other sheet in the group as well.
+    const writes = () => {
       for (const op of ops) {
         this.line = Number.isInteger(op?.line) ? op.line : 0;
         const fn = WRITES[op?.op];
         if (!fn) this.fail(`Unknown operation "${op?.op}".`);
         fn.call(this, op);
       }
-    });
+    };
+    this.wb.transaction('Run script', () => (this.wb._withoutGroup ? this.wb._withoutGroup(writes) : writes()));
   }
 
   /** Answer one read; the answer is plain data. */
@@ -386,7 +390,7 @@ const WRITES = {
     this.wb.applyStyle(sheet.id, range, patch);
     // A larger font grows the rows that could no longer show it, as the toolbar's size does.
     if (patch.size && !wholeCols(range)) {
-      const needed = Math.ceil(patch.size * 1.35) + 8;
+      const needed = heightForLines(1, patch.size);
       for (let r = range.r1; r <= Math.min(range.r2, range.r1 + MAX_STYLE_ROWS); r++) {
         if (!this.wb.isHidden(sheet.id, 'row', r) && this.wb.rowHeight(sheet.id, r) < needed) this.wb.setRowHeight(sheet.id, r, needed, { auto: true });
       }

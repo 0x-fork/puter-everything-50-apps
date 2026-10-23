@@ -65,7 +65,7 @@ import { htmlTableRows } from './html-table.js';
 import { reconcileConditionalFormats } from './xlsx-condformat-reconcile.js';
 import { prepareXlsxValidationLists } from './xlsx-validation.js';
 import { sheetFilters, sameFilterRange, filterRangeKey, mapSheetFilters } from './sheet-filters.js';
-import { readXlsxFilter, readXlsxFilterButtons, writeXlsxFilter } from './xlsx-filter.js';
+import { nativeFilterJudge, readXlsxFilter, readXlsxFilterButtons, writeXlsxFilter } from './xlsx-filter.js';
 import { readStyleResets, styleResetAt } from './style-resets.js';
 import { xlsxResetCells } from './xlsx-style-resets.js';
 import { xlsxRowStyleBase, xlsxLineIntersectionCells } from './xlsx-line-intersections.js';
@@ -324,6 +324,12 @@ function buildSheet(X, wb, sheet, { ods = false } = {}) {
   const text = (value) => (ods ? String(value).replace(/\r\n?/g, '\n').replace(/[\0-\b\v-\x1f￾￿]/g, '') : String(value));
   const numFmtOf = (style) => (ods ? odsFormatCode(styleToNumFmt(style)) : styleToNumFmt(style));
   const ws = {};
+  if (ods && sheet.protected) ws['!odsProtected'] = true;
+  // The print area, as the space-separated range addresses of table:print-ranges.
+  if (ods && sheet.printSettings?.areas?.length) {
+    const at = `${odsSheetName(sheet.name)}.`;
+    ws['!odsPrintRanges'] = sheet.printSettings.areas.map((a) => `${at}${cellName(a.r1, a.c1)}:${at}${cellName(a.r2, a.c2)}`).join(' ');
+  }
   if (sheet.validations.length) ws['!validations'] = sheet.validations.map((rule) => ({
     ...rule,
     source: rule.type === 'formula' || (rule.type === 'list' && isRangeSource(rule.source))
@@ -557,9 +563,9 @@ function tableFileFormulas(table, externalWorkbooks = null) {
 }
 
 /** The app's own state for the sidecar; `ods` adds what that format's writer and reader lose. */
-function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null, history = true } = {}) {
+function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null, history = true, active = wb.activeSheet } = {}) {
   // Sheet names are user data; names such as __proto__ must be ordinary keys.
-  const meta = { v: 1, format: 'puter-spreadsheet', ...(!ods ? { themeFonts: true } : {}), active: wb.activeSheet?.name || null, sheets: Object.create(null) };
+  const meta = { v: 1, format: 'puter-spreadsheet', ...(!ods ? { themeFonts: true } : {}), active: active?.name || null, sheets: Object.create(null) };
   let any = structuredNames.length > 0;
   if (ods && (wb.calculationCompatibility.version !== 2 || wb.calculationCompatibility.warnBelowVersion)) {
     meta.calculationCompatibility = wb.calculationCompatibility; any = true;
@@ -815,11 +821,13 @@ function collectMeta(wb, structuredNames = [], { ods = false, fileSheets = null,
 }
 
 /** The SheetJS workbook for this document; `meta` adds the very-hidden styling sheet this app reads back. */
-function buildBook(X, wb, { meta = true, odsSettings = false, ods = false, history = true } = {}) {
+function buildBook(X, wb, { meta = true, odsSettings = false, ods = false, history = true, built = null, activeSheetId = wb.activeSheetId } = {}) {
+  const open = wb.sheets.find((s) => s.id === activeSheetId) || wb.activeSheet;
   const book = { SheetNames: [], Sheets: Object.create(null), Workbook: { Sheets: [] } };
   for (const sheet of wb.sheets) {
     book.SheetNames.push(sheet.name);
-    book.Sheets[sheet.name] = buildSheet(X, wb, sheet, { ods });
+    // `built`: the sheets already built for this book, by sheet (see workbookToXlsx).
+    book.Sheets[sheet.name] = built?.get(sheet) || buildSheet(X, wb, sheet, { ods });
     book.Workbook.Sheets.push({ name: sheet.name, Hidden: sheet.hidden ? (sheet.veryHidden ? 2 : 1) : 0 });
   }
   const structuredNames = [];
@@ -863,17 +871,18 @@ function buildBook(X, wb, { meta = true, odsSettings = false, ods = false, histo
     if (sheet.kind !== 'chart' && p.titleCols) titles.push(prefix + p.titleCols.map(c => `$${X.utils.encode_col(c)}`).join(':'));
     if (titles.length) (book.Workbook.Names ||= []).push({ Name: '_xlnm.Print_Titles', Ref: titles.join(','), Sheet: i });
   }
-  const extra = meta || odsSettings ? collectMeta(wb, structuredNames, { ods: odsSettings, fileSheets: book.Sheets, history }) : null;
+  const extra = meta || odsSettings ? collectMeta(wb, structuredNames, { ods: odsSettings, fileSheets: book.Sheets, history, active: open }) : null;
   if (extra && odsSettings) book.PuterSettings = extra;
-  // LibreOffice reads frozen panes, tab colours and the open sheet from its own view settings.
+  // LibreOffice reads frozen panes, tab colours, gridlines, zoom and the open sheet from its own view settings.
   if (ods) {
     const sheets = {};
     for (const sheet of wb.sheets) {
       const color = typeof sheet.color === 'string' && /^#[\da-f]{6}$/i.test(sheet.color) ? sheet.color : null;
-      if (sheet.frozenRows || sheet.frozenCols || color) sheets[sheet.name] = { frozenRows: sheet.frozenRows, frozenCols: sheet.frozenCols, ...(color ? { tabColor: color } : {}) };
+      const look = { ...(sheet.gridlines === false ? { gridlines: false } : {}), ...(sheet.viewZoom && sheet.viewZoom !== 1 ? { zoom: sheet.viewZoom } : {}) };
+      if (sheet.frozenRows || sheet.frozenCols || color || Object.keys(look).length) sheets[sheet.name] = { frozenRows: sheet.frozenRows, frozenCols: sheet.frozenCols, ...(color ? { tabColor: color } : {}), ...look };
     }
     // A book that opens on its first sheet, with nothing frozen or coloured, needs no view settings.
-    const active = wb.sheets.indexOf(wb.activeSheet) > 0 ? wb.activeSheet.name : null;
+    const active = wb.sheets.indexOf(open) > 0 ? open.name : null;
     if (active || Object.keys(sheets).length) book.OdsView = { active, sheets };
   }
   if (extra && meta) {
@@ -922,8 +931,12 @@ export async function workbookToXlsx(wb, { sourceWorkbook = null, history = true
   wb = sharedBook(wb);
   const { completeXlsx } = await import('./xlsx-export.js');
   const X = await XLSX();
-  const build = () => {
-    const book = buildBook(X, wb, { history });
+  // The sheet open as the book is built is the one the file names, here and in the finishing step: another one opened
+  // meanwhile, which is no edit, needs nothing built again (that held the page as long as the save it was spread over).
+  let activeSheetId = wb.activeSheetId;
+  const build = (built = null) => {
+    activeSheetId = wb.activeSheetId;
+    const book = buildBook(X, wb, { history, built, activeSheetId });
     writeDocumentProperties(book, wb.documentProperties);
     return book;
   };
@@ -933,19 +946,52 @@ export async function workbookToXlsx(wb, { sourceWorkbook = null, history = true
   // cells held scrolling still for that long): the page gets a turn between the steps. The last step reads the
   // book again, so an edit made meanwhile has the steps before it done over, at once, to go with it.
   const large = wb.sheets.reduce((n, sheet) => n + sheet.cells.size, 0) > YIELD_CELLS;
-  let book = build();
+  // Its sheets are gathered one at a time, with a turn whenever a slice of time has gone: the cells of fifty sheets
+  // of 4,000 cells held the page for 0.6 s at once.
+  let built = null;
+  if (large && wb.sheets.length > 1) {
+    built = new Map();
+    let start = performance.now();
+    for (const sheet of [...wb.sheets]) {
+      if (performance.now() - start > YIELD_SLICE_MS) { await nextTask(); start = performance.now(); }
+      if (wb.sheets.includes(sheet)) built.set(sheet, buildSheet(X, wb, sheet));
+    }
+  }
+  let book = build(built);
   if (large) await nextTask();
   let bytes = write(book);
   if (large) {
     await nextTask();
     if (wb.version !== version) bytes = write(book = build());
   }
-  const data = await completeXlsx(X, wb, book, bytes, { sourceWorkbook });
+  // The file is finished a sheet at a time too. That step reads the workbook itself as well as what was built from it,
+  // so an edit meanwhile has it done over, at once, from the book as it now is. It names the sheet open as the book
+  // was built throughout (another opened meanwhile would leave two tabs selected, the sheets grouped in Excel).
+  if (large && wb.sheets.length > 1) {
+    const at = wb.version;
+    let start = performance.now();
+    const pause = async () => {
+      if (performance.now() - start <= YIELD_SLICE_MS) return;
+      await nextTask();
+      if (wb.version !== at) throw STALE;
+      start = performance.now();
+    };
+    try {
+      return new Blob([await completeXlsx(X, wb, book, bytes, { sourceWorkbook, pause, activeSheetId })], { type: XLSX_MIME });
+    } catch (e) {
+      if (e !== STALE) throw e;
+      bytes = write(book = build());
+    }
+  }
+  const data = await completeXlsx(X, wb, book, bytes, { sourceWorkbook, activeSheetId });
   return new Blob([data], { type: XLSX_MIME });
 }
 
 /** A book of more cells than this takes long enough to encode that the page is given turns along the way. */
 const YIELD_CELLS = 50_000;
+/** About how long gathering or finishing a large book's sheets goes on before the page gets a turn. */
+const YIELD_SLICE_MS = 30;
+const STALE = Symbol('stale');
 /** Resolves in a task of its own, once the page has had its turn (input, a frame). */
 export function nextTask() {
   if (typeof MessageChannel !== 'function') return new Promise((resolve) => setTimeout(resolve, 0));
@@ -1197,6 +1243,7 @@ const xmlAttr = (tag, name) => {
 };
 // The built-in table styles cycle through the theme's accent colours.
 const TABLE_STYLE_COLORS = ['gray', 'blue', 'orange', 'gray', 'orange', 'blue', 'green'];
+const BUILTIN_TABLE_STYLE = /^TableStyle(?:Light|Medium|Dark)\d{1,2}$/;
 
 /**
  * Excel tables from a sheet's table parts (xl/tables/tableN.xml), in this
@@ -1244,6 +1291,8 @@ function nativeTables(X, ws, definedNames, customStyles) {
       // Giving it our default theme recolors directly formatted headers.
       style: styleInfo && !styleName ? 'none' : styleIndex ? TABLE_STYLE_COLORS[(styleIndex - 1) % TABLE_STYLE_COLORS.length] : 'blue',
       ...(customStyle ? { style: 'custom', customStyle } : {}),
+      // One of Excel's own styles shows here in the nearest of the app's colours, and goes back out by its name.
+      ...(!customStyle && BUILTIN_TABLE_STYLE.test(styleName || '') ? { nativeStyle: styleName } : {}),
       banded: !['0', 'false'].includes(xmlAttr(styleInfo, 'showRowStripes')),
       ...(['1', 'true'].includes(xmlAttr(styleInfo, 'showFirstColumn')) ? { firstColumn: true } : {}),
       ...(['1', 'true'].includes(xmlAttr(styleInfo, 'showColumnStripes')) ? { bandedColumns: true } : {}),
@@ -1980,7 +2029,8 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
   const hiddenRows = hiddenLines(meta?.sheets?.[name]?.hidden?.rows, MAX_ROW);
   (ws?.['!cols'] || []).forEach((col, i) => {
     if (!col) return;
-    if (col.hidden) hiddenCols.add(i);
+    // A column the file gives no width (width="0") shows in Excel as no column, as a hidden one does.
+    if (col.hidden || col.width === 0 || col.wpx === 0) hiddenCols.add(i);
     const px = ((!own || own.nativeStyles) && partXml ? nativePixels(col) : null) ?? col.wpx ?? (col.wch != null ? Math.round(col.wch * 7 + 5) : col.width != null ? Math.round(col.width * 7 + 5) : null);
     // Even a one-pixel override affects cell and drawing boundaries.
     if (px && px !== defaultColWidth) colWidths[i] = Math.max(1, Math.min(MAX_STORED_COL_WIDTH, px));
@@ -2034,15 +2084,34 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     if (!filter || !dateTargets) return filter;
     let criteria = filter.criteria;
     for (const [key, crit] of Object.entries(criteria)) {
-      if (!['gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'between'].includes(crit?.op) || typeof crit.value !== 'number') continue;
+      // A pair of custom conditions kept as the file wrote it ({ native }) names its days by serial too.
+      const pair = typeof crit?.native === 'string' && /^<customFilters\b/.test(crit.native);
+      if (!pair && (!['gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'between'].includes(crit?.op) || typeof crit.value !== 'number')) continue;
       if (!dateTargets([{ r1: filter.range.r1 + 1, c1: Number(key), r2: filter.range.r2, c2: Number(key) }])) continue;
-      criteria = { ...criteria, [key]: { ...crit, value: crit.value + 1462, ...(typeof crit.value2 === 'number' ? { value2: crit.value2 + 1462 } : {}) } };
+      criteria = { ...criteria, [key]: pair
+        ? { ...crit, native: crit.native.replace(/(<customFilter\b[^>]*\sval=")([-+]?\d+(?:\.\d+)?)(")/g, (m, open, val, close) => `${open}${Number(val) + 1462}${close}`) }
+        : { ...crit, value: crit.value + 1462, ...(typeof crit.value2 === 'number' ? { value2: crit.value2 + 1462 } : {}) } };
+    }
+    return criteria === filter.criteria ? filter : { ...filter, criteria };
+  };
+  // A colour filter Excel wrote names a differential format: its fill is the colour this app's own colour filter
+  // keeps rows by, so the rows can be judged again. The condition still goes back into the file as it came.
+  const filterColors = (filter) => {
+    if (!filter) return filter;
+    let criteria = filter.criteria;
+    for (const [key, crit] of Object.entries(criteria)) {
+      const tag = typeof crit?.native === 'string' && crit.color == null && crit.ink == null ? /^<colorFilter\b[^>]*>/.exec(crit.native)?.[0] : null;
+      if (!tag) continue;
+      // cellColor="0" filters by the font colour, which the app keeps (as ink) only to write the condition back.
+      const ink = ['0', 'false'].includes(xmlAttr(tag, 'cellColor')), dxf = nativeStyles?.dxfs?.[Number(xmlAttr(tag, 'dxfId'))];
+      const colour = ink ? (typeof dxf?.color === 'string' ? dxf.color : dxf?.color?.rgb) : dxf?.bg;
+      if (typeof colour === 'string' && /^#[\da-f]{6}$/i.test(colour)) criteria = { ...criteria, [key]: { ...crit, [ink ? 'ink' : 'color']: colour.toLowerCase() } };
     }
     return criteria === filter.criteria ? filter : { ...filter, criteria };
   };
   const currentFilters = [fileFilter(X, ws?.['!autofilter']),
     ...(ws?.['!filters'] || []).map(f => fileFilter(X, f)),
-    ...native.filter(t => t.filter).map(t => fileFilter(X, null, t.filter))].filter(Boolean).map(filterDates);
+    ...native.filter(t => t.filter).map(t => fileFilter(X, null, t.filter))].filter(Boolean).map(filterDates).map(filterColors);
   const savedOwners = new Map((Array.isArray(own?.tables) ? own.tables : []).filter(t => typeof t?.name === 'string' && validMetaRange(t.range))
     .map(t => [filterRangeKey({ range: { ...t.range, r2: t.range.r2 - Number(!!t.totalsRow) } }), t]));
   const currentByRange = new Map(currentFilters.map(f => [filterRangeKey(f), f]));
@@ -2067,7 +2136,7 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
       : saved === own?.filter ? own?.nativeFilter : undefined);
     if (expected === undefined && validMetaRange(saved?.range)) {
       const xml = writeXlsxFilter({ ...saved, hiddenButtons: Array.isArray(saved.hiddenButtons) ? saved.hiddenButtons : [] });
-      expected = { range: saved.range, criteria: readXlsxFilter(xml, saved.range) || {}, ...readXlsxFilterButtons(xml, saved.range) };
+      expected = filterColors({ range: saved.range, criteria: readXlsxFilter(xml, saved.range) || {}, ...readXlsxFilterButtons(xml, saved.range) });
     }
     if (saved && JSON.stringify(expected) === JSON.stringify(current)) return saved;
     filtersFromFile.push(current.range);
@@ -2083,7 +2152,11 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
   // from its predicates: edited data and adjacent tables can legitimately leave different
   // rows visible until Reapply. Unknown conditions still retain their rows as manual hides.
   // The private baseline distinguishes manual/filter hides while native visibility is unchanged.
-  const filtered = filters.filter(f => Object.keys(f.criteria || {}).length).map(f => f.range);
+  // So do the rows of a filter with a condition kept as the file wrote it that the app cannot judge (an icon, a
+  // font colour): owned by the filter, they all came back the moment it ran again, as it does after a row is
+  // inserted anywhere in the book, and the next save wrote them shown. The condition still goes back into the file.
+  const unjudged = (crit) => typeof crit?.native === 'string' && crit.color == null && !nativeFilterJudge(crit.native, []);
+  const filtered = filters.filter(f => Object.keys(f.criteria || {}).length && !Object.values(f.criteria).some(unjudged)).map(f => f.range);
   let fileFilterHidden = partXml && currentFilters.length ? [] : undefined;
   const fileHiddenRows = [];
   const rowHeights = {};
@@ -2106,7 +2179,10 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     : own?.nativeDefaultHeight);
   (ws?.['!rows'] || []).forEach((row, i) => {
     if (!row) return;
-    if (row.hidden || row.filtered) {
+    // A row the file gives no height at all (ht="0") shows as no row in Excel, as a hidden one does; it is not
+    // a row of the default height, which is what a height of nothing used to read as.
+    const zero = !row.hidden && !row.filtered && (row.hpt === 0 || row.hpx === 0);
+    if (row.hidden || row.filtered || zero) {
       fileHiddenRows.push(i);
       if (filtered.some(range => i > range.r1 && i <= range.r2)) fileFilterHidden?.push(i);
       else hiddenRows.add(i);
@@ -2163,7 +2239,8 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     scenarios: partXml ? parseScenariosXml(partXml) : own?.scenarios,
     validations: meta?.sheets?.[name]?.validations || (ws?.['!validations'] || []).map(({ _odsName, ...rule }) => rule),
     color: own?.color || part?.color || (!own && partXml ? xlsxColor(partXml.match(/<(?:\w+:)?tabColor\b[^>]*>/)?.[0], nativeStyles?.colors || themes) : null),
-    protected: own ? !!own.protected : !!part?.protected,
+    // An .ods from another program says a protected sheet on its table (see the vendor's !odsProtected).
+    protected: own ? !!own.protected : !!part?.protected || (!partXml && !!ws?.['!odsProtected']),
     groups: own ? own.groups || null : fileGroups(ws, filtered),
     advancedFilter: own?.advancedFilter,
     outlineSettings: partXml ? readXlsxOutlineSettings(partXml) : own?.outlineSettings,
@@ -2208,6 +2285,25 @@ function importSheet(X, ws, name, meta, date1904 = false, definedNames, fileForm
     cells,
     ...(external.size ? { externalFormulas: external } : {}),
   };
+}
+
+/** A sheet name as an ODF range address spells it: bare when it is a plain word, else quoted. */
+const odsSheetName = (name) => (/^[\p{L}_][\p{L}\p{N}_]*$/u.test(name) ? name : `'${name.replace(/'/g, "''")}'`);
+
+/**
+ * The print settings an .ods from another program gives a sheet: its print ranges (table:print-ranges,
+ * "Sheet1.A1:Sheet1.D20 'My Sheet'.A23:.B26") and the rows and columns its header-rows and header-columns
+ * repeat on every page. Null when it names none.
+ */
+function odsPrintSettings(ws) {
+  const areas = [];
+  for (const address of String(ws?.['!odsPrintRanges'] || '').replace(/\$/g, '').match(/(?:'(?:[^']|'')*'|[^\s'])+/g) || []) {
+    const m = /^(?:'(?:[^']|'')*'|[^.:']*)?\.([A-Z]{1,3}\d{1,7})(?::(?:'(?:[^']|'')*'|[^.:']*)?\.([A-Z]{1,3}\d{1,7}))?$/i.exec(address);
+    const range = m && parseRange(`${m[1]}:${m[2] || m[1]}`);
+    if (range) areas.push(range);
+  }
+  const titleRows = ws?.['!odsTitleRows'], titleCols = ws?.['!odsTitleCols'];
+  return areas.length || titleRows || titleCols ? { areas, ...(titleRows ? { titleRows } : {}), ...(titleCols ? { titleCols } : {}) } : null;
 }
 
 /** CSV / TSV / TXT go through the app's own parser so "7,5" stays text. */
@@ -2713,6 +2809,8 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
       if (chartSheet) sheet.kind = 'chart';
       const printSettings = readXlsxPrint(partOf(n), book.Workbook?.Names, n, book.SheetNames.indexOf(n));
       sheet.printSettings = printSettings ? { ...meta?.sheets?.[n]?.printSettings, ...printSettings } : meta?.sheets?.[n]?.printSettings;
+      // An .ods from another program says its print ranges and repeated rows on the table itself.
+      if (!meta?.sheets?.[n] && !partOf(n)) sheet.printSettings = odsPrintSettings(book.Sheets[n]) ?? sheet.printSettings;
       // A native editor can delete the built-in title name. Absence in the
       // native package must override the app's older private metadata too.
       if (sheet.printSettings && partOf(n)) sheet.printSettings = { ...sheet.printSettings,
@@ -2736,6 +2834,8 @@ export async function workbookFromFile(data, filename = '', { sourceWorkbook = n
         if (odsView.frozenRows) sheet.frozenRows = odsView.frozenRows;
         if (odsView.frozenCols) sheet.frozenCols = odsView.frozenCols;
         if (odsView.tabColor && !sheet.color) sheet.color = odsView.tabColor;
+        if (odsView.gridlines === false) sheet.gridlines = false;
+        if (odsView.zoom) sheet.viewZoom = odsView.zoom;
       }
       return { ...sheet, hidden: hidden.has(n) || isVeryHidden || visibility === 'hidden', veryHidden: isVeryHidden };
     });

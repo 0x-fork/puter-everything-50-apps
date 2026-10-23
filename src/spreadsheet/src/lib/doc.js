@@ -35,6 +35,7 @@ import { draftKey, liveDraftKey, draftRevision, saveDraft, loadDraft, clearDraft
 import { adoptVersionsByUid, listVersions, saveVersion, readVersion, dueForVersion, moveVersions, parkVersions, RESTORE_LABEL } from './versions.js';
 import { storageScope, accountStorageKey, isAccountScope, isProvisionalScope } from './account-storage.js';
 import { optionState } from './option-state.js';
+import { rememberMade } from './made.js';
 
 const AUTOSAVE_MS = 1500;
 // Encoding a large book holds the page for a moment (about a second for 200,000 cells): its autosave waits for a pause
@@ -703,6 +704,8 @@ export class Doc extends EventTarget {
         if (!written) { this._setStatus(this.wb.dirty ? 'unsaved' : 'saved'); return false; }
         target = written.path;
         dir = target.slice(0, target.lastIndexOf('/'));
+        // Made by the app outside its folder: the home screen lists it with the folder's own (see recent.js).
+        rememberMade({ path: P.canonicalPath(target, written), uid: written.uid || written.id || null });
       } else try {
         attempt(target);
         written = await P.writeFile(target, blob, { dedupe: fresh && !reuse });
@@ -791,6 +794,11 @@ export class Doc extends EventTarget {
     if (!dueForVersion(this._lastVersionAt)) return;
     this._lastVersionAt = Date.now(); // claimed first, so overlapping saves write one snapshot
     try { await saveVersion(file, blob); } catch (e) { console.warn('Version snapshot failed', e); }
+  }
+
+  /** Resolves once the automatic snapshot of the last save, when one is on its way, has landed (or failed). */
+  versionSettled() {
+    return Promise.resolve(this._versioning);
   }
 
   /**
@@ -988,6 +996,7 @@ export class Doc extends EventTarget {
     }
     clearTimeout(this._timer);
     const version = this.wb.version;
+    const was = { status: this.status, error: this.error };
     this._setStatus('saving');
     let written;
     try {
@@ -996,11 +1005,15 @@ export class Doc extends EventTarget {
         // The dialog writes the copy, asking before it replaces a file of that name.
         written = await P.saveFileAs(blob, `${clean}.xlsx`);
         if (!written) {
+          // The file moved, deleted or changed elsewhere is still so: the question stands, put again at the next edit
+          // as after Keep editing, rather than by an AutoSave of edits already asked about, a moment after the cancel.
+          if (was.status === 'conflict') { this._setStatus(was.status, was.error); return CANCELLED; }
           this._setStatus(this.wb.dirty ? 'unsaved' : 'saved');
           if (this.wb.dirty) this._changed('cells');
           return CANCELLED;
         }
         target = written.path;
+        rememberMade({ path: P.canonicalPath(target, written), uid: written.uid || written.id || null });
       } else written = await P.writeFile(target, blob, { overwrite: false });
       this.remoteModified = modifiedMs(written) ?? modifiedMs(await P.statFile(target).catch(() => null)) ?? Date.now();
       this.remoteSize = blob.size;

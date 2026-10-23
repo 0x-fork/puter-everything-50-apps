@@ -3,6 +3,7 @@ import { writeOdsSettings, readOdsSettings, readOdsViewSettings } from '../core/
 import { odsFilterReader, writeOdsFilter } from '../core/ods-filter.js';
 import { writeOdsValidations, readOdsValidations, odsValidationLayout, addOdsValidation, odsFormulaReader } from '../core/ods-validation.js';
 import { odsCellStyleProperties, odsTextStyleProperties } from '../core/ods-cell-styles.js';
+import { XLFN } from '../core/xlfn.js';
 import { xlmlCellProps } from '../core/xlml-styles.js';
 import { odsConditionalFormatsXml } from '../core/ods-condformat.js';
 /*! xlsx.js (C) 2013-present SheetJS -- http://sheetjs.com */
@@ -382,7 +383,8 @@ function SSF_init_table(t/*:any*/) {
 	t[40]= '#,##0.00;[Red](#,##0.00)';
 	t[45]= 'mm:ss';
 	t[46]= '[h]:mm:ss';
-	t[47]= 'mmss.0';
+	/* Puter Spreadsheet local patch: Excel shows built-in 47 as mm:ss.0 (30:00.0); the spec's listing drops the colon. */
+	t[47]= 'mm:ss.0';
 	t[48]= '##0.0E+0';
 	t[49]= '@';
 	t[56]= '"上午/下午 "hh"時"mm"分"ss"秒 "';
@@ -415,7 +417,7 @@ var table_fmt = {
 	40: '#,##0.00;[Red](#,##0.00)',
 	45: 'mm:ss',
 	46: '[h]:mm:ss',
-	47: 'mmss.0',
+	47: 'mm:ss.0',
 	48: '##0.0E+0',
 	49: '@',
 	56: '"上午/下午 "hh"時"mm"分"ss"秒 "'
@@ -1380,7 +1382,7 @@ var SSFImplicit/*{[number]:string}*/ = ({
 	"78": 'm/d/yy h:mm',
 	"79": 'mm:ss',
 	"80": '[h]:mm:ss',
-	"81": 'mmss.0'
+	"81": 'mm:ss.0'
 }/*:any*/);
 
 /* dateNF parse TODO: move to SSF */
@@ -16001,6 +16003,9 @@ function ods_to_csf_formula(f/*:string*/)/*:string*/ {
 			 * "!" between two references or parenthesized expressions where Excel's is a space. An error literal
 			 * such as #REF! keeps its "!", as does a sheet name before one ('Data'![.A1]). */
 			else if((i == 0 || !/[\w.]/.test(f.charAt(i - 1))) && (replacement = /^LEGACY\.(?=[A-Za-z]+\s*\()/i.exec(f.slice(i)))) { end = i + replacement[0].length; replacement = ""; }
+			/* Puter Spreadsheet local patch: the functions OpenFormula names otherwise than Excel (FORMULA for FORMULATEXT,
+			 * FDIST and FINV for F.DIST and F.INV, SKEWP for SKEW.P), as LibreOffice writes them. */
+			else if((i == 0 || !/[\w.]/.test(f.charAt(i - 1))) && (replacement = /^(FORMULA|FDIST|FINV|SKEWP|CEILING|FLOOR)(?=\s*\()/i.exec(f.slice(i)))) { end = i + replacement[0].length; replacement = ods_excel_names[replacement[1].toUpperCase()]; }
 			else if(ch == "#" && (replacement = /^#[A-Za-z0-9\/]+[!?]?/.exec(f.slice(i)))) { i += replacement[0].length - 1; continue; }
 			else if(ch == "!" && /[\])]\s*$/.test(f.slice(0, i))) replacement = " ";
 			else if(ch == ";" || ch == "~") replacement = ",";
@@ -16029,6 +16034,26 @@ function csf_formula_reference(match) {
 	return "[" + first + (cells.length == 2 || sheets.length == 2 ? ":" + last : "") + "]";
 }
 
+/* Puter Spreadsheet local patch: Excel's file spelling marks the functions added since Excel 2007 with _xlfn. (and
+ * SORT and FILTER with _xlfn._xlws.), and LET and LAMBDA names with _xlpm.; LibreOffice reads none of these in an
+ * .ods, so every XLOOKUP or IFS there turned to #NAME? on its first recalculation. OpenFormula has some of them under
+ * their own names (IFNA, XOR, DAYS); the others are spelled COM.MICROSOFT.* as LibreOffice writes them. */
+var ods_plain_functions = {};
+"ACOT ACOTH ARABIC BASE BINOM.DIST.RANGE BITAND BITLSHIFT BITOR BITRSHIFT BITXOR COMBINA COT COTH CSC CSCH DAYS DECIMAL GAMMA GAUSS IFNA IMCOSH IMCOT IMCSC IMCSCH IMSEC IMSECH IMSINH IMTAN ISFORMULA ISOWEEKNUM MUNIT NUMBERVALUE PDURATION PERMUTATIONA PHI RRI SEC SECH SHEET SHEETS UNICHAR UNICODE XOR".split(" ").forEach(function(name) { ods_plain_functions[name] = true; });
+/* Puter Spreadsheet local patch: the functions OpenFormula (and LibreOffice) names otherwise than Excel. */
+var ods_renamed_functions = { "FORMULATEXT": "FORMULA", "F.DIST": "FDIST", "F.INV": "FINV", "SKEW.P": "SKEWP" };
+/* OpenFormula's CEILING and FLOOR take a mode, as Excel's CEILING.MATH and FLOOR.MATH do (LibreOffice saves them as
+ * those in an .xlsx); Excel's two-argument CEILING, FLOOR and ISO.CEILING are COM.MICROSOFT.* there. */
+var ods_excel_names = { "FORMULA": "FORMULATEXT", "FDIST": "F.DIST", "FINV": "F.INV", "SKEWP": "SKEW.P", "CEILING": "CEILING.MATH", "FLOOR": "FLOOR.MATH" };
+function ods_function_name(name) {
+	var m = /^_xlpm\.(.*)$/i.exec(name);
+	if(m) return m[1];
+	m = /^_xlfn\.(?:_xlws\.)?(.+)$/i.exec(name);
+	/* Only the functions Excel marks so: a spill reference (A1#, ANCHORARRAY) and the @ operator (SINGLE) have no
+	 * OpenFormula spelling, and keep Excel's, as does a name this app does not know. */
+	if(!m || !XLFN.has(m[1].toUpperCase()) || /^SINGLE$/i.test(m[1])) return null;
+	return ods_renamed_functions[m[1].toUpperCase()] || (ods_plain_functions[m[1].toUpperCase()] ? m[1] : "COM.MICROSOFT." + m[1]);
+}
 function csf_to_ods_formula(f/*:string*/)/*:string*/ {
 	// Keep delimiter context across string-literal segments. A comma inside
 	// grouping parentheses joins references; calls and arrays use separators.
@@ -16063,6 +16088,8 @@ function csf_to_ods_formula(f/*:string*/)/*:string*/ {
 				while(end < f.length && /[\w.\u0080-\uFFFF]/.test(f.charAt(end))) ++end;
 				/* Puter Spreadsheet local patch: the functions OpenFormula spells as LEGACY.* (see ods_to_csf_formula). */
 				if(/^(?:CHIDIST|CHIINV|CHITEST|FDIST|FINV|NORMSDIST|NORMSINV|TDIST)$/i.test(f.slice(i, end)) && /^\s*\(/.test(f.slice(end))) replacement = "LEGACY." + f.slice(i, end);
+				else if(/^(?:CEILING|FLOOR|ISO\.CEILING)$/i.test(f.slice(i, end)) && /^\s*\(/.test(f.slice(end))) replacement = "COM.MICROSOFT." + f.slice(i, end);
+				else if(/^_xl(?:fn|pm)\./i.test(f.slice(i, end)) && (replacement = ods_function_name(f.slice(i, end))) != null) {}
 				else if(f.charAt(end) != "!" || !(match = csf_ods_name.exec(f.slice(i)))) { i = end - 1; continue; }
 				else { replacement = "'" + match[1] + "'.$$'" + match[2] + "'"; end = i + match[0].length; }
 			} else if((ch >= "0" && ch <= "9") || ch == ".") {
@@ -23540,7 +23567,7 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 	var str = xlml_normalize(d);
 	xlmlregex.lastIndex = 0;
 	str = remove_doctype(str_remove_ng(str, "<!--", "-->"));
-	var Rn, NFtag, NFmaps = {}, NF = "", tNF = "", y, etpos = 0, tidx = -1, infmt = false, payload = "";
+	var Rn, NFtag, NFmaps = {}, NF = "", tNF = "", y, etpos = 0, tidx = -1, infmt = false, payload = "", etnum = null;
 	var inCommonStyles = false, commonStyle = null;
 	var ods_common_props = function(style, tag) {
 		var attrs = parsexmltag(tag, true, true);
@@ -23774,7 +23801,24 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 
 		case 'number': // <number:number> 16.29.3
 			// TODO: handle all the attributes
-			if(Rn[1]==='/') break;
+			/* Puter Spreadsheet local patch: the number's embedded texts go in when it closes, each before the count of
+			 * integer digits its position names, whatever order they come in; a character offset from the end of the
+			 * code put a second one inside the first and counted the decimals as digits. */
+			if(Rn[1]==='/') {
+				if(etnum && etnum.texts.length) {
+					var code = NF.slice(etnum.at), intEnd = code.indexOf("."), out = "", seen = 0;
+					if(intEnd < 0) intEnd = code.replace(/,+$/, "").length;
+					var at = function(n) { return etnum.texts.filter(function(t) { return t.position == n; }).map(function(t) { return t.text; }).join(""); };
+					for(var k = intEnd - 1; k >= 0; --k) {
+						if(code[k] != ",") out = at(seen++) + out;
+						out = code[k] + out;
+					}
+					out = etnum.texts.filter(function(t) { return t.position >= seen; }).sort(function(a, b) { return b.position - a.position; }).map(function(t) { return t.text; }).join("") + out;
+					NF = NF.slice(0, etnum.at) + out + code.slice(intEnd);
+				}
+				etnum = null;
+				break;
+			}
 			y = parsexmltag(Rn[0], false);
 			tNF = "";
 			/* Puter Spreadsheet local patch: optional digits are #, as LibreOffice writes "#.##": no required integer
@@ -23786,6 +23830,7 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			if(+y["decimal-places"] - (+y["min-decimal-places"]||0)) tNF += fill(y["min-decimal-places"] != null ? "#" : "0", +y["decimal-places"] - (+y["min-decimal-places"]||0));
 			/* Puter Spreadsheet local patch: a display factor of a thousand per comma scales the number shown. */
 			for(var factor = +y["display-factor"] || 1; factor >= 1000; factor /= 1000) tNF += ",";
+			etnum = Rn[0].charAt(Rn[0].length-2) !== '/' ? { at: NF.length, texts: [] } : null;
 			NF += tNF;
 			break;
 
@@ -23793,7 +23838,8 @@ function parse_ods_styles(d/*:string*/, _opts, _nfm, _styles) {
 			// TODO: verify interplay with grouping et al
 			if(Rn[1]==='/') {
 				payload = ods_format_literal(parse_ods_format_text(str.slice(tidx, xlmlregex.lastIndex - Rn[0].length)));
-				if(etpos == 0) NF += payload;
+				if(etnum) etnum.texts.push({ position: -etpos, text: payload });
+				else if(etpos == 0) NF += payload;
 				else NF = NF.slice(0, etpos) + payload + NF.slice(etpos);
 			} else if(Rn[0].charAt(Rn[0].length-2) !== '/') {
 				tidx = xlmlregex.lastIndex;
@@ -23866,6 +23912,8 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 		var number_format_map = _nfm || Object.create(null), styles = Object.create(null);
 		var commonStyles = _styles || Object.create(null), inCommonStyles = false, styleNumberFormats = new WeakMap();
 		var columnNumberFormats = [], columnCount = 0, rowNumberFormatName = null;
+		/* Puter Spreadsheet local patch: where the rows and columns to repeat on every printed page start. */
+		var headerRowStart = null, headerColStart = null;
 		function ods_number_format(name) {
 			return resolve_ods_style_number_format(name && (styles[name] || commonStyles[name]), commonStyles, styleNumberFormats);
 		}
@@ -23897,6 +23945,8 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 			var props = ods_cell_props(name);
 			if(!props) return false;
 			if(props["background-color"] && props["background-color"] !== "transparent") return true;
+			/* Puter Spreadsheet local patch: so is one whose protection is not the default, a form's blank input cell left unlocked. */
+			if(props["cell-protect"] && !/^\s*protected\s*$/i.test(props["cell-protect"])) return true;
 			return ["border", "border-top", "border-bottom", "border-left", "border-right"].some(function(k) { return props[k] && !/^\s*none\b/i.test(props[k]); });
 		}
 		var merges/*:Array<Range>*/ = [], mrange = {}, mR = 0, mC = 0;
@@ -23937,6 +23987,14 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 						ws['!ref'] = encode_range(range);
 					}
 					if(merges.length) ws['!merges'] = merges;
+					/* Puter Spreadsheet local patch: a protected table (Tools ▸ Protect Sheet in LibreOffice). Its password key is not kept.
+					 * Not where the Default cell style is itself unprotected (a form made by unlocking Default and locking a few
+					 * cells by a style of their own): every cell without a style of its own, blank ones too, is open for input
+					 * there, which the app cannot say, and protected here they were all locked. */
+					var defaultProtect = commonStyles["Default"] && commonStyles["Default"].odsProps && commonStyles["Default"].odsProps["cell-protect"];
+					if(parsexmlbool(sheetag["protected"]) && !(defaultProtect && !/^\s*protected\s*$/i.test(defaultProtect))) ws['!odsProtected'] = true;
+					/* Puter Spreadsheet local patch: the sheet's print ranges, as their ODF addresses (read in io.js). */
+					if(sheetag["print-ranges"]) ws['!odsPrintRanges'] = unescapexml(sheetag["print-ranges"]);
 					if(ws['!odsConditionalFormats']) ws['!odsConditionalFormats'] = odsConditionalFormatsXml(ws['!odsConditionalFormats'], { convert: ods_to_csf_formula, address: ods_to_csf_3D });
 					if(rowinfo.length) ws["!rows"] = rowinfo;
 					if(colinfo.length) ws["!cols"] = colinfo;
@@ -24354,11 +24412,19 @@ function parse_content_xml(d/*:string*/, _opts, _nfm, _styles)/*:Workbook*/ {
 					columnCount += columnRepeat;
 				}
 				break;
-			case 'table-header-rows': break; // 9.1.7 <table:table-header-rows>
+			case 'table-header-rows': // 9.1.7 <table:table-header-rows>
+				/* Puter Spreadsheet local patch: the rows LibreOffice repeats at the top of every printed page (!odsTitleRows). */
+				if(Rn[1] === '/') { if(headerRowStart != null && R - 1 >= headerRowStart) ws['!odsTitleRows'] = [headerRowStart, R - 1]; headerRowStart = null; }
+				else if(Rn[0].charAt(Rn[0].length-2) !== '/') headerRowStart = R < 0 ? 0 : R;
+				break;
 			case 'table-rows': break; // 9.1.12 <table:table-rows>
 			/* TODO: outline levels */
 			case 'table-column-group': break; // 9.1.10 <table:table-column-group>
-			case 'table-header-columns': break; // 9.1.11 <table:table-header-columns>
+			case 'table-header-columns': // 9.1.11 <table:table-header-columns>
+				/* Puter Spreadsheet local patch: the columns repeated at the left of every printed page (!odsTitleCols). */
+				if(Rn[1] === '/') { if(headerColStart != null && columnCount - 1 >= headerColStart) ws['!odsTitleCols'] = [headerColStart, columnCount - 1]; headerColStart = null; }
+				else if(Rn[0].charAt(Rn[0].length-2) !== '/') headerColStart = columnCount;
+				break;
 			case 'table-columns': break; // 9.1.12 <table:table-columns>
 
 			case 'null-date': // 9.4.2 <table:null-date>
@@ -24782,7 +24848,9 @@ function write_number_format_ods_section(nf/*:string*/, nfidx/*:string*/)/*:stri
 
 		/* fractions */
 		var t = nf.match(/# (\?+)\/(\?+)/);
-		if(t) { payload += writextag("number:fraction", null, {"number:min-integer-digits":0, "number:min-numerator-digits": t[1].length, "number:max-denominator-value": Math.max(+(t[1].replace(/./g, "9")), +(t[2].replace(/./g, "9"))) }); break j; }
+		/* Puter Spreadsheet local patch: the denominator's width too (# ??/?? shows 1241 46/81), which a reader takes
+		 * from min-denominator-digits: without it the format came back as # ??/? and showed 1241  4/7. */
+		if(t) { payload += writextag("number:fraction", null, {"number:min-integer-digits":0, "number:min-numerator-digits": t[1].length, "number:min-denominator-digits": t[2].length, "number:max-denominator-value": Math.max(+(t[1].replace(/./g, "9")), +(t[2].replace(/./g, "9"))) }); break j; }
 		if((t=nf.match(/# (\?+)\/(\d+)/))) { payload += writextag("number:fraction", null, {"number:min-integer-digits":0, "number:min-numerator-digits": t[1].length, "number:denominator-value": +t[2]}); break j; }
 
 		/* percentages */
@@ -24897,24 +24965,34 @@ function write_number_format_ods_section(nf/*:string*/, nfidx/*:string*/)/*:stri
 		/* Puter Spreadsheet local patch: a section of text alone (an accounting zero, "$" "-") has no digits to find. */
 		if(!np || !np[0]) { if(!payload) console.error("Could not find numeric part of " + nf); }
 		else {
-			var base = np[1].replace(/,/g, "");
+			/* Puter Spreadsheet local patch: text between the integer digits (000-00-0000, (000) 000-0000) is embedded
+			 * text, placed by the count of integer digits to its right; the number used to end before the first of it. */
+			var digits = np[1], decimals = np[2], exponent = np[3], numEnd = np.index + np[0].length, embedded = [];
+			if(!decimals && !exponent) for(var more;;) {
+				var between = read_ods_format_text_run(nf, numEnd);
+				if(!between.text || !(more = nf.slice(between.end).match(/^([#0][0#,]*)(\.[0#]*|)(E[+-]?0*|)/i)) || more[3]) break;
+				embedded.push({ text: between.text, before: digits.replace(/,/g, "").length });
+				digits += more[1]; decimals = more[2]; numEnd = between.end + more[0].length;
+				if(decimals) break;
+			}
+			var base = digits.replace(/,/g, "");
 			/* Puter Spreadsheet local patch: a comma after the digits scales by a thousand (#,##0,"K" shows 1,235K for
 			 * 1234567), which ODF spells as a display factor; only a comma between digits asks for grouping. */
-			var scaling = (np[1].match(/,+$/) || [""])[0].length, trailing = nf.slice(np.index + np[0].length).match(/^,+/);
+			var scaling = (digits.match(/,+$/) || [""])[0].length, trailing = nf.slice(numEnd).match(/^,+/);
 			if(trailing) scaling += trailing[0].length;
-			payload += '<number:' + (np[3] ? "scientific-" : "")+ 'number' +
+			payload += '<number:' + (exponent ? "scientific-" : "")+ 'number' +
 				' number:min-integer-digits="' + (base.indexOf("0") == -1 ? "0" : base.length - base.indexOf("0")) + '"' +
-				(/[#0],[#0]/.test(np[1]) ? ' number:grouping="true"' : "") +
-				(np[2] && ' number:decimal-places="' + (np[2].length - 1) + '"' || ' number:decimal-places="0"') +
+				(/[#0],[#0]/.test(digits) ? ' number:grouping="true"' : "") +
+				(decimals && ' number:decimal-places="' + (decimals.length - 1) + '"' || ' number:decimal-places="0"') +
 				/* Puter Spreadsheet local patch: optional decimals (0.## shows 1.5) need the count of required ones. */
-				(!np[3] && np[2].indexOf("#") > -1 ? ' number:min-decimal-places="' + (np[2].match(/0/g) || []).length + '"' : "") +
+				(!exponent && decimals.indexOf("#") > -1 ? ' number:min-decimal-places="' + (decimals.match(/0/g) || []).length + '"' : "") +
 				(scaling ? ' number:display-factor="' + Math.pow(1000, scaling) + '"' : "") +
-				(np[3] ? ' number:forced-exponent-sign="' + (np[3].indexOf("-") > -1 ? "false" : "true") + '"' : "" ) +
-				(np[3] ? ' number:min-exponent-digits="' + ((np[3].match(/0+/) || ["0"])[0].length) + '"' : "" ) +
+				(exponent ? ' number:forced-exponent-sign="' + (exponent.indexOf("-") > -1 ? "false" : "true") + '"' : "" ) +
+				(exponent ? ' number:min-exponent-digits="' + ((exponent.match(/0+/) || ["0"])[0].length) + '"' : "" ) +
 				'>' +
-				/* TODO: interstitial text placeholders */
-				'</number:' + (np[3] ? "scientific-" : "") + 'number>';
-			i = np.index + np[0].length + (trailing ? trailing[0].length : 0);
+				embedded.map(function(e) { return '<number:embedded-text number:position="' + (base.length - e.before) + '">' + escapexml(e.text) + '</number:embedded-text>'; }).join("") +
+				'</number:' + (exponent ? "scientific-" : "") + 'number>';
+			i = numEnd + (trailing ? trailing[0].length : 0);
 		}
 
 		/* residual text */
@@ -25018,7 +25096,8 @@ var write_content_ods/*:{(wb:any, opts:any):string}*/ = /* @__PURE__ */(function
 		var o/*:Array<string>*/ = [];
 		/* Puter Spreadsheet local patch: a hidden sheet (Workbook.Sheets[i].Hidden) uses the table style that does not display. */
 		var sheetHidden = (wb.Workbook||{}).Sheets && wb.Workbook.Sheets[i] && wb.Workbook.Sheets[i].Hidden;
-		o.push('      <table:table table:name="' + escapexml(wb.SheetNames[i]) + '" table:style-name="' + (sheetHidden ? "ta2" : "ta1") + '">\n');
+		/* Puter Spreadsheet local patch: a protected sheet (!odsProtected) is a protected table, with no password. */
+		o.push('      <table:table table:name="' + escapexml(wb.SheetNames[i]) + '" table:style-name="' + (sheetHidden ? "ta2" : "ta1") + '"' + (ws['!odsProtected'] ? ' table:protected="true"' : '') + (ws['!odsPrintRanges'] ? ' table:print-ranges="' + escapexml(ws['!odsPrintRanges']) + '"' : '') + '>\n');
 		var R=0,C=0, range = decode_range(ws['!ref']||"A1");
 		var marr/*:Array<Range>*/ = ws['!merges'] || [], mi = 0;
 		var validationLayout = ws['!validations'] && ws['!validations'].length ? odsValidationLayout(ws['!validations'], range, i) : null;

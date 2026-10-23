@@ -571,6 +571,13 @@ function criteriaNumber(v) {
 /** Build a predicate from a criteria value like ">10", "<>x", "a*", 5. */
 export function criteriaMatcher(criteria) {
   criteria = scalar(criteria);
+  const match = criteriaTest(criteria);
+  // A text criterion is a test of the cell's value alone, the same each time it is built: see scannedCriterion.
+  if (typeof criteria === 'string') match.source = criteria;
+  return match;
+}
+
+function criteriaTest(criteria) {
   if (isError(criteria)) return () => false;
   if (typeof criteria !== 'string') {
     // A reference to an empty cell as the criterion is the value 0.
@@ -865,7 +872,7 @@ function indexCriterion(match, range) {
     match.run = { index, lo, hi, count: hi - lo };
     return;
   }
-  if (match.key === undefined) return;
+  if (match.key === undefined) { scannedCriterion(match, range); return; }
   const index = criteriaIndex(range.values);
   if (!index) return;
   match.cols = index.cols;
@@ -897,6 +904,41 @@ function indexCriterion(match, range) {
     }
   }
   match.positions = positions;
+}
+
+/**
+ * The cells of a range a text criterion no index answers matches ("<>"&B2, "a*", ">m"), found by testing each cell
+ * once and kept for the next formula asking the same of the same values: COUNTIF(B:B,"<>"&B2) filled down 3,000 rows
+ * compared every cell of the column for every row, nine million text comparisons, where the column holds a dozen
+ * distinct criteria. As criteriaIndex, from the second use of the values, and within a bound of positions kept.
+ */
+const scannedIndexes = new WeakMap();
+function scannedCriterion(match, range) {
+  if (match.source === undefined) return;
+  const { values } = range;
+  let index = scannedIndexes.get(values);
+  if (index === undefined) { scannedIndexes.set(values, false); return; }
+  if (!index) scannedIndexes.set(values, index = { queries: new Map(), positions: 0 });
+  const cols = values[0]?.length || 0;
+  // Reading a number or a date out of a criterion follows the regional settings.
+  const key = `${getLocale()}\u0000${match.source}`;
+  let positions = index.queries.get(key);
+  if (!positions) {
+    positions = [];
+    for (let r = 0; r < values.length; r++) {
+      const row = values[r];
+      for (let c = 0; c < cols; c++) if (match(row[c])) positions.push(r * cols + c);
+    }
+    // More cells than are kept are this formula's candidates alone: dropped, they were tested once more by the function
+    // itself, each formula over such a column taking twice as long as without the search.
+    if (positions.length <= 100000) {
+      if (index.queries.size >= 256 || index.positions + positions.length > 100000) { index.queries.clear(); index.positions = 0; }
+      index.queries.set(key, positions); index.positions += positions.length;
+    }
+  }
+  match.cols = cols;
+  match.positions = positions;
+  match.scanned = true;
 }
 
 /**
@@ -995,15 +1037,17 @@ function pairedNumbers(a, b) {
  * every one of `count` cells in `window`, the rows and columns read of `range` unless given.
  */
 function candidates(pred, range, [rows, cols] = readWindow(range), ordered = true) {
-  if (pred.positions) return { cells: pred.positions, cols: pred.cols, count: pred.positions.length };
+  // `test` is what each candidate must still pass: an index lists only cells its own criteria match, so those
+  // are not tested again (see multiCriteria's rest and runRest).
+  if (pred.positions) return { cells: pred.positions, cols: pred.cols, count: pred.positions.length, test: pred.rest ?? pred };
   // A run of an order index (see multiCriteria): in source order for a sum, whose rounding depends on it, unless the
   // caller only counts. Sorting a long run costs more than testing every cell, so only a short one is taken.
   if (pred.run && (!ordered || pred.run.count * 4 <= rows * cols)) {
     const { index, lo, hi } = pred.run;
     const cells = ordered ? index.positions.slice(lo, hi).sort() : index.positions.subarray(lo, hi);
-    return { cells, cols: index.cols, count: hi - lo };
+    return { cells, cols: index.cols, count: hi - lo, test: pred.runRest ?? pred };
   }
-  return { cells: null, cols, count: rows * cols };
+  return { cells: null, cols, count: rows * cols, test: pred };
 }
 
 /**
@@ -1079,7 +1123,8 @@ function multiCriteria(pairs, baseRange) {
     if (height !== rows || width !== cols) return err('#VALUE!');
     tests.push({ range, match: criteriaMatcher(pairs[i + 1]) });
   }
-  const ok = (r, c) => tests.every((t) => t.match(t.range.values[r]?.[c]));
+  const every = (list) => (list.length ? (r, c) => list.every((t) => t.match(t.range.values[r]?.[c])) : Object.assign(() => true, { always: true }));
+  const ok = every(tests);
   // Each range is read only as far as its own sheet holds values, so a whole column on another
   // sheet may have been read past the rows of the first: ok.read is the window every range was read
   // within, for a count that visits each cell any of them holds. A range read short of it is blank there.
@@ -1088,9 +1133,21 @@ function multiCriteria(pairs, baseRange) {
     return [Math.max(rows, h), Math.max(cols, w)];
   }, [0, 0]);
   // An indexed text criterion names the only cells that can match; the other tests are applied to those.
+  const readAsFar = (range) => {
+    const [h, w] = readWindow(range), [bh, bw] = readWindow(baseRange);
+    return h === ok.read[0] && w === ok.read[1] && h === bh && w === bw;
+  };
   for (const t of tests) {
     indexCriterion(t.match, t.range);
-    if (t.match.positions) { ok.positions = t.match.positions; ok.cols = t.match.cols; break; }
+    // Cells found by testing a range are those it was read to: for a criterion matching a blank ("<>x") they name
+    // the candidates only when every range of the list was read as far, or cells past them would be missed.
+    if (t.match.positions && (!t.match.scanned || !t.match(undefined) || readAsFar(t.range))) {
+      ok.positions = t.match.positions; ok.cols = t.match.cols;
+      // The index lists exactly the cells this criterion matches, so a candidate is tested against the others only:
+      // retesting it cost a text comparison per candidate, 30 million for a 20,000-row column of COUNTIFS on 13 labels.
+      ok.rest = every(tests.filter((u) => u !== t));
+      break;
+    }
   }
   if (ok.positions) return ok;
   // Criteria comparing one range with numbers (">="&A2, "<"&A2+7: a window of dates) match one run of its numbers in
@@ -1107,12 +1164,68 @@ function multiCriteria(pairs, baseRange) {
     }
     [run.lo, run.hi] = orderRun(run.index, t.match, run.lo, run.hi);
   }
-  for (const run of runs.values()) {
+  let runValues = null;
+  for (const [values, run] of runs) {
     if (!run) continue;
     run.count = run.hi - run.lo;
-    if (!ok.run || run.count < ok.run.count) ok.run = run;
+    if (!ok.run || run.count < ok.run.count) { ok.run = run; runValues = values; }
   }
+  // Every number of the run passes each comparison with a number made of its range; the other criteria remain.
+  if (ok.run) ok.runRest = every(tests.filter((t) => !(t.match.order && t.range.values === runValues)));
   return ok;
+}
+
+/**
+ * The answers of a criteria function kept for the values it read: SUMIFS(C:C,B:B,B2) filled down a list of 20,000
+ * rows in five categories added up 4,000 amounts for each row, 80 million in all, though there are five answers.
+ * The ranges' values arrays are shared by every formula that reads them in one calculation and replaced by any
+ * change, so an answer is kept beside the first range's array, under the other arrays, the extents of the ranges
+ * and the criteria themselves, and lives no longer than the values it was worked out from.
+ */
+const valuesIds = new WeakMap();
+let nextValuesId = 0;
+function rememberCriteria(fn, first, repeating) {
+  const criteriaAnswers = new WeakMap(); // the first range's values array → Map(key → answer), for this function
+  const criterion = (k) => k >= first && (repeating ? (k - first) % 2 === 0 : k === first);
+  const part = (v) => (v == null ? 'z' : typeof v === 'string' ? `s${v}` : typeof v === 'number' ? `n${v}` : typeof v === 'boolean' ? `b${v}`
+    : v === EMPTY ? 'E' : isError(v) ? `e${v.error}` : null);
+  // A reference is read when its values are first asked for, and the function reads its criteria ranges before a sum
+  // range (SUMIFS, MAXIFS: the first argument) and no range of pairs it refuses: the key asks in the same order, and
+  // asks nothing of such pairs, as which cell of a circle of references is read first settles whether it is a cycle.
+  const shift = repeating && first === 2 ? 1 : 0;
+  const refused = (args) => {
+    const pairs = args.slice(first - 1);
+    if (pairs.length < 2 || pairs.length % 2) return true;
+    const [rows, cols] = rangeShape(asRange(args[0]));
+    return pairs.some((a, i) => { if (i % 2) return false; const [h, w] = rangeShape(asRange(a)); return h !== rows || w !== cols; });
+  };
+  return (args, ctx) => {
+    if (!isRange(args[0]) || (repeating && refused(args))) return fn(args, ctx);
+    // Reading a number or a date out of a criterion follows the regional settings.
+    let key = getLocale();
+    for (let i = 0; i < args.length; i++) {
+      const k = (i + shift) % args.length, a = args[k];
+      let p;
+      if (isRange(a) && !(criterion(k) && a.values.length === 1 && a.values[0]?.length === 1)) {
+        let id = valuesIds.get(a.values);
+        if (id === undefined) valuesIds.set(a.values, id = ++nextValuesId);
+        const ref = a.ref;
+        p = `r${id}:${ref ? `${ref.sheet ?? ''}!${ref.r1},${ref.c1},${ref.r2},${ref.c2}` : (a.extent || '')}`;
+      } else p = part(scalar(a));
+      if (p === null) return fn(args, ctx); // a sparkline or other drawable: worked out as it stands
+      key += `\u0000${p}`;
+    }
+    const base = args[0].values;
+    // A range of a running family ($A$1:A9, see noteRangeRows) is read by one formula alone: nothing to keep.
+    if (RANGE_PARENTS.has(base)) return fn(args, ctx);
+    let answers = criteriaAnswers.get(base);
+    if (!answers) criteriaAnswers.set(base, answers = new Map());
+    if (answers.has(key)) return answers.get(key);
+    const answer = fn(args, ctx);
+    if (answers.size >= 10000) answers.clear();
+    answers.set(key, answer);
+    return answer;
+  };
 }
 
 /**
@@ -1126,6 +1239,7 @@ function multiCriteria(pairs, baseRange) {
  * with a range criterion for an array formula that may spill.
  */
 function overCriteria(fn, first, repeating = false, { errorCriteria = false } = {}) {
+  fn = rememberCriteria(fn, first, repeating);
   const lifted = (args, ctx) => {
     let grids = null;
     let rows = 1;
@@ -2056,7 +2170,7 @@ export const FUNCTIONS = {
         const p = cells ? cells[k] : k;
         const r = Math.floor(p / cols);
         const c = p - r * cols;
-        if (!match(rg.values[r][c])) continue;
+        if (!cells && !match(rg.values[r][c])) continue; // an index's cells all match
         const s = sr.values[r]?.[c];
         if (typeof s === 'number') total += s;
         else if (isError(s)) return s;
@@ -2071,14 +2185,14 @@ export const FUNCTIONS = {
       const ok = multiCriteria(pairs, sr);
       if (isError(ok)) return ok;
       let total = 0;
-      const { cells, cols, count } = candidates(ok, sr);
+      const { cells, cols, count, test } = candidates(ok, sr);
       for (let k = 0; k < count; k++) {
         const p = cells ? cells[k] : k;
         const r = Math.floor(p / cols);
         const c = p - r * cols;
         const v = sr.values[r]?.[c];
-        if (typeof v === 'number') { if (ok(r, c)) total += v; }
-        else if (isError(v) && ok(r, c)) return v;
+        if (typeof v === 'number') { if (test(r, c)) total += v; }
+        else if (isError(v) && test(r, c)) return v;
       }
       return total;
     }, 2, true),
@@ -2110,11 +2224,12 @@ export const FUNCTIONS = {
       if (isError(ok)) return ok;
       let n = 0;
       // Every cell any of the ranges was read to is visited, not only those of the first range.
-      const { cells, cols, count } = candidates(ok, first, ok.read, false);
-      for (let k = 0; k < count; k++) {
+      const { cells, cols, count, test } = candidates(ok, first, ok.read, false);
+      if (test.always) n = count;
+      else for (let k = 0; k < count; k++) {
         const p = cells ? cells[k] : k;
         const r = Math.floor(p / cols);
-        if (ok(r, p - r * cols)) n++;
+        if (test(r, p - r * cols)) n++;
       }
       // Blank cells beyond the values read of every range are blank in each range of the pair list.
       if (ok(-1, -1)) n += unreadBlanks(first, ok.read);
@@ -2135,7 +2250,7 @@ export const FUNCTIONS = {
         const p = cells ? cells[k] : k;
         const r = Math.floor(p / cols);
         const c = p - r * cols;
-        if (!match(rg.values[r][c])) continue;
+        if (!cells && !match(rg.values[r][c])) continue; // an index's cells all match
         const s = ar.values[r]?.[c];
         if (typeof s === 'number') { total += s; n++; }
         else if (isError(s)) return s;
@@ -2150,14 +2265,14 @@ export const FUNCTIONS = {
       const ok = multiCriteria(pairs, rg);
       if (isError(ok)) return ok;
       let best = null;
-      const { cells, cols, count } = candidates(ok, rg);
+      const { cells, cols, count, test } = candidates(ok, rg);
       for (let k = 0; k < count; k++) {
         const p = cells ? cells[k] : k;
         const r = Math.floor(p / cols);
         const c = p - r * cols;
         const v = rg.values[r]?.[c];
-        if (typeof v === 'number') { if (ok(r, c) && (best === null || v > best)) best = v; }
-        else if (isError(v) && ok(r, c)) return v; // a cell in error is reported, as SUMIFS and MAX report it
+        if (typeof v === 'number') { if (test(r, c) && (best === null || v > best)) best = v; }
+        else if (isError(v) && test(r, c)) return v; // a cell in error is reported, as SUMIFS and MAX report it
       }
       return best ?? 0;
     }, 2, true),
@@ -2169,14 +2284,14 @@ export const FUNCTIONS = {
       const ok = multiCriteria(pairs, rg);
       if (isError(ok)) return ok;
       let best = null;
-      const { cells, cols, count } = candidates(ok, rg);
+      const { cells, cols, count, test } = candidates(ok, rg);
       for (let k = 0; k < count; k++) {
         const p = cells ? cells[k] : k;
         const r = Math.floor(p / cols);
         const c = p - r * cols;
         const v = rg.values[r]?.[c];
-        if (typeof v === 'number') { if (ok(r, c) && (best === null || v < best)) best = v; }
-        else if (isError(v) && ok(r, c)) return v; // a cell in error is reported, as SUMIFS and MIN report it
+        if (typeof v === 'number') { if (test(r, c) && (best === null || v < best)) best = v; }
+        else if (isError(v) && test(r, c)) return v; // a cell in error is reported, as SUMIFS and MIN report it
       }
       return best ?? 0;
     }, 2, true),
@@ -2906,14 +3021,14 @@ export const FUNCTIONS = {
       if (isError(ok)) return ok;
       let total = 0;
       let n = 0;
-      const { cells, cols, count } = candidates(ok, ar);
+      const { cells, cols, count, test } = candidates(ok, ar);
       for (let k = 0; k < count; k++) {
         const p = cells ? cells[k] : k;
         const r = Math.floor(p / cols);
         const c = p - r * cols;
         const v = ar.values[r]?.[c];
-        if (typeof v === 'number') { if (ok(r, c)) { total += v; n++; } }
-        else if (isError(v) && ok(r, c)) return v;
+        if (typeof v === 'number') { if (test(r, c)) { total += v; n++; } }
+        else if (isError(v) && test(r, c)) return v;
       }
       return n ? total / n : err('#DIV/0!');
     }, 2, true),

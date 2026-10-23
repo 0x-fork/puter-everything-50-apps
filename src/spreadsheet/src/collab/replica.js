@@ -23,7 +23,7 @@
  * ordinary change, shared like any other, and its own inverse is the redo.
  */
 
-import { Workbook, sheetShapeJSON, sameJSON, cloneCell } from '../core/workbook.js';
+import { Workbook, sheetShapeJSON, sameJSON, cloneCell, STYLE_FILL_CELLS } from '../core/workbook.js';
 import { cellKey, parseKey, cutText } from '../core/cell.js';
 import { LINE_PROPS, SHEET_PROPS, BOOK_PROPS, MAX_LABEL, MAX_CHANGE, MAX_OPS, MAX_RUNS, mapCellKey, mapLineKey, mergeRuns, transformStructure, isStructure, parseCellKey } from './ops.js';
 import { applyOps, contentOf, sheetJSON, lineValues, sheetProps } from './apply.js';
@@ -397,14 +397,17 @@ export class Replica extends EventTarget {
 
   /**
    * The inverse of a structural operation: the opposite operation and, for deletions, the writes that put back
-   * what went with the deleted lines or sheet (cells, formulas elsewhere that turned to #REF!, settings).
+   * what went with the deleted lines or sheet (cells, formulas elsewhere that turned to #REF!, settings). The
+   * opposite of an insertion or a move does not give every setting back either: a conditional format, a rule of
+   * validation or a filter over rows a moved row joined has no way to tell, when the row goes back, that it was
+   * not one of them (the rows they cover shrank to the row moved back, say), so the settings are put back too.
    */
   _inverseOf(op, old, result, before) {
     switch (op.t) {
       case 'insert':
-        return [{ t: 'delete', s: op.s, axis: op.axis, runs: [{ from: op.at, to: op.at + op.n - 1 }] }];
+        return [{ t: 'delete', s: op.s, axis: op.axis, runs: [{ from: op.at, to: op.at + op.n - 1 }] }, ...this._restoration(op, old, { cells: false })];
       case 'move':
-        return [{ t: 'move', s: op.s, axis: op.axis, from: result, count: op.count, to: op.from < result ? op.from : op.from + op.count }];
+        return [{ t: 'move', s: op.s, axis: op.axis, from: result, count: op.count, to: op.from < result ? op.from : op.from + op.count }, ...this._restoration(op, old, { cells: false })];
       case 'rename':
         return [{ t: 'rename', s: op.s, name: before }];
       case 'order':
@@ -417,7 +420,8 @@ export class Replica extends EventTarget {
     return [];
   }
 
-  _restoration(op, old) {
+  /** The writes that put back what a structural operation changed beside its own lines: with `cells` false, its settings alone. */
+  _restoration(op, old, { cells = true } = {}) {
     const cur = this.shadow;
     const out = [];
     for (const [id, o] of old.sheets) {
@@ -425,7 +429,12 @@ export class Replica extends EventTarget {
       if (!n) continue;
       const v = {}, st = {};
       let any = false;
-      for (const [key, cell] of o.cells) {
+      // Lines put back take the formatting of the line before them, as any inserted line does (see Workbook._insertLines):
+      // the formatting cells there lend (the line before each run deleted, by its index) is taken off again below.
+      const row = op.axis === 'row';
+      const lenders = cells && op.t === 'delete' && op.s === id ? new Map(op.runs.filter((r) => r.from > 0).map((r) => [r.from - 1, r])) : null;
+      const lent = [];
+      if (cells) for (const [key, cell] of o.cells) {
         const at = mapCellKey(op, id, key);
         const was = o.f.get(key) ?? null;
         if (at == null) {
@@ -433,17 +442,46 @@ export class Replica extends EventTarget {
           if (cell.s && Object.keys(cell.s).length) st[key] = { ...cell.s };
           any = true;
         } else if (was != null) {
+          // A formula that holds one #REF! more than it did is put back, one with a reference lost before as well, and so
+          // is one the deletion took away though its cell stayed (the first row of a table, become its header row).
           const now = n.f.get(at) ?? null;
-          if (now !== was && /#REF!/i.test(now ?? '') && !/#REF!/i.test(was)) { v[key] = contentOf(cell, was); any = true; }
+          if (now !== was && (now == null || refErrors(now) > refErrors(was))) { v[key] = contentOf(cell, was); any = true; }
+        } else {
+          // A value the deletion changed though its cell stayed (made the text of a table's header, that row become it).
+          const moved = n.cells.get(at);
+          if (moved !== cell && !sameJSON(contentOf(moved), contentOf(cell))) { v[key] = contentOf(cell); any = true; }
+        }
+        if (lenders?.size && cell.s && Object.keys(cell.s).length) {
+          const p = parseKey(key);
+          const run = lenders.get(row ? p.r : p.c);
+          if (run) lent.push({ p, s: cell.s, run });
+        }
+      }
+      if (lent.reduce((count, { run }) => count + run.to - run.from + 1, 0) <= STYLE_FILL_CELLS) {
+        for (const { p, s, run } of lent) {
+          for (let i = run.from; i <= run.to; i++) {
+            const key = row ? cellKey(i, p.c) : cellKey(p.r, i);
+            const had = o.cells.get(key)?.s || EMPTY;
+            const extra = Object.keys(s).filter((k) => !own(had, k));
+            if (!extra.length) continue;
+            st[key] = { ...Object.fromEntries(extra.map((k) => [k, null])), ...st[key] };
+            if (!own(v, key)) v[key] = null;
+            any = true;
+          }
         }
       }
       const pv = {};
       for (const p of SHEET_PROPS) if (o.props.get(p) !== n.props.get(p)) pv[p] = parse(o.props.get(p));
       const lines = [];
       if (op.t === 'delete' && op.s === id) {
+        // A line's own format is lent to the lines put back after it as well (see above).
+        const lineStyles = op.axis === 'row' ? 'rowStyles' : 'colStyles';
         for (const p of Object.keys(LINE_PROPS)) {
           const lv = {};
           for (const [k, val] of o.lines[p]) if (mapLineKey(op, id, p, k) == null) lv[k] = parse(val);
+          if (p === lineStyles) {
+            for (const r of op.runs) if (r.from > 0 && o.lines[p].has(String(r.from - 1))) for (let i = r.from; i <= r.to; i++) if (!o.lines[p].has(String(i))) lv[i] = null;
+          }
           if (Object.keys(lv).length) lines.push({ t: 'lines', s: id, p, v: lv });
         }
       }
@@ -1025,9 +1063,15 @@ export function splitChange(ops, inverses, limit = PART) {
  * person did, and only where nobody has changed it since, so another person's entries are not deleted with it.
  */
 function keepOthersWork(ops, theirs) {
+  // The settings an insertion's undo puts back after deleting the lines (see _inverseOf) follow the deletion: kept
+  // whole, it is followed by them; cut short for someone's work, the lines kept would leave them in the wrong places.
+  let end = ops.length;
+  while (end > 0 && (ops[end - 1].t === 'props' || ops[end - 1].t === 'book') && ops.slice(0, end - 1).some((o) => o.t === 'delete')) end--;
+  const settings = ops.slice(end);
+  ops = ops.slice(0, end);
   const last = ops.at(-1);
-  if (last?.t === 'drop') return theirs.some((t) => t.s === last.s && t.t !== 'drop') ? ops.slice(0, -1) : ops;
-  if (last?.t !== 'delete') return ops;
+  if (last?.t === 'drop') return [...(theirs.some((t) => t.s === last.s && t.t !== 'drop') ? ops.slice(0, -1) : ops), ...settings];
+  if (last?.t !== 'delete') return [...ops, ...settings];
   const written = new Set();
   const line = (key) => { const p = parseCellKey(key); if (p) written.add(last.axis === 'row' ? p.r : p.c); };
   for (const t of theirs) {
@@ -1043,7 +1087,7 @@ function keepOthersWork(ops, theirs) {
       }
     }
   }
-  if (!written.size) return ops;
+  if (!written.size) return [...ops, ...settings];
   const kept = [...written].sort((a, b) => a - b);
   const runs = [];
   for (const r of mergeRuns(last.runs)) {
@@ -1053,6 +1097,9 @@ function keepOthersWork(ops, theirs) {
   }
   return runs.length ? [...ops.slice(0, -1), { ...last, runs }] : ops.slice(0, -1);
 }
+
+/** How many #REF! errors a formula holds (none for no formula). */
+const refErrors = (f) => (f ? f.match(/#REF!/gi)?.length ?? 0 : 0);
 
 /** A sheet added whole as [operation, inverse] pairs: the sheet without its cells, taken back by dropping it, then its cells. */
 function putInParts(op, inverse) {

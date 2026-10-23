@@ -196,7 +196,11 @@ export function createStatusBar(ctx) {
     if (!m) { pageEl.hidden = true; return; }
     const band = (list, i) => { let k = 0; while (k + 1 < list.length && list[k + 1] <= i) k++; return k; };
     const { r, c } = ctx.grid.active;
-    const { number, pages } = pageNumber(m, band(m.cols, c), band(m.rows, r));
+    const across = band(m.cols, c), down = band(m.rows, r);
+    // A cell on a page above or left of the print area is on none of the printed pages: counted from the area's first,
+    // it read "Page: 0" or less, or the number of another page. The bar names no page for it.
+    if (across < m.printed.a0 || down < m.printed.d0) { pageEl.hidden = true; return; }
+    const { number, pages } = pageNumber(m, across, down);
     pageEl.textContent = `Page: ${number} of ${pages}`;
     pageEl.hidden = false;
   };
@@ -212,7 +216,9 @@ export function createStatusBar(ctx) {
       a11yVersion = ctx.wb.version;
       const status = accessibilityStatus(checkAccessibility(ctx.wb));
       a11yEl.querySelector('.status-a11y-text').textContent = `Accessibility: ${status}`;
-      a11yEl.classList.toggle('investigate', status !== 'No issues');
+      const investigate = status !== 'No issues';
+      if (investigate !== a11yEl.classList.contains('investigate')) a11yEl.querySelector('.status-a11y-icon').innerHTML = icon(investigate ? 'accessibilityReview' : 'accessibility', 15);
+      a11yEl.classList.toggle('investigate', investigate);
     }, a11yVersion < 0 ? 0 : 400);
   };
   const left = el('div.status-left');
@@ -292,13 +298,23 @@ export function createStatusBar(ctx) {
     });
   });
 
+  // The last summary, kept until the workbook changes or another range is selected: the bar refreshes on every
+  // keystroke typed into a cell and every Tab or Enter that moves the active cell within the selection, and each
+  // summing a large selection again held typing up (100 ms a key over 150,000 cells). Any change the workbook
+  // announces, a recalculation included, counts.
+  let stamp = 0, statsMemo = null;
+  const onWorkbookChange = () => { stamp++; };
+  ctx.wb.addEventListener?.('change', onWorkbookChange);
+
   /** The selection's statistics, formatted as the bar shows them (null for a single cell or a chart sheet). */
   function selectionStats() {
     const sheet = ctx.wb.sheet(ctx.sheetId());
     const sel = ctx.grid.selection;
     const ranges = ctx.grid.ranges || [ctx.grid.range];
     if (!sheet || sheet.kind === 'chart' || (isSingle(sel) && ranges.length === 1)) return null;
-    const s = ranges.length === 1 ? summarize(ctx.wb, ctx.sheetId(), ctx.grid.range) : summarizeAll(ctx.wb, ctx.sheetId(), ranges);
+    const key = `${ctx.sheetId()}|${ctx.wb.version}|${stamp}|${(ranges.length === 1 ? [ctx.grid.range] : ranges).map(({ r1, c1, r2, c2 }) => `${r1},${c1},${r2},${c2}`).join(';')}`;
+    if (statsMemo?.key !== key) statsMemo = { key, s: ranges.length === 1 ? summarize(ctx.wb, ctx.sheetId(), ctx.grid.range) : summarizeAll(ctx.wb, ctx.sheetId(), ranges) };
+    const { s } = statsMemo;
     if (!s) return null;
     const style = s.nums ? numericStyleAt(ctx.wb, sheet, sel.active.r, sel.active.c) || s.style || null : null;
     return { s, fmt: style ? (n) => formatValue(n, style) : formatGeneral };
@@ -397,7 +413,8 @@ export function createStatusBar(ctx) {
     const stats = [];
     const stat = (label, value, extra = '') => el(`span.status-item.status-stat${extra}`, {}, el('span.muted', {}, `${label}: `), value);
     const summary = selectionStats();
-    if (summary) {
+    // A selection of empty cells shows no statistics at all, as in Excel, rather than "Count: 0".
+    if (summary?.s.count) {
       const { s, fmt } = summary;
       if (s.nums && prefs.avg) stats.push(stat('Average', fmt(s.avg)));
       if (prefs.count) stats.push(stat('Count', String(s.count)));
@@ -415,5 +432,5 @@ export function createStatusBar(ctx) {
 
   const unsubscribe = ctx.subscribe(refresh);
   refresh();
-  return { el: root, refresh, announce, destroy: () => { clearTimeout(a11yTimer); unsubscribe(); } };
+  return { el: root, refresh, announce, destroy: () => { clearTimeout(a11yTimer); unsubscribe(); ctx.wb.removeEventListener?.('change', onWorkbookChange); } };
 }

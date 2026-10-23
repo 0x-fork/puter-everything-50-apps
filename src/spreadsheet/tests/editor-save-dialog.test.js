@@ -144,3 +144,36 @@ it('says a new spreadsheet is not saved yet, AutoSave or not, and saves it from 
   expect(await until(() => pill.textContent === 'Saved')).toBe(true);
   expect(pill.disabled).toBe(true);
 });
+
+it('says where the changes to a .csv from the drive are kept when it is left unsaved', async () => {
+  // A file of another kind is on Puter already, and its draft is offered when it is opened again, not listed
+  // under Unsaved spreadsheets: the question said both of a new spreadsheet only.
+  mock.fs.set('~/Desktop/data.csv', { blob: new Blob(['a,b']), size: 3, modified: 1 });
+  const doc = setup(new Doc({ name: 'data', path: '~/Desktop/data.csv' }));
+  doc.wb.setInput(doc.wb.activeSheetId, 0, 0, 'Rent');
+  const leaving = view.flush();
+  expect(await until(() => modal('Save before leaving?'))).toBeTruthy();
+  const text = modal('Save before leaving?').querySelector('.modal-text').textContent;
+  expect(text).toContain('Your changes to "data.csv" are not saved yet');
+  expect(text).toContain('offered again when you open data.csv here');
+  expect(text).not.toContain('Unsaved spreadsheets');
+  expect(text).not.toContain('not saved to Puter yet');
+  press('Save before leaving?', 'Leave');
+  expect(await leaving).toBe(true);
+});
+
+it('does not share a .csv from the drive when the Save dialog for its .xlsx is cancelled', async () => {
+  // Shared as it was, the .csv never sees the edits, and editing together would have the room write the
+  // workbook's .xlsx bytes over it.
+  answer = null;
+  puter.fs.share = vi.fn(async () => []);
+  puter.fs.getShares = vi.fn(async () => []);
+  mock.fs.set('~/Desktop/data.csv', { blob: new Blob(['a,b']), size: 3, modified: 1 });
+  const doc = setup(new Doc({ name: 'data', path: '~/Desktop/data.csv' }));
+  doc.wb.setInput(doc.wb.activeSheetId, 0, 0, 'Rent');
+  view.el.querySelector('.share-btn').click();
+  expect(await until(() => puter.ui.showSaveFilePicker.mock.calls.length === 1)).toBe(true);
+  await new Promise((r) => setTimeout(r, 50));
+  expect(document.querySelector('.share-dialog')).toBeNull();
+  expect(doc.path).toBe('~/Desktop/data.csv');
+});

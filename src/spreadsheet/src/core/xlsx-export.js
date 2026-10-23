@@ -65,7 +65,7 @@ function tableTotal(cell, table, column) {
     formula: builtIn ? '' : xmlTag('totalsRowFormula', { array: cell.F ? 1 : null }, xmlText(cell.f).replace(/\r/g, '&#13;')) };
 }
 
-function worksheetViews(X, wb, sheet) {
+function worksheetViews(X, wb, sheet, activeSheetId = wb.activeSheetId) {
   const r = sheet.frozenRows, c = sheet.frozenCols;
   const base = { r: r ? sheet.frozenOrigin?.r || 0 : 0, c: c ? sheet.frozenOrigin?.c || 0 : 0 };
   const origin = sheet.viewOrigin || { r: base.r + r, c: base.c + c };
@@ -81,10 +81,10 @@ function worksheetViews(X, wb, sheet) {
     sqref: saved.ranges.map(rg => X.utils.encode_range({ s: { r: rg.r1, c: rg.c1 }, e: { r: rg.r2, c: rg.c2 } })).join(' '),
   }) : r || c ? xmlTag('selection', { pane, activeCell: at, sqref: at }) : '';
   const split = !r && !c ? normalizeSplit(sheet.split) : null;
-  if (split) return splitSheetViews(X, wb, sheet, split);
+  if (split) return splitSheetViews(X, wb, sheet, split, activeSheetId);
   const body = (r || c ? xmlTag('pane', { xSplit: c || null, ySplit: r || null, topLeftCell: at, activePane: pane, state: 'frozen' }) : '') + selection;
   return xmlTag('sheetViews', {}, xmlTag('sheetView', {
-    workbookViewId: 0, rightToLeft: sheet.rightToLeft ? 1 : undefined, showGridLines: Number(sheet.gridlines), showRowColHeaders: Number(sheet.headers !== false), showZeros: Number(sheet.zeros), tabSelected: Number(wb.activeSheetId === sheet.id),
+    workbookViewId: 0, rightToLeft: sheet.rightToLeft ? 1 : undefined, showGridLines: Number(sheet.gridlines), showRowColHeaders: Number(sheet.headers !== false), showZeros: Number(sheet.zeros), tabSelected: Number(activeSheetId === sheet.id),
     view: { pageLayout: 'pageLayout', pageBreak: 'pageBreakPreview' }[sheet.viewMode] || null,
     zoomScale: sheet.viewZoom != null ? Math.round(sheet.viewZoom * 100) : null,
     // Excel keeps each view's zoom; the one shown is the zoom the sheet is viewed at.
@@ -99,7 +99,7 @@ function worksheetViews(X, wb, sheet) {
  * sheetView names the top-left pane's first cell and the pane the bottom-right one's. The selection is the
  * active pane's, which is the bottom-right one, where Split leaves the active cell.
  */
-function splitSheetViews(X, wb, sheet, split) {
+function splitSheetViews(X, wb, sheet, split, activeSheetId = wb.activeSheetId) {
   const origin = sheet.viewOrigin || { r: split.r, c: split.c };
   const at = X.utils.encode_cell({ r: split.y ? origin.r : split.r, c: split.x ? origin.c : split.c });
   const activePane = paneName(split, { left: false, top: false });
@@ -110,7 +110,7 @@ function splitSheetViews(X, wb, sheet, split) {
     sqref: saved.ranges.map(rg => X.utils.encode_range({ s: { r: rg.r1, c: rg.c1 }, e: { r: rg.r2, c: rg.c2 } })).join(' '),
   }) : xmlTag('selection', { pane: activePane, activeCell: at, sqref: at });
   return xmlTag('sheetViews', {}, xmlTag('sheetView', {
-    workbookViewId: 0, rightToLeft: sheet.rightToLeft ? 1 : undefined, showGridLines: Number(sheet.gridlines), showRowColHeaders: Number(sheet.headers !== false), showZeros: Number(sheet.zeros), tabSelected: Number(wb.activeSheetId === sheet.id),
+    workbookViewId: 0, rightToLeft: sheet.rightToLeft ? 1 : undefined, showGridLines: Number(sheet.gridlines), showRowColHeaders: Number(sheet.headers !== false), showZeros: Number(sheet.zeros), tabSelected: Number(activeSheetId === sheet.id),
     zoomScale: sheet.viewZoom != null ? Math.round(sheet.viewZoom * 100) : null,
     topLeftCell: split.r || split.c ? X.utils.encode_cell({ r: split.r, c: split.c }) : null,
   }, splitPaneXml(split, { topLeftCell: at, activePane }) + selection));
@@ -129,7 +129,12 @@ export function dataTableFormula(ref, row, col) {
   return `<f t="dataTable"${Object.entries(attrs).map(([k, v]) => ` ${k}="${v}"`).join('')}/>`;
 }
 
-export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null } = {}) {
+/**
+ * `pause`, when given, is awaited between sheets: the caller's chance to give the page a turn (see workbookToXlsx).
+ * `activeSheetId` is the sheet the book was built as open on: the file names that one throughout, though another
+ * sheet is opened during such a turn.
+ */
+export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null, pause = null, activeSheetId = wb.activeSheetId } = {}) {
   const zip = X.CFB.read(new Uint8Array(bytes), { type: 'array' });
   const decoder = new TextDecoder(), encoder = new TextEncoder();
   const get = path => { const file = X.CFB.find(zip, path); return file ? decoder.decode(file.content) : ''; };
@@ -193,13 +198,17 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
   const contentType = (path, type) => { types = types.replace('</Types>', xmlTag('Override', { PartName: path, ContentType: type }) + '</Types>'); };
   const richValues = richValueWriter({ get, set, binary: put, contentType });
   const persons = createPersonList();
+  // A colour filter kept from a file names its colour as a format of this file's own (see writeXlsxFilter).
+  const filterColorFormats = (xml) => xml.replace(/\bdxfId="puter-(fill|ink)-([\da-f]{6})"/g,
+    (m, kind, hex) => `dxfId="${styles.differential(kind === 'fill' ? { bg: `#${hex}` } : { color: `#${hex}` })}"`);
   for (const [i, sheet] of wb.sheets.entries()) {
+    if (i && pause) await pause();
     const ws = book.Sheets[sheet.name], path = `/xl/worksheets/sheet${i + 1}.xml`;
     if (sheet.kind === 'chart') {
       const chartPath = `/xl/chartsheets/sheet${i + 1}.xml`;
       const drawing = await exportDrawings(X, wb, sheet, i + 1, { set, binary: put, contentType, recordDrawing, recordGroup, slicers });
       const views = xmlTag('sheetViews', {}, xmlTag('sheetView', {
-        workbookViewId: 0, tabSelected: Number(wb.activeSheetId === sheet.id), zoomToFit: Number(!!sheet.zoomToFit),
+        workbookViewId: 0, tabSelected: Number(activeSheetId === sheet.id), zoomToFit: Number(!!sheet.zoomToFit),
         zoomScale: sheet.viewZoom != null ? Math.round(sheet.viewZoom * 100) : null,
       }));
       const properties = sheet.color ? xmlTag('sheetPr', {}, xmlTag('tabColor', { rgb: `FF${sheet.color.slice(1).toUpperCase()}` })) : '';
@@ -226,7 +235,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
       const index = styles.cell(cell.s, Number(xlsxAttr(head, 's') || 0));
       return head.replace(/\ss="[^"]*"/, '').replace(/(\sr="[^"]*")/, `$1 s="${index}"`);
     });
-    xml = xml.replace(/<sheetViews\b[^>]*>[\s\S]*?<\/sheetViews>/, worksheetViews(X, wb, sheet));
+    xml = xml.replace(/<sheetViews\b[^>]*>[\s\S]*?<\/sheetViews>/, worksheetViews(X, wb, sheet, activeSheetId));
     xml = xml.replace(/<f\b[^>]*\bt="array"[^>]*\bref="([^"]+)"[^>]*>(?:_xlfn\.)?TABLE\(([^(),]*),([^(),]*)\)<\/f>/g, (all, ref, row, col) => dataTableFormula(ref, row, col) || all);
     // A protected sheet says so where Excel reads it, right after the cells (and any sheetCalcPr); no password is set.
     xml = xml.replace(/<sheetProtection\b[^>]*\/>/g, '');
@@ -314,13 +323,15 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
           const total = tableTotal(ws[X.utils.encode_cell({ r: t.range.r2, c })], t, columnNames[offset]);
           columns += xmlTag('tableColumn', { id: offset + 1, name: encodeXlsxAttribute(columnNames[offset]), ...total.attrs }, (formula || '') + total.formula || null);
         }
-        const name = `PuterTableStyle${id}`, appearance = tableStyleParts(t, wb);
+        // A table still in the Excel style its file named is written in that style, which Excel draws as its own.
+        const name = t.nativeStyle && !t.customStyle && t.style !== 'none' ? t.nativeStyle : `PuterTableStyle${id}`;
+        const appearance = name === t.nativeStyle ? null : tableStyleParts(t, wb);
         if (appearance) styles.tableStyle(name, appearance);
         const filterRef = X.utils.encode_range({ s: { r: t.range.r1, c: t.range.c1 }, e: { r: t.range.r2 - Number(t.totalsRow), c: t.range.c2 } });
         // A table whose Header Row is off has no AutoFilter: headerRowCount="0" and its names in tableColumn.
         const filter = t.headerRow === false ? null : book.Sheets[sheet.name]?.['!tableFilters']?.[t.id];
         set(target, HEADER + xmlTag('table', { xmlns: MAIN, id, name: encodeXlsxAttribute(t.name), displayName: encodeXlsxAttribute(t.name), ref, ...(t.headerRow === false ? { headerRowCount: 0 } : {}), totalsRowCount: Number(t.totalsRow), totalsRowShown: Number(t.totalsRow) },
-          (filter ? xmlTag('autoFilter', { ref: filterRef }, filter.filterColumns || null) : '') + xmlTag('tableColumns', { count: t.range.c2 - t.range.c1 + 1 }, columns)
+          (filter ? xmlTag('autoFilter', { ref: filterRef }, filterColorFormats(filter.filterColumns || '') || null) : '') + xmlTag('tableColumns', { count: t.range.c2 - t.range.c1 + 1 }, columns)
           + xmlTag('tableStyleInfo', { name: t.style === 'none' ? null : name, showFirstColumn: Number(!!t.firstColumn), showLastColumn: Number(!!t.lastColumn), showRowStripes: Number(t.banded), showColumnStripes: Number(!!t.bandedColumns) })));
         rels = rels.replace('</Relationships>', xmlTag('Relationship', { Id: relId, Type: `${REL}table`, Target: `../tables/table${id}.xml` }) + '</Relationships>');
         contentType(target, 'application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml');
@@ -363,7 +374,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
     xml = writeXlsxIgnoredErrors(xml, sheet.ignoredErrors);
     xml = writeXlsxRichText(xml, ws, wb.colorPalette, normalFont, wb.fontTheme);
     writeXlsxThreadedComments(sheet, i + 1, persons, { get, set, contentType });
-    set(path, richValues.sheet(writeXlsxSheetCustomViews(writeXlsxOutlineSettings(writeXlsxPrint(xml, sheet.printSettings), sheet.outlineSettings), wb.customViews || [], sheet), imageValues));
+    set(path, filterColorFormats(richValues.sheet(writeXlsxSheetCustomViews(writeXlsxOutlineSettings(writeXlsxPrint(xml, sheet.printSettings), sheet.outlineSettings), wb.customViews || [], sheet), imageValues)));
   }
   writeXlsxPersons(persons, { get, set, contentType });
   let workbook = get('/xl/workbook.xml');
@@ -374,7 +385,7 @@ export async function completeXlsx(X, wb, book, bytes, { sourceWorkbook = null }
   const firstSheet = firstSheetId == null ? null : wb.sheets.findIndex(s => s.id === firstSheetId);
   const views = xmlTag('bookViews', {}, xmlTag('workbookView', {
     ...windowView, firstSheet: firstSheet >= 0 ? firstSheet : null,
-    activeTab: Math.max(0, wb.sheets.findIndex(s => s.id === wb.activeSheetId)),
+    activeTab: Math.max(0, wb.sheets.findIndex(s => s.id === activeSheetId)),
   }));
   workbook = /<bookViews\b/.test(workbook) ? workbook.replace(/<bookViews\b[^>]*>[\s\S]*?<\/bookViews>/, views) : workbook.replace('<sheets>', `${views}<sheets>`);
   // Protect Workbook: the structure lock sits just before the views, where the schema has it; no password is set.

@@ -90,11 +90,38 @@ it('coexists with ordinary drawings and preserves absolute anchors', async () =>
   expect(charts.find(c => c.type === 'text').text).toBe('A separate drawing');
 });
 it('rejects missing bindings and unsupported styles instead of writing an invalid native cache', async () => {
-  const { wb, sheet, owner, id } = make();
-  wb.deleteTable(sheet.id, sheet.tables[0].id);
+  const { wb, owner, id } = make();
+  wb.updateChart(owner.id, id, { tableRef: slicerTableReference('Sales', 'Nowhere') });
   await expect(bytes(wb)).rejects.toThrow(/missing table column/);
   wb.undo(); wb.updateChart(owner.id, id, { paint: null });
   await expect(bytes(wb)).rejects.toThrow(/supported style/);
+});
+// A table converted to a range, or the column a slicer filters deleted, takes its slicers along, as Excel does:
+// left behind, they filtered nothing and the workbook could no longer be saved.
+it('deletes a table’s slicers with the table or their column, so the workbook still saves', async () => {
+  const { wb, sheet, owner, id } = make();
+  wb.deleteTable(sheet.id, sheet.tables[0].id);
+  expect(owner.charts).toEqual([]);
+  expect(wb.undoLabels()[0]).toBe('Convert table to range');
+  await expect(bytes(wb)).resolves.toBeInstanceOf(Uint8Array);
+  wb.undo();
+  expect(wb.chartById(owner.id, id)?.tableRef).toBe(slicerTableReference('Sales', 'Region [Code]'));
+  wb.deleteCols(sheet.id, 4); // the Value column: the slicer stays
+  expect(wb.chartById(owner.id, id)).toBeTruthy();
+  wb.undo();
+  wb.deleteCols(sheet.id, 3); // its own column
+  expect(wb.chartById(owner.id, id)).toBeFalsy();
+  await expect(bytes(wb)).resolves.toBeInstanceOf(Uint8Array);
+  wb.undo();
+  expect(slicerTarget(wb, wb.chartById(owner.id, id))?.col).toBe(3);
+  wb.deleteCells(sheet.id, { r1: 0, c1: 3, r2: 20, c2: 3 }, 'left'); // the column's cells, shifted left
+  expect(wb.chartById(owner.id, id)).toBeFalsy();
+  wb.undo();
+  expect(wb.chartById(owner.id, id)).toBeTruthy();
+  wb.deleteRows(sheet.id, 2, 4); // the whole table
+  expect(wb.chartById(owner.id, id)).toBeFalsy();
+  wb.undo();
+  expect(wb.chartById(owner.id, id)).toBeTruthy();
 });
 it('keeps worksheet slicer extensions outside nested conditional-format extensions', async () => {
   const { wb, owner } = make();
@@ -279,4 +306,23 @@ it('honors external removal of hide-no-data despite saved private control metada
     const p='/xl/slicerCaches/slicerCache1.xml'; set(p,get(p).replace(/<x15:slicerCacheHideItemsWithNoData\s*\/>/,''));
   });
   expect((await open(output)).sheetByName('Views').charts[0].hideItemsWithNoData).toBe(false);
+});
+it('deletes the slicers of a table whose sheet is deleted, or whose column a resize leaves out', async () => {
+  const { wb, sheet, owner, id } = make();
+  wb.addSheet('Spare');
+  wb.deleteSheet(sheet.id);
+  expect(wb.chartById(owner.id, id)).toBeFalsy();
+  await expect(bytes(wb)).resolves.toBeInstanceOf(Uint8Array);
+  wb.undo();
+  expect(wb.chartById(owner.id, id)).toBeTruthy();
+  const table = wb.sheetByName(sheet.name).tables[0];
+  wb.resizeTable(sheet.id, table.id, { ...table.range, c2: table.range.c2 + 1 }); // grown: the slicer stays
+  expect(wb.chartById(owner.id, id)).toBeTruthy();
+  wb.undo();
+  wb.resizeTable(sheet.id, table.id, { ...table.range, c1: table.range.c1 + 1 });
+  expect(wb.chartById(owner.id, id)).toBeFalsy();
+  expect(wb.undoLabels()[0]).toBe('Resize table');
+  await expect(bytes(wb)).resolves.toBeInstanceOf(Uint8Array);
+  wb.undo();
+  expect(slicerTarget(wb, wb.chartById(owner.id, id))?.col).toBe(3);
 });

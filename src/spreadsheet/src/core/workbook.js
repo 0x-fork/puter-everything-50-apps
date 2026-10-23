@@ -57,7 +57,7 @@ import { normalizeFontColor, normalizeColorPalette, sameFontColor, DEFAULT_FONT_
 
 import { cellKey, parseKey, normalizeRange, cellName, MAX_TEXT } from './cell.js';
 import { parseDecimal } from './formula/number-text.js';
-import { fontName, parseInput, refineImpliedFormat, formatValue, serialToYMD, ymdToSerial, dateTimeKind, FORMAT_DETAIL_KEYS, getLocale, dateNames, styleToNumFmt } from './format.js';
+import { fontName, parseInput, refineImpliedFormat, formatValue, serialToYMD, ymdToSerial, dateTimeKind, FORMAT_DETAIL_KEYS, NUMBER_FORMAT_KEYS, getLocale, dateNames, styleToNumFmt } from './format.js';
 import { xlsxLayoutDigitWidth } from './xlsx-styles.js';
 import { MAX_FORMAT_CODE_LENGTH, codeIsFraction, codeScalesPercent } from './numfmt.js';
 import { normalizeCalculationCompatibility } from './calculation-compatibility.js';
@@ -108,9 +108,10 @@ import { normalizeScripts, serializeScripts } from './scripts.js';
 import { installSheetGroups } from './sheet-group.js';
 import { normalizeChangeHistory, recordCellWrites, recordStep } from './change-history.js';
 import { eachStoredCell } from './sparse-range.js';
+import { nativeFilterJudge } from './xlsx-filter.js';
 
 /** What a floating object is called in undo labels: chart, image, or text box. */
-function objectNoun(obj) {
+export function objectNoun(obj) {
   return obj?.type === 'slicer' ? 'slicer' : obj?.type === 'scroll' ? 'scroll bar' : obj?.type === 'image' ? 'image' : obj?.type === 'smartart' ? 'SmartArt' : obj?.type === 'text' ? obj.equation ? 'equation' : 'text box' : 'chart';
 }
 
@@ -225,7 +226,7 @@ function rangeCost(values) { return values.length * ((values[0]?.length || 0) + 
 // of more cells than this (a whole sheet of 20,000 rows) that would store a cell per empty coordinate, 320,000
 // of them for Select all → Bold on a sheet holding 200,000 values, and every later scan, save and draft would
 // carry them: there the format goes to the cells holding something and the empty cells beside them (applyStyle).
-const STYLE_FILL_CELLS = 50_000;
+export const STYLE_FILL_CELLS = 50_000;
 const INVALID_SHEET_CHARS = /[[\]:*?/\\]/;
 
 /**
@@ -362,7 +363,7 @@ export function cellFromInput(text, prevStyle, { typed = true } = {}) {
     const half = typedFraction(raw);
     if (half != null && codeIsFraction(half, prevStyle.code)) return { v: half, f: null, s: { ...prevStyle } };
   }
-  const { v: parsed, f, fmt, dateStyle, cur } = parseInput(text);
+  const { v: parsed, f, fmt, dateStyle, cur, code } = parseInput(text);
   // A formula longer than the .xlsx limit, or nested deeper than the parser can follow, stays
   // the text that was typed rather than becoming a formula nothing can read.
   if (f != null && (f.length > MAX_FORMULA_LENGTH || formulaNesting(f) > MAX_FORMULA_NESTING)) return { v: raw, f: null, s: prevStyle ? { ...prevStyle } : undefined };
@@ -384,6 +385,16 @@ export function cellFromInput(text, prevStyle, { typed = true } = {}) {
     // The decimals, seconds or fraction code the text was typed with refine only the format this entry
     // implied: a cell already set to Percent, Number or Time keeps its own decimals and seconds.
     refineImpliedFormat(s, fmt, text);
+  } else if (s && typeof v === 'number' && fmt) {
+    // A time typed into a cell formatted as a date alone (or a date into one formatted as a time alone) would read
+    // 1900-01-00 (or 00:00): the entry's own format replaces that one, as Excel's does, so Ctrl+Shift+; in a date
+    // column shows the time it put there.
+    const typedKind = dateTimeKind({ fmt, code }, v), cellKind = dateTimeKind(s, v);
+    if ((typedKind === 'time' && cellKind === 'date') || (typedKind === 'date' && cellKind === 'time')) {
+      for (const k of FORMAT_DETAIL_KEYS) delete s[k];
+      Object.assign(s, { fmt, ...(dateStyle ? { dateStyle } : {}) });
+      refineImpliedFormat(s, fmt, text);
+    }
   }
   return v == null && f == null && !s ? null : { v, f, s };
 }
@@ -692,6 +703,18 @@ function rectCandidates(list, r, rectOf) {
 }
 const ownRect = (item) => item;
 /**
+ * Whether a merge of `merges` overlaps rows r1..r2 and columns c1..c2: the merges filed under the bands of those
+ * rows (see rectCandidates) are tested, not the whole list. Every spill of a sheet asks this whenever the sheet's
+ * spills are worked out, which is after every edit, and a formatted report brings thousands of merges.
+ */
+function mergeWithin(merges, r1, c1, r2, c2) {
+  const hit = (m) => m.r2 >= r1 && m.r1 <= r2 && m.c2 >= c1 && m.c1 <= c2;
+  const b1 = Math.floor(r1 / RECT_BAND), b2 = Math.floor(r2 / RECT_BAND);
+  if (merges.length < 32 || b2 - b1 > 64) return merges.some(hit);
+  for (let b = b1; b <= b2; b++) if (rectCandidates(merges, b * RECT_BAND, ownRect).some(hit)) return true;
+  return false;
+}
+/**
  * Which of a list of ranges overlap a given one, found through bands of rows rather than by testing every one
  * (merging across thousands of rows asks once per row). Indexes into the list, in order.
  */
@@ -801,7 +824,7 @@ function normalizeFilter(raw) {
     if (!/^(0|[1-9]\d*)$/.test(key) || Number(key) < n.c1 || Number(key) > n.c2) continue;
     if (!criterion || typeof criterion !== 'object' || Array.isArray(criterion)) continue;
     if ('values' in criterion && (!Array.isArray(criterion.values) || !criterion.values.every((v) => typeof v === 'string'))) continue;
-    if (['op', 'formula', 'text', 'color'].some((key) => key in criterion && typeof criterion[key] !== 'string')) continue;
+    if (['op', 'formula', 'text', 'color', 'native', 'ink'].some((key) => key in criterion && typeof criterion[key] !== 'string')) continue;
     // The keys beside a value filter's texts (see _filterValueKeys) are a list of strings or nothing: an odd
     // shape is dropped on its own, and the texts still judge the rows.
     const { keys, ...rest } = criterion;
@@ -977,6 +1000,8 @@ export function makeSheet({ id, name, kind, rows, cols, colWidths, rowHeights, r
       ...(t.bandedColumns === true ? { bandedColumns: true } : {}),
       ...normalizeTableHeaderState(t),
       ...(t.customStyle ? { customStyle: normalizeCustomTableStyle(t.customStyle) } : {}),
+      // The Excel style a file named (TableStyleMedium9), written back while the table keeps it.
+      ...(!t.customStyle && typeof t.nativeStyle === 'string' && /^TableStyle(?:Light|Medium|Dark)\d{1,2}$/.test(t.nativeStyle) ? { nativeStyle: t.nativeStyle } : {}),
       // Templates normally start at the first data row. An explicit origin
       // follows structural edits without losing relative cross-sheet refs.
       ...(Number.isInteger(t.calcRow) && t.calcRow >= 0 ? { calcRow: t.calcRow } : {}),
@@ -1823,6 +1848,8 @@ export class Workbook extends EventTarget {
       ? tableRefsToA1(f, () => null, (table) => !!table && goneLower.includes(table.toLowerCase()), goneTables) : f);
     const rewrite = (f) => dropTables(unlink(shrink(f)));
     this._structural('Delete sheet', () => {
+      // Slicers on other sheets that filtered the sheet's tables go with them.
+      if (goneLower.length) this._dropLostSlicers(new Map(goneLower.map((name) => [name, true])));
       this._removeNativePivots((this.nativePivots?.tables || []).filter(p => p.owner === id), 'Delete sheet', true);
       if (this.nativePivots) this.nativePivots = { ...this.nativePivots, caches: this.nativePivots.caches.map(c =>
         c.sourceSheetId === id && c.sourceRef ? { ...c, sourceSheetId: null, sourceRef: '#REF!' } : c) };
@@ -2336,7 +2363,9 @@ export class Workbook extends EventTarget {
     const spill = own?.f == null ? this.spillAt(sheetId, r, c) : null;
     const formula = own?.f ?? (spill?.anchor ? this.getCell(sheetId, spill.anchor.r, spill.anchor.c)?.f : null) ?? null;
     return explainError(v.error, formula, {
-      names: this.namesForSheet(sheetId).map((n) => n.name),
+      // A hidden name (a pivot table's definition, Excel's _xlnm._FilterDatabase) works in a formula but is never offered.
+      names: this.namesForSheet(sheetId).filter((n) => !n.hidden).map((n) => n.name),
+      hidden: this.namesForSheet(sheetId).filter((n) => n.hidden).map((n) => n.name),
       tables: this.sheets.flatMap((sh) => sh.tables.map((t) => t.name)),
       hasSheet: (name) => !!this.sheetByName(name),
     });
@@ -5315,8 +5344,8 @@ export class Workbook extends EventTarget {
    * { range } trimmed to a table's data rows, and widened to the table's
    * columns, when they can; { reason } when not: 'table' (a table only
    * partly inside, or two of them; any table when sorting columns), 'merged'
-   * (merges that would come apart or hide cells) or 'array' (a spilled
-   * result that would scatter).
+   * (merges that would come apart or hide cells), 'array' (a spilled
+   * result that would scatter) or 'pivot' (a PivotTable report).
    */
   _rearrangeCheck(sheet, range, axis) {
     const hit = sheet.tables.filter((t) => !(range.r2 < t.range.r1 || range.r1 > t.range.r2 || range.c2 < t.range.c1 || range.c1 > t.range.c2));
@@ -5334,6 +5363,9 @@ export class Workbook extends EventTarget {
       out = { ...out, r1: Math.max(range.r1, dataStart), r2: Math.min(range.r2, dataEnd) };
       if (out.r1 > out.r2) return { reason: 'table' };
     }
+    // A PivotTable report is laid out from its definition: rows moved inside it would leave the report's cells out of
+    // step with the items it names (and a sort of its columns would swap its labels with its values), as Excel refuses.
+    if (this.nativePivotOverlap(sheet.id, out)) return { reason: 'pivot' };
     // Lines can only change places when every line has the same merges (all of them one line
     // wide and inside the range), and when no spilled array lies across them: a rearranged
     // block would otherwise hide cells under a merge or scatter an array.
@@ -6443,7 +6475,7 @@ export class Workbook extends EventTarget {
       return cols;
     });
     this._structural(label, () => {
-      if (lostTables) this._dropLostTableReferences(lostTables);
+      if (lostTables) { this._dropLostSlicers(lostTables); this._dropLostTableReferences(lostTables); }
       if (remove) this._removeNativePivots((this.nativePivots?.tables || []).filter(p => {
         const ref = p.owner === sheetId && parseRefText(p.ref || '');
         return ref && insideBand(ref) && !adjustRefForDelete(ref, axis, at, n);
@@ -7057,7 +7089,7 @@ export class Workbook extends EventTarget {
       }
     }
     this._structural(label || (axis === 'row' ? 'Delete rows' : 'Delete columns'), () => {
-      if (lostTables) this._dropLostTableReferences(lostTables);
+      if (lostTables) { this._dropLostSlicers(lostTables); this._dropLostTableReferences(lostTables); }
       this._removeNativePivots((this.nativePivots?.tables || []).filter(p => {
         const ref = p.owner === sheetId && parseRefText(p.ref || '');
         return ref && !adjustRefForDeletedLines(ref, axis, refLines);
@@ -8901,6 +8933,14 @@ export class Workbook extends EventTarget {
     // Text conditions take Excel's wildcards: ? any one character, * any run of them, ~ before either for itself.
     const wildcards = new Map();
     for (const c of cols) { const pattern = filterWildcard(f.criteria[c]); if (pattern) wildcards.set(c, pattern); }
+    // A condition a file wrote that the app keeps as written (a top ten, a date group): judged from the
+    // column's values, every data row of the list, as Excel ranks a top ten among them.
+    const natives = new Map();
+    for (const c of cols) if (typeof f.criteria[c].native === 'string') {
+      const values = [];
+      for (let r = f.range.r1 + 1, last = Math.min(f.range.r2, sheet.rows - 1); r <= last; r++) values.push(this._compute(sheet, r, c));
+      natives.set(c, nativeFilterJudge(f.criteria[c].native, values));
+    }
     return r => {
       for (const c of cols) {
         const crit = f.criteria[c];
@@ -8933,6 +8973,7 @@ export class Workbook extends EventTarget {
         }
         else if (crit.color != null) keep = this._cellFill(sheet, r, c) === String(crit.color).toLowerCase();
         else if (crit.text != null) keep = text.toLowerCase().includes(String(crit.text).toLowerCase());
+        else if (natives.get(c)) keep = natives.get(c)(this._compute(sheet, r, c), text);
         if (!keep) return false;
       }
       return true;
@@ -9058,11 +9099,40 @@ export class Workbook extends EventTarget {
     const ch = sheet?.charts.find((c) => c.id === id);
     if (!ch) return null;
     if (this._locked(sheet)) return null;
+    const full = this._duplicateOf(sheet, ch);
+    if (!full) return null;
+    this._setCharts(sheet, [...sheet.charts, full], `Duplicate ${objectNoun(full)}`);
+    return full.id;
+  }
+
+  /**
+   * Ctrl+D on several objects selected, or on a group: a copy of each (whole groups), as duplicateChart makes
+   * one, in front of the rest in their own order, a group's copies grouped among themselves. One undo step;
+   * returns the copies' ids.
+   */
+  duplicateObjects(sheetId, ids) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || this._locked(sheet)) return [];
+    const picked = new Set(withGroups(sheet.charts, ids)), groups = new Map(), copies = [];
+    for (const ch of sheet.charts) {
+      if (!picked.has(ch.id)) continue;
+      if (ch.group && !groups.has(ch.group)) groups.set(ch.group, `g${newId().replace(/[^\w]/g, '').slice(0, 24)}`);
+      const full = this._duplicateOf(sheet, ch, ch.group ? groups.get(ch.group) : undefined);
+      if (full) copies.push(full);
+    }
+    if (!copies.length) return [];
+    this._setCharts(sheet, [...sheet.charts, ...copies], copies.length === 1 ? `Duplicate ${objectNoun(copies[0])}` : 'Duplicate objects');
+    return copies.map((c) => c.id);
+  }
+
+  /** A copy of an object, nudged down and right (see duplicateChart), in the group `group` or in none. */
+  _duplicateOf(sheet, ch, group) {
     const copy = JSON.parse(JSON.stringify(ch));
     delete copy.id;
     // The copy stands on its own: in the original's group it would be selected and moved with objects it was
     // never grouped with, and lie apart from them in the stacking order a group keeps together.
     delete copy.group;
+    if (group) copy.group = group;
     if (copy.type === 'slicer') delete copy.nativeName;
     // The copy sits 24 pixels down and right of the original, inside the sheet, and is anchored again to
     // the cell its corner now lies in, as a drag anchors what it moves: an object's anchor is the cell its
@@ -9074,10 +9144,7 @@ export class Workbook extends EventTarget {
     copy.dx = col.offset;
     copy.dy = row.offset;
     if (copy.title && !['image', 'text', 'slicer', 'smartart'].includes(copy.type)) copy.title = `${copy.title} (copy)`;
-    const full = reanchorCellDrawing(sheet, absoluteDrawingAnchor(sheet, normalizeChart({ ...copy, id: newId() })));
-    if (!full) return null;
-    this._setCharts(sheet, [...sheet.charts, full], `Duplicate ${objectNoun(full)}`);
-    return full.id;
+    return reanchorCellDrawing(sheet, absoluteDrawingAnchor(sheet, normalizeChart({ ...copy, id: newId() })));
   }
 
   chartById(sheetId, id) {
@@ -10106,8 +10173,8 @@ export class Workbook extends EventTarget {
     const next = { ...table };
     if (patch.style !== undefined) {
       next.style = String(patch.style);
-      // An explicit gallery choice replaces an imported theme even when the fallback key matches.
-      if (next.style !== table.style || patch.customStyle === null) delete next.customStyle;
+      // An explicit gallery choice replaces an imported theme (or Excel style) even when the fallback key matches.
+      if (next.style !== table.style || patch.customStyle === null) { delete next.customStyle; delete next.nativeStyle; }
     }
     if (patch.banded !== undefined) next.banded = !!patch.banded;
     for (const key of ['firstColumn', 'lastColumn', 'bandedColumns']) if (patch[key] !== undefined) {
@@ -10221,6 +10288,8 @@ export class Workbook extends EventTarget {
     if (!table || this._gridLocked(sheet)) return;
     const appearance = tableConversionStyle(this, sheet, table);
     this.transaction('Convert table to range', () => {
+      // Its slicers go with the table: they filter through it, and a range has nothing for them to filter.
+      this._dropLostSlicers(new Map([[table.name.toLowerCase(), true]]), (s, charts) => this._setCharts(s, charts, 'Convert table to range'));
       this._rewriteFormulas((f, s, r, c) => this.structuredToA1(s.id, r, c, f, table.name), 'Convert table to range');
       this._rewriteNamedFormulas((f) => this.structuredToA1(sheetId, tableRows(table).dataStart, table.range.c1, f, table.name, true), 'Convert table to range');
       // Conditional formats, validations, and filter conditions name the table too. Each reads
@@ -10385,7 +10454,11 @@ export class Workbook extends EventTarget {
         return false;
       }
     }
+    // Columns the resize leaves out take their slicers with them, as a deleted column does.
+    const names = this.tableColumns(sheetId, table);
+    const cut = new Set(names.filter((_, i) => old.c1 + i < n.c1 || old.c1 + i > n.c2).map((name) => name.toLowerCase()));
     this.transaction('Resize table', () => {
+      if (cut.size) this._dropLostSlicers(new Map([[table.name.toLowerCase(), cut]]), (s, charts) => this._setCharts(s, charts, 'Resize table'));
       moveFooter();
       const live = this.tableById(sheetId, id);
       // A blank header reads as the ColumnN of its place, and a moved left edge changes its place: the name
@@ -10549,6 +10622,27 @@ export class Workbook extends EventTarget {
       gone.set(t.name.toLowerCase(), new Set(out.map((i) => names[i]?.toLowerCase()).filter(Boolean)));
     }
     return gone.size ? gone : null;
+  }
+
+  /**
+   * The table slicers whose table or column is gone (`gone` as _lostTableColumns gives it) go with it, as Excel
+   * deletes them. Kept, such a slicer filtered nothing, read only that its column was unavailable, and the
+   * workbook could no longer be saved as .xlsx. `set` replaces a sheet's objects: inside a structural step the
+   * snapshot records them, inside a transaction _setCharts does.
+   */
+  _dropLostSlicers(gone, set = (sheet, charts) => { sheet.charts = charts; }) {
+    for (const s of this.sheets) {
+      const kept = s.charts.filter((ch) => {
+        if (ch.type !== 'slicer' || typeof ch.tableRef !== 'string') return true;
+        let token;
+        try { [token] = tokenize(ch.tableRef); } catch { return true; }
+        const cols = token?.type === 'tref' && token.table ? gone.get(token.table.toLowerCase()) : null;
+        if (!cols) return true;
+        if (cols === true) return false;
+        return !parseTableSpec(token.spec)?.cols?.some((c) => cols.has(c.toLowerCase()));
+      });
+      if (kept.length !== s.charts.length) set(s, kept);
+    }
   }
 
   /**
@@ -11033,7 +11127,7 @@ export class Workbook extends EventTarget {
     this._listLabelCache ??= new WeakMap();
     let labels = this._listLabelCache.get(values);
     if (labels) return labels;
-    labels = { byKey: new Map(), first: new Map() };
+    labels = { byKey: new Map(), first: new Map(), cellByKey: new Map() };
     let i = 0; // the option's place among the typed options, which optionsEntry dedupes by type and text as here
     values.source.cells.forEach(({ r, c }, k) => {
       const v = values[k];
@@ -11043,12 +11137,31 @@ export class Workbook extends EventTarget {
       const shown = this.getDisplay(values.source.sheetId, r, c, v);
       const text = shown.trim() ? shown : null;
       labels.byKey.set(key, text);
+      labels.cellByKey.set(key, { sheetId: values.source.sheetId, r, c });
       const label = (text ?? key.slice(key.indexOf(':') + 1)).trim().toLowerCase();
       if (!labels.first.has(label)) labels.first.set(label, i);
       i++;
     });
     this._listLabelCache.set(values, labels);
     return labels;
+  }
+
+  /**
+   * The number format a number picked from a dropdown brings into (r, c): the format of the source cell its
+   * option reads from, so a date, an amount or a percentage picked as the list shows it reads the same in the
+   * cell, as Excel enters the option's text as if it were typed. Null when the cell already shows a number
+   * format of its own (that one stays), the option has no cell behind it, or that cell shows General.
+   */
+  listOptionFormat(sheetId, rule, value, r, c) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet || typeof value !== 'number') return null;
+    const own = this.styleAt(sheetId, r, c);
+    if (own?.fmt && own.fmt !== 'general') return null;
+    const labels = this._listLabels(rule, (source) => this._resolveValidationSource(sheet, rule, source, r, c));
+    const from = labels?.cellByKey.get(optionKey(value));
+    const source = from && this.styleAt(from.sheetId, from.r, from.c);
+    if (!source?.fmt || source.fmt === 'general') return null;
+    return Object.fromEntries(NUMBER_FORMAT_KEYS.map((key) => [key, source[key] ?? null]));
   }
 
   /** The chip colors ({ bg, color }) a list cell's text is drawn with, or null. */
@@ -11078,8 +11191,13 @@ export class Workbook extends EventTarget {
     if (!rule) return { ok: true, rule: null };
     // The entry is judged as the cell will hold it: 50 typed into a percent cell is 0.5, 00123 in a Text cell
     // stays the text 00123, and 1/2 in a fraction cell is a half rather than January 2.
-    const { v = null, f = null } = typedDigits(cellFromInput(text, this.styleAt(sheetId, r, c)), text) || {};
-    if (f != null) return { ok: true, rule }; // formulas are checked by their results
+    let { v = null, f = null } = typedDigits(cellFromInput(text, this.styleAt(sheetId, r, c)), text) || {};
+    // A formula is judged by the result it gives in this cell, as Excel judges one as it is entered: =20 is refused
+    // where only 1 to 10 may go. One whose result is an error, or that cannot be worked out, passes as errors do.
+    if (f != null) {
+      v = this.evalRuleFormula(sheetId, this._closeParentheses(f), { r1: r, c1: c }, r, c);
+      if (v == null) return { ok: true, rule };
+    }
     const sheet = this.sheet(sheetId);
     return { ...checkValue(rule, v, (source) => this._resolveValidationSource(sheet, rule, source, r, c), (formula) => this.evalRuleFormula(sheetId, formula, rule.range, r, c, v)), rule };
   }
@@ -12075,6 +12193,9 @@ export class Workbook extends EventTarget {
               return local.spills;
             }
             if (local.lambda) return consumed ? false : expand(local.lambda, local.scope, node.args, scope, sink);
+            // LET(g,Double,g(A1:A3)): a local holding a defined name may hold its LAMBDA, and is judged as the
+            // definition called by its own name is (Double(A1:A3) below), as one that can hand back an array.
+            if (local.names.length) return !consumed;
             // LET(PI,5,PI()): a local that is no LAMBDA leaves the call form to the built-in of that name.
             if (!FUNCTIONS[node.name]) return false;
           } else if (node.bare) {
@@ -12100,12 +12221,22 @@ export class Workbook extends EventTarget {
           }
           if (node.name === 'LAMBDA' && !node.bare) return false; // uncalled, it is #CALC!; called, it is judged where it is called
           if (node.name === 'REDUCE' && !node.bare) {
-            // REDUCE answers whatever its lambda leaves in the accumulator: VSTACK there builds an array.
+            // REDUCE answers whatever its lambda leaves in the accumulator: VSTACK there builds an array, and so
+            // does a+v when the accumulator starts as one, REDUCE({0,0},A1:A3,LAMBDA(a,v,a+v)).
             const fn = node.args[node.args.length - 1];
-            if (isLambda(fn)) return expand(fn, scope, [], scope, sink);
+            const start = node.args.length >= 3 ? [node.args[0]] : [];
+            if (isLambda(fn)) return expand(fn, scope, start, scope, sink);
             const held = paramName(fn) && scope?.get(fn.name);
-            if (held?.lambda) return expand(held.lambda, held.scope, [], scope, sink);
-            return false; // a built-in or a defined LAMBDA folds the values to one
+            if (held?.lambda) return expand(held.lambda, held.scope, start, scope, sink);
+            // A defined LAMBDA, REDUCE(0,A1:A3,Stack), named here or by way of a LET local, is judged as a
+            // definition called by its name is, as one that can build an array.
+            const startSpills = () => start.length > 0 && walk(start[0], false, scope, sink);
+            if (held) return held.names.length > 0 || startSpills();
+            if (fn?.type === 'call' && fn.bare && (fn.sheet || !FUNCTIONS[fn.name])) return true;
+            // A built-in named here folds the values to one (SUM), unless it builds an array (VSTACK) or the
+            // accumulator it is handed starts as one.
+            if (fn?.type === 'call' && fn.bare && FUNCTIONS[fn.name].array) return true;
+            return startSpills();
           }
           if (node.name === 'SUBTOTAL' && !node.bare) {
             // A vector of OFFSET references yields one subtotal per reference;
@@ -12646,7 +12777,7 @@ export class Workbook extends EventTarget {
     if (r + rows > rowLimit || c + cols > colLimit) return err('#SPILL!');
     if (st.fixed.overlapping({ r1: r, c1: c, r2: r + rows - 1, c2: c + cols - 1 }).next().value) return err('#SPILL!');
     // A merged block anywhere in the way stops the spill, the anchor's own merge included.
-    if (sheet.merges.some((m) => m.r2 >= r && m.r1 <= r + rows - 1 && m.c2 >= c && m.c1 <= c + cols - 1)) return err('#SPILL!');
+    if (mergeWithin(sheet.merges, r, c, r + rows - 1, c + cols - 1)) return err('#SPILL!');
     for (let i = 0; i < rows; i++) {
       for (let j = 0; j < cols; j++) {
         if (!i && !j) continue;

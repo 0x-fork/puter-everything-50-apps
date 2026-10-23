@@ -24,7 +24,7 @@ const GROUPS = [
     ['Page Up / Page Down', 'Scroll a screen up / down'],
     ['Alt + Page Up / Alt + Page Down', 'Scroll a screen left / right'],
     // Browsers keep Ctrl+PgUp/PgDn for their own tabs on Windows and Linux, so the Alt chords come first.
-    ['Alt + → / Alt + ←', `Next / previous sheet (also ${MOD_KEY} + Page Down / Page Up)`],
+    ['Alt + → / Alt + ←', `Next / previous sheet (also ${IS_MAC ? '⌃ or ⌘' : MOD_KEY} + Page Down / Page Up)`],
     ['End, then an arrow', 'Jump to the edge of the data (End Mode); End, then Home: the last cell'],
     ['F8 / Shift + F8', 'Extend the selection / add to the selection with the arrows and clicks'],
     ['Shift + Backspace', 'Select only the active cell'],
@@ -34,10 +34,10 @@ const GROUPS = [
     [`${MOD_KEY} + Shift + { / }`, 'Select the precedents / dependents of the active cell'],
     [`${MOD_KEY} + A or ${MOD_KEY} + Shift + Space`, 'Select all'],
     [`${MOD_KEY} + click`, 'Add another cell, range, row, or column to the selection'],
-    ['Shift + Space', 'Select the row'],
+    ['Shift + Space', 'Select the row (in a table, its row first)'],
     [`${MOD_KEY} + Shift + 8`, 'Select the current region: the block of data around the active cell'],
     // macOS takes ⌘+Space (Spotlight) and ⌘+` (next window) before the page sees them, so there Control serves as well.
-    [IS_MAC ? `${MOD_KEY} + Space or ⌃ + Space` : `${MOD_KEY} + Space`, 'Select the column'],
+    [IS_MAC ? `${MOD_KEY} + Space or ⌃ + Space` : `${MOD_KEY} + Space`, 'Select the column (in a table, its data first, then with its header)'],
     ['Drag the bar at the corner of the headers', 'Freeze rows or columns up to where it lands'],
     // Floating objects: the grid selects and moves them from the keyboard.
     [`${MOD_KEY} + Alt + O`, 'Select the next chart, image, or text box (Shift: the previous one)'],
@@ -108,6 +108,7 @@ const GROUPS = [
     [`${MOD_KEY} + 2 / 3 / 4`, 'Bold / italic / underline'],
     [`${MOD_KEY} + Shift + F`, 'Format cells dialog (number, alignment, font, border, fill)'],
     [`${MOD_KEY} + Shift + L`, 'Create or remove a filter'],
+    [`Alt + F5 / ${MOD_KEY} + Alt + F5`, 'Refresh the query table or PivotTable here / refresh everything'],
     ['Paint format, then select', 'Copy formatting onto other cells: select them with the pointer, or move there and press Enter (Escape cancels)'],
     [IS_MAC ? `${MOD_KEY} + \` or ⌃ + \`` : `${MOD_KEY} + \``, 'Show formulas instead of values'],
   ]],

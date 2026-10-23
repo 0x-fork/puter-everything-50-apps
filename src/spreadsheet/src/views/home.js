@@ -21,11 +21,13 @@ import * as P from '../lib/puter.js';
 import { stripExtension } from '../core/io.js';
 import { IMPORT_EXTENSIONS } from '../core/filetypes.js';
 import { recentFiles, forgetRecent, refreshRecent } from '../lib/recent.js';
+import { madeFiles, forgetMade } from '../lib/made.js';
 import { listDrafts, clearDraft, draftKey, liveDraftKey, moveDraft, parkDraft } from '../lib/drafts.js';
 import { removeVersions, moveVersions, parkVersions } from '../lib/versions.js';
 import { moveExternalDecision, copyExternalDecision, forgetExternalDecision } from '../lib/doc.js';
 
 let views = 0; // headings name their sections by id, and each home screen has ids of its own
+const dirOf = (path) => path.slice(0, path.lastIndexOf('/') + 1);
 
 export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, importFile, recoverDraft }) {
   const n = ++views;
@@ -413,8 +415,11 @@ export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, i
     loadShared(requestId);
     refreshRecent().then(() => { if (!destroyed && requestId === loadId) renderRecent(); }, () => {}); // files moved or renamed since are listed where they are now
     try {
-      const nextFiles = await P.listFiles();
+      // With the app folder's files, those the app made elsewhere on the drive (Puter's Save dialog put them where the
+      // user chose): listed among the user's spreadsheets, not left to fall out of the eight opened elsewhere.
+      const [folder, made] = await Promise.all([P.listFiles(), madeFiles().catch(() => [])]);
       if (destroyed || requestId !== loadId) return;
+      const nextFiles = [...folder, ...made.filter((m) => !folder.some((f) => P.samePath(f.path, m.path) || (m.uid && f.uid === m.uid)))];
       files = nextFiles;
       rowCache = new Map(); // the rows of the listing before
     } catch (e) {
@@ -454,7 +459,8 @@ export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, i
       validate: (v) => {
         const clean = stem(v);
         if (!clean) return 'Enter a name';
-        if (files.some((f) => f.name.toLowerCase() === `${clean}${ext}`.toLowerCase() && f.path !== file.path)) return 'A file with that name already exists';
+        // Only a file in the same folder takes the name: the list holds spreadsheets made elsewhere on the drive too.
+        if (files.some((f) => f.name.toLowerCase() === `${clean}${ext}`.toLowerCase() && f.path !== file.path && dirOf(f.path) === dirOf(file.path))) return 'A file with that name already exists';
         return null;
       },
     });
@@ -470,6 +476,7 @@ export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, i
       moveDraft(liveDraftKey(draftKey(file.path)), liveDraftKey(draftKey(target)));
       moveExternalDecision(file.path, target);
       forgetRecent(file.path);
+      forgetMade(file.path, target);
       moveVersions({ path: file.path, uid: file.uid }, { path: target, uid: file.uid }).catch(() => {});
       toast('Renamed');
       load();
@@ -485,7 +492,8 @@ export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, i
       const ext = file.name.slice(file.name.lastIndexOf('.'));
       let name = `${stem} copy${ext}`;
       let n = 2;
-      while (files.some((f) => f.name.toLowerCase() === name.toLowerCase())) name = `${stem} copy ${n++}${ext}`;
+      // The copy goes in the app folder: a file of that name elsewhere (the list holds spreadsheets made outside it) is no clash.
+      while (files.some((f) => P.inAppFolder(f.path) && f.name.toLowerCase() === name.toLowerCase())) name = `${stem} copy ${n++}${ext}`;
       // The displayed list may be stale, or another tab may claim the name.
       const written = await P.writeFile(`${P.FOLDER}/${name}`, new Blob([bytes]), { dedupe: true });
       // The copy holds the same content: whether it may load outside content is decided already.
@@ -521,6 +529,7 @@ export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, i
       // the edits kept beside one awaiting a decision; whatever lands at the address later is another file with a decision of its own.
       for (const spelling of [file.path, P.legacyAppPath(file.path)].filter(Boolean)) { clearDraft(draftKey(spelling)); clearDraft(liveDraftKey(draftKey(spelling))); }
       forgetExternalDecision({ path: file.path, uid: file.uid });
+      forgetMade(file.path);
       files = files.filter((f) => f.path !== file.path);
       rowCache.delete(file);
       renderList();
@@ -612,7 +621,8 @@ export function homeView({ openPath, openFile, newDoc, sampleDoc, templateDoc, i
     const row = el('div.file-row', { role: 'listitem', dataset: { focusKey: file.path } },
       el('a.file-main', {
         href: `#/edit/${encodeURIComponent(file.path)}`,
-        title: file.name, // a long name is cut short on screen; the whole of it on hover
+        // A long name is cut short on screen; the whole of it on hover, with its folder for one saved outside the app's.
+        title: P.inAppFolder(file.path) ? file.name : file.path,
         // A modifier click asks for a new tab or window: leave it to the browser.
         onclick: (e) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; e.preventDefault(); openPath(file.path); },
       },
