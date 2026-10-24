@@ -1,7 +1,7 @@
 /**
  * Read Mode: the document laid out as screen pages that fit the window, side by side like an open
  * book, without the ribbon. Pages turn with the arrow keys, Page Up/Down, Space, the side arrows, a
- * click on either half of the page or the scroll wheel; Escape returns to editing. The reading tools
+ * click on either half of the page or the scroll wheel (a click on a link follows it); Escape returns to editing. The reading tools
  * change the column width, the page colour (none, sepia, inverse), text spacing and Line Focus, which
  * dims all but the lines being read, and start Read Aloud. The document itself is never changed:
  * reading is a screen geometry (engine/document-views.js) and a few screen-only overlays.
@@ -143,8 +143,10 @@ export function createReadMode({ editor, host, root: rootOf, exit, toggleNavigat
   }
   function onPointer(e) {
     if (!active || e.button !== 0 || !e.target.closest?.('.canvas-pages')) return;
-    // Reading is not editing: a click turns the page instead of placing the caret.
+    // Reading is not editing: a click turns the page instead of placing the caret, and a click on a link follows it.
     e.preventDefault(); e.stopPropagation();
+    const ed = engine(), link = ed?.linkAtPointer(e);
+    if (link) { ed.openHyperlink(link.link); return; }
     const box = host.getBoundingClientRect();
     turn(e.clientX - box.left < box.width / 3 ? -1 : 1);
     focusSurface();

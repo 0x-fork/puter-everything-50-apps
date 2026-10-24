@@ -184,6 +184,15 @@
 .editor-popover .field { margin-bottom: 10px; }
 .editor-popover .field-hint { font-size: 11px; line-height: 1.5; margin: 8px 0 12px; }
 .editor-popover form > .input { width: 100%; }
+.link-card { position: fixed; z-index: 90; display: flex; align-items: center; gap: 4px; max-width: min(420px, calc(100vw - 16px)); padding: 4px 4px 4px 10px; background: var(--surface); border: 1px solid var(--hairline-strong); border-radius: var(--r-md); box-shadow: 0 4px 14px rgb(0 0 0 / 14%); font-size: 13px; animation: menu-in 0.12s ease; }
+.link-card[hidden] { display: none; }
+.link-card-icon { display: inline-flex; color: var(--ink-3); }
+.link-card-address, .link-card-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px 0 2px; }
+.link-card-address { color: var(--accent-strong); text-decoration: underline; cursor: pointer; }
+.link-card-note { color: var(--ink-3); }
+.link-card-address.is-retained { color: var(--ink-2); text-decoration: none; cursor: text; }
+.link-card-note { flex: 0 0 auto; font-size: 12px; }
+.link-card-note[hidden] { display: none; }
 .font-picker-list { display: flex; flex-direction: column; max-height: 310px; overflow: auto; }
 .font-choice { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 8px; border-radius: 5px; text-align: start; font-size: 16px; }
 .font-choice small { font: 10px var(--font); color: var(--ink-3); }

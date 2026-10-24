@@ -63,7 +63,7 @@ const LAYOUT_OUTPUT = new Set(['text', 'x', 'start', 'end', 'width', 'contentWid
 
 /** Canvas paint surface plus a real textarea for native input, composition and accessible text. */
 export class CanvasEditor {
-  constructor(host, { paragraphs, pageSettings, numbering, styles, tables, pageStories, comments = null, trackChanges, assets = {}, images = new Map(), borrowImages = false, drawingLayouts, inputLabel, readOnly = false, protectedPageFields = false, onChange = () => {}, onSelection = () => {}, onSave = () => {}, onLink = () => {}, onOpenLink = () => {}, onError = () => {}, onContextMenu = () => {}, onUpdateFields = null, correctTyping = null, linkTyping = null } = {}) {
+  constructor(host, { paragraphs, pageSettings, numbering, styles, tables, pageStories, comments = null, trackChanges, assets = {}, images = new Map(), borrowImages = false, drawingLayouts, inputLabel, readOnly = false, protectedPageFields = false, onChange = () => {}, onSelection = () => {}, onSave = () => {}, onLink = () => {}, onOpenLink = () => {}, onLinkClick = () => {}, onError = () => {}, onContextMenu = () => {}, onUpdateFields = null, correctTyping = null, linkTyping = null } = {}) {
     this.host = host;
     this.inputLabel = inputLabel;
     this.readOnly = readOnly;
@@ -76,7 +76,7 @@ export class CanvasEditor {
     this.onChange = onChange; this.onSelection = onSelection; this.onSave = onSave; this.onError = onError;
     this.correctTyping = correctTyping; this.linkTyping = linkTyping;
     this.onUpdateFields = onUpdateFields;
-    this.onLink = onLink; this.onOpenLink = onOpenLink; this.visitedLinks = new Set();
+    this.onLink = onLink; this.onOpenLink = onOpenLink; this.onLinkClick = onLinkClick; this.visitedLinks = new Set();
     this.zoom = 1;
     // The document view laid out on screen (document-views.js); null is Print Layout.
     this.view = null;
@@ -144,7 +144,7 @@ export class CanvasEditor {
     listen(document, 'pointerdown', e => { if (!this.pages.contains(e.target)) this.lastPress = null; });
     listen(this.pages, 'pointermove', e => this.pointerMove(e));
     listen(this.pages, 'pointerup', e => this.pointerUp(e));
-    listen(this.pages, 'pointercancel', () => { this.touch = null; this.dragging = false; this.dragControl = null; this.stopAutoScroll(); this.imageInteraction.cancel(); });
+    listen(this.pages, 'pointercancel', () => { this.touch = null; this.linkPress = null; this.dragging = false; this.dragControl = null; this.stopAutoScroll(); this.imageInteraction.cancel(); });
     listen(this.pages, 'contextmenu', e => {
       // A long press opens the menu; lifting that finger is not a tap.
       this.touch = null;
@@ -983,6 +983,28 @@ export class CanvasEditor {
     if (link.history && openableHyperlink(link)) this.visitedLinks.add(link.target);
     this.onOpenLink(link.target);
   }
+  /** The link under a pointer event, or null. */
+  linkAtPointer(event) { this.point(event, false); return this.pointLink; }
+  /**
+   * A plain click on a link follows it where nothing can be edited. In an editable document the click
+   * places the caret, as in any text, and offers the link (onLinkClick) with the box it was painted in.
+   */
+  linkClicked(range, x, y) {
+    if (this.readOnly || this.viewOnly) { this.openHyperlink(range.link); return; }
+    this.onLinkClick({ ...range, rect: this.linkClientRect(range, x, y) });
+  }
+  /** The painted box of a link under a client point, in client coordinates; the point itself when no box holds it. */
+  linkClientRect(range, x, y) {
+    for (const canvas of this.canvases) {
+      const r = canvas.getBoundingClientRect();
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+      const page = Number(canvas.dataset.page), px = (x - r.left) / this.zoom, py = (y - r.top) / this.zoom;
+      const box = range.start < range.end && selectionRects(this.selectionLayout, range.start, range.end)
+        .find(b => b.page === page && px >= b.x && px <= b.x + b.width && py >= b.y && py <= b.y + b.height);
+      if (box) return { left: r.left + box.x * this.zoom, top: r.top + box.y * this.zoom, width: box.width * this.zoom, height: box.height * this.zoom };
+    }
+    return { left: x, top: y, width: 0, height: 0 };
+  }
   setHyperlink(target, text, { appearance = false } = {}) {
     this.execute(() => { const changed = this.model.setHyperlink(target, text); if (changed && appearance) showLink(this.model); return changed; });
     this.focus();
@@ -1052,6 +1074,7 @@ export class CanvasEditor {
   pointerDown(e, tapped = false) {
     // Control+click is a Mac's secondary click: the context menu follows, and the selection it acts on stays.
     if (e.button !== 0 || MAC && e.ctrlKey) return;
+    this.linkPress = null;
     // A press during composition commits it and goes on to place the caret, as in a native field;
     // returning would let the press take focus from the document, losing what is typed next.
     if (this.composition) this.finishComposition();
@@ -1080,6 +1103,8 @@ export class CanvasEditor {
     }
     let position = this.point(e), restoredPromptSelection, restoredOutsideCaret, sameOffsetCaret;
     if ((e.ctrlKey || e.metaKey) && this.pointLink) { this.openHyperlink(this.pointLink.link); return; }
+    // A plain press on a link is settled when it lifts: a click there is a click on the link, a drag selects.
+    if (this.pointLink && presses === 1 && !e.shiftKey && !e.altKey) this.linkPress = { range: this.pointLink, x: e.clientX, y: e.clientY, pointerId: e.pointerId };
     const selection = this.model.selection;
     if (!this.readOnly && !e.shiftKey && selection.anchor === selection.focus && selection.controlCaret?.side === 'inside') {
       const range = inlineControlCaret(this.model.paragraphs, selection.focus, selection.controlCaret);
@@ -1142,8 +1167,8 @@ export class CanvasEditor {
     if (!this.dragging) {
       this.point(e, false);
       const openable = this.pointLink && openableHyperlink(this.pointLink.link);
-      this.pages.title = this.pointLink ? `${this.pointLink.link.tooltip || hyperlinkLabel(this.pointLink.link)}${openable ? ' (Ctrl/Cmd+click to open)' : ''}` : '';
-      this.pages.style.cursor = openable && (e.ctrlKey || e.metaKey) ? 'pointer' : '';
+      this.pages.title = this.pointLink ? `${this.pointLink.link.tooltip || hyperlinkLabel(this.pointLink.link)}${openable ? this.readOnly || this.viewOnly ? ' (Click to open)' : ` (${MAC ? 'Cmd' : 'Ctrl'}+click to open)` : ''}` : '';
+      this.pages.style.cursor = openable && (this.readOnly || this.viewOnly || e.metaKey || e.ctrlKey && !MAC) ? 'pointer' : '';
       return;
     }
     this.dragTo(e);
@@ -1207,6 +1232,12 @@ export class CanvasEditor {
       if (Math.hypot(e.clientX - x, e.clientY - y) > 10) return;
       this.pointerDown(down, true);
     }
+    const press = this.linkPress; this.linkPress = null;
+    this.release(e);
+    if (press?.pointerId === e.pointerId && Math.hypot(e.clientX - press.x, e.clientY - press.y) < 5 && !this.destroyed) this.linkClicked(press.range, e.clientX, e.clientY);
+  }
+  /** The end of a press on the pages: a picture move or resize, a drag, or a drag out of an empty control. */
+  release(e) {
     if (this.imageInteraction.end(e)) return;
     const control = this.dragControl, wasDragging = this.dragging;
     this.dragging = false; this.dragControl = null; this.stopAutoScroll();

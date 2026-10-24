@@ -147,3 +147,67 @@ test('finishes native composition before editing its link and keeps composition 
   await input.evaluate(el=>{el.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true,data:''}));el.setRangeText('한',el.selectionStart,el.selectionEnd,'end');el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'한',isComposing:true}));});
   await button.click(); await expect(page.getByRole('textbox',{name:'Link address',exact:true})).toHaveValue('https://example.com/ime'); await page.getByRole('textbox',{name:'Link address',exact:true}).fill('https://example.com/ime-edited'); await apply(page); await expect(input).toHaveValue('Link a한lpha'); await page.getByRole('button',{name:'Undo',exact:true}).click(); await expect(input).toHaveValue('Link a한lpha'); await dialog(page,input); await expect(page.getByRole('textbox',{name:'Link address',exact:true})).toHaveValue('https://example.com/ime'); await page.getByRole('dialog').getByRole('button',{name:'Cancel',exact:true}).click(); await expect(page.getByRole('dialog')).toHaveCount(0); await page.getByRole('button',{name:'Undo',exact:true}).click(); await expect(input).toHaveValue('Link alpha'); await page.getByRole('button',{name:'Redo',exact:true}).click(); await page.getByRole('button',{name:'Redo',exact:true}).click(); await expect(input).toHaveValue('Link a한lpha'); await dialog(page,input); await expect(page.getByRole('textbox',{name:'Link address',exact:true})).toHaveValue('https://example.com/ime-edited');
 });
+
+// The pages name the link under the pointer in their tooltip; found that way, a link is found in any layout or view.
+async function pointAtLink(page, target) {
+  const point = await page.evaluate(target => {
+    const pages = document.querySelector('.canvas-pages');
+    for (const canvas of document.querySelectorAll('canvas.canvas-page')) {
+      const r = canvas.getBoundingClientRect();
+      for (let y = Math.max(r.top, 0) + 3; y < Math.min(r.bottom, innerHeight); y += 4)
+        for (let x = Math.max(r.left, 0) + 3; x < Math.min(r.right, innerWidth); x += 6) {
+          pages.dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y, bubbles: true, pointerType: 'mouse' }));
+          if (pages.title.startsWith(target)) return { x: x + 2, y };
+        }
+    }
+    return null;
+  }, target);
+  if (!point) throw new Error(`No link to ${target}`);
+  await page.mouse.move(point.x, point.y); return point;
+}
+
+test('a plain click on a link offers it while editing and follows it in Viewing mode and Read Mode (issue 71)', async ({ page }, info) => {
+  await stubOpen(page); const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto('/playground.html'); await showAllTools(page); await page.getByLabel('Open DOCX file').setInputFiles('public/fixtures/hyperlinks.docx');
+  const input = page.getByRole('textbox', { name: 'Document text' }); await expect(input).toHaveValue(/^External hyperlinks/);
+  const card = page.getByRole('group', { name: 'Link', exact: true });
+  let point = await pointAtLink(page, TARGET);
+  await expect(page.locator('.canvas-pages')).toHaveAttribute('title', new RegExp(`\\((Ctrl|Cmd)\\+click to open\\)$`));
+  // Editing: the click places the caret and shows the destination, without opening it or taking the focus.
+  await page.mouse.click(point.x, point.y);
+  await expect(card).toBeVisible(); await expect(input).toBeFocused();
+  await expect(card.getByRole('link')).toHaveAttribute('href', TARGET); await expect(card.getByText('Can’t be opened here')).toBeHidden();
+  expect(await page.evaluate(() => window.linkOpens)).toEqual([]);
+  await card.screenshot({ path: info.outputPath('link-card.png'), animations: 'disabled' });
+  await card.getByRole('link').click();
+  expect(await page.evaluate(() => window.linkOpens)).toEqual([[TARGET, '_blank', 'noopener,noreferrer']]);
+  await expect(card).toBeHidden(); await expect(input).toBeFocused();
+  // Escape and typing put the card away; Edit opens the link dialog.
+  await page.waitForTimeout(600); await page.mouse.click(point.x, point.y); await expect(card).toBeVisible();
+  await page.keyboard.press('Escape'); await expect(card).toBeHidden();
+  await page.waitForTimeout(600); await page.mouse.click(point.x, point.y); await expect(card).toBeVisible();
+  const text = await input.inputValue(); await page.keyboard.type('Z'); await expect(card).toBeHidden(); await expect(input).not.toHaveValue(text);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click(); await expect(input).toHaveValue(text);
+  await page.waitForTimeout(600); await page.mouse.click(point.x, point.y);
+  await card.getByRole('button', { name: 'Edit link' }).click();
+  await expect(page.getByRole('textbox', { name: 'Link address', exact: true })).toHaveValue(TARGET);
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+  // A drag across a link selects without offering it.
+  await page.mouse.move(point.x - 30, point.y); await page.mouse.down(); await page.mouse.move(point.x + 10, point.y, { steps: 4 }); await page.mouse.up();
+  await expect(card).toBeHidden();
+  // Viewing: nothing can be edited, so a click follows the link.
+  const mode = page.getByRole('button', { name: /^Editing mode/ }); await mode.click(); await page.getByRole('menuitemradio', { name: /^Viewing/ }).click();
+  point = await pointAtLink(page, TARGET);
+  await expect(page.locator('.canvas-pages')).toHaveAttribute('title', /\(Click to open\)$/);
+  await page.mouse.click(point.x, point.y);
+  expect(await page.evaluate(() => window.linkOpens.length)).toBe(2); await expect(card).toBeHidden();
+  await mode.click(); await page.getByRole('menuitemradio', { name: /^Editing/ }).click();
+  // Read Mode: a click on a link follows it rather than turning the page.
+  await page.getByLabel('Status bar').getByRole('button', { name: 'Read Mode', exact: true }).click();
+  await expect(page.getByRole('toolbar', { name: 'Read Mode' })).toBeVisible();
+  point = await pointAtLink(page, TARGET); const counter = await page.locator('.read-counter').textContent();
+  await page.mouse.click(point.x, point.y);
+  expect(await page.evaluate(() => window.linkOpens.at(-1))).toEqual([TARGET, '_blank', 'noopener,noreferrer']);
+  expect(await page.evaluate(() => window.linkOpens.length)).toBe(3); await expect(page.locator('.read-counter')).toHaveText(counter);
+  expect(errors).toEqual([]);
+});

@@ -13,6 +13,7 @@ import { CELL_ALIGNMENTS } from '../engine/cell-alignment.js';
 import { paragraphFormat } from '../engine/model.js';
 import { openParagraphShading, paragraphShadingLabel } from './paragraph-shading.js';
 import { openHyperlink } from './hyperlink.js';
+import { createLinkCard } from './link-card.js';
 import { openBookmarks } from './bookmarks.js';
 import { checkedHyperlinkTarget, hyperlinkRanges } from '../engine/hyperlinks.js';
 import { openUnderline } from './underline.js';
@@ -256,6 +257,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     hyperlinkModal = openHyperlink({ anchor, ...options, link: engine.model.hyperlink?.link, bookmarks: engine.bookmarks, insert: engine.model.range[0] === engine.model.range[1] && !engine.model.hyperlink,
       apply: (target, text) => engine?.setHyperlink(target, text, { appearance: !engine.model.hyperlink }), remove: () => engine?.removeHyperlink(), open: () => engine?.openHyperlink() });
   };
+  // A click on a link while editing shows where it goes, to follow, edit or remove it.
+  const linkCard = createLinkCard({ editor: () => engine, host, edit: () => editHyperlink(engine?.input) });
   const button = (label, action, attrs = {}) => el('button.btn', { type: 'button', onclick: action, ...attrs }, label);
   // A tool with a shortcut names it in its tooltip and carries it for the menus that list the same command.
   const tool = (label, name, action, { shortcut = null, ...attrs } = {}) => el('button.icon-btn.canvas-tool', { type: 'button', disabled: true, 'aria-label': label, title: shortcut ? `${label} (${shortcut})` : label, dataset: { icon: name, ...(shortcut ? { shortcut } : {}) }, onclick: action, ...attrs }, iconEl(name, 19));
@@ -1489,12 +1492,14 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
 
   /** The editor for the open package, with the view's handlers. */
   function createEngine(CanvasEditor, images) {
+    linkCard.hide();
     const created = new CanvasEditor(host, {
       onContextMenu: openDocumentContextMenu,
       onUpdateFields: () => references.updateAllFields(),
       paragraphs: pkg.paragraphs, pageSettings: pkg.pageSettings, numbering: pkg.numbering, styles: pkg.styles, tables: pkg.tables, pageStories: pkg.pageStories, comments: pkg.comments, trackChanges: pkg.trackRevisions, assets: pkg.assets, drawingLayouts: pkg.drawingLayouts, images, readOnly: !!pkg.readOnly,
-      onChange: () => { if (!reopening) { designVersions.redo = []; if (created.session.history.length >= 100) designVersions.undo = []; } labelHistory(); doc.changed(); update(); updateStatus(); proofing.changed(true); reviewTools.changed(); },
-      onSelection: () => { update(); proofing.selectionChanged(); reviewTools.selectionChanged(); }, onSave: save, onError: error, onLink: editHyperlink,
+      onChange: () => { linkCard.hide(); if (!reopening) { designVersions.redo = []; if (created.session.history.length >= 100) designVersions.undo = []; } labelHistory(); doc.changed(); update(); updateStatus(); proofing.changed(true); reviewTools.changed(); },
+      onSelection: () => { linkCard.changed(); update(); proofing.selectionChanged(); reviewTools.selectionChanged(); }, onSave: save, onError: error, onLink: editHyperlink,
+      onLinkClick: range => linkCard.show(range),
       onOpenLink: target => {
         // Imported destinations outside web, email and phone addresses (file paths, relative links) stay in the document unopened.
         try { checkedHyperlinkTarget(target); } catch { error(new Error('This link points to a file or address that can’t be opened from here. It is kept in the document.')); return; }
@@ -1711,7 +1716,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     destroy() {
       drawingTextModal?.close();
       printAbort.abort();
-      destroyed = true; tables.destroy(); paragraphBorderModal?.close(); paragraphShadingModal?.close(); bookmarkModal?.close(); hyperlinkModal?.close(); pageSetupModal?.close(); paragraphModal?.close(); styleModal?.close(); tableModal?.close(); imageModal?.close(); fontPopover?.close(); colorPalette?.close(); highlightPalette?.close(); baselineModal?.close(); characterSpacingModal?.close(); textWidthModal?.close(); kerningModal?.close(); underlineModal?.close();
+      destroyed = true; linkCard.destroy(); tables.destroy(); paragraphBorderModal?.close(); paragraphShadingModal?.close(); bookmarkModal?.close(); hyperlinkModal?.close(); pageSetupModal?.close(); paragraphModal?.close(); styleModal?.close(); tableModal?.close(); imageModal?.close(); fontPopover?.close(); colorPalette?.close(); highlightPalette?.close(); baselineModal?.close(); characterSpacingModal?.close(); textWidthModal?.close(); kerningModal?.close(); underlineModal?.close();
       backstage?.close({ focus: false });
       fitObserver?.disconnect(); rulers?.destroy(); views.destroy(); chrome.destroy(); formatArea.destroy(); review.destroy(); reviewTools.destroy(); collab.destroy(); versionHistory.destroy(); assistant.destroy(); references.destroy(); insert.destroy(); draw.destroy(); pictures.destroy(); editingCommands.destroy(); proofing.destroy(); for (const module of pageModules) module.destroy();
       releasePictures();
