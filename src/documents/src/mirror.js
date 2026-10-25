@@ -34,14 +34,14 @@ async function show({ name, bytes }) {
   const mine = ++version;
   modules ||= await loadEngine();
   const { CanvasEditor, openCanvasDocument, loadCanvasFonts } = modules;
-  const { pkg, images } = await openCanvasDocument(new Blob([bytes]));
+  const { pkg, images, measure } = await openCanvasDocument(new Blob([bytes]));
   await loadCanvasFonts();
   if (mine !== version) { for (const image of images.values()) image.close?.(); return; }
   // Keep the reader's place across updates.
   const top = host.scrollTop, left = host.scrollLeft;
   editor?.destroy();
   editor = new CanvasEditor(host, { paragraphs: pkg.paragraphs, pageSettings: pkg.pageSettings, numbering: pkg.numbering, styles: pkg.styles, tables: pkg.tables, pageStories: pkg.pageStories,
-    comments: pkg.comments, assets: pkg.assets, drawingLayouts: pkg.drawingLayouts, images, readOnly: true, inputLabel: 'Document text (read only)' });
+    comments: pkg.comments, assets: pkg.assets, drawingLayouts: pkg.drawingLayouts, images, measure, readOnly: true, inputLabel: 'Document text (read only)' });
   editor.setZoom(Number(zoom.value));
   host.scrollTop = top; host.scrollLeft = left;
   title.textContent = name || 'Document';

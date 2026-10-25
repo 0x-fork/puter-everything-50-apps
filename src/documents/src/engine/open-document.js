@@ -18,7 +18,7 @@ function refreshOpeningReferences(pkg, preparation) {
   } catch (error) { pkg.fieldRefreshIssues = [error.message]; }
 }
 
-async function decodedDocument(pkg) {
+async function decodedDocument(pkg, measure) {
   const missing = new Set();
   const issues = new Set(pkg.previewIssues || []);
   const images = await decodeImages(pkg.assets, pkg.styles.fontAlternatives, family => missing.add(family), (id, error) => {
@@ -28,17 +28,20 @@ async function decodedDocument(pkg) {
     pkg.previewIssues = [...issues];
   });
   pkg.missingPictureFonts = [...missing];
-  return { pkg, images };
+  return { pkg, images, measure };
 }
 
-/** Open for display even when the editing or layout subset is insufficient. */
+/**
+ * Open for display even when the editing or layout subset is insufficient. `measure` is the
+ * measurer that validated the layout; an editor of `pkg` can start from its measurements.
+ */
 export async function openCanvasDocument(input) {
   let pkg = await DocxPackage.open(input, { bestEffort: true });
   try {
     if (pkg.readOnly) new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets, { displayOnly: true });
     const preparation = await validateCanvasLayout(pkg);
     refreshOpeningReferences(pkg, preparation);
-    return await decodedDocument(pkg);
+    return await decodedDocument(pkg, preparation.measure);
   } catch (error) {
     const issues = new Set(pkg.previewIssues || []);
     recordPreviewIssue(issues, error);
@@ -49,8 +52,8 @@ export async function openCanvasDocument(input) {
       pkg.readOnly = true;
       try {
         new TextDocument(pkg.paragraphs, pkg.pageSettings, pkg.numbering, pkg.styles, pkg.tables, pkg.assets, { displayOnly: true });
-        await validateCanvasLayout(pkg);
-        return await decodedDocument(pkg);
+        const preparation = await validateCanvasLayout(pkg);
+        return await decodedDocument(pkg, preparation.measure);
       } catch (fallbackError) {
         recordPreviewIssue(issues, fallbackError);
       }

@@ -129,10 +129,10 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
   if (notes || endnotes) paragraphs = numberNotes();
   for (let attempt = 0; attempt < MAX_PAGES; attempt++) {
     // Page counts reach the body only through the header and footer heights they produce.
-    const storyHeights = totals ? new Map() : undefined;
+    const storyHeights = totals ? new Map() : undefined, storyHeightCache = new Map(), paragraphKeys = new WeakMap();
     const flow = () => notes
-      ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights, noteReserve }), measureBase, numbering, storyOptions)
-      : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights });
+      ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights, storyHeightCache, paragraphKeys, noteReserve }), measureBase, numbering, storyOptions)
+      : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights, storyHeightCache, paragraphKeys });
     placed = flow();
     // Footnotes numbered per page (§17.11.19 eachPage) need their pages first; renumber once and lay out again.
     if (notes?.restart === 'eachPage') {
@@ -177,6 +177,8 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
   // Body paragraphs measured by an earlier layout with this measurer (paragraph-measure-cache.js).
   const paragraphCache = measureBase.paragraphCache?.();
   const pageKeys = new WeakMap(), sharedKey = paragraphCache && JSON.stringify([numbering ?? null, revisionView]);
+  // Paragraphs keep their content through the passes of one layout; serialize each once.
+  const paragraphKeys = storyOptions.paragraphKeys || new WeakMap();
   const pageKey = geometry => { let key = pageKeys.get(geometry); if (key === undefined) pageKeys.set(geometry, key = JSON.stringify(geometry)); return key; };
   // A screen view (web, draft, read) lays every section out on its own display geometry.
   const viewPage = storyOptions.viewGeometry || (geometry => geometry);
@@ -268,7 +270,11 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
         // measured again.
         let key = null;
         if (paragraphCache && !squareHintsReach(hints, block.paragraph.id) && !page.rotatedCellText && !page.columnWidthAt && !block.paragraph.runs.some(r => r.image)) {
-          try { key = JSON.stringify([block.paragraph, pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey]); } catch { key = null; }
+          try {
+            let content = paragraphKeys.get(block.paragraph);
+            if (content === undefined) paragraphKeys.set(block.paragraph, content = JSON.stringify(block.paragraph));
+            key = `[${content},${JSON.stringify([pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey])}]`;
+          } catch { key = null; }
         }
         const measured = key === null ? run() : paragraphCache.measure(key, block.offset, run);
         // Removing a floating frame from body flow must not join paragraph

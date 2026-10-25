@@ -5,23 +5,23 @@ vi.mock('../src/engine/canvas-text.js',()=>({validateCanvasLayout:fake.validate}
 vi.mock('../src/engine/images.js',()=>({decodeImages:fake.decode}));
 vi.mock('../src/engine/model.js',()=>({TextDocument:class{constructor(...args){fake.model(...args);}}}));
 import {openCanvasDocument} from '../src/engine/open-document.js';
-beforeEach(()=>{vi.resetAllMocks();fake.decode.mockResolvedValue(new Map());});
+beforeEach(()=>{vi.resetAllMocks();fake.decode.mockResolvedValue(new Map());fake.validate.mockResolvedValue({});});
 it('preserves the reason when a layout limit has a successful structured preview',async()=>{
  const pkg={paragraphs:[],styles:{},assets:{}};fake.open.mockResolvedValue(pkg);
- fake.validate.mockRejectedValueOnce(new Error('Text exceeds the supported page bounds.')).mockResolvedValue(undefined);
+ fake.validate.mockRejectedValueOnce(new Error('Text exceeds the supported page bounds.')).mockResolvedValue({});
  const result=await openCanvasDocument(new Uint8Array());
  expect(result.pkg.readOnly).toBe(true);expect(result.pkg.previewIssues).toEqual(['Text exceeds the supported page bounds.']);expect(fake.preview).not.toHaveBeenCalled();
 });
 it('keeps import and decoding reasons when falling back to plain text',async()=>{
  const original={readOnly:true,previewIssues:['Unsupported picture effects'],paragraphs:[],styles:{},assets:{},parts:{}};
- const plain={paragraphs:[],styles:{},assets:{},readOnly:true};fake.open.mockResolvedValue(original);fake.preview.mockReturnValue(plain);fake.validate.mockResolvedValue(undefined);
+ const plain={paragraphs:[],styles:{},assets:{},readOnly:true};fake.open.mockResolvedValue(original);fake.preview.mockReturnValue(plain);fake.validate.mockResolvedValue({});
  fake.decode.mockRejectedValue(new Error('The image cannot be decoded.'));
  const result=await openCanvasDocument(new Uint8Array());
  expect(result.pkg).toBe(plain);expect(result.pkg.previewIssues).toEqual(['Unsupported picture effects','The image cannot be decoded.']);
 });
 it('retains both layout errors when both structured attempts fail',async()=>{
  fake.open.mockResolvedValue({paragraphs:[],styles:{},assets:{},parts:{}});fake.preview.mockReturnValue({paragraphs:[],styles:{},readOnly:true});
- fake.validate.mockRejectedValueOnce(new Error('Editing limit')).mockRejectedValueOnce(new Error('Preview limit')).mockResolvedValue(undefined);
+ fake.validate.mockRejectedValueOnce(new Error('Editing limit')).mockRejectedValueOnce(new Error('Preview limit')).mockResolvedValue({});
  expect((await openCanvasDocument(new Uint8Array())).pkg.previewIssues).toEqual(['Editing limit','Preview limit']);
 });
 

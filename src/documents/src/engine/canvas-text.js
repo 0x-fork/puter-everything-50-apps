@@ -23,6 +23,7 @@ import { bidiPaintText } from './bidi-text.js';
 import { shapedCaretAdvances } from './shaped-carets.js';
 import { outlineTextScale } from './outline-text-scale.js';
 import { prepareOpenTypeKerning, requestsOpenTypeKerning, openTypeKerningFamily } from './opentype-kerning.js';
+import { createCanvasMeasurer } from './canvas-measurer.js';
 
 const fontAlternatives = new WeakMap();
 const roundedAdvanceFaces = new Map();
@@ -278,7 +279,8 @@ export async function validateCanvasLayout(pkg) {
   validateCanvasTextSupport(pkg); await loadCanvasFonts(pkg);
   const context = document.createElement('canvas').getContext('2d');
   setCanvasFontAlternatives(context, pkg.styles?.fontAlternatives);
-  const measure = (text, style) => measureCanvasText(context, text, style);
+  // A long document is laid out more than once (footnote reservations, square wrapping): remember measurements.
+  const measure = createCanvasMeasurer(context);
   const { assets, drawingLayouts, autofitApproximations } = prepareShapeAutofit(pkg.assets, measure, { bestEffort: pkg.readOnly });
   const body = layoutDocument(pkg.paragraphs, measure, pageGeometry(pkg.pageSettings), pkg.numbering, pkg.tables, pkg.pageStories, { ...(!pkg.readOnly ? { styles: pkg.styles } : {}), drawingLayouts, bestEffort: pkg.readOnly });
   if (pkg.pageStories && !pkg.readOnly) layoutPageStories(body, pkg.pageStories, [...pkg.paragraphs.filter(p => p.sectionEnd).map(p => p.sectionEnd), pkg.pageSettings], measure, pkg.numbering, { styles: pkg.styles, drawingLayouts });
@@ -294,7 +296,8 @@ export async function validateCanvasLayout(pkg) {
     }
     pkg.previewIssues = [...issues];
   }
-  return { body, layoutOf(model) {
+  return { body, measure, layoutOf(model) {
+    measure.paragraphCache().nextGeneration();
     const next = layoutDocument(model.paragraphs, measure, pageGeometry(model.pageSettings), model.numbering, model.tables, pkg.pageStories, { styles: model.styles, drawingLayouts });
     if (pkg.pageStories) layoutPageStories(next, pkg.pageStories, [...model.paragraphs.filter(p => p.sectionEnd).map(p => p.sectionEnd), model.pageSettings], measure, model.numbering, { styles: model.styles, drawingLayouts });
     return next;

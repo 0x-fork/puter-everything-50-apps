@@ -3,6 +3,7 @@ import { layoutDocument } from '../src/engine/layout.js';
 import { layoutPageStories } from '../src/engine/page-story-layout.js';
 import { paragraph } from '../src/engine/model.js';
 import { DEFAULT_PAGE_SETTINGS, pageGeometry } from '../src/engine/page-settings.js';
+import { sectionStoryBounds } from '../src/engine/story-clearance.js';
 
 // "Page X of Y" footers hold the page count, which is known only after layout. The body is laid out
 // again with the real count only when that count changes a header or footer's height.
@@ -38,4 +39,25 @@ it('lays the body out again when the page count makes the footer taller', () => 
     expect(bodyBottom).toBeLessThanOrEqual(footerTop);
   }
   expect(placed.lines.filter(line => line.page === 9)).toHaveLength(2);
+});
+
+it('measures each page\'s footer once across the passes of one layout', () => {
+  // Footnote reservations and wrapped pictures paginate the body again with the same footers.
+  const folio = { kind: 'footer', paragraphs: [paragraph('', { runs: [{ text: 'Folio ' }, { text: '￼', field: { type: 'PAGE', cachedText: '1' } }] })] };
+  const folios = { evenAndOdd: false, sections: [{ header: {}, footer: { default: 'folio' } }], stories: { folio } };
+  const footers = [];
+  const measure = text => { if (text.startsWith('Folio')) footers.push(text); return { width: text.length * 8, ascent: 12, descent: 4 }; };
+  const page = pageGeometry(DEFAULT_PAGE_SETTINGS), options = { storyHeightCache: new Map() };
+  const pass = (firstNumber, shared = options) => [0, 1, 2].map(sectionStoryBounds(page, folios, 0, { firstNumber }, measure, undefined, shared));
+  const bounds = pass(1);
+  expect(footers).toEqual(expect.arrayContaining(['Folio 1', 'Folio 2', 'Folio 3']));
+  const measured = footers.length;
+  expect(pass(1)).toEqual(bounds);
+  expect(footers).toHaveLength(measured);
+  // Other page numbers are other footers; without the shared heights each pass measures its own.
+  pass(4);
+  expect(footers.slice(measured)).toContain('Folio 6');
+  const before = footers.length;
+  expect(pass(1, {})).toEqual(bounds);
+  expect(footers.length).toBeGreaterThan(before);
 });

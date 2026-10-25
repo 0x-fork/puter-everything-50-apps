@@ -18,7 +18,7 @@ import { pageStoryAtPoint } from './page-story-hit.js';
 import { paintImage } from './paint-image.js';
 import { prepareText3dFonts } from './text-3d-fonts.js';
 import { localFontVersion } from './local-fonts.js';
-import { ParagraphMeasureCache } from './paragraph-measure-cache.js';
+import { createCanvasMeasurer } from './canvas-measurer.js';
 import { displayedFont } from './font-availability.js';
 import { preparedScriptMetrics } from './script-font-size.js';
 import { text3dSurface } from './text-3d.js';
@@ -36,7 +36,7 @@ import { internalHyperlink, hyperlinkLabel, openableHyperlink } from './hyperlin
 import { paintUnderline } from './canvas-underlines.js';
 import { paintText, paintTextShadows } from './canvas-paint-text.js';
 import { strikeSpans } from './strikethrough.js';
-import { setCanvasTextStyle, measureCanvasText, setCanvasFontAlternatives, loadCanvasFonts } from './canvas-text.js';
+import { setCanvasTextStyle, setCanvasFontAlternatives, loadCanvasFonts } from './canvas-text.js';
 import { hasRunBackground, runBackground, foregroundBackground, runBackgroundRect } from './backgrounds.js';
 import { paintColor } from './colors.js';
 import { TextDocument, boundaries, locate, paragraphFormat, paragraphText } from './model.js';
@@ -58,12 +58,10 @@ let nextAsset = 0;
 // once; the rest are painted when they scroll into view, when their pixels are read, or while the
 // browser is idle.
 const EAGER_PAGES = 80;
-// Fields layout writes onto the style objects it measures with; measurement never reads them.
-const LAYOUT_OUTPUT = new Set(['text', 'x', 'start', 'end', 'width', 'contentWidth', 'origin', 'ascent', 'descent', 'lineAscent', 'lineDescent', 'textParts', 'textOffsetX', 'textTransform', 'underline', 'strike', 'background', 'group', 'followingSpace', 'fastSpaces', 'lastSpace', 'spaceMetrics', 'trailingStart', 'numberEnd', 'numberDone', 'decimal', 'hasTextShadow', 'discretionaryOnly', 'colors']);
 
 /** Canvas paint surface plus a real textarea for native input, composition and accessible text. */
 export class CanvasEditor {
-  constructor(host, { paragraphs, pageSettings, numbering, styles, tables, pageStories, comments = null, trackChanges, assets = {}, images = new Map(), borrowImages = false, drawingLayouts, inputLabel, readOnly = false, protectedPageFields = false, onChange = () => {}, onSelection = () => {}, onSave = () => {}, onLink = () => {}, onOpenLink = () => {}, onLinkClick = () => {}, onError = () => {}, onContextMenu = () => {}, onUpdateFields = null, correctTyping = null, linkTyping = null } = {}) {
+  constructor(host, { paragraphs, pageSettings, numbering, styles, tables, pageStories, comments = null, trackChanges, assets = {}, images = new Map(), borrowImages = false, drawingLayouts, inputLabel, readOnly = false, protectedPageFields = false, onChange = () => {}, onSelection = () => {}, onSave = () => {}, onLink = () => {}, onOpenLink = () => {}, onLinkClick = () => {}, onError = () => {}, onContextMenu = () => {}, onUpdateFields = null, correctTyping = null, linkTyping = null, measure = null } = {}) {
     this.host = host;
     this.inputLabel = inputLabel;
     this.readOnly = readOnly;
@@ -103,41 +101,17 @@ export class CanvasEditor {
     this.input.setAttribute('data-testid', 'document-input');
     host.replaceChildren(this.pages, this.input);
     this.imageInteraction = createImageInteraction(this);
-    const measureCanvas = document.createElement('canvas');
-    const context = measureCanvas.getContext('2d');
-    if (!context) throw new Error('Canvas 2D is unavailable in this browser.');
-    setCanvasFontAlternatives(context, this.model.styles.fontAlternatives);
-    const separatorReady=()=>{if(!this.destroyed){this.measureCache.clear();try{this.relayout();this.revealCaret();}catch(error){this.onError(error);}}};
-    // Every edit lays the whole story out again, measuring the same text with the same styles thousands
-    // of times. Remember each measurement by style and exact text. A style object's key is computed once
-    // (layout writes only its own output fields onto it, never ones measurement reads); font changes clear
-    // the memory (refreshFonts, deferred script/separator faces, local font access); callers get a copy.
-    // Measured paragraphs follow the same memory: they are dropped whenever measurements are.
-    const measuredParagraphs = new ParagraphMeasureCache();
-    let byStyle = new WeakMap(), byKey = new Map(), entries = 0, measuredFonts = localFontVersion();
-    this.measureCache = { clear() { byStyle = new WeakMap(); byKey = new Map(); entries = 0; measuredParagraphs.clear(); } };
-    const checkFonts = () => {
-      const fonts = localFontVersion();
-      if (fonts !== measuredFonts) { this.measureCache.clear(); measuredFonts = fonts; }
-    };
-    this.measure = (text, style) => {
-      checkFonts();
-      let texts = byStyle.get(style);
-      if (!texts) {
-        const key = JSON.stringify(style, (name, value) => LAYOUT_OUTPUT.has(name) ? undefined : value);
-        texts = byKey.get(key);
-        if (!texts) byKey.set(key, texts = new Map());
-        byStyle.set(style, texts);
-      }
-      let result = texts.get(text);
-      if (!result) {
-        result = measureCanvasText(context, text, style, separatorReady);
-        if (++entries > 200000) this.measureCache.clear();
-        texts.set(text, result);
-      }
-      return { ...result };
-    };
-    this.measure.paragraphCache = () => { checkFonts(); return measuredParagraphs; };
+    // Measurements and measured paragraphs are remembered between layouts (canvas-measurer.js),
+    // starting from those of the opening validation when it hands its measurer over.
+    if (measure) this.measure = measure;
+    else {
+      const context = document.createElement('canvas').getContext('2d');
+      if (!context) throw new Error('Canvas 2D is unavailable in this browser.');
+      setCanvasFontAlternatives(context, this.model.styles.fontAlternatives);
+      this.measure = createCanvasMeasurer(context);
+    }
+    this.measure.onFontsReady = () => { if (!this.destroyed) { try { this.relayout(); this.revealCaret(); } catch (error) { this.onError(error); } } };
+    this.measureCache = { clear: () => this.measure.clear() };
     const listen = (node, name, fn) => node.addEventListener(name, fn, { signal: this.abort.signal });
     listen(this.pages, 'pointerdown', e => this.pointerDown(e));
     // A press anywhere else ends a run of quick presses, as it does natively.

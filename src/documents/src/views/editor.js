@@ -1491,12 +1491,12 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   updateStatus();
 
   /** The editor for the open package, with the view's handlers. */
-  function createEngine(CanvasEditor, images) {
+  function createEngine(CanvasEditor, images, measure) {
     linkCard.hide();
     const created = new CanvasEditor(host, {
       onContextMenu: openDocumentContextMenu,
       onUpdateFields: () => references.updateAllFields(),
-      paragraphs: pkg.paragraphs, pageSettings: pkg.pageSettings, numbering: pkg.numbering, styles: pkg.styles, tables: pkg.tables, pageStories: pkg.pageStories, comments: pkg.comments, trackChanges: pkg.trackRevisions, assets: pkg.assets, drawingLayouts: pkg.drawingLayouts, images, readOnly: !!pkg.readOnly,
+      paragraphs: pkg.paragraphs, pageSettings: pkg.pageSettings, numbering: pkg.numbering, styles: pkg.styles, tables: pkg.tables, pageStories: pkg.pageStories, comments: pkg.comments, trackChanges: pkg.trackRevisions, assets: pkg.assets, drawingLayouts: pkg.drawingLayouts, images, measure, readOnly: !!pkg.readOnly,
       onChange: () => { linkCard.hide(); if (!reopening) { designVersions.redo = []; if (created.session.history.length >= 100) designVersions.undo = []; } labelHistory(); doc.changed(); update(); updateStatus(); proofing.changed(true); reviewTools.changed(); },
       onSelection: () => { linkCard.changed(); update(); proofing.selectionChanged(); reviewTools.selectionChanged(); }, onSave: save, onError: error, onLink: editHyperlink,
       onLinkClick: range => linkCard.show(range),
@@ -1536,7 +1536,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     const previous = engine, range = [...previous.model.range], scrollTop = host.scrollTop, scrollLeft = host.scrollLeft, scale = previous.zoom;
     previous.destroy(); releasePictures();
     pkg = opened.pkg; decodedPictures = opened.images;
-    engine = createEngine(CanvasEditor, opened.images);
+    engine = createEngine(CanvasEditor, opened.images, opened.measure);
     engine.setZoom(scale);
     const length = engine.model.text.length;
     engine.model.select(Math.min(range[0], length), Math.min(range[1], length));
@@ -1597,7 +1597,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     const images = opened.images; decodedPictures = images;
     await loadCanvasFonts();
     if (destroyed) { releasePictures(); return; }
-    engine = createEngine(CanvasEditor, images);
+    engine = createEngine(CanvasEditor, images, opened.measure);
     if (importedText) {
       // The imported text is the starting point, not an edit: it adds no undo step.
       engine.session.run(() => { engine.model.replace(importedText); engine.model.select(0); }, () => engine.validateStory(), { record: false });

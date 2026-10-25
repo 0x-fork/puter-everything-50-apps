@@ -4,7 +4,9 @@ import { referencePageGeometry } from './page-settings.js';
 
 export function sectionStoryBounds(page, definition, sectionIndex, section, measure, numbering, options) {
   page = referencePageGeometry(page);
-  const heights = new Map();
+  // A layout paginates its body more than once (footnote reservations, wrapping) with the same
+  // stories, page counts and section geometry; `options.storyHeightCache` keeps heights across them.
+  const heights = new Map(), shared = options.storyHeightCache, geometryKey = shared && JSON.stringify(page);
   return localPage => {
     const pageNumber = section.firstNumber + localPage;
     let top = page.top, bottom = page.height - page.bottom;
@@ -24,7 +26,9 @@ export function sectionStoryBounds(page, definition, sectionIndex, section, meas
             return placed.endY - trim;
           } catch (error) { if (!options.bestEffort) throw error; return 0; }
         };
-        heights.set(key, height(options));
+        const sharedKey = shared && `${sectionIndex}/${geometryKey}/${key}`;
+        heights.set(key, shared?.has(sharedKey) ? shared.get(sharedKey) : height(options));
+        shared?.set(sharedKey, heights.get(key));
         options.storyHeights?.set(`${sectionIndex}/${key}`, { height: heights.get(key), measure: height });
       }
       if (kind === 'header') top = Math.max(top, (page.header || 0) + heights.get(key));

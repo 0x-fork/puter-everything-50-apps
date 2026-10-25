@@ -13,13 +13,21 @@
 const OFFSET_KEYS = new Set(['start', 'end', 'trailingStart', 'drawingSegmentStart']);
 const STOP_LISTS = new Set(['stops', 'caretStops', 'textOffsets']);
 
+// Every layout copies each reused paragraph (once per pagination pass), so this stays a plain loop.
 function shifted(value, delta, list) {
-  if (Array.isArray(value)) return value.map(item => shifted(item, delta, list));
-  if (!value || typeof value !== 'object') return value;
-  const copy = {};
+  if (Array.isArray(value)) {
+    const copy = new Array(value.length);
+    for (let i = 0; i < value.length; i++) {
+      const item = value[i];
+      copy[i] = item && typeof item === 'object' ? shifted(item, delta, list) : item;
+    }
+    return copy;
+  }
+  const copy = {}, stops = STOP_LISTS.has(list);
   for (const key in value) {
     const item = value[key];
-    copy[key] = typeof item === 'number' ? OFFSET_KEYS.has(key) || key === 'offset' && STOP_LISTS.has(list) ? item + delta : item : shifted(item, delta, key);
+    copy[key] = typeof item === 'number' ? delta && (OFFSET_KEYS.has(key) || stops && key === 'offset') ? item + delta : item
+      : item && typeof item === 'object' ? shifted(item, delta, key) : item;
   }
   return copy;
 }
