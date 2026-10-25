@@ -59,14 +59,35 @@ export function assignFootnotes(placed, refs) {
 export function measureNote(story, display, numbers, geometry, measure, numbering, options = {}) {
   const paragraphs = numberedParagraphs(story.paragraphs, numbers, display);
   return measurePageStory({ ...story, paragraphs }, { ...geometry, storyKind: 'footnote', top: 0, bottom: 0 }, measure, numbering,
-    { pageNumber: 1, pageCount: 1, sectionPageCount: 1 }, { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined });
+    { pageNumber: 1, pageCount: 1, sectionPageCount: 1 }, { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined, stylesKey: options.storyStylesKey, storyKeys: options.storyKeys });
+}
+
+/** For each reference, the line of its paragraph that holds it: measurement, not pagination, decides this. */
+function referenceLines(placed, refs) {
+  const byParagraph = new Map();
+  for (const line of placed.lines) {
+    if (line.virtual || line.pageStory) continue;
+    const list = byParagraph.get(line.paragraphId);
+    if (list) list.push(line); else byParagraph.set(line.paragraphId, [line]);
+  }
+  return refs.map(ref => {
+    const lines = byParagraph.get(ref.paragraphId) || [];
+    const index = lines.findIndex(l => l.start <= ref.position && ref.position < l.end);
+    return `${ref.paragraphId}:${index < 0 ? lines.findIndex(l => l.start <= ref.position && ref.position <= l.end) : index}`;
+  }).join(' ');
 }
 
 /**
  * Lay out with footnote reservations. `layout(reserve)` paginates with `reserve[page]` px kept
  * free above the bottom margin. Returns the final layout with `footnoteAreas`.
+ *
+ * Settling the reservations lays the body out several times. With a measurer that remembers
+ * paragraphs, `flowContext` names everything besides the body's blocks that the settling reads
+ * (the notes, page stories, styles and page counts). An edit that leaves the blocks paginating
+ * alike (layoutPass flowSignature), its references on the same lines and the context unchanged
+ * settles exactly as before: the remembered final reservation is laid out once instead.
  */
-export function layoutWithFootnotes(plan, layout, measure, numbering, options) {
+export function layoutWithFootnotes(plan, layout, measure, numbering, options, flowContext) {
   const heights = new Map();
   const noteHeight = (id, geometry) => {
     const key = `${id}/${geometry.width}/${geometry.left}/${geometry.right}`;
@@ -88,9 +109,18 @@ export function layoutWithFootnotes(plan, layout, measure, numbering, options) {
   // A reference that only fits without its note's reservation moves to the next
   // page and takes the note along; that can alternate. When a state repeats,
   // reserve the union so the final layout and its note areas agree.
-  let reserve = {}, placed, pages;
+  let reserve = {}, placed, pages, settled = false;
+  const cache = flowContext ? measure.paragraphCache?.() : null;
+  const flowKey = cache && cache.intern(JSON.stringify([flowContext, [...plan.numbers], plan.settings, plan.position, plan.restart]));
+  const remembered = cache?.flows.get(flowKey);
+  if (remembered) {
+    const candidate = layout(remembered.reserve);
+    if (candidate.flowSignature !== undefined && candidate.flowSignature === remembered.signature && referenceLines(candidate, plan.refs) === remembered.references) {
+      placed = candidate; reserve = remembered.reserve; pages = assignFootnotes(placed, plan.refs); settled = true;
+    }
+  }
   const seen = new Set();
-  for (let attempt = 0; attempt < 8; attempt++) {
+  for (let attempt = 0; attempt < 8 && !settled; attempt++) {
     placed = layout(reserve);
     pages = assignFootnotes(placed, plan.refs);
     const next = needed(placed, pages), key = JSON.stringify(next);
@@ -105,6 +135,11 @@ export function layoutWithFootnotes(plan, layout, measure, numbering, options) {
     }
     seen.add(JSON.stringify(reserve));
     reserve = next;
+  }
+  if (cache && placed.flowSignature !== undefined) {
+    cache.flows.delete(flowKey);
+    cache.flows.set(flowKey, { reserve, signature: placed.flowSignature, references: referenceLines(placed, plan.refs) });
+    if (cache.flows.size > 8) cache.flows.delete(cache.flows.keys().next().value);
   }
   const final = needed(placed, pages);
   placed.footnoteAreas = [];

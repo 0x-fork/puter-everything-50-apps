@@ -4,9 +4,41 @@ import { isPositionedImage } from './images.js';
 import { pageFieldValue } from './docx-page-fields.js';
 import { resolveStyledParagraph } from './styles.js';
 import { pageStoryPositions } from './page-story-positions.js';
+import { revisionView } from './revisions.js';
 
-// The body clearance and story painter must measure the same generated text.
-export function measurePageStory(story, geometry, measure, numbering, context, { styles, drawingLayouts, onUnsupported } = {}) {
+/**
+ * What a story measurement reads besides the measurer, as text. Every page of a long document lays
+ * its header, footer and notes out again on each edit, mostly unchanged. A layout serializes its
+ * styles once (`stylesKey`) and each story's paragraphs once (`storyKeys`, by paragraphs array).
+ */
+function storyMeasureKey(cache, story, geometry, numbering, context, { styles, drawingLayouts, onUnsupported, stylesKey, storyKeys }) {
+  let paragraphs = storyKeys?.get(story.paragraphs);
+  if (paragraphs === undefined) { paragraphs = cache.intern(JSON.stringify(story.paragraphs)); storyKeys?.set(story.paragraphs, paragraphs); }
+  return JSON.stringify([paragraphs, { ...story, paragraphs: undefined }, geometry, numbering ?? null, context, revisionView,
+    styles ? cache.intern(stylesKey ?? JSON.stringify(styles)) : null, drawingLayouts ? [...drawingLayouts] : null, !!onUnsupported]);
+}
+
+// The body clearance and story painter must measure the same generated text. With a measurer that
+// remembers paragraphs, a story measured alike before is reused: its unsupported features are
+// reported again, and callers read the result without changing it.
+export function measurePageStory(story, geometry, measure, numbering, context, options = {}) {
+  const cache = measure.paragraphCache?.();
+  if (!cache) return measureStory(story, geometry, measure, numbering, context, options);
+  let key;
+  try { key = storyMeasureKey(cache, story, geometry, numbering, context, options); }
+  catch { return measureStory(story, geometry, measure, numbering, context, options); }
+  const remembered = cache.story(key);
+  if (remembered) {
+    for (const error of remembered.unsupported) options.onUnsupported(error);
+    return remembered.result;
+  }
+  const unsupported = [];
+  const result = measureStory(story, geometry, measure, numbering, context, { ...options, onUnsupported: options.onUnsupported && (error => { unsupported.push(error); options.onUnsupported(error); }) });
+  cache.rememberStory(key, { result, unsupported });
+  return result;
+}
+
+function measureStory(story, geometry, measure, numbering, context, { styles, drawingLayouts, onUnsupported } = {}) {
   const source = styles ? story.paragraphs.map(p => resolveStyledParagraph(structuredClone(p), styles, numbering)) : story.paragraphs;
   const paragraphs = source.map(p => ({ ...p, runs: p.runs.map(r => {
     if (!r.field) return r;

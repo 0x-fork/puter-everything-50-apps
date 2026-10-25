@@ -7,6 +7,7 @@ import { layoutDocument } from '../src/engine/layout.js';
 import { layoutPageStories } from '../src/engine/page-story-layout.js';
 import { pageGeometry } from '../src/engine/page-settings.js';
 import { footnoteNumbers, footnoteOpeningRuns } from '../src/engine/footnotes.js';
+import { ParagraphMeasureCache } from '../src/engine/paragraph-measure-cache.js';
 
 let dom;
 beforeAll(() => { dom = new JSDOM(); globalThis.DOMParser = dom.window.DOMParser; globalThis.XMLSerializer = dom.window.XMLSerializer; });
@@ -169,6 +170,31 @@ describe('footnotes', () => {
         expect(body.lines.some(l => l.paragraphId === pid && l.page === area.page)).toBe(true);
       }
     }
+  }, 120000);
+
+  it('settles reservations once, then reuses them for edits that leave every line where it was', async () => {
+    // A reference near the foot of a page needs several passes to settle its note's room.
+    const { pkg, model } = await open(notedDocx());
+    model.select(0); model.replace(Array.from({ length: 36 }, (_, i) => `Line ${i}`).join('\n') + '\n');
+    model.select(model.text.length); model.replace('\n' + Array.from({ length: 60 }, (_, i) => `Tail ${i}`).join('\n'));
+    const cache = new ParagraphMeasureCache(), remembered = (text, style) => measure(text, style);
+    remembered.paragraphCache = () => cache;
+    let passes = 0;
+    const measureParagraphs = cache.measure.bind(cache);
+    cache.measure = (...args) => { passes++; return measureParagraphs(...args); };
+    const lay = () => { passes = 0; cache.nextGeneration(); return layoutDocument(model.paragraphs, remembered, pageGeometry(model.pageSettings), model.numbering, model.tables, pkg.pageStories, { styles: model.styles }); };
+    const plain = body => JSON.stringify({ pages: body.pageCount, lines: body.lines.map(l => [l.paragraphId, l.page, l.y, l.start, l.end]), notes: body.footnoteAreas });
+    const blocks = model.paragraphs.length;
+    expect(plain(lay())).toBe(plain(layout(pkg, model)));
+    expect(passes).toBeGreaterThanOrEqual(2 * blocks);
+    // Typing in a later paragraph moves no line: one pass with the remembered reservations.
+    model.select(model.text.indexOf('Tail 30') + 4); model.replace('x');
+    expect(plain(lay())).toBe(plain(layout(pkg, model)));
+    expect(passes).toBe(blocks);
+    // Text before a reference that moves it to another line settles the reservations again.
+    model.select(model.text.indexOf('First claim')); model.replace('Words before the claim push its reference along the line. '.repeat(3));
+    expect(plain(lay())).toBe(plain(layout(pkg, model)));
+    expect(passes).toBeGreaterThan(blocks);
   }, 120000);
 
   it('tracks a footnote inserted with Track Changes on, so rejecting it removes the note', async () => {

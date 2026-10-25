@@ -15,7 +15,7 @@ export function layoutPageStories(body, definition, sectionSettings, measure, nu
   const borderMargins = [];
   const positions = [];
   if (!definition) return { lines, borders, cells, tableBorders, floatingObjects, paragraphFrames, unsupported, borderMargins };
-  const resolved = new Map();
+  const resolved = new Map(), storyKeys = new WeakMap();
   const storyParagraphs = (path, story) => {
     if (!styles) return story.paragraphs;
     if (!resolved.has(path)) resolved.set(path, story.paragraphs.map(p => resolveStyledParagraph(structuredClone(p), styles, numbering)));
@@ -46,7 +46,7 @@ export function layoutPageStories(body, definition, sectionSettings, measure, nu
       try {
         const { placed, trim, storyGeometry, positions: storyPositions } = measurePageStory({ ...story, paragraphs: storyParagraphs(path, story) }, { ...geometry, storyKind: kind }, measure, numbering,
           { pageNumber: numbers[page], pageCount: body.pageCount, sectionPageCount: counts.get(section), pageNumbering: definition.sections[section].pageNumbering },
-          { drawingLayouts, onUnsupported: bestEffort ? error => unsupported.push({ path, page, message: error.message }) : undefined });
+          { drawingLayouts, onUnsupported: bestEffort ? error => unsupported.push({ path, page, message: error.message }) : undefined, storyKeys });
         positions.push({ path, page, positions: storyPositions });
         const y = kind === 'header' ? settings.header / 15 : geometry.height - settings.footer / 15 - placed.endY + trim;
         const frames = new Map((placed.paragraphFrames || []).map(f=>[f.frameId,f]));
@@ -91,7 +91,7 @@ export function layoutPageStories(body, definition, sectionSettings, measure, nu
       if (!story) continue;
       if (note.y !== undefined) y = note.y;
       try {
-        const { placed, storyGeometry, positions: storyPositions } = measureNote({ ...story, paragraphs: storyParagraphs(note.path, story) }, note.display, numbers, geometry, measure, numbering, { drawingLayouts, bestEffort });
+        const { placed, storyGeometry, positions: storyPositions } = measureNote({ ...story, paragraphs: storyParagraphs(note.path, story) }, note.display, numbers, geometry, measure, numbering, { drawingLayouts, bestEffort, storyKeys });
         positions.push({ path: note.path, page: area.page, positions: storyPositions });
         const top = y, shifted = item => ({ ...item, page: area.page, pageStory: note.path, y: item.y + top, ...(item.cellClip ? { cellClip: shiftCellClip(item.cellClip, top) } : {}) });
         lines.push(...placed.lines.map(line => ({ ...shifted(line), storyGeometry, baseline: line.baseline + top })));

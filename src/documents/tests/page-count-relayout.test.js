@@ -4,6 +4,8 @@ import { layoutPageStories } from '../src/engine/page-story-layout.js';
 import { paragraph } from '../src/engine/model.js';
 import { DEFAULT_PAGE_SETTINGS, pageGeometry } from '../src/engine/page-settings.js';
 import { sectionStoryBounds } from '../src/engine/story-clearance.js';
+import { measurePageStory } from '../src/engine/page-story-measure.js';
+import { ParagraphMeasureCache } from '../src/engine/paragraph-measure-cache.js';
 
 // "Page X of Y" footers hold the page count, which is known only after layout. The body is laid out
 // again with the real count only when that count changes a header or footer's height.
@@ -60,4 +62,25 @@ it('measures each page\'s footer once across the passes of one layout', () => {
   const before = footers.length;
   expect(pass(1, {})).toEqual(bounds);
   expect(footers.length).toBeGreaterThan(before);
+});
+
+it('reuses page stories measured alike by an earlier layout, reporting their unsupported fields again', () => {
+  const cache = new ParagraphMeasureCache(), footers = [];
+  const measure = text => { if (text.startsWith('Page')) footers.push(text); return { width: text.length * 8, ascent: 12, descent: 4 }; };
+  measure.paragraphCache = () => cache;
+  const paragraphs = body(120), page = pageGeometry(DEFAULT_PAGE_SETTINGS);
+  const lay = () => { cache.nextGeneration(); return layoutDocument(paragraphs, measure, page, undefined, [], stories); };
+  const first = lay(), measured = footers.length;
+  expect(measured).toBeGreaterThan(0);
+  expect(lay()).toEqual(first);
+  expect(footers).toHaveLength(measured);
+  const fresh = layoutDocument(paragraphs, text => ({ width: text.length * 8, ascent: 12, descent: 4 }), page, undefined, [], stories);
+  expect(first.lines.map(l => [l.page, l.y])).toEqual(fresh.lines.map(l => [l.page, l.y]));
+  const chapter = { ...footer, paragraphs: [paragraph('', { runs: [{ text: 'Page ' }, { text: '￼', field: { type: 'PAGE', cachedText: '1' } }] })] };
+  const unsupported = [], options = { onUnsupported: error => unsupported.push(error.message) };
+  const context = { pageNumber: 2, pageCount: 3, sectionPageCount: 3, pageNumbering: { chapterStyle: 1 } };
+  const once = measurePageStory(chapter, { ...page, storyKind: 'footer' }, measure, undefined, context, options);
+  const again = measurePageStory(chapter, { ...page, storyKind: 'footer' }, measure, undefined, context, options);
+  expect(again).toBe(once);
+  expect(unsupported).toEqual(['Chapter-prefixed page numbers are not supported yet.', 'Chapter-prefixed page numbers are not supported yet.']);
 });

@@ -1592,7 +1592,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     const template = !doc.blob && doc.template ? templateById(doc.template) : null;
     const blank = () => createDocx([paragraph()], defaultPageSettings(), undefined, undefined, [], {}, WRITING_STYLES);
     // A new document starts from the page and Design defaults the user set, if any.
-    const opened = doc.blob ? await openCanvasDocument(doc.blob) : await editorCommands.newDocumentDefaults?.(blank(), openCanvasDocument) || { pkg: blank(), images: new Map() };
+    // A host that already opened the file (the local playground validates it first) hands it over once.
+    const handed = doc.opened; doc.opened = null;
+    const opened = handed || (doc.blob ? await openCanvasDocument(doc.blob) : await editorCommands.newDocumentDefaults?.(blank(), openCanvasDocument) || { pkg: blank(), images: new Map() });
     pkg = opened.pkg;
     const images = opened.images; decodedPictures = images;
     await loadCanvasFonts();

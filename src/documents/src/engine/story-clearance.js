@@ -22,7 +22,7 @@ export function sectionStoryBounds(page, definition, sectionIndex, section, meas
           try {
             const { placed, trim } = measurePageStory(story, { ...page, storyKind: kind }, measure, numbering,
               { pageNumber, pageCount: counts.pageCount || 1, sectionPageCount: counts.sectionCounts?.[sectionIndex] || 1, pageNumbering: definition.sections[sectionIndex].pageNumbering },
-              { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined });
+              { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined, stylesKey: options.storyStylesKey, storyKeys: options.storyKeys });
             return placed.endY - trim;
           } catch (error) { if (!options.bestEffort) throw error; return 0; }
         };

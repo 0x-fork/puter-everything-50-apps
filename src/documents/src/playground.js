@@ -23,14 +23,18 @@ let current, request = 0;
 const host = el('div.playground-editor');
 const open = async (name, blob, { initial = false, collab = null } = {}) => {
   const token = ++request;
+  // Opened once: the editor starts from this validated package and its measurements.
+  let opened = null;
+  const release = () => { for (const image of opened?.images.values() || []) image.close(); };
   try {
-    if (blob) { const { images } = await openCanvasDocument(blob); for (const image of images.values()) image.close(); }
+    if (blob) opened = await openCanvasDocument(blob);
   }
   catch (e) { document.getElementById('playground-error').textContent = e.message; return; }
-  if (token !== request) return;
-  if (!initial && current?.doc.dirty && !window.confirm('Open another document? Download your current changes first if you want to keep them.')) return;
+  if (token !== request) { release(); return; }
+  if (!initial && current?.doc.dirty && !window.confirm('Open another document? Download your current changes first if you want to keep them.')) { release(); return; }
   current?.destroy();
   const doc = new LocalDocument(name, blob);
+  doc.opened = opened;
   if (collab) { doc.collab = collab; doc.setSaving(false); }
   current = editorView({
     doc, local: true,

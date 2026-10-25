@@ -39,6 +39,7 @@ import { resolveDrawingCollisions } from './drawing-collisions.js';
 import { floatingParagraph } from './floating-images.js';
 import { exactRowHeight, rowPadding } from './row-height.js';
 import { blockMinimumHeight } from './block-layout.js';
+import { readOnlyMeasurement } from './paragraph-measure-cache.js';
 import { sectionStoryBounds } from './story-clearance.js';
 import { spacedFormat } from './document-views.js';
 import { footnotePlan, endnotePlan, layoutWithFootnotes, pageRestartedNumbers, placeEndnotes } from './footnote-layout.js';
@@ -130,9 +131,14 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
   for (let attempt = 0; attempt < MAX_PAGES; attempt++) {
     // Page counts reach the body only through the header and footer heights they produce.
     const storyHeights = totals ? new Map() : undefined, storyHeightCache = new Map(), paragraphKeys = new WeakMap();
+    // Page stories measured by this layout share one serialization of the styles and of each story (page-story-measure.js).
+    const storyScope = measureBase.paragraphCache ? { storyStylesKey: JSON.stringify(storyOptions.styles ?? null), storyKeys: new WeakMap() } : {};
+    // Everything besides the blocks that decides where footnote references land and how tall their notes are.
+    const flowContext = () => measureBase.paragraphCache && JSON.stringify([counts, pageStories, storyOptions.styles ?? null, numbering ?? null, !!storyOptions.bestEffort,
+      storyOptions.drawingLayouts ? [...storyOptions.drawingLayouts] : null, revisionView]);
     const flow = () => notes
-      ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights, storyHeightCache, paragraphKeys, noteReserve }), measureBase, numbering, storyOptions)
-      : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...counts, storyHeights, storyHeightCache, paragraphKeys });
+      ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...storyScope, ...counts, storyHeights, storyHeightCache, paragraphKeys, noteReserve }), measureBase, numbering, { ...storyOptions, ...storyScope }, flowContext())
+      : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...storyScope, ...counts, storyHeights, storyHeightCache, paragraphKeys });
     placed = flow();
     // Footnotes numbered per page (§17.11.19 eachPage) need their pages first; renumber once and lay out again.
     if (notes?.restart === 'eachPage') {
@@ -160,10 +166,13 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
 function layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, storyOptions) {
   let placed = layoutPass(paragraphs, measureBase, page, numbering, tables, pageStories, undefined, storyOptions);
   if (!placed.paragraphFrames?.length && (page.storyKind === 'footer' && (page.compatibilityMode ?? 12) < 15 || !tables.some(t => t.floating) && !paragraphs.some(p => p.runs.some(r => isSideWrappedImage(r.image))))) return placed;
+  // Wrapping around drawings depends on where the earlier pass placed them, not only on the blocks.
+  delete placed.flowSignature;
   let signature = squareFlowSignature(placed);
   for (let attempt = 0; attempt < paragraphs.length * 2 + 8; attempt++) {
     const next = layoutPass(paragraphs, measureBase, page, numbering, tables, pageStories, squareFlowHints(placed), storyOptions);
     const nextSignature = squareFlowSignature(next);
+    delete next.flowSignature;
     if (nextSignature === signature) return next;
     placed = next; signature = nextSignature;
   }
@@ -176,10 +185,13 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
   const measure = (text, style) => measureTextGeometry(text, style, measureBase);
   // Body paragraphs measured by an earlier layout with this measurer (paragraph-measure-cache.js).
   const paragraphCache = measureBase.paragraphCache?.();
-  const pageKeys = new WeakMap(), sharedKey = paragraphCache && JSON.stringify([numbering ?? null, revisionView]);
+  // Page geometry and numbering are long; keys name them by the cache's short ids (intern).
+  const pageKeys = new WeakMap(), sharedKey = paragraphCache && paragraphCache.intern(JSON.stringify([numbering ?? null, revisionView]));
   // Paragraphs keep their content through the passes of one layout; serialize each once.
   const paragraphKeys = storyOptions.paragraphKeys || new WeakMap();
-  const pageKey = geometry => { let key = pageKeys.get(geometry); if (key === undefined) pageKeys.set(geometry, key = JSON.stringify(geometry)); return key; };
+  // What pagination reads of each block, in order (paragraph-measure-cache.js flowName).
+  let flowNames = paragraphCache ? [] : null;
+  const pageKey = geometry => { let key = pageKeys.get(geometry); if (key === undefined) pageKeys.set(geometry, key = paragraphCache.intern(JSON.stringify(geometry))); return key; };
   // A screen view (web, draft, read) lays every section out on its own display geometry.
   const viewPage = storyOptions.viewGeometry || (geometry => geometry);
   page = viewPage(page);
@@ -271,16 +283,18 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
         let key = null;
         if (paragraphCache && !squareHintsReach(hints, block.paragraph.id) && !page.rotatedCellText && !page.columnWidthAt && !block.paragraph.runs.some(r => r.image)) {
           try {
-            let content = paragraphKeys.get(block.paragraph);
-            if (content === undefined) paragraphKeys.set(block.paragraph, content = JSON.stringify(block.paragraph));
-            key = `[${content},${JSON.stringify([pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey])}]`;
+            // The same key string in every pass keeps its hash: the cache does not hash a long paragraph again.
+            let keys = paragraphKeys.get(block.paragraph);
+            if (!keys) paragraphKeys.set(block.paragraph, keys = { content: JSON.stringify(block.paragraph), byContext: new Map() });
+            const context = JSON.stringify([pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey]);
+            key = keys.byContext.get(context);
+            if (key === undefined) keys.byContext.set(context, key = `[${keys.content},${context}]`);
           } catch { key = null; }
         }
-        const measured = key === null ? run() : paragraphCache.measure(key, block.offset, run);
+        const measured = key === null ? readOnlyMeasurement(run()) : paragraphCache.measure(key, block.offset, run);
         // Removing a floating frame from body flow must not join paragraph
         // borders across the source paragraph that interrupted the group.
-        if (!page.paragraphFrameFlow && framePlan.byParagraph.has(previous?.id)) measured.borderGroupStart = true;
-        return [measured];
+        return [!page.paragraphFrameFlow && framePlan.byParagraph.has(previous?.id) ? { ...measured, borderGroupStart: true } : measured];
       }
       const { table } = block;
       const cellBorders = new Map(), cellBottomWidths = new Map(); let borderWidths = tableRowBorderWidths(block, cellBorders, undefined, cellBottomWidths);
@@ -415,17 +429,15 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
             const childPage = page.shapeText && child.table && !child.table.floating ? {
               ...cellPage, left: cellPage.left - nestedShift, right: cellPage.right + nestedShift,
             } : cellPage;
-            const results = measureBlock(child, childPage, { left: box.x, right: x, anchorId: anchor?.id, first: cellIndex === 0, rowStart: rowIndex > 0 && cell === row.cells[0], ...continuationContext, ...followingContext, last: cellIndex === cell.content.length - 1, afterTable: !!cell.content[cellIndex - 1]?.table, hideMark: cell.hideMark && cellIndex === cell.content.length - 1 });
-            if (child.paragraph) for (const result of results) {
-              if (result.format.pageBreakBefore) {
-                if (!storyOptions.bestEffort && !storyOptions.previewCellPageBreaks) throw new Error('Page breaks inside table cells are not supported yet.');
-                // Only the measured preview changes; retain the authored
-                // property and rich paragraph in the model and original file.
-                result.format = { ...result.format, pageBreakBefore: false };
-              }
+            let results = measureBlock(child, childPage, { left: box.x, right: x, anchorId: anchor?.id, first: cellIndex === 0, rowStart: rowIndex > 0 && cell === row.cells[0], ...continuationContext, ...followingContext, last: cellIndex === cell.content.length - 1, afterTable: !!cell.content[cellIndex - 1]?.table, hideMark: cell.hideMark && cellIndex === cell.content.length - 1 });
+            if (child.paragraph) results = results.map(result => {
+              if (result.format.pageBreakBefore && !storyOptions.bestEffort && !storyOptions.previewCellPageBreaks) throw new Error('Page breaks inside table cells are not supported yet.');
               if (result.lines.some(l => ['page', 'column'].includes(l.hardBreak))) throw new Error('Page breaks inside table cells are not supported yet.');
-              for (const line of result.lines) { line.cellId = cell.id; line.columnLeft = cellPage.left; }
-            }
+              // Only the measured preview changes; retain the authored
+              // property and rich paragraph in the model and original file.
+              return { ...result, ...(result.format.pageBreakBefore ? { format: { ...result.format, pageBreakBefore: false } } : {}),
+                lines: result.lines.map(line => ({ ...line, cellId: cell.id, columnLeft: cellPage.left })) };
+            });
             if (child.table?.floating) {
               if (!anchor) throw new Error('Floating tables require a following anchor paragraph.');
               nestedFloats.push({ tableId: child.table.id, cellRight: x, position: child.table.floating, blocks: results, anchorId: anchor.id });
@@ -443,7 +455,7 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
             if (cell.content.some(child => !child.paragraph)) throw new UnsupportedRotatedCellError('Nested tables within rotated cells require additional layout support.', cell.id);
             if (cell.hideMark) throw new UnsupportedRotatedCellError('Hidden terminal marks in rotated cells require additional layout support.', cell.id);
             const terminal = cell.content.at(-1), markStyle = runFormat(terminal.paragraph.markFormat);
-            const placeholder = measureBlock({ ...terminal, paragraph: { ...terminal.paragraph, runs: [], format: { ...terminal.paragraph.format, spaceBefore: 0 } } }, cellPage)[0];
+            const placeholder = { ...measureBlock({ ...terminal, paragraph: { ...terminal.paragraph, runs: [], format: { ...terminal.paragraph.format, spaceBefore: 0 } } }, cellPage)[0] };
             placeholder.format = { ...placeholder.format, spaceBefore: 0 };
             const required = rotatedCellMinimumHeight(placeholder.format, markStyle, measure('', markStyle));
             placeholder.lines = [{ ...placeholder.lines[0], cellId: cell.id, height: required - placeholder.format.spaceAfter * 4 / 3, fitHeight: required - placeholder.format.spaceAfter * 4 / 3 }];
@@ -523,6 +535,10 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
     }
     currentSection.measures.push(widthAt => measureBlock(block, { ...measuredPage, columnWidthAt: widthAt }));
     const result = measureBlock(block, page);
+    if (flowNames) {
+      try { flowNames.push(`${pageKey(page)}:${block.paragraph ? result.map(r => paragraphCache.flowName(r)).join(',') : paragraphCache.flowName(result, true)}`); }
+      catch { flowNames = null; }
+    }
     if (block.table?.floating) {
       const anchor = floatingAnchor;
       if (!anchor) throw new Error('Floating tables require a following anchor paragraph.');
@@ -724,7 +740,7 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
   const paragraphBorders = layoutParagraphBorders(placed);
   let offset = 0;
   const pageOffsets = placed.pages.map(p => { const start = offset; offset += p.height; return start; });
-  return { ...placed, page, pageOffsets, tableWidths, paragraphBorders, tableBorders: layoutTableBorders(placed.cells), ...(hasRotatedCells ? { hasRotatedCells: true } : {}) };
+  return { ...placed, page, pageOffsets, tableWidths, paragraphBorders, tableBorders: layoutTableBorders(placed.cells), ...(hasRotatedCells ? { hasRotatedCells: true } : {}), ...(flowNames ? { flowSignature: flowNames.join(' ') } : {}) };
 }
 
 // Give pagination all rows connected by vertical spans, without keeping them on a page.

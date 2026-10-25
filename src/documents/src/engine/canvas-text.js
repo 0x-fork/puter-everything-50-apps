@@ -70,10 +70,17 @@ export function usesRoundedFontAdvances(context, style) {
 // A font-encoded numbering glyph and its Unicode fallback are not interchangeable.
 // Use the original glyph only with its own available font, in both paint/measure.
 export function canvasText(context, text, style) {
+  return symbolCanvasText(context, text, style, ownSymbolFont(context, style));
+}
+function ownSymbolFont(context, style) {
   const symbol = style.symbol;
+  if (!symbol) return false;
   const family = displayedFont(style, fontAlternatives.get(context));
-  const matches = symbol && (family.toLowerCase() === symbol.font.trim().toLowerCase() ||
-    (isEmbeddedFont(family) || fileFontSources(family)) && family === displayedFont({ fontFamily: symbol.font }, fontAlternatives.get(context)));
+  return family.toLowerCase() === symbol.font.trim().toLowerCase() ||
+    (isEmbeddedFont(family) || fileFontSources(family)) && family === displayedFont({ fontFamily: symbol.font }, fontAlternatives.get(context));
+}
+function symbolCanvasText(context, text, style, matches) {
+  const symbol = style.symbol;
   const painted=bidiPaintText(symbol && text === symbol.fallback && matches ? symbol.text : text.replaceAll('\u00a0', ' '), style);
   return painted.includes('\u2028')?literalSeparatorText(painted,selectedCanvasFamily(context,renderedStyle(context,style))):painted;
 }
@@ -88,24 +95,39 @@ export function canvasLetterSpacing(style) {
 }
 export const canvasWordSpacing = style => (style.justificationSpacing || 0) / (textTransform(style)?.scaleX || 1);
 export function setCanvasTextStyle(context, style) {
+  applyCanvasTextState(context, canvasTextState(context, style));
+}
+// The canvas state that draws or measures `style`, worked out from the style alone.
+function canvasTextState(context, style) {
   if (!context) throw new Error('Canvas 2D is unavailable in this browser.');
   style = renderedStyle(context, style);
   const selected=selectedCanvasFamily(context,style);
-  const separatorFamily=literalSeparatorFamily(selected);
   const nativeFont=font(selected === (style.fontFamily||style.fontAscii||'Noto Sans') ? style : { ...style, fontFamily: selected });
   const primary=isBundledFont(selected)?'"Canvas Noto Sans"':cssFontString(selected);
-  // Keep the real family first: the private face supplies only the absent alias.
-  context.font=separatorFamily?nativeFont.replace(primary,()=>`${primary}, ${cssFontString(separatorFamily)}`):nativeFont;
-  // Canvas defaults to standard ligatures; DOCX defaults to none. Explicit
-  // fontKerning below retains the independent run kerning threshold.
-  if ('textRendering' in context) context.textRendering = style.ligatures === 'none' ? 'optimizeSpeed' : 'auto';
-  context.direction = style.bidiDirection || 'ltr';
   if (!('fontKerning' in context)) throw new Error('This browser cannot control font kerning. Open the document in a browser with Canvas font-kerning support.');
-  context.fontKerning = kerningEnabled(style) ? 'normal' : 'none';
-  if ('letterSpacing' in context) context.letterSpacing = `${canvasLetterSpacing(style)}px`;
-  else if (style.characterSpacing) throw new Error('This browser cannot display character spacing. Open the document in a browser with Canvas letter-spacing support.');
-  if ('wordSpacing' in context) context.wordSpacing = `${canvasWordSpacing(style)}px`;
-  else if (style.justificationSpacing) throw new Error('This browser cannot display justified text. Open the document in a browser with Canvas word-spacing support.');
+  if (!('letterSpacing' in context) && style.characterSpacing) throw new Error('This browser cannot display character spacing. Open the document in a browser with Canvas letter-spacing support.');
+  if (!('wordSpacing' in context) && style.justificationSpacing) throw new Error('This browser cannot display justified text. Open the document in a browser with Canvas word-spacing support.');
+  return {
+    selected, nativeFont, primary,
+    // Canvas defaults to standard ligatures; DOCX defaults to none. Explicit
+    // fontKerning below retains the independent run kerning threshold.
+    textRendering: style.ligatures === 'none' ? 'optimizeSpeed' : 'auto',
+    direction: style.bidiDirection || 'ltr',
+    fontKerning: kerningEnabled(style) ? 'normal' : 'none',
+    letterSpacing: `${canvasLetterSpacing(style)}px`,
+    wordSpacing: `${canvasWordSpacing(style)}px`,
+  };
+}
+function applyCanvasTextState(context, state) {
+  // A deferred private separator face can become available later: look it up each time.
+  const separatorFamily=literalSeparatorFamily(state.selected);
+  // Keep the real family first: the private face supplies only the absent alias.
+  context.font=separatorFamily?state.nativeFont.replace(state.primary,()=>`${state.primary}, ${cssFontString(separatorFamily)}`):state.nativeFont;
+  if ('textRendering' in context) context.textRendering = state.textRendering;
+  context.direction = state.direction;
+  context.fontKerning = state.fontKerning;
+  if ('letterSpacing' in context) context.letterSpacing = state.letterSpacing;
+  if ('wordSpacing' in context) context.wordSpacing = state.wordSpacing;
 }
 
 export function validateCanvasTextSupport(pkg) {
@@ -224,21 +246,15 @@ export async function loadCanvasFonts(pkg) {
 }
 
 export function measureCanvasText(context, text, style, onSeparatorReady) {
-  style = renderedStyle(context, style);
-  if(onSeparatorReady&&style.verticalAlign&&style.verticalAlign!=='baseline'&&!scriptFontSizeReady(style)){
-    let requested=scriptRequests.get(context);if(!requested)scriptRequests.set(context,requested=new Set());
-    const id=JSON.stringify([style.fontFamily,separatorFontVersion()]);
-    if(!requested.has(id)){
-      requested.add(id);
-      void prepareScriptFontSizes(new Set([style.fontFamily])).then(onSeparatorReady);
-    }
-  }
-  if(onSeparatorReady&&text.includes('\u2028')&&!literalSeparatorFamily(selectedCanvasFamily(context,style))){
-    let requested=separatorRequests.get(context);if(!requested)separatorRequests.set(context,requested=new Set());
-    const id=JSON.stringify([font(style),style.legacyKerning,style.ligatures,style.kerning,separatorFontVersion()]);
-    if(!requested.has(id)){requested.add(id);void prepareLiteralSeparatorDisplay(style).then(changed=>{if(changed)onSeparatorReady();});}
-  }
+  return measurePreparedText(context, prepareCanvasMeasure(context, style), text, onSeparatorReady);
+}
 
+/**
+ * What measuring reads of a style but not of its text: the displayed face, the scale it is shaped
+ * at and the canvas state. A measurer that remembers texts by style prepares each style once.
+ */
+export function prepareCanvasMeasure(context, style) {
+  style = renderedStyle(context, style);
   // One shaping call at outline scale avoids bitmap advances and fractional
   // CSS-em truncation, retaining authored spacing and line-box metrics.
   const outlined = usesRoundedFontAdvances(context, style);
@@ -253,13 +269,38 @@ export function measureCanvasText(context, text, style, onSeparatorReady) {
       kerning: kerningEnabled(style) ? style.kerning * scale : 0,
     };
   }
-  if(measuredStyle!==style&&style.verticalAlign&&style.verticalAlign!=='baseline')measuredStyle.scriptReferenceSize=style.scriptReferenceSize??style.fontSize??12;
+  const script = !!style.verticalAlign && style.verticalAlign !== 'baseline';
+  if(measuredStyle!==style&&script)measuredStyle.scriptReferenceSize=style.scriptReferenceSize??style.fontSize??12;
+  const faceFamily = displayedFont(style);
+  return {
+    style, outlined, scale, measuredStyle, state: canvasTextState(context, measuredStyle), symbolFont: ownSymbolFont(context, style),
+    faceFamily, faceFont: isBundledFont(faceFamily) ? null : font({ ...style, fontSize: 1536 }),
+    script, scriptTransform: script ? textTransform(style) : undefined, metrics: null,
+  };
+}
+
+/** Measure `text` in a style prepared by prepareCanvasMeasure on the same context. */
+export function measurePreparedText(context, prepared, text, onSeparatorReady) {
+  const { style, outlined, scale, measuredStyle } = prepared;
+  if(onSeparatorReady&&prepared.script&&!scriptFontSizeReady(style)){
+    let requested=scriptRequests.get(context);if(!requested)scriptRequests.set(context,requested=new Set());
+    const id=JSON.stringify([style.fontFamily,separatorFontVersion()]);
+    if(!requested.has(id)){
+      requested.add(id);
+      void prepareScriptFontSizes(new Set([style.fontFamily])).then(onSeparatorReady);
+    }
+  }
+  if(onSeparatorReady&&text.includes('\u2028')&&!literalSeparatorFamily(selectedCanvasFamily(context,style))){
+    let requested=separatorRequests.get(context);if(!requested)separatorRequests.set(context,requested=new Set());
+    const id=JSON.stringify([font(style),style.legacyKerning,style.ligatures,style.kerning,separatorFontVersion()]);
+    if(!requested.has(id)){requested.add(id);void prepareLiteralSeparatorDisplay(style).then(changed=>{if(changed)onSeparatorReady();});}
+  }
   if (outlined) context.save();
-  setCanvasTextStyle(context, measuredStyle);
-  const displayedText=canvasText(context,text,style);
+  applyCanvasTextState(context, prepared.state);
+  const displayedText=symbolCanvasText(context,text,style,prepared.symbolFont);
   const native = context.measureText(displayedText);
-  const face = !isBundledFont(displayedFont(style)) && Number.isFinite(native.fontBoundingBoxAscent)
-    ? nativeFaceMetrics(font({ ...style, fontSize: 1536 }), displayedFont(style), style) : undefined;
+  const face = prepared.faceFont && Number.isFinite(native.fontBoundingBoxAscent)
+    ? nativeFaceMetrics(prepared.faceFont, prepared.faceFamily, style) : undefined;
   const box = measuredStyle === style ? native : {
     fontBoundingBoxAscent: native.fontBoundingBoxAscent / scale,
     fontBoundingBoxDescent: native.fontBoundingBoxDescent / scale,
@@ -268,8 +309,12 @@ export function measureCanvasText(context, text, style, onSeparatorReady) {
   const caretText=style.caretOffsets&&caretGlyphs.includes('\u2028')?literalSeparatorText(caretGlyphs,selectedCanvasFamily(context,style)):caretGlyphs;
   const caretAdvances=style.caretOffsets && shapedCaretAdvances(context,caretText,style.caretOffsets,native.width / scale);
   if (outlined) context.restore();
-  const result = { width: native.width / scale, ...fontMetrics(style, box, face), ...(caretAdvances ? {caretAdvances} : {}) };
-  if(style.verticalAlign&&style.verticalAlign!=='baseline')result.scriptTransform=textTransform(style);
+  // Font bounding boxes belong to the face, not the letters: the line metrics repeat for every text.
+  let metrics = prepared.metrics;
+  if (!metrics || metrics.face !== face || metrics.ascent !== box.fontBoundingBoxAscent || metrics.descent !== box.fontBoundingBoxDescent)
+    metrics = prepared.metrics = { face, ascent: box.fontBoundingBoxAscent, descent: box.fontBoundingBoxDescent, value: fontMetrics(style, box, face) };
+  const result = { width: native.width / scale, ...metrics.value, ...(caretAdvances ? {caretAdvances} : {}) };
+  if(prepared.script)result.scriptTransform=prepared.scriptTransform;
   return result;
 }
 

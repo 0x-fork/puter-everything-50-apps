@@ -63,12 +63,20 @@ it('measures again when a paragraph, its list label or its page changes in place
   doc.undo(); check(); doc.undo(); check(); doc.redo(); check();
 });
 
-it('keeps each use separate, so later layout stages cannot change a remembered measurement', () => {
+it('shares remembered measurements read-only, so later layout stages cannot change them', () => {
   const doc = new TextDocument([paragraph('Alpha beta gamma'), paragraph('Delta')]);
   const { measure } = cachedMeasure();
   const first = lay(doc, measure);
-  first.lines[0].fragments[0].x += 100; first.lines[0].stops[0].offset = 99;
+  // Layout passes and later layouts share the remembered lines instead of copying them.
+  expect(lay(doc, measure).lines[0].fragments).toBe(first.lines[0].fragments);
+  expect(() => { first.lines[0].fragments[0].x += 100; }).toThrow(TypeError);
+  expect(() => { first.lines[0].stops[0].offset = 99; }).toThrow(TypeError);
   expect(plain(lay(doc, measure))).toEqual(plain(lay(doc, metrics)));
+  // A moved paragraph is copied once, at its new offsets, and then shared again.
+  doc.select(0); doc.replace('x');
+  const moved = lay(doc, measure).lines.at(-1);
+  expect(moved.start).toBe(first.lines.at(-1).start + 1);
+  expect(lay(doc, measure).lines.at(-1).fragments).toBe(moved.fragments);
 });
 
 it('bounds its memory: replaced paragraphs are forgotten, and the least recently used go first', () => {
