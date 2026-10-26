@@ -49,7 +49,7 @@ export function fitContractedWord(chars, start, end, lastBreak, scanner, right, 
   for (;;) {
     if (scanner.end - right > spaces * .25 + 1e-6) return null;
     i++;
-    if (i === chars.length || breakAfter(chars[i - 1].text, chars[i - 1].image, chars[i - 1].noBreakHyphen) || /[\s\u000e]/u.test(chars[i].text) && breakAfter(chars[i].text, chars[i].image, chars[i].noBreakHyphen)) break;
+    if (i === chars.length || breakAfter(chars[i - 1].text, chars[i - 1].image, chars[i - 1].noBreakHyphen, chars[i - 1].wordBreak) || /[\s\u000e]/u.test(chars[i].text) && breakAfter(chars[i].text, chars[i].image, chars[i].noBreakHyphen)) break;
     if (chars[i].image) return null;
     scanner.add(chars[i]);
   }

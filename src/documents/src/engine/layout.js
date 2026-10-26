@@ -24,6 +24,7 @@ import { documentBlocks, fixedColumnWidths, roundColumnWidths, autoColumnWidths,
 import { measureTextGeometry } from './text-geometry.js';
 import { prepareTableHeader } from './table-headers.js';
 import { breakAfter, cellIntrinsicWidths } from './intrinsic-widths.js';
+import { dictionaryBreaks, splitsSyllable } from './dictionary-breaks.js';
 import { listMarkers } from './numbering.js';
 import { markerGeometry } from './list-layout.js';
 import { paragraphEdges } from './paragraph-geometry.js';
@@ -804,6 +805,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
   let chars = [];
   // Segment the whole paragraph, so a grapheme spanning two format runs stays intact.
   let runIndex = 0, runEnd = p.runs[0]?.text.length ?? 0, styleIndex = -1, runStyle, runHidden = false;
+  const wordBreaks = dictionaryBreaks(text);
   for (const s of inlineSegments(text)) {
     while (s.index >= runEnd && runIndex < p.runs.length - 1) runEnd += p.runs[++runIndex].text.length;
     // Normalize the immutable run once; font-slot selection still follows each
@@ -824,7 +826,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
     const ignoredCellBreak = runHidden || !!p.cellId && (s.segment === '\f' || s.segment === '\u000e');
     const noBreakHyphen = !!p.runs[runIndex]?.noBreakHyphen;
     const displayText = inlineDisplayText(p.runs[runIndex], s.segment);
-    chars.push({ text: ignoredCellBreak ? '' : displayText, ignoredCellBreak, ...(noBreakHyphen ? { noBreakHyphen: true } : {}), breakClear: p.runs[runIndex]?.breakClear, start: documentOffset + s.index, end: documentOffset + s.index + s.segment.length, style: textFontStyle(displayText, runStyle), image: runHidden ? undefined : p.runs[runIndex]?.image, positionalTab: p.runs[runIndex]?.positionalTab });
+    chars.push({ text: ignoredCellBreak ? '' : displayText, ignoredCellBreak, ...(noBreakHyphen ? { noBreakHyphen: true } : {}), ...(wordBreaks?.has(s.index + s.segment.length) ? { wordBreak: true } : {}), breakClear: p.runs[runIndex]?.breakClear, start: documentOffset + s.index, end: documentOffset + s.index + s.segment.length, style: textFontStyle(displayText, runStyle), image: runHidden ? undefined : p.runs[runIndex]?.image, positionalTab: p.runs[runIndex]?.positionalTab });
   }
   // Active RTL import/editing remains guarded while interaction is verified.
   // Do not alter the existing unmarked-text path during that rollout.
@@ -872,7 +874,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
         oversizedInline = true;
       }
       if (oversizedInline && [' ', '\u00ad'].includes(c.text)) lastBreak = end;
-      if (breakAfter(c.text, c.image, c.noBreakHyphen) && (c.text !== '\u00ad' || scanner.discretionaryEnd() <= right + 1e-6)) lastBreak = end;
+      if (breakAfter(c.text, c.image, c.noBreakHyphen, c.wordBreak) && (c.text !== '\u00ad' || scanner.discretionaryEnd() <= right + 1e-6)) lastBreak = end;
     }
     // A word that fits the next interval stays intact instead of being split
     // into a narrow sliver beside a floating object.
@@ -884,7 +886,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
         for (let i=start;i<chars.length;i++) {
           if ([' ','\v','\f','\u000e'].includes(chars[i].text)) break;
           word.add(chars[i]);
-          if (word.end > fullWidth || breakAfter(chars[i].text, chars[i].image, chars[i].noBreakHyphen)) break;
+          if (word.end > fullWidth || breakAfter(chars[i].text, chars[i].image, chars[i].noBreakHyphen, chars[i].wordBreak)) break;
         }
         // The obstacle is cleared before emergency character breaks are used.
         // Cap at the paragraph width so overlong words still make progress.
@@ -903,7 +905,7 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
       for (let i=start;i<chars.length;i++) {
         if ([' ','\v','\f','\u000e'].includes(chars[i].text)) break;
         word.add(chars[i]);
-        if (word.end > maximum || breakAfter(chars[i].text, chars[i].image, chars[i].noBreakHyphen)) break;
+        if (word.end > maximum || breakAfter(chars[i].text, chars[i].image, chars[i].noBreakHyphen, chars[i].wordBreak)) break;
       }
       if (word.end <= maximum) { pieceIndex++; continue; }
     }
@@ -915,6 +917,8 @@ function measureParagraph(p, documentOffset, measure, page, listMarker, numberin
       : null;
     if (autoHyphen !== null) end = lastBreak = autoHyphen;
     if (end < chars.length && !['\v', '\f', '\u000e'].includes(chars[end].text) && lastBreak > start) end = lastBreak;
+    // A forced break inside an overlong Thai or Lao word keeps vowels with their consonant.
+    else if (end < chars.length && !oversizedInline) while (end - 1 > start && splitsSyllable(chars[end - 1].text, chars[end].text)) end--;
     const softBreak = !oversizedInline && end < chars.length && !['\v', '\f', '\u000e'].includes(chars[end].text) && chars[end - 1]?.text === '\u00ad' && end === lastBreak;
     let span = chars.slice(start, end);
     if (softBreak) span[span.length - 1] = { ...span.at(-1), text: '-', discretionaryHyphen: true };

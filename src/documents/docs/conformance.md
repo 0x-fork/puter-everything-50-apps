@@ -7217,6 +7217,39 @@ Automatic linguistic hyphenation, soft-hyphen support and general multilingual
 line-breaking rules remain separate gaps. Forced grapheme wrapping of oversized
 unbreakable content retains its existing behavior.
 
+## Thai, Lao, Khmer and Myanmar word wrapping
+
+ECMA-376 Part 1 §17.3.3.31 (`t`) retains literal authored text and does not
+define where a line may break; §17.3.2.20 (`lang`) records a language but
+prescribes no wrapping algorithm. Thai, Lao, Khmer and Myanmar are written
+without spaces between words (UAX #14 line-break class SA, see
+https://www.unicode.org/reports/tr14/), so paragraphs containing these scripts
+are segmented with the browser's dictionary-based `Intl.Segmenter` word
+boundaries. A boundary between two characters of these scripts becomes a break
+opportunity shared by paragraph layout, the floating-object word check,
+justification contraction and AutoFit intrinsic minimum widths. Boundaries
+beside spaces, punctuation or other scripts keep the existing rules, so `ไทย,`
+keeps its comma. Paragraphs without these scripts are not segmented. Breaks are
+chosen by script, not by the `lang` value. No source text or package part is
+rewritten, and a word split across source runs stays one word.
+
+When a single word is wider than the line, forced grapheme wrapping still
+applies, but it does not leave a Thai or Lao leading vowel (U+0E40–U+0E44,
+U+0EC0–U+0EC4) at a line end or start a line with a following vowel (U+0E30,
+U+0E32, U+0E33, U+0E45, U+0EB0, U+0EB2, U+0EB3), unless only one grapheme fits.
+
+`tools/thai_wrap_fixture.py` manually constructs `public/fixtures/thai-wrap.docx`
+(Thai, a Thai word split across runs, Thai mixed with Latin and punctuation, and
+Lao). `tests/thai-line-breaking.test.js` covers layout, intrinsic widths,
+editing, undo and package preservation; `tests/browser/thai-wrap.spec.js`
+checks every line end against segmenter boundaries with browser canvas
+measurement through editing, undo, export and reopen. No native reference PDF
+was recorded: line positions follow the browser's dictionary and fonts, not a
+reference application's. Remaining gaps: Ctrl+Arrow word movement, word count
+and spelling still treat a run of these scripts as one word; Tai Tham, Tai Viet
+and New Tai Lue (also class SA) are not segmented; CJK and East Asian kinsoku
+rules (§17.3.1.16) remain separate.
+
 ## Body editing with retained nonempty headers and footers
 
 ECMA-376 Part 1 §§17.10.1–2 and §§17.10.5–6 define independent header/footer

@@ -9,13 +9,15 @@ import { markerGeometry } from './list-layout.js';
 import { OBJECT, inlineSegments, EMU_PER_PX, drawingOffsetPixels, imageExtents, isPositionedImage } from './images.js';
 import { isCellRelativePosition, isPageBasedCellPosition } from './positioned-images.js';
 import { rowGrid, minimumSpanWidth, fixedColumnWidths } from './tables.js';
+import { dictionaryBreaks } from './dictionary-breaks.js';
 
 // The same break opportunities drive both wrapping and intrinsic cell widths.
 // Breaks are permitted after authored ASCII hyphens, including numeric/leading
 // ones. U+2010/U+2011 and minus signs do not share this opportunity. Nonbreaking
 // spaces stay within a word; forced grapheme wrapping remains possible.
 // Floating anchors have zero text width and do not split the surrounding word.
-export const breakAfter = (text, image, noBreakHyphen = false) => text === OBJECT && !isPositionedImage(image) || text === '\u00ad' || text === '-' && !noBreakHyphen || /\s/u.test(text) && !/[\u00a0\u202f\u2007]/u.test(text);
+// `wordBreak` marks the end of a Thai, Lao, Khmer or Myanmar word (dictionary-breaks.js).
+export const breakAfter = (text, image, noBreakHyphen = false, wordBreak = false) => wordBreak || text === OBJECT && !isPositionedImage(image) || text === '\u00ad' || text === '-' && !noBreakHyphen || /\s/u.test(text) && !/[\u00a0\u202f\u2007]/u.test(text);
 const shapeKey = style => `${(style.fontFamily || style.fontAscii || '').toLowerCase()}/${style.capitalization}/${style.bold}/${style.italic}/${style.fontSize}/${style.verticalAlign}/${style.baselineShift}/${style.characterSpacing}/${style.textScale}/${kerningEnabled(style)}`;
 function withoutTrailingSpaces(chars, page) {
   if (page.wrapTrailSpaces) return chars;
@@ -93,7 +95,7 @@ function unwrappedWidth(chars, left, format, page, measure, minimum) {
       const target = (stop?.position ?? (Math.floor((defaultFrom + 1e-6) / interval) + 1) * interval) / 15;
       const aligned = stop?.alignment === 'right' ? width : stop?.alignment === 'center' ? width / 2 : stop?.alignment === 'decimal' ? custom?.alignment === 'decimal' ? offset : decimalOffset(field, measure) : 0;
       const advance = Math.max(0, target - aligned - minimumEnd);
-      const breakIndex = field.findIndex(c => breakAfter(c.text, c.image, c.noBreakHyphen));
+      const breakIndex = field.findIndex(c => breakAfter(c.text, c.image, c.noBreakHyphen, c.wordBreak));
       const chunkWidth = breakIndex < 0 ? width
         : breakIndex === field.length - 1 && i === fields.length - 1 ? width - trailing
         : contentSpanWidth(field.slice(0, breakIndex + 1), measure, page);
@@ -137,12 +139,13 @@ export function cellIntrinsicWidths(cell, measure, page, numbering, markers, bor
     // those are content even when no ordinary text glyph is painted.
     if (!text && !markers[index]?.text) continue;
     let runIndex = 0, runEnd = p.runs[0]?.text.length ?? 0;
+    const wordBreaks = dictionaryBreaks(text);
     for (const part of inlineSegments(text)) {
       while (part.index >= runEnd && runIndex < p.runs.length - 1) runEnd += p.runs[++runIndex].text.length;
       // Inline page/column breaks have no visual or wrapping effect in cells.
       if (part.segment === '\f' || part.segment === '\u000e') continue;
       const run = p.runs[runIndex], text = inlineDisplayText(run, part.segment);
-      chars.push({ text, ...(run?.noBreakHyphen ? { noBreakHyphen: true } : {}), style: textFontStyle(text, bodySymbolStyle(run, runFormat(run))), image: run?.image });
+      chars.push({ text, ...(run?.noBreakHyphen ? { noBreakHyphen: true } : {}), ...(wordBreaks?.has(part.index + part.segment.length) ? { wordBreak: true } : {}), style: textFontStyle(text, bodySymbolStyle(run, runFormat(run))), image: run?.image });
     }
     const continuation = paddingLeft + format.indentLeft / 15;
     const initial = continuation + format.firstLine / 15;
@@ -188,7 +191,7 @@ export function cellIntrinsicWidths(cell, measure, page, numbering, markers, bor
       if (c.text !== '\t' && c.text !== '\u00ad' && (c.text !== ' ' || page.wrapTrailSpaces)) floor = Math.max(floor, (i === 0 ? first : continuation) + (c.image ? imageExtents(c.image).width / EMU_PER_PX : measure(c.text, c.style).width) + right);
       line.push(c);
       if (c.text === '\t') { tabMinimum ||= {value:0}; finishChunk(); }
-      else { if (c.image && chunk.length) finishChunk(); chunk.push(c); if (breakAfter(c.text, c.image, c.noBreakHyphen)) finishChunk(c.text === '\u00ad' && i + 1 < chars.length && !['\v','\f','\u000e'].includes(chars[i + 1].text)); }
+      else { if (c.image && chunk.length) finishChunk(); chunk.push(c); if (breakAfter(c.text, c.image, c.noBreakHyphen, c.wordBreak)) finishChunk(c.text === '\u00ad' && i + 1 < chars.length && !['\v','\f','\u000e'].includes(chars[i + 1].text)); }
     });
     finishLine();
   }
