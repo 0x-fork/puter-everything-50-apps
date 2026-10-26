@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/everything.png" width="300" alt="Everything"></p>
 
-<h3 align="center">The world’s software. Rebuilt, open-sourced, and MIT-licensed.</h3>
+<h3 align="center">The world’s software. Rebuilt, and open-sourced.</h3>
 
 <!-- App names, descriptions, and navigation are native text. The Everything logo, app icons, and decorative hero are images. Demo and source links use project metadata where available; missing destinations point to the link-status note. -->
 
