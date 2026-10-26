@@ -13,19 +13,25 @@ export const LAYOUT_OUTPUT = new Set(['text', 'x', 'start', 'end', 'width', 'con
  * a copy. Measured paragraphs (paragraph-measure-cache.js) follow the same memory: `clear()`
  * drops both, and so does a change of local fonts.
  *
- * The text memory is bounded by `limit` entries. Past it only the text memory starts over: the
- * measured paragraphs stay, since one layout of a long document can measure more texts than the
- * limit and every later layout would otherwise measure the whole document again.
+ * The text memory keeps two generations of `limit` entries: past the limit the current one becomes
+ * the older one, and texts found there move back into the current one. Line building measures each
+ * prefix of a line while fitting it and again while placing it, and a long document measures more
+ * texts than the limit in one layout; the measured paragraphs stay either way.
  *
  * Measuring text that needs a deferred script or separator face prepares it; once prepared, the
  * memory is cleared and `measurer.onFontsReady()` is called so the current owner lays out again.
  * Opening a document validates its layout with one measurer and hands it to the editor, whose
  * first layout then reuses what validation measured.
  */
-export function createCanvasMeasurer(context, { limit = 200000 } = {}) {
+export function createCanvasMeasurer(context, { limit = 100000 } = {}) {
   const paragraphs = new ParagraphMeasureCache();
-  let byStyle = new WeakMap(), byKey = new Map(), entries = 0, measuredFonts = localFontVersion();
+  let byStyle = new WeakMap(), byKey = new Map(), entries = 0, generation = 0, measuredFonts = localFontVersion();
   const forgetTexts = () => { byStyle = new WeakMap(); byKey = new Map(); entries = 0; };
+  const age = () => {
+    generation++; entries = 0;
+    // Styles used in neither generation go (each justified line has its own spacing, and so its own style).
+    for (const [key, measured] of byKey) if (measured.generation < generation - 1) byKey.delete(key);
+  };
   const clear = () => { forgetTexts(); paragraphs.clear(); };
   const checkFonts = () => {
     const fonts = localFontVersion();
@@ -39,14 +45,18 @@ export function createCanvasMeasurer(context, { limit = 200000 } = {}) {
     if (!measured) {
       const key = JSON.stringify(style, (name, value) => LAYOUT_OUTPUT.has(name) ? undefined : value);
       measured = byKey.get(key);
-      if (!measured) byKey.set(key, measured = { texts: new Map(), prepared: null });
+      if (!measured) byKey.set(key, measured = { texts: new Map(), older: null, generation, prepared: null });
       byStyle.set(style, measured);
     }
+    if (measured.generation !== generation) {
+      measured.older = measured.generation === generation - 1 ? measured.texts : null;
+      measured.texts = new Map(); measured.generation = generation;
+    }
     let result = measured.texts.get(text);
-    if (!result) {
-      result = measurePreparedText(context, measured.prepared ||= prepareCanvasMeasure(context, style), text, fontsReady);
-      if (++entries > limit) { forgetTexts(); return { ...result }; }
+    if (result === undefined) {
+      result = measured.older?.get(text) ?? measurePreparedText(context, measured.prepared ||= prepareCanvasMeasure(context, style), text, fontsReady, true);
       measured.texts.set(text, result);
+      if (++entries > limit) age();
     }
     return { ...result };
   };

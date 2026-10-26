@@ -1,5 +1,5 @@
 import { pageStoryPath } from './page-stories.js';
-import { measurePageStory } from './page-story-measure.js';
+import { measurePageStory, storyContentKey } from './page-story-measure.js';
 import { referencePageGeometry } from './page-settings.js';
 
 export function sectionStoryBounds(page, definition, sectionIndex, section, measure, numbering, options) {
@@ -22,7 +22,7 @@ export function sectionStoryBounds(page, definition, sectionIndex, section, meas
           try {
             const { placed, trim } = measurePageStory(story, { ...page, storyKind: kind }, measure, numbering,
               { pageNumber, pageCount: counts.pageCount || 1, sectionPageCount: counts.sectionCounts?.[sectionIndex] || 1, pageNumbering: definition.sections[sectionIndex].pageNumbering },
-              { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined, stylesKey: options.storyStylesKey, storyKeys: options.storyKeys });
+              { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined, stylesKey: options.storyStylesKey, storyKeys: options.storyKeys, contentKey: storyContentKey(definition, path) });
             return placed.endY - trim;
           } catch (error) { if (!options.bestEffort) throw error; return 0; }
         };

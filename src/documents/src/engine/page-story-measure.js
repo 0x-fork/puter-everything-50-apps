@@ -6,15 +6,46 @@ import { resolveStyledParagraph } from './styles.js';
 import { pageStoryPositions } from './page-story-positions.js';
 import { revisionView } from './revisions.js';
 
+// Development builds check that a content name always stands for the same content.
+const namedContent = new Map();
+function checkNamedContent(name, content) {
+  if (!import.meta.env?.DEV) return;
+  const json = JSON.stringify(content), seen = namedContent.get(name);
+  if (seen !== undefined && seen !== json) throw new Error(`Story content changed under the same name (${name}).`);
+  namedContent.set(name, json);
+}
+
+/**
+ * Page stories as layout keys them: the session's version of their content (StorySession
+ * pageStories) when it has one, so an edit to the body does not serialize every story again.
+ */
+export function storiesContentKey(pageStories) {
+  const version = pageStories?.storiesVersion;
+  if (version === undefined) return JSON.stringify(pageStories ?? null);
+  checkNamedContent(`stories ${version}`, pageStories);
+  return `stories ${version}`;
+}
+/** A story of versioned page stories, by its path (and, for a note, its numbers): or undefined. */
+export function storyContentKey(pageStories, path, ...numbering) {
+  const version = pageStories?.storiesVersion;
+  return version === undefined ? undefined : JSON.stringify([version, path, ...numbering]);
+}
+
 /**
  * What a story measurement reads besides the measurer, as text. Every page of a long document lays
  * its header, footer and notes out again on each edit, mostly unchanged. A layout serializes its
- * styles once (`stylesKey`) and each story's paragraphs once (`storyKeys`, by paragraphs array).
+ * styles once (`stylesKey`) and each story's paragraphs once (`storyKeys`, by paragraphs array), or
+ * names a versioned story's content (`contentKey`, storyContentKey) without serializing it.
  */
-function storyMeasureKey(cache, story, geometry, numbering, context, { styles, drawingLayouts, onUnsupported, stylesKey, storyKeys }) {
-  let paragraphs = storyKeys?.get(story.paragraphs);
-  if (paragraphs === undefined) { paragraphs = cache.intern(JSON.stringify(story.paragraphs)); storyKeys?.set(story.paragraphs, paragraphs); }
-  return JSON.stringify([paragraphs, { ...story, paragraphs: undefined }, geometry, numbering ?? null, context, revisionView,
+function storyMeasureKey(cache, story, geometry, numbering, context, { styles, drawingLayouts, onUnsupported, stylesKey, storyKeys, contentKey }) {
+  let content;
+  if (contentKey !== undefined) { checkNamedContent(contentKey, story); content = cache.intern(contentKey); }
+  else {
+    let paragraphs = storyKeys?.get(story.paragraphs);
+    if (paragraphs === undefined) { paragraphs = cache.intern(JSON.stringify(story.paragraphs)); storyKeys?.set(story.paragraphs, paragraphs); }
+    content = [paragraphs, { ...story, paragraphs: undefined }];
+  }
+  return JSON.stringify([content, geometry, numbering ?? null, context, revisionView,
     styles ? cache.intern(stylesKey ?? JSON.stringify(styles)) : null, drawingLayouts ? [...drawingLayouts] : null, !!onUnsupported]);
 }
 

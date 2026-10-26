@@ -58,6 +58,8 @@ let nextAsset = 0;
 // once; the rest are painted when they scroll into view, when their pixels are read, or while the
 // browser is idle.
 const EAGER_PAGES = 80;
+// Pages off screen are painted once changes have paused this long (schedulePaint).
+const QUIET_PAINT_MS = 600;
 
 /** Canvas paint surface plus a real textarea for native input, composition and accessible text. */
 export class CanvasEditor {
@@ -659,10 +661,20 @@ export class CanvasEditor {
   }
   schedulePaint() {
     if (this.paintTask || !this.stalePages.size || this.destroyed) return;
+    // Every change repaints the pages on screen at once. The others wait until changes pause: painting
+    // a long document's every page after each keystroke only competes with the next keystroke, and a
+    // page scrolled into view, or whose pixels are read, is painted then (paintShownPages, flushPaint).
+    const quiet = (this.changedAt ?? -Infinity) + QUIET_PAINT_MS - performance.now();
+    if (quiet > 0) {
+      this.paintTask = { idle: false, id: setTimeout(() => { this.paintTask = null; this.schedulePaint(); }, quiet) };
+      return;
+    }
     const idle = typeof requestIdleCallback === 'function';
     const run = deadline => {
       this.paintTask = null;
       if (this.destroyed || !this.stalePages.size) return;
+      // A change since this was scheduled starts the wait again.
+      if ((this.changedAt ?? -Infinity) + QUIET_PAINT_MS > performance.now()) { this.schedulePaint(); return; }
       // Nearest pages first, a couple at a time while the browser has idle time, so typing and
       // scrolling stay responsive.
       const shown = this.shownPages(), anchor = shown.length ? shown[0] : 0;
@@ -682,6 +694,7 @@ export class CanvasEditor {
         indices = this.shownPages();
         const shown = new Set(indices);
         this.stalePages = new Set(canvases.map((_, index) => index).filter(index => !shown.has(index)));
+        this.changedAt = performance.now();
       }
     }
     const [start, end] = this.model.range;
@@ -937,6 +950,8 @@ export class CanvasEditor {
   get inputText() { return this.model.text.replace(/[\v\f\u000e]/g, '\n'); }
   syncInput() {
     if (this.composition) return;
+    // The browser inserts the typed text into the field itself once the keystroke's handler returns.
+    if (this.nativeInsertion != null && this.inputText === this.nativeInsertion) return;
     if (this.input.value !== this.inputText) this.input.value = this.inputText;
     const [start, end] = this.model.range;
     const direction = this.model.selection.focus < this.model.selection.anchor ? 'backward' : 'forward';
@@ -1566,7 +1581,23 @@ export class CanvasEditor {
       formatJustifyFull: () => this.model.setParagraphFormat({ alignment: 'both' }),
       formatRemove: () => this.model.clearDirectTextFormatting(),
     };
-    if (e.inputType === 'insertText') { e.preventDefault(); this.typeText(actions.insertText, e.data || ''); return; }
+    if (e.inputType === 'insertText') {
+      // Replacing the native field's whole text makes the browser lay a long document's text out again;
+      // inserting the typed text itself costs it little. When the document took exactly that text, the
+      // field is left for the browser to update (syncInput skips it), and the input event that follows
+      // is already in the document (nativeInput).
+      const value = this.input.value, a = this.input.selectionStart, b = this.input.selectionEnd, data = e.data || '';
+      const expected = value === this.inputText ? value.slice(0, a) + data.replace(/[\v\f\u000e]/g, '\n') + value.slice(b) : null;
+      this.nativeInsertion = expected;
+      try { this.typeText(actions.insertText, data); } finally { this.nativeInsertion = null; }
+      const [start, end] = this.model.range;
+      if (expected !== null && data && start === end && start === a + data.length && this.inputText === expected) {
+        this.awaitedInput = expected;
+        // Should the browser not insert it after all, the field takes the document's text as usual.
+        setTimeout(() => { if (this.awaitedInput === expected) { this.awaitedInput = null; this.syncInput(); } });
+      } else { e.preventDefault(); this.syncInput(); }
+      return;
+    }
     if (actions[e.inputType]) { e.preventDefault(); this.execute(actions[e.inputType]); }
   }
   /** Delete from the caret to the start (or end) of its line as laid out, or the selection. */
@@ -1589,7 +1620,11 @@ export class CanvasEditor {
     const merge = !!group && !newWord && start === end && group.at === start &&
       group.revision === this.session.revision && group.path === this.session.path;
     this.typingGroup = null;
-    if (this.execute(action, undefined, { record: !merge })) {
+    // While true, the host may refresh its controls after the frame that shows the typed text.
+    this.typing = true;
+    let executed;
+    try { executed = this.execute(action, undefined, { record: !merge }); } finally { this.typing = false; }
+    if (executed) {
       this.typingGroup = { revision: this.session.revision, path: this.session.path, at: this.model.selection.focus, last: text.at(-1) };
       if (text.length === 1) this.assistTyping(text);
     }
@@ -1675,6 +1710,11 @@ export class CanvasEditor {
     return this.model.replace(value.slice(start, tail), { checkpoint });
   }
   nativeInput(e) {
+    if (this.awaitedInput != null) {
+      const awaited = this.awaitedInput;
+      this.awaitedInput = null;
+      if (this.input.value === awaited && awaited === this.inputText) { this.syncInput(); return; }
+    }
     if (this.readOnly || this.viewOnly) { this.syncInput(); return; }
     try {
       const revision = this.session.revision;

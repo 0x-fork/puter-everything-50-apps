@@ -1,4 +1,4 @@
-import { measurePageStory } from './page-story-measure.js';
+import { measurePageStory, storyContentKey } from './page-story-measure.js';
 import { pageStoryPath } from './page-stories.js';
 import { positionedImageFrame } from './positioned-images.js';
 import { resolveDrawingCollisions } from './drawing-collisions.js';
@@ -16,8 +16,11 @@ export function layoutPageStories(body, definition, sectionSettings, measure, nu
   const positions = [];
   if (!definition) return { lines, borders, cells, tableBorders, floatingObjects, paragraphFrames, unsupported, borderMargins };
   const resolved = new Map(), storyKeys = new WeakMap();
+  // A measurer that remembers stories resolves their styles only when it measures one it has not seen.
+  const remembered = !!(styles && measure.paragraphCache);
+  const styleOptions = remembered ? { styles, stylesKey: JSON.stringify(styles) } : {};
   const storyParagraphs = (path, story) => {
-    if (!styles) return story.paragraphs;
+    if (!styles || remembered) return story.paragraphs;
     if (!resolved.has(path)) resolved.set(path, story.paragraphs.map(p => resolveStyledParagraph(structuredClone(p), styles, numbering)));
     return resolved.get(path);
   };
@@ -46,7 +49,7 @@ export function layoutPageStories(body, definition, sectionSettings, measure, nu
       try {
         const { placed, trim, storyGeometry, positions: storyPositions } = measurePageStory({ ...story, paragraphs: storyParagraphs(path, story) }, { ...geometry, storyKind: kind }, measure, numbering,
           { pageNumber: numbers[page], pageCount: body.pageCount, sectionPageCount: counts.get(section), pageNumbering: definition.sections[section].pageNumbering },
-          { drawingLayouts, onUnsupported: bestEffort ? error => unsupported.push({ path, page, message: error.message }) : undefined, storyKeys });
+          { drawingLayouts, onUnsupported: bestEffort ? error => unsupported.push({ path, page, message: error.message }) : undefined, storyKeys, ...styleOptions, contentKey: storyContentKey(definition, path) });
         positions.push({ path, page, positions: storyPositions });
         const y = kind === 'header' ? settings.header / 15 : geometry.height - settings.footer / 15 - placed.endY + trim;
         const frames = new Map((placed.paragraphFrames || []).map(f=>[f.frameId,f]));
@@ -83,7 +86,7 @@ export function layoutPageStories(body, definition, sectionSettings, measure, nu
   // follow the body's last line at the positions the body layout assigned them.
   const areas = [...(body.footnoteAreas || []).map(area => ({ area, kind: 'footnote' })), ...(body.endnoteAreas || []).map(area => ({ area, kind: 'endnote' }))];
   for (const { area, kind } of areas) {
-    const geometry = referencePageGeometry(body.pages[area.page]), shown = new Map(area.notes.map(note => [note.id, note.display]));
+    const geometry = referencePageGeometry(body.pages[area.page]), shown = new Map(area.notes.map(note => [note.id, note.display])), shownKey = JSON.stringify([kind, ...shown]);
     const numbers = kind === 'footnote' ? shown : { footnote: new Map(), endnote: shown };
     let y = area.top + (area.separator === false ? 0 : FOOTNOTE_SEPARATOR);
     for (const note of area.notes) {
@@ -91,7 +94,7 @@ export function layoutPageStories(body, definition, sectionSettings, measure, nu
       if (!story) continue;
       if (note.y !== undefined) y = note.y;
       try {
-        const { placed, storyGeometry, positions: storyPositions } = measureNote({ ...story, paragraphs: storyParagraphs(note.path, story) }, note.display, numbers, geometry, measure, numbering, { drawingLayouts, bestEffort, storyKeys });
+        const { placed, storyGeometry, positions: storyPositions } = measureNote({ ...story, paragraphs: storyParagraphs(note.path, story) }, note.display, numbers, geometry, measure, numbering, { drawingLayouts, bestEffort, storyKeys, ...styleOptions, storyStylesKey: styleOptions.stylesKey, contentKey: storyContentKey(definition, note.path, note.display, shownKey) });
         positions.push({ path: note.path, page: area.page, positions: storyPositions });
         const top = y, shifted = item => ({ ...item, page: area.page, pageStory: note.path, y: item.y + top, ...(item.cellClip ? { cellClip: shiftCellClip(item.cellClip, top) } : {}) });
         lines.push(...placed.lines.map(line => ({ ...shifted(line), storyGeometry, baseline: line.baseline + top })));

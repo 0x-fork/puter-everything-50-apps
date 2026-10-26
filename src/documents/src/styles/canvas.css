@@ -10,6 +10,10 @@
 .canvas-pages { display: flex; flex-direction: column; align-items: center; width: max-content; min-width: 100%; padding: 24px; gap: 24px; touch-action: pan-y; }
 .canvas-page { display: block; background: white; outline: 1px solid var(--hairline-strong); cursor: text; flex-shrink: 0; }
 .canvas-input { position: absolute; width: 2px; height: 26px; padding: 0; border: 0; opacity: 0.01; overflow: hidden; resize: none; white-space: pre; pointer-events: none; }
+/* The hidden field holds the whole document and is laid out again on every keystroke: a system face
+   without kerning or ligature shaping takes about half that work. The inline font shorthand sets these,
+   hence !important. Accessible editing shows the field itself and keeps ordinary text rendering. */
+.canvas-host:not(.accessible-editing) .canvas-input { font-family: Arial, Helvetica, sans-serif !important; font-kerning: none !important; font-variant-ligatures: none !important; text-rendering: optimizeSpeed; }
 .canvas-image-frame { position:absolute; border:1px solid #375f91; pointer-events:none; z-index:3; }
 .canvas-image-frame[hidden] { display:none; }
 .canvas-image-handle { position:absolute; width:12px; height:12px; padding:0; border:1px solid #375f91; background:white; pointer-events:auto; touch-action:none; border-radius:2px; }

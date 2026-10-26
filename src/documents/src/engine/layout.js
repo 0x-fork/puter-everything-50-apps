@@ -39,6 +39,7 @@ import { resolveDrawingCollisions } from './drawing-collisions.js';
 import { floatingParagraph } from './floating-images.js';
 import { exactRowHeight, rowPadding } from './row-height.js';
 import { blockMinimumHeight } from './block-layout.js';
+import { storiesContentKey } from './page-story-measure.js';
 import { readOnlyMeasurement } from './paragraph-measure-cache.js';
 import { sectionStoryBounds } from './story-clearance.js';
 import { spacedFormat } from './document-views.js';
@@ -132,9 +133,9 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
     // Page counts reach the body only through the header and footer heights they produce.
     const storyHeights = totals ? new Map() : undefined, storyHeightCache = new Map(), paragraphKeys = new WeakMap();
     // Page stories measured by this layout share one serialization of the styles and of each story (page-story-measure.js).
-    const storyScope = measureBase.paragraphCache ? { storyStylesKey: JSON.stringify(storyOptions.styles ?? null), storyKeys: new WeakMap() } : {};
+    const storyScope = measureBase.paragraphCache ? { storyStylesKey: JSON.stringify(storyOptions.styles ?? null), storyKeys: new WeakMap(), storyStories: pageStories } : {};
     // Everything besides the blocks that decides where footnote references land and how tall their notes are.
-    const flowContext = () => measureBase.paragraphCache && JSON.stringify([counts, pageStories, storyOptions.styles ?? null, numbering ?? null, !!storyOptions.bestEffort,
+    const flowContext = () => measureBase.paragraphCache && JSON.stringify([counts, storiesContentKey(pageStories), storyOptions.styles ?? null, numbering ?? null, !!storyOptions.bestEffort,
       storyOptions.drawingLayouts ? [...storyOptions.drawingLayouts] : null, revisionView]);
     const flow = () => notes
       ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...storyScope, ...counts, storyHeights, storyHeightCache, paragraphKeys, noteReserve }), measureBase, numbering, { ...storyOptions, ...storyScope }, flowContext())
@@ -145,7 +146,7 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
       const renumbered = pageRestartedNumbers(notes, source, placed);
       if ([...renumbered].some(([id, display]) => notes.numbers.get(id) !== display)) { notes.numbers = renumbered; paragraphs = numberNotes(); placed = flow(); }
     }
-    if (endnotes) placed = placeEndnotes(endnotes, placed, measureBase, numbering, storyOptions);
+    if (endnotes) placed = placeEndnotes(endnotes, placed, measureBase, numbering, { ...storyOptions, ...storyScope });
     const aligned = () => {
       const result = alignPageBody(placed, paragraphs, tables);
       return finishRotatedCells(result === placed ? placed : { ...result, paragraphBorders: layoutParagraphBorders(result), tableBorders: layoutTableBorders(result.cells) });

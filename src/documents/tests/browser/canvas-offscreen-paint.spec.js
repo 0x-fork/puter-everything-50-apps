@@ -29,6 +29,14 @@ test('typing repaints only the pages on screen, and a page scrolled into view is
   expect(count).toBeGreaterThan(80);
   await page.evaluate(() => { painted.clear(); editor.input.setSelectionRange(0, 0); editor.nativeSelection(); });
   await page.keyboard.press('Enter');
+  // Idle time does not paint the other pages straight after a change: the next keystroke would compete with them.
+  const [before, after] = await page.evaluate(() => {
+    const before = editor.stalePages.size;
+    for (const task of idleTasks.splice(0)) task({didTimeout: false, timeRemaining: () => 10});
+    return [before, editor.stalePages.size];
+  });
+  expect(before).toBeGreaterThan(0);
+  expect(after).toBe(before);
   const repainted = await page.evaluate(() => editor.canvases.filter(c => painted.has(c)).map(c => Number(c.dataset.page)));
   expect(repainted.length).toBeGreaterThan(0);
   expect(repainted.length).toBeLessThan(8);
@@ -45,9 +53,11 @@ test('typing repaints only the pages on screen, and a page scrolled into view is
   const read = await page.evaluate(middle => pixels(middle), middle);
   expect(await page.evaluate(middle => editor.stalePages.has(middle), middle)).toBe(false);
   expect(read).toBe(await page.evaluate(middle => fresh(middle), middle));
-  // Idle time paints the rest, nearest first, a few pages at a time.
-  await page.evaluate(() => { while (editor.stalePages.size) { const task = idleTasks.shift(); if (!task) break; task({didTimeout: false, timeRemaining: () => 10}); } });
-  expect(await page.evaluate(() => editor.stalePages.size)).toBe(0);
+  // Idle time paints the rest once changes pause, nearest first, a few pages at a time.
+  await expect.poll(() => page.evaluate(() => {
+    for (const task of idleTasks.splice(0)) task({didTimeout: false, timeRemaining: () => 10});
+    return editor.stalePages.size;
+  }), {timeout: 10000}).toBe(0);
   for (const index of [middle + 1, last - 2]) {
     const idle = await page.evaluate(index => pixels(index), index);
     expect(idle).toBe(await page.evaluate(index => fresh(index), index));

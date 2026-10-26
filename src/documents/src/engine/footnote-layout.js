@@ -2,7 +2,7 @@
 // text area for the notes referenced on it, separated from the body by a short
 // rule. Pagination repeats until the reservations settle (a reference pushed to
 // the next page takes its note with it).
-import { measurePageStory } from './page-story-measure.js';
+import { measurePageStory, storyContentKey } from './page-story-measure.js';
 import { noteNumbers, noteReferences, numberedParagraphs, footnoteStoryPath } from './footnotes.js';
 
 export const FOOTNOTE_SEPARATOR = 16; // px: the separator paragraph, about one 12pt line
@@ -59,7 +59,7 @@ export function assignFootnotes(placed, refs) {
 export function measureNote(story, display, numbers, geometry, measure, numbering, options = {}) {
   const paragraphs = numberedParagraphs(story.paragraphs, numbers, display);
   return measurePageStory({ ...story, paragraphs }, { ...geometry, storyKind: 'footnote', top: 0, bottom: 0 }, measure, numbering,
-    { pageNumber: 1, pageCount: 1, sectionPageCount: 1 }, { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined, stylesKey: options.storyStylesKey, storyKeys: options.storyKeys });
+    { pageNumber: 1, pageCount: 1, sectionPageCount: 1 }, { styles: options.styles, drawingLayouts: options.drawingLayouts, onUnsupported: options.bestEffort ? () => {} : undefined, stylesKey: options.storyStylesKey, storyKeys: options.storyKeys, contentKey: options.contentKey });
 }
 
 /** For each reference, the line of its paragraph that holds it: measurement, not pagination, decides this. */
@@ -88,11 +88,12 @@ function referenceLines(placed, refs) {
  * settles exactly as before: the remembered final reservation is laid out once instead.
  */
 export function layoutWithFootnotes(plan, layout, measure, numbering, options, flowContext) {
-  const heights = new Map();
+  const heights = new Map(), numbersKey = JSON.stringify([...plan.numbers]);
   const noteHeight = (id, geometry) => {
     const key = `${id}/${geometry.width}/${geometry.left}/${geometry.right}`;
     if (!heights.has(key)) {
-      try { heights.set(key, measureNote(plan.stories.get(id), plan.numbers.get(id), plan.numbers, geometry, measure, numbering, options).placed.endY); }
+      const contentKey = storyContentKey(options.storyStories, footnoteStoryPath(plan.part, id), plan.numbers.get(id), numbersKey);
+      try { heights.set(key, measureNote(plan.stories.get(id), plan.numbers.get(id), plan.numbers, geometry, measure, numbering, { ...options, contentKey }).placed.endY); }
       catch (error) { if (!options.bestEffort) throw error; heights.set(key, 0); }
     }
     return heights.get(key);
@@ -172,11 +173,12 @@ export function placeEndnotes(plan, placed, measure, numbering, options) {
   const geometryOf = page => placed.pages[page] || placed.page;
   const noteTop = page => placed.footnoteAreas?.find(area => area.page === page)?.top ?? Infinity;
   const bottomOf = page => { const g = geometryOf(page); return Math.min(g.height - g.bottom, noteTop(page)); };
-  const heights = new Map();
+  const heights = new Map(), numbersKey = JSON.stringify(['endnote', ...plan.numbers]);
   const height = (id, geometry) => {
     const key = `${id}/${geometry.width}/${geometry.left}/${geometry.right}`;
     if (!heights.has(key)) {
-      try { heights.set(key, measureNote(plan.stories.get(id), plan.numbers.get(id), { footnote: new Map(), endnote: plan.numbers }, geometry, measure, numbering, options).placed.endY); }
+      const contentKey = storyContentKey(options.storyStories, footnoteStoryPath(plan.part, id), plan.numbers.get(id), numbersKey);
+      try { heights.set(key, measureNote(plan.stories.get(id), plan.numbers.get(id), { footnote: new Map(), endnote: plan.numbers }, geometry, measure, numbering, { ...options, contentKey }).placed.endY); }
       catch (error) { if (!options.bestEffort) throw error; heights.set(key, 0); }
     }
     return heights.get(key);

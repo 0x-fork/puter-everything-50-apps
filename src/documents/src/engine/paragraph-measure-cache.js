@@ -14,22 +14,52 @@
 const OFFSET_KEYS = new Set(['start', 'end', 'trailingStart', 'drawingSegmentStart']);
 const STOP_LISTS = new Set(['stops', 'caretStops', 'textOffsets']);
 
-// A long document moves most of its paragraphs on every keystroke, so this stays a plain loop.
-function shifted(value, delta, list) {
+// Where a measured paragraph holds document offsets (null where a part holds none), worked out once
+// for each remembered paragraph. A long document moves most of its paragraphs on every keystroke:
+// a moved paragraph copies only the parts its plan names, and shares the rest (measurements are
+// read-only). Plans of the same shape are one object, so a list of alike parts (caret stops,
+// fragments) has one plan for every item.
+const plans = new Map();
+let uniquePlans = 0;
+const canonicalPlan = plan => {
+  // A plan holding a list of unlike parts is that paragraph's own; only shared shapes are kept.
+  if (plan.sig.includes('#')) return plan;
+  let found = plans.get(plan.sig);
+  if (!found) plans.set(plan.sig, found = plan);
+  return found;
+};
+function offsetPlan(value, list) {
   if (Array.isArray(value)) {
-    const copy = new Array(value.length);
+    let items = null, first, same = true;
     for (let i = 0; i < value.length; i++) {
-      const item = value[i];
-      copy[i] = item && typeof item === 'object' ? shifted(item, delta, list) : item;
+      const item = value[i], plan = item && typeof item === 'object' ? offsetPlan(item, list) : null;
+      if (plan) (items ||= new Array(value.length).fill(null))[i] = plan;
+      if (i === 0) first = plan; else if (plan !== first) same = false;
     }
-    return copy;
+    if (!items) return null;
+    return same ? canonicalPlan({ each: first, sig: `[${first.sig}]` }) : { items, sig: `#${uniquePlans++}` };
   }
-  const copy = {}, stops = STOP_LISTS.has(list);
+  const stops = STOP_LISTS.has(list);
+  let keys = null, children = null;
   for (const key in value) {
     const item = value[key];
-    copy[key] = typeof item === 'number' ? delta && (OFFSET_KEYS.has(key) || stops && key === 'offset') ? item + delta : item
-      : item && typeof item === 'object' ? shifted(item, delta, key) : item;
+    if (typeof item === 'number') { if (OFFSET_KEYS.has(key) || stops && key === 'offset') (keys ||= []).push(key); }
+    else if (item && typeof item === 'object') { const plan = offsetPlan(item, key); if (plan) (children ||= []).push([key, plan]); }
   }
+  if (!keys && !children) return null;
+  keys ||= []; children ||= [];
+  return canonicalPlan({ keys, children, sig: `{${keys.join(',')}|${children.map(([key, plan]) => `${key}:${plan.sig}`).join(',')}}` });
+}
+function shifted(value, plan, delta) {
+  if (Array.isArray(value)) {
+    const copy = value.slice();
+    if (plan.each) { for (let i = 0; i < copy.length; i++) if (copy[i] && typeof copy[i] === 'object') copy[i] = shifted(copy[i], plan.each, delta); }
+    else for (let i = 0; i < copy.length; i++) if (plan.items[i]) copy[i] = shifted(copy[i], plan.items[i], delta);
+    return copy;
+  }
+  const copy = { ...value };
+  for (const key of plan.keys) copy[key] += delta;
+  for (const [key, child] of plan.children) copy[key] = shifted(value[key], child, delta);
   return copy;
 }
 
@@ -117,14 +147,17 @@ export class ParagraphMeasureCache {
       // Most recently used entries stay; the oldest go first if the cache is ever full.
       this.entries.delete(key); this.entries.set(key, entry); entry.used = this.generation;
       if (entry.offset !== offset) {
-        const moved = readOnlyMeasurement(shifted(entry.measured, offset - entry.offset)), name = this.flowNames.get(entry.measured);
+        // Moved copies are made from the paragraph as first measured, along its offset plan.
+        if (entry.plan === undefined) entry.plan = offsetPlan(entry.base);
+        const moved = entry.plan ? readOnlyMeasurement(shifted(entry.base, entry.plan, offset - entry.baseOffset)) : entry.base;
+        const name = this.flowNames.get(entry.base);
         if (name) this.flowNames.set(moved, name);
         entry.measured = moved; entry.offset = offset;
       }
       return entry.measured;
     }
     const measured = readOnlyMeasurement(measure());
-    this.entries.set(key, { offset, measured, used: this.generation });
+    this.entries.set(key, { offset, measured, base: measured, baseOffset: offset, plan: undefined, used: this.generation });
     // Past the limit the least recently used entry goes, unless this layout used it too: a document with
     // more paragraphs than the limit would otherwise evict each before its next use, and every keystroke
     // would measure the whole document again. nextGeneration() still forgets what layouts stop using.

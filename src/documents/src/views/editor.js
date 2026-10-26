@@ -1260,8 +1260,26 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (action) { e.preventDefault(); action(); }
   });
 
-  let scriptMetricSignature;
+  let scriptMetricSignature, updateQueued = false;
+  // Refresh the controls once for everything that asked since: one keystroke reports both a selection
+  // and a change. Typed text is shown first and the controls follow the frame that shows it (a tab in
+  // the background draws no frames; the timer refreshes it then). Anything else refreshes them before
+  // the next task, so a contextual tab is there as soon as the selection enters a table.
+  let refreshSoon = false;
+  const runRefresh = () => { if (!updateQueued) return; updateQueued = refreshSoon = false; refreshControls(); };
   function update() {
+    if (engine?.typing) {
+      if (updateQueued) return;
+      updateQueued = true;
+      requestAnimationFrame(() => setTimeout(runRefresh));
+      setTimeout(runRefresh, 100);
+      return;
+    }
+    if (refreshSoon) return;
+    updateQueued = refreshSoon = true;
+    queueMicrotask(runRefresh);
+  }
+  function refreshControls() {
     if (!engine || destroyed) return;
     const scriptSignature = JSON.stringify(engine.approximateScriptFonts || []);
     if (scriptSignature !== scriptMetricSignature) {

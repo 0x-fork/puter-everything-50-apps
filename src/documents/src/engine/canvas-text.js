@@ -279,8 +279,15 @@ export function prepareCanvasMeasure(context, style) {
   };
 }
 
-/** Measure `text` in a style prepared by prepareCanvasMeasure on the same context. */
-export function measurePreparedText(context, prepared, text, onSeparatorReady) {
+// The state last applied to a context that only measures (a layout measurer's own): consecutive
+// measurements in one style, every prefix of a line, need not set it again.
+const appliedStates = new WeakMap();
+
+/**
+ * Measure `text` in a style prepared by prepareCanvasMeasure on the same context. `ownContext`: no
+ * other code sets this context's state, so a state it already has is not applied again.
+ */
+export function measurePreparedText(context, prepared, text, onSeparatorReady, ownContext = false) {
   const { style, outlined, scale, measuredStyle } = prepared;
   if(onSeparatorReady&&prepared.script&&!scriptFontSizeReady(style)){
     let requested=scriptRequests.get(context);if(!requested)scriptRequests.set(context,requested=new Set());
@@ -296,7 +303,18 @@ export function measurePreparedText(context, prepared, text, onSeparatorReady) {
     if(!requested.has(id)){requested.add(id);void prepareLiteralSeparatorDisplay(style).then(changed=>{if(changed)onSeparatorReady();});}
   }
   if (outlined) context.save();
-  applyCanvasTextState(context, prepared.state);
+  if (ownContext && !outlined) {
+    // The private separator face can become available later, which changes the font list.
+    const applied = appliedStates.get(context), separator = literalSeparatorFamily(prepared.state.selected);
+    if (applied?.state !== prepared.state || applied.separator !== separator) {
+      applyCanvasTextState(context, prepared.state);
+      appliedStates.set(context, { state: prepared.state, separator });
+    }
+  } else {
+    applyCanvasTextState(context, prepared.state);
+    // An outlined measurement restores the context afterwards; any other leaves it in this state.
+    if (!outlined) appliedStates.delete(context);
+  }
   const displayedText=symbolCanvasText(context,text,style,prepared.symbolFont);
   const native = context.measureText(displayedText);
   const face = prepared.faceFont && Number.isFinite(native.fontBoundingBoxAscent)

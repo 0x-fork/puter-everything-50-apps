@@ -2,6 +2,10 @@ import { TextDocument } from './model.js';
 import { resolveStyledParagraph } from './styles.js';
 import { trackFormatChanges } from './revisions.js';
 
+const objectNames = new WeakMap();
+let nextObjectName = 0;
+const objectName = object => { let name = objectNames.get(object); if (name === undefined) objectNames.set(object, name = nextObjectName++); return name; };
+
 // A document has separate text-position spaces, but one chronological undo
 // stack. History stores only the changed story, never copies of every story.
 export class StorySession {
@@ -16,6 +20,7 @@ export class StorySession {
     this.revision = 0;
     // guard(beforeState, model, path) throws to refuse a change (document protection).
     this.guard = null;
+    this.prepareSnapshot();
   }
   get model() { return this.models.get(this.path); }
   activate(path = null) {
@@ -30,7 +35,30 @@ export class StorySession {
     this.path = path;
     return this.model;
   }
-  capture() { return { path: this.path, page: this.page, state: this.model.snapshot(), revision: this.model.revision }; }
+  capture() { return { path: this.path, page: this.page, state: this.snapshot(this.model), revision: this.model.revision }; }
+  /**
+   * The model's state for undo. Copying a long document takes a while, so after each command the
+   * document is copied while the browser is idle (prepareSnapshot); the next command starts from
+   * that copy when the document has no new revision since. Each prepared copy is used once.
+   */
+  snapshot(model) {
+    const prepared = this.prepared;
+    this.prepared = null;
+    if (prepared?.model !== model || prepared.revision !== model.revision) return model.snapshot();
+    const state = { ...prepared.document, ...model.typingSnapshot() };
+    // Every document change must come with a new revision. Development builds check that it did.
+    if (import.meta.env?.DEV && JSON.stringify(prepared.document) !== JSON.stringify(model.documentSnapshot())) throw new Error('The document changed without a new revision.');
+    return state;
+  }
+  prepareSnapshot() {
+    if (typeof requestIdleCallback !== 'function') return;
+    if (this.prepareTask) cancelIdleCallback(this.prepareTask);
+    const model = this.model, revision = model.revision;
+    this.prepareTask = requestIdleCallback(() => {
+      this.prepareTask = null;
+      if (this.model === model && model.revision === revision) this.prepared = { model, revision, document: model.documentSnapshot() };
+    }, { timeout: 2000 });
+  }
   publish(owner, before) {
     if (this.models.size === 1) return;
     const stylesChanged = JSON.stringify(before.styles) !== JSON.stringify(owner.styles);
@@ -82,6 +110,7 @@ export class StorySession {
       validate(model);
       if (model.revision !== before.revision) { if (record) this.record(before); this.revision++; }
       model.history = []; model.future = [];
+      this.prepareSnapshot();
       return result;
     } catch (error) {
       this.restore(before); this.model.revision = before.revision;
@@ -102,6 +131,7 @@ export class StorySession {
       validate?.(this.model);
       from.pop(); to.push(current);
       this.revision++;
+      this.prepareSnapshot();
       return true;
     } catch (error) {
       this.restore(current); this.model.revision = current.revision;
@@ -118,19 +148,32 @@ export class StorySession {
       const source = this.definition.sections;
       // A file with one section keeps its definition only while the body has one too: a section break
       // inserted since makes another section, which takes its headers, footers and notes from the file's.
-      if (source.length === 1 && !this.body.paragraphs?.some(p => p.sectionEnd)) this.sectionDefinition = this.definition;
+      if (source.length === 1 && !this.body.paragraphs?.some(p => p.sectionEnd)) { this.sectionDefinition = this.definition; this.sectionMapping = null; }
       else {
         const indices = this.body.paragraphs.filter(p => p.sectionEnd).map((p, i) => Math.min(p.sectionSourceIndex ?? i, source.length - 1));
         indices.push(source.length - 1);
-        this.sectionDefinition = indices.length === source.length && indices.every((index, i) => index === i)
-          ? this.definition : { ...this.definition, sections: indices.map(index => source[index]) };
+        // The same sections keep the same object, so edits within them keep their stories' version.
+        const mapping = indices.join(',');
+        if (mapping !== this.sectionMapping || this.sectionSource !== this.definition) {
+          this.sectionDefinition = indices.length === source.length && indices.every((index, i) => index === i)
+            ? this.definition : { ...this.definition, sections: indices.map(index => source[index]) };
+          this.sectionMapping = mapping; this.sectionSource = this.definition;
+        }
       }
       this.sectionRevision = this.body.revision;
     }
-    if (this.models.size === 1) return this.sectionDefinition;
-    const stories = { ...this.definition.stories };
-    for (const [path, model] of this.models) if (path !== null) stories[path] = { ...stories[path], paragraphs: model.paragraphs, tables: model.tables };
-    return { ...this.sectionDefinition, stories };
+    let pageStories = this.sectionDefinition;
+    if (this.models.size > 1) {
+      const stories = { ...this.definition.stories };
+      for (const [path, model] of this.models) if (path !== null) stories[path] = { ...stories[path], paragraphs: model.paragraphs, tables: model.tables };
+      pageStories = { ...this.sectionDefinition, stories };
+    }
+    // Names this content for layout's remembered story measurements (page-story-measure.js): the file's
+    // stories change only by edits to their own models (each with its revision) or by notes added to it.
+    const edited = [...this.models].filter(([path]) => path !== null).map(([path, model]) => `${path}@${model.revision}`);
+    Object.defineProperty(pageStories, 'storiesVersion', { configurable: true, enumerable: false, writable: true,
+      value: `${objectName(this.definition)}:${objectName(this.sectionDefinition.sections)}:${Object.keys(this.definition.stories).length}:${edited.join(',')}` });
+    return pageStories;
   }
   get storyEdits() {
     return Object.fromEntries([...this.models].filter(([path]) => path !== null).map(([path, model]) => [path, { paragraphs: model.paragraphs, tables: model.tables }]));
