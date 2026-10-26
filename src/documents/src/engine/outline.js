@@ -7,7 +7,10 @@ export function outlineEntries(paragraphs) {
   return paragraphs.flatMap(p => {
     const end = start + p.runs.reduce((n, r) => n + r.text.length, 0), level = p.format?.outlineLevel ?? 9;
     const entry = { id: p.id, start, end, level: level + 1,
-      text: p.runs.map(r => r.image ? r.image.alt || '[Image]' : r.text).join('').replace(/\s+/gu, ' ').trim() || '(Empty heading)' };
+      // A note reference, field or equation is an object character, which a heading's name does not show.
+      text: p.runs.map(r => r.image ? r.image.alt || '[Image]' : r.math ? r.math.text || '' : r.text.replace(/\uFFFC/g, '')).join('').replace(/\s+/gu, ' ').trim() || '(Empty heading)' };
+    // A heading in a table cell belongs to the table: it is listed, but the outline cannot move or delete it.
+    if (p.cellId) entry.inTable = true;
     start = end + 1;
     return level < 9 ? [entry] : [];
   });

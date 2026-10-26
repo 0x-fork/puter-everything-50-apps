@@ -119,6 +119,26 @@ describe('Markdown text that looks like markup', () => {
     lines.select(1, 2); lines.toggleBold();
     expect(documentMarkdown(lines)).toBe('A\\\nB\n');
   });
+  it('keeps emphasis that changes between two runs with nothing between them', () => {
+    const cases = [[['important', 'bi'], ['!', 'b']], [['foo', 'bi'], ['bar', 'i']], [['Warning', 'b'], [':', 'bi'], [' read this', '']], [['Hello', 'b'], ['World', 'bi']], [['old', 's'], ['new', 'sb']]];
+    const styled = d => d.paragraphs[0].runs.filter(r => r.text).map(r => `${r.text}:${r.bold ? 'b' : ''}${r.italic ? 'i' : ''}${r.strikethrough && r.strikethrough !== 'none' ? 's' : ''}`);
+    for (const runs of cases) {
+      const doc = blankDoc();
+      doc.replace(runs.map(([text]) => text).join(''));
+      let at = 0;
+      for (const [text, format] of runs) {
+        doc.select(at, at + text.length); at += text.length;
+        doc.setRunFormat({ bold: format.includes('b'), italic: format.includes('i'), strikethrough: format.includes('s') ? 'single' : 'none' });
+      }
+      const markdown = documentMarkdown(doc);
+      // Markers never run into the previous run's closing ones ("***important*****!**" showed "**!**").
+      expect(markdown).not.toMatch(/\*{4}|~{4}/);
+      const back = blankDoc(), fragment = htmlFragment(markdownHtml(markdown));
+      for (const p of fragment.paragraphs) p.mark = true;
+      pasteFragment(back, fragment);
+      expect(styled(back)).toEqual(styled(doc));
+    }
+  });
   it('after a line break too', () => {
     const doc = blankDoc();
     doc.replace('Intro\v- dash\v===\v3. three');
@@ -194,5 +214,45 @@ describe('paragraph alignment', () => {
       doc.select(at); doc.setParagraphFormat({ alignment });
     }
     expect(body(documentHtml(doc))).toBe('<p style="text-align:center">Title</p><p style="text-align:justify">Body</p><p style="text-align:right">Signed</p><p>Left</p>');
+  });
+});
+
+describe('exported links', () => {
+  it('come back as links when the file is opened again, telephone links included', () => {
+    const doc = blankDoc();
+    doc.replace('Call us or write or visit');
+    const link = (word, target) => { const at = doc.text.indexOf(word); doc.select(at, at + word.length); doc.setHyperlink(target); };
+    link('Call us', 'tel:+15551234567'); link('write', 'mailto:hi@example.com'); link('visit', 'https://example.com/');
+    const targets = d => d.paragraphs[0].runs.filter(r => r.link).map(r => [r.text, r.link.target]);
+    const expected = [['Call us', 'tel:+15551234567'], ['write', 'mailto:hi@example.com'], ['visit', 'https://example.com/']];
+    for (const [exported, html] of [[documentMarkdown(doc), false], [documentHtml(doc), true]]) {
+      const back = blankDoc(), fragment = htmlFragment(html ? exported : markdownHtml(exported));
+      pasteFragment(back, fragment);
+      expect(targets(back)).toEqual(expected);
+    }
+  });
+  it('keeps web addresses in the text as they are typed', () => {
+    const lines = ['See https://example.com/path_name_here#top_part for more.', 'Docs (https://en.wikipedia.org/wiki/Foo_(bar)), then www.example.com/a_b*c.', 'Piped https://example.com/a~b|c and 1http://x.y/*a*'];
+    const doc = blankDoc();
+    lines.forEach((line, i) => { if (i) doc.insertParagraph(); doc.replace(line); });
+    const markdown = documentMarkdown(doc);
+    // An address reads best, and links in any Markdown reader, as an autolink; the sentence's punctuation stays outside it.
+    expect(markdown).toContain('See <https://example.com/path_name_here#top_part> for more.');
+    expect(markdown).toContain('(<https://en.wikipedia.org/wiki/Foo_(bar)>),');
+    const back = blankDoc(), fragment = htmlFragment(markdownHtml(markdown));
+    for (const p of fragment.paragraphs) p.mark = true;
+    pasteFragment(back, fragment);
+    expect(back.paragraphs.map(p => p.runs.map(r => r.text).join(''))).toEqual(lines);
+    expect(back.paragraphs[0].runs.find(r => r.link)?.link.target).toBe('https://example.com/path_name_here#top_part');
+  });
+  it('keeps a link that follows an exclamation mark, rather than reading it back as a picture', () => {
+    const doc = blankDoc();
+    doc.replace('Wow!docs and more');
+    doc.select(4, 8); doc.setHyperlink('https://example.com/');
+    const markdown = documentMarkdown(doc);
+    expect(markdown).toBe('Wow\\![docs](https://example.com/) and more\n');
+    const back = blankDoc();
+    pasteFragment(back, htmlFragment(markdownHtml(markdown)));
+    expect(back.paragraphs[0].runs.map(r => [r.text, r.link?.target ?? null])).toEqual([['Wow!', null], ['docs', 'https://example.com/'], [' and more', null]]);
   });
 });

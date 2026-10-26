@@ -62,7 +62,7 @@ import { createReviewTools } from './review-tools.js';
 import { createReferences } from './references.js';
 import { createMailings } from './mailings.js';
 import { createDocumentViews } from './document-views.js';
-import { createInsert } from './insert-tab.js';
+import { createInsert, pictureFile } from './insert-tab.js';
 import { imageFilesFrom } from '../lib/images.js';
 import { createDraw } from './draw-tab.js';
 import { createPictures } from './pictures.js';
@@ -147,7 +147,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const clipboardState = () => {
     if (!engine) return { cut: false, copy: false, paste: false };
     const image = engine.model.selectedImage, editable = !pkg.readOnly && !engine.viewOnly;
-    const textSelected = engine.model.range[0] !== engine.model.range[1] && !image;
+    // A picture copies as itself (charts, diagrams and drawings do not copy yet).
+    const textSelected = engine.model.range[0] !== engine.model.range[1] && (!image || engine.copiesPicture());
     return { cut: editable && textSelected, copy: textSelected, paste: editable && !image };
   };
   const copyText = async cut => {
@@ -187,7 +188,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
         }
       } else text = await navigator.clipboard.readText();
       if (!destroyed && engine === editor && revision === editor.session.revision && JSON.stringify(selection) === JSON.stringify(editor.model.range)) {
-        if (picture && !text) await editor.insertImageFile(picture);
+        if (picture && !text.replace(/\ufffc/g, '')) await editor.insertImageFile(picture);
         else editor.pasteData(text, html);
       }
       if (!destroyed) engine?.focus();
@@ -316,7 +317,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   // The format area's search covers the body, a selection, and headers and footers (advanced options).
   const finder = findReplacePanel({ readOnly: () => !!pkg?.readOnly, matches: (text, options) => engine?.model.findMatches(text, options) || [],
     // What the matches depend on: the document, any change to any of its stories, and the story being edited.
-    version: () => (engine ? [engine, engine.session.revision, engine.session.body.revision, engine.session.path, engine.model] : null), range: () => engine?.model.range || [0, 0], select: match => engine?.selectMatch(match), highlight: matches => engine?.setFindHighlights(matches), replace: (...args) => engine?.replaceMatches(...args), ...formatArea.findApi, close: () => { find.setAttribute('aria-expanded', 'false'); engine?.focus(); } });
+    version: () => (engine ? [engine, engine.session.revision, engine.session.body.revision, engine.session.path, engine.model] : null), range: () => engine?.model.range || [0, 0], textLength: () => engine?.model.text.length ?? 0, select: match => engine?.selectMatch(match), highlight: matches => engine?.setFindHighlights(matches), replace: (...args) => engine?.replaceMatches(...args), ...formatArea.findApi, close: () => { find.setAttribute('aria-expanded', 'false'); engine?.focus(); } });
   const openFind = (options = {}) => {
     if (!engine) return;
     engine.finishComposition();
@@ -336,7 +337,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const unlink = tool('Remove link', 'unlink', () => engine?.removeHyperlink(), { disabled: true });
   const bookmarks = tool('Bookmarks', 'bookmark', () => {
     if (!engine) return; engine.finishComposition();
-    bookmarkModal = openBookmarks({ entries: () => engine?.bookmarks || [], add: name => engine?.addBookmark(name), rename: (id, name) => engine?.renameBookmark(id, name), remove: id => engine?.removeBookmark(id), navigate: id => engine?.goToBookmark(id) });
+    // Hidden bookmarks (named with a leading underscore: _Toc…, _Ref…, _GoBack) belong to fields and links; renaming or
+    // deleting one broke them, so the dialog lists only the author's own, as desktop word processors do by default.
+    bookmarkModal = openBookmarks({ entries: () => (engine?.bookmarks || []).filter(b => !b.name?.startsWith('_')), add: name => engine?.addBookmark(name), rename: (id, name) => engine?.renameBookmark(id, name), remove: id => engine?.removeBookmark(id), navigate: id => engine?.goToBookmark(id) });
   });
   const underline = tool('Underline', 'underline', () => engine?.toggleUnderline(), { disabled: true, 'aria-pressed': 'false', shortcut: `${MOD_KEY}+U` });
   const clearTextFormatting = tool('Clear direct text formatting', 'clearFormat', () => engine?.clearDirectTextFormatting(), { shortcut: `${MOD_KEY}+Space`, title: `Clear direct text formatting (${MOD_KEY}+Space). Keep styles and links.` });
@@ -679,14 +682,15 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   };
   // A drag hands the keyboard back to the text when it ends; the arrow keys, which end a change at every press, keep it on the slider.
   let zoomDragged = false;
-  const zoomSlider = el('input.ed-zoom-slider', { type: 'range', min: 10, max: 200, step: 1, value: 100, 'aria-label': 'Zoom slider', oninput: () => zoomControl.set(Number(zoomSlider.value) / 100),
+  // The slider's value is a percentage, and says so: a screen reader read a bare "100".
+  const zoomSlider = el('input.ed-zoom-slider', { type: 'range', min: 10, max: 200, step: 1, value: 100, 'aria-label': 'Zoom slider', 'aria-valuetext': '100%', oninput: () => zoomControl.set(Number(zoomSlider.value) / 100),
     onpointerdown: () => { zoomDragged = true; }, onchange: () => { if (zoomDragged) { zoomDragged = false; engine?.focus(); } } });
   const zoomStep = (label, icon, delta) => el('button.icon-btn.ed-zoom-step', { type: 'button', 'aria-label': label, title: label, onclick: () => {
     const now = Math.round((engine?.zoom ?? 1) * 100), next = delta > 0 ? Math.floor(now / 10) * 10 + 10 : Math.ceil(now / 10) * 10 - 10;
     zoomControl.set(Math.max(10, Math.min(200, next)) / 100);
   } }, commandIconEl(icon, 12));
   const zoomOut = zoomStep('Zoom Out', 'zoomOut', -1), zoomIn = zoomStep('Zoom In', 'zoomIn', 1);
-  function syncZoom() { if (engine) zoomSlider.value = String(Math.round(engine.zoom * 100)); }
+  function syncZoom() { if (engine) { zoomSlider.value = String(Math.round(engine.zoom * 100)); zoomSlider.setAttribute('aria-valuetext', `${zoomSlider.value}%`); } }
   function fitWidth() {
     if (!engine || zoom.value !== 'fit' || !host.clientWidth) return;
     const style = getComputedStyle(engine.pages);
@@ -714,11 +718,12 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     const image = engine?.model.selectedImage;
     if (!image || !pkg) return [];
     return pkg.drawingTextFrames(image, engine.model.assets).map(frame => ({ label: `Text frame ${frame.index + 1}`, disabled: !!frame.reason || !!pkg.readOnly, hint: frame.reason,
-      onSelect: async () => {
-        const editor = engine;
+      // `options.select`: text to select when the editor opens (a new drawing's sample text).
+      onSelect: async options => {
+        const editor = engine, select = typeof options?.select === 'string' ? options.select : null;
         try {
           const { openDrawingText } = await import('./drawing-text.js');
-          if (!destroyed && engine === editor && editor.model.selectedImage === image) drawingTextModal = openDrawingText({ engine, pkg, image, frame: frame.index });
+          if (!destroyed && engine === editor && editor.model.selectedImage === image) drawingTextModal = openDrawingText({ engine, pkg, image, frame: frame.index, select });
         } catch (e) { if (!destroyed) error(e); }
       } }));
   };
@@ -774,7 +779,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const review = createReview({ editor: () => engine, pkg: () => pkg, host: () => (engine && !failed ? host : null), error, author: () => session.username, onChange: () => update(), onShift: () => { fitWidth(); rulers?.update(); }, hooks: reviewHooks });
   // Insert tab: galleries, pictures, drawings, fields, equations and symbols (insert-tab.js).
   const insert = createInsert({ editor: () => engine, pkg: () => pkg, error, docName: () => title.value, user: () => (!local && session.signedIn ? session.username : ''), onChange: () => update(),
-    base: { editHeader: editorCommands.editHeader, insertBlankPage: editorCommands.insertBlankPage, updateFields: editorCommands.updateFields, editDrawingText: () => editorCommands.drawingTextItems()?.find(item => !item.disabled)?.onSelect(),
+    base: { editHeader: editorCommands.editHeader, insertBlankPage: editorCommands.insertBlankPage, updateFields: editorCommands.updateFields, editDrawingText: options => editorCommands.drawingTextItems()?.find(item => !item.disabled)?.onSelect(options),
       link: () => editHyperlink(), bookmark: () => bookmarks.click(), comment: () => review.commands?.newComment?.() } });
   const baseMenu = editorCommands.extendMenu, baseContextItems = editorCommands.contextMenuItems;
   Object.assign(editorCommands, insert.commands);
@@ -944,7 +949,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     ];
     return openPreferences({ sections, section, onClose: () => queueMicrotask(() => engine?.focus()) });
   }
-  const mailings = createMailings({ editor: () => (failed ? null : engine), pkg: () => pkg, error, onChange: () => update(), markDirty: () => doc.changed(), importFile,
+  // Filled in once the review tools (which own document protection) exist.
+  const mailingHooks = {};
+  const mailings = createMailings({ editor: () => (failed ? null : engine), pkg: () => pkg, error, onChange: () => update(), markDirty: () => doc.changed(), importFile, protectedDocument: () => !!mailingHooks.protectedDocument?.(),
     print: capture => printPages({ host, signal: printAbort.signal, capture }), documentTitle: () => title?.value?.trim(), layoutChanged: () => { fitWidth(); rulers?.update(); } });
   Object.assign(editorCommands, mailings.commands);
   const baseExtraTabs = editorCommands.extraTabs;
@@ -954,6 +961,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   // Review tools: Editor pane, Thesaurus, Accessibility, Language, Compare, Restrict Editing (review-tools.js).
   const reviewTools = createReviewTools({ editor: () => engine, pkg: () => pkg, error, author: () => session.username, review, proofing, commands: editorCommands, documentName: () => title.value, openDocument: file => importFile?.(file),
     currentBytes: async () => new Uint8Array(await (pkg.readOnly ? doc.blob : engine.export(pkg)).arrayBuffer()), onChange: () => update() });
+  // Under protection (other than Lock Tracking) the Mailings commands, which rewrite the document and its settings, are unavailable.
+  mailingHooks.protectedDocument = () => reviewTools.protectionEnforced && !reviewTools.trackingLocked;
   Object.assign(reviewHooks, { tints: reviewTools.tints, trackingLocked: () => reviewTools.trackingLocked, people: () => reviewTools.people(), commentsPane: reviewTools.commands.commentsPane, trackingOptions: reviewTools.commands.trackingOptions, showMarkupItems: reviewTools.commands.showMarkupItems, lockTracking: reviewTools.commands.lockTracking });
   Object.assign(editorCommands, reviewTools.commands);
   const reviewFileItems = editorCommands.fileItems;
@@ -1256,6 +1265,11 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (shortcutCode(e) === 'KeyH' && !e.altKey && engine && (MOD_KEY === 'Cmd' ? e.metaKey && e.shiftKey : e.ctrlKey && !e.shiftKey)) { e.preventDefault(); openFind(); return; }
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === '/') { e.preventDefault(); editorCommands.openShortcuts(); return; }
     if (e.key === 'F7' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && engine) { e.preventDefault(); proofing.openPane(); return; }
+    // Shift+F10 opens the document's menu, as the ContextMenu key does. Chrome turns it into a contextmenu event
+    // everywhere but on a Mac, whose keyboards have no menu key: there it would leave the menu out of the keyboard's reach.
+    if (IS_MAC && e.key === 'F10' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && engine && e.target === engine.input) {
+      e.preventDefault(); openDocumentContextMenu({ event: { button: -1, clientX: 0, clientY: 0 } }); return;
+    }
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && shortcutCode(e) === 'KeyV' && engine && host.contains(e.target)) { e.preventDefault(); pastePlainText(); return; }
     const action = formattingShortcut(e);
     if (action) { e.preventDefault(); action(); }
@@ -1436,6 +1450,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   function updateWordCount() {
     const text = engine.model.text, [a, b] = engine.model.range;
     if (text !== counted.text || a !== counted.a || b !== counted.b) {
+      // The Word Count dialog counts with the same rule, so the two always agree.
       const total = text === counted.text ? counted.total : countWords(text);
       const chosen = a !== b ? countWords(text.slice(a, b)) : null;
       counted = { text, a, b, total, chosen };
@@ -1496,6 +1511,17 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (e.key === 'Escape') { e.preventDefault(); title.value = doc.name; refreshTitle(); title.blur(); engine?.focus(); }
   });
   doc.addEventListener('status', updateStatus);
+  // An autosave refused because another window changed the file is not tried again, so the user hears of it, once
+  // until the document saves again, with the way to keep the edits.
+  let conflictTold = false;
+  const onConflict = e => {
+    if (destroyed || conflictTold) return;
+    conflictTold = true;
+    toast(e.detail.message, { icon: 'alert', duration: 15000, action: { label: 'Save a Copy', onClick: () => backstage.open('save') } });
+  };
+  const onSaved = () => { if (doc.status === 'saved') conflictTold = false; };
+  doc.addEventListener('conflict', onConflict);
+  doc.addEventListener('status', onSaved);
   // A first save can name the file otherwise than the name shown ("Untitled document 2" when the first is taken):
   // the title shows the document's name, unless the user is typing a new one there.
   const onPath = () => {
@@ -1527,7 +1553,10 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       // The account menu's typing settings, read at each keystroke so a change applies at once.
       correctTyping: (before, typed, { list }) => (autocorrectEnabled() && (listMarker(before, typed, list) || correction(before, typed))) || (capitalizeSentencesEnabled() && sentenceCapital(before, typed)) || null,
       linkTyping: (text, end) => autolinkEnabled() ? linkCandidateBefore(text, end) : null,
+      preparePicture: pictureFile,
     });
+    // Double-clicking a chart, diagram or text box edits it (insert-tab.js).
+    created.onOpenDrawing = () => { if (!pkg.readOnly) editorCommands.openSelectedDrawing?.(); };
     // Undo past the editor's own history steps back through design-wide changes.
     created.onHistoryEnd = direction => {
       const list = direction === 'undo' ? designVersions.undo : designVersions.redo;
@@ -1695,6 +1724,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       button('New document', () => newDoc?.(), { className: 'btn btn-outline' }));
     message.replaceChildren(el('p.canvas-message-text', {}, e.message || 'Could not open this document.'), actions);
     message.classList.add('canvas-message-error', 'editor-error');
+    // The notice bar may have been hidden while the editor was attaching (it had no notices then).
+    message.hidden = false;
     host.hidden = true;
     renderStatus('Could not open', 'alert', 'error');
     status.disabled = true;
@@ -1712,15 +1743,21 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     get engine() { return engine; },
     /** Whether the document opened as a read-only preview or not at all, so that nothing here can save it. */
     get unsaveable() { return settled && !doc.exporter; },
+    /** Whether changes to a shared document have not reached the others yet, and are kept nowhere else (collab.js). */
+    get undelivered() { return collab.undelivered; },
     get commands() { return editorCommands; },
     async flush() {
       if (destroyed) return true;
       engine?.finishComposition();
       // A clean document still waits for a rename or copy under way (doc.flush), or leaving would cancel it.
-      if (doc.dirty && !doc.exporter) return false;
+      if (doc.dirty && !doc.exporter) {
+        // A template not laid out yet holds nothing of the user's: leaving it asks nothing.
+        return !!doc.untouchedTemplate;
+      }
       // A save that never answers (a stalled connection) must not keep the user in the editor: after a while
       // leaving asks, as it does after a failed save, and the save itself goes on.
-      const flushing = doc.flush();
+      // In a shared document this tab does not save, the edits are only safe once the room has them.
+      const flushing = doc.flush().then(saved => saved && collab.deliver());
       flushing.catch(() => {});
       let timer;
       // Time spent in Puter's Save dialog is the user's, not a stalled connection: the wait starts over while it is open.
@@ -1742,6 +1779,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       fitObserver?.disconnect(); rulers?.destroy(); views.destroy(); chrome.destroy(); formatArea.destroy(); review.destroy(); reviewTools.destroy(); collab.destroy(); versionHistory.destroy(); assistant.destroy(); references.destroy(); insert.destroy(); draw.destroy(); pictures.destroy(); editingCommands.destroy(); proofing.destroy(); for (const module of pageModules) module.destroy();
       releasePictures();
       doc.removeEventListener('status', updateStatus);
+      doc.removeEventListener('conflict', onConflict);
+      doc.removeEventListener('status', onSaved);
       doc.removeEventListener('path', onPath);
       session.removeEventListener('change', onSession);
       doc.destroy(); engine?.destroy();

@@ -160,7 +160,13 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
     const engine = editor(), notesModule = await import('../engine/footnotes.js');
     const definition = engine?.pageStories, paragraphs = engine?.session.body.paragraphs || [];
     const maps = {};
-    for (const kind of ['footnote', 'endnote']) maps[kind] = notesModule.noteNumbers(paragraphs, definition?.[`${kind}s`] || { format: kind === 'footnote' ? 'decimal' : 'lowerRoman' }, kind);
+    for (const kind of ['footnote', 'endnote']) {
+      const settings = definition?.[`${kind}s`] || { format: kind === 'footnote' ? 'decimal' : 'lowerRoman' };
+      // Footnotes numbered from 1 on each page are numbered by the pages the layout put them on, as shown.
+      let pages = null;
+      if (kind === 'footnote' && settings.restart === 'eachPage') { pages = new Map(); for (const area of engine?.layout?.footnoteAreas || []) for (const note of area.notes) pages.set(note.id, area.page); }
+      maps[kind] = notesModule.noteNumbers(paragraphs, settings, kind, pages);
+    }
     return maps;
   }
   /** Update every field this editor can evaluate: sequences, references, citations, bibliographies and page numbers. */
@@ -379,10 +385,10 @@ export function createReferences({ editor, pkg, error, base = {}, onChange = () 
     customToc: () => toc.customDialog(),
     updateAllFields,
     canUpdateFields: () => !!ready() && (hasToc() || !!base.canUpdateFields?.()),
-    updateFields() {
-      if (!hasToc()) { base.updateFields?.(); return; }
-      toc.updateTable(false, 'pages');
-    },
+    // Update Fields (Tools menu, the field's context menu, after inserting a field) does what F9 does:
+    // sequences, references, dates, citations and page numbers, including the table of contents' pages.
+    // It refreshed only page references before, so SEQ and REF results stayed stale.
+    updateFields: () => updateAllFields(),
     smartLookup: () => lookup.open(),
     canSmartLookup: () => lookup.available(),
     extendMenu,

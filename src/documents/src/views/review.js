@@ -109,7 +109,9 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
   }
 
   function selectThread(thread, { focusDocument = true } = {}) {
-    const engine = editor(); if (!engine || thread.start === null) return;
+    // A card or a Reviewing Pane entry can outlive edits that moved its anchor: select where the thread is now.
+    thread = threads().find(t => t.id === thread.id);
+    const engine = editor(); if (!engine || !thread || thread.start === null) return;
     activeId = thread.id; pinned = true; pinnedRange = editor()?.model.range.join() ?? '';
     engine.finishComposition();
     // Comment anchors are body positions: leave a header, footer or note first.
@@ -165,7 +167,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     },
     get paneShown() { return paneShown; },
     toggleReviewingPane(on = !paneShown) { paneShown = on; paneSignature = ''; refresh(true); },
-    setPaneOrientation(value = 'vertical') { paneOrientation = value; pane.dataset.orientation = value; refresh(true); },
+    // The Tracking Options dialog shows (and keeps) the orientation chosen here.
+    setPaneOrientation(value = 'vertical') { paneOrientation = value; revisionView.options.paneOrientation = value; pane.dataset.orientation = value; refresh(true); },
     /** 'everyone' writes Track Changes into the document; 'mine' tracks this session only. */
     get trackingMode() { const body = editor()?.session.body; return !body?.trackChanges ? 'off' : body.trackChangesMode === 'mine' ? 'mine' : 'everyone'; },
     setTrackingMode(mode) {
@@ -380,8 +383,10 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
   function place() {
     const engine = editor(); if (!engine || !layer.isConnected) return;
     const items = [...layer.querySelectorAll('.ed-comment-card')];
+    // Look every card's thread up in one pass: a lookup per card made each keystroke slow in a much-reviewed document.
+    const byId = new Map(threads().map(t => [t.id, t]));
     const anchored = items.map(node => {
-      const id = node.dataset.thread, thread = id ? threads().find(t => t.id === id) : null;
+      const id = node.dataset.thread, thread = id ? byId.get(id) : null;
       const start = node.dataset.anchor !== undefined ? Number(node.dataset.anchor) : id ? thread?.start : draft?.start;
       return { node, geometry: start === null || start === undefined ? null : engine.positionGeometry(start), active: node.classList.contains('is-active') };
     }).filter(item => item.geometry).sort((a, b) => a.geometry.top - b.geometry.top);
@@ -398,6 +403,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     anchored.forEach((item, i) => {
       item.node.style.top = `${Math.max(8, tops[i])}px`;
       item.node.style.left = `${right + 16}px`;
+      item.node.style.display = '';
     });
     for (const node of items) if (!anchored.some(item => item.node === node)) node.style.display = 'none';
   }
@@ -434,7 +440,9 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     const visible = commentsShown && (list.length > 0 || !!draft) || balloons.length > 0;
     if (scroller.classList.contains('has-comment-markup') !== visible) { scroller.classList.toggle('has-comment-markup', visible); positionsKey = ''; queueMicrotask(onShift); }
     layer.hidden = !visible;
-    const sig = JSON.stringify([list, activeId, editing, !!draft, commentsShown, !!ready(), balloons, locked()]);
+    // Where the threads are anchored does not change the cards (place() follows the anchors), so typing before
+    // a comment does not rebuild every card.
+    const sig = JSON.stringify([JSON.stringify(list, (key, value) => key === 'start' || key === 'end' ? undefined : value), activeId, editing, !!draft, commentsShown, !!ready(), balloons, locked()]);
     if (force || sig !== signature) {
       signature = sig;
       const focused = layer.contains(document.activeElement) ? document.activeElement : null;
@@ -444,6 +452,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       if (visible && commentsShown && draft) nodes.push(draftCard());
       nodes.push(...balloons.map(balloonCard));
       layer.replaceChildren(...nodes);
+      // A card that grows (a reply or edit being typed, a wrapped draft) pushes the cards below it down.
+      cardResize.disconnect(); for (const node of nodes) cardResize.observe(node);
       if (keep && !force) {
         const target = keep.draft ? layer.querySelector('.ed-comment-draft textarea') : cards.get(keep.thread)?.querySelector('textarea');
         if (target) { target.value = keep.value; target.dispatchEvent(new Event('input')); target.focus(); target.setSelectionRange(keep.start, keep.end); }
@@ -571,6 +581,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     else if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && code === 'KeyE') { e.preventDefault(); commands.toggleTracking(); }
   }, { signal: keyAbort.signal });
   const resize = typeof ResizeObserver === 'undefined' ? { observe() {}, disconnect() {} } : new ResizeObserver(() => { positionsKey = ''; refresh(); });
+  const cardResize = typeof ResizeObserver === 'undefined' ? { observe() {}, disconnect() {} } : new ResizeObserver(() => { if (!layer.hidden) place(); });
 
-  return { commands, extendTab, contextItems, refresh, layer, pane, destroy() { keyAbort.abort(); resize.disconnect(); layer.remove(); readAloud.destroy(); } };
+  return { commands, extendTab, contextItems, refresh, layer, pane, destroy() { keyAbort.abort(); resize.disconnect(); cardResize.disconnect(); layer.remove(); readAloud.destroy(); } };
 }

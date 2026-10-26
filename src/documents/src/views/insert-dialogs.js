@@ -44,7 +44,9 @@ export function openDateTime({ onInsert, onClose }) {
   let chosen = DATE_PICTURES.includes(preferred) ? preferred : DATE_PICTURES[0];
   const options = DATE_PICTURES.map(picture => {
     const option = el('button.ed-choice', { type: 'button', role: 'option', 'aria-selected': String(picture === chosen), dataset: { picture }, onclick: () => pick(picture),
-      ondblclick: () => { pick(picture); dialog.form.requestSubmit(); } }, formatDatePicture(now, picture));
+      ondblclick: () => { pick(picture); dialog.form.requestSubmit(); },
+      // Enter inserts the format it is on, as a double-click does; Space only chooses it.
+      onkeydown: e => { if (e.key === 'Enter' && !isComposing(e) && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); pick(picture); dialog.form.requestSubmit(); } } }, formatDatePicture(now, picture));
     return option;
   });
   list.append(...options);
@@ -181,7 +183,17 @@ export function openSymbolDialog({ onInsert, onClose }) {
     grid.replaceChildren(...chars.map(ch => cell(ch, choose)));
     const first = grid.firstElementChild; if (first) first.tabIndex = 0;
   };
-  const drawRecent = () => recent.replaceChildren(...recentSymbols().map(ch => cell(ch, choose)));
+  // The recent symbols are one Tab stop too (each cell alone was out of the keyboard's reach); Left, Right, Home and End move along them.
+  const drawRecent = () => { recent.replaceChildren(...recentSymbols().map(ch => cell(ch, choose))); if (recent.firstElementChild) recent.firstElementChild.tabIndex = 0; };
+  recent.addEventListener('keydown', e => {
+    if (isComposing(e) || e.altKey || e.ctrlKey || e.metaKey) return;
+    const cells = [...recent.children], at = cells.indexOf(document.activeElement); if (at < 0) return;
+    const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: cells.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const target = cells[Math.max(0, Math.min(cells.length - 1, next))];
+    cells[at].tabIndex = -1; target.tabIndex = 0; target.focus(); choose(target.textContent, null);
+  });
   grid.addEventListener('keydown', e => {
     const cells = [...grid.children], at = cells.indexOf(document.activeElement); if (at < 0) return;
     const columns = Math.max(1, Math.round(grid.clientWidth / (cells[0]?.offsetWidth || 32)) || 16);
@@ -206,6 +218,13 @@ export function openSymbolDialog({ onInsert, onClose }) {
       ondblclick: () => { chosen = ch; dialog.form.requestSubmit(); } },
     el('span.insert-special-char', {}, /[\s\u00AD\u200B\u2060]/.test(ch) ? '\u00B7' : ch), el('span', {}, label), el('span.insert-special-keys', {}, `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`))));
   listboxKeys(special, option => option.click());
+  // Enter inserts the character it is on, as a double-click does (the dialog stays open for the next); Space only chooses it.
+  const insertOnEnter = e => {
+    if (e.key !== 'Enter' || isComposing(e) || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const button = e.target.closest?.('button'); if (!button) return;
+    e.preventDefault(); button.click(); dialog.form.requestSubmit();
+  };
+  for (const node of [grid, recent, special]) node.addEventListener('keydown', insertOnEnter);
   const symbolsPane = el('div.insert-symbol-pane', {}, el('div.insert-symbol-filters', {}, field('Font', font), field('Subset', subset)), grid,
     el('div.insert-symbol-footer', {}, preview, el('div', {}, name, field('Character code', code))), el('span.field-label', {}, 'Recently used symbols'), recent);
   const specialPane = el('div.insert-symbol-pane', { hidden: true }, special);
@@ -388,6 +407,10 @@ export function openGenerateDialog({ generate, onInsert, onClose }) {
       const url = URL.createObjectURL(file);
       preview.replaceChildren(el('img', { src: url, alt: prompt.value.trim(), onload: () => URL.revokeObjectURL(url) }));
       dialog.primary.textContent = 'Insert';
+    } catch (e) {
+      // The error shows below; "Generating…" does not stay above it.
+      preview.replaceChildren();
+      throw e;
     } finally { busy = false; dialog.primary.disabled = false; }
     return false;
   } });

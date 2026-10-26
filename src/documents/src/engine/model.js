@@ -151,6 +151,18 @@ function tableContent(doc, table) {
  * A comment anchored only in cells a table edit removed goes with them (and its replies), as in Word: left
  * without an anchor it could not be reached and was written to the file again on every save.
  */
+/**
+ * Make room for an object character inserted at `offset` of paragraph `p`: markers after it move on. A
+ * field that starts there (empty or not) starts after the object, which goes before it rather than into
+ * its result, where updating the field (F9) deleted it. With `commentEnds`, a comment ending there takes
+ * the object in, as text typed at its end would be.
+ */
+function shiftMarkersPastObject(p, offset, { commentEnds = false } = {}) {
+  for (const marker of p.bookmarks || []) if (marker.offset > offset || commentEnds && marker.offset === offset && marker.edge === 'end' && marker.comment) marker.offset++;
+  if (!p.fieldMarkers?.length) return;
+  const starting = new Set(p.fieldMarkers.filter(m => m.type === 'start' && m.offset === offset).map(m => m.field.id));
+  for (const marker of p.fieldMarkers) if (marker.offset > offset || marker.offset === offset && starting.has(marker.field.id)) marker.offset++;
+}
 function removeUnanchoredComments(doc, anchored) {
   if (!anchored?.size || !doc.comments) return;
   const kept = new Set(commentAnchors(doc.paragraphs).map(a => a.id)), gone = new Set([...anchored].filter(id => !kept.has(id)));
@@ -382,13 +394,19 @@ export class TextDocument {
     const p = this.sectionPageSettings;
     return p.width - p.left - p.right;
   }
-  clipboardText() {
+  /**
+   * The selection as plain text. An object's place holder character (U+FFFC) is not text: a field
+   * gives its result, an equation its text and a note reference `noteText(run, offset)` (the number
+   * shown, which only layout knows), so neither another application nor a paste back here gets it.
+   */
+  clipboardText(noteText = () => '') {
     const [start, end] = this.range; let at = 0, text = '';
     for (const p of this.paragraphs) {
       for (const run of p.runs) {
         const length = run.text.length;
         if (run.image) { if (at >= start && at < end) text += run.image.alt || '[Image]'; }
         else if (run.bodySymbol) { if (at >= start && at < end) text += bodySymbolText(run, run.text); }
+        else if (run.text === '\ufffc') { if (at >= start && at < end) text += run.field ? run.field.cachedText || '' : run.math ? run.math.text || '' : run.noteMark ? noteText(run, at) || '' : ''; }
         else text += run.text.slice(Math.max(0, start - at), Math.max(0, end - at));
         at += length;
       }
@@ -617,6 +635,9 @@ export class TextDocument {
   insertParagraph() {
     const p = this.selectedParagraphs[0];
     if (this.range[0] === this.range[1] && p.list && !paragraphText(p)) {
+      // An empty nested item steps out one level, as in other word processors; only at the top level does
+      // Enter end the list. A level the list does not define ends it too.
+      if (p.list.level > 0) { try { if (this.changeListLevel(-1)) return true; } catch { /* ends the list below */ } }
       this.checkpoint(); p.list = null; p.listChanged = true; this.didChange(); return true;
     }
     const at = locate(this.paragraphs, this.range[0]), atEnd = this.range[0] === this.range[1] && at.offset === paragraphLength(p);
@@ -680,6 +701,10 @@ export class TextDocument {
     // A new section: validate the result before changing anything, so a failure leaves the document as it was.
     const [start, end] = this.range;
     if (scope === 'selection' && start === end) throw new Error('Select the text to give its own settings.');
+    // Sections that already have these settings need no breaks of their own (one column for text
+    // that has one column): splitting them would change nothing but the document's section marks.
+    const covered = this.sectionIndexAt(start), through = scope === 'selection' ? this.sectionIndexAt(Math.max(start, end - 1)) : this.sectionCount - 1;
+    if (!changed(plan(covered, through))) return false;
     this.checkpoint();
     let caret = start;
     if (scope === 'selection' && !this.startsSection(end)) this.insertSectionBreakAt(end, breakType);
@@ -1142,8 +1167,10 @@ export class TextDocument {
     if (table.rows.some(row => row.gridBefore || row.gridAfter)) throw new Error('Column insertion in tables with omitted grid cells is not supported yet.');
     if (documentLength(this.paragraphs) + table.rows.length > MAX_DOCUMENT_CHARACTERS) throw new Error(DOCUMENT_CHARACTER_LIMIT_MESSAGE);
     if (table.grid.length >= 32) throw new Error('This table already has 32 columns.');
+    // An AutoFit column starts as wide as the one it follows (the other columns keep their widths); only a
+    // grid that holds no widths (fitting the contents) takes an unsized one. A zero-width column is not one.
     const automatic = table.layout === 'autofit'; let grid = [...table.grid], total;
-    if (automatic) grid.splice(position, 0, 0);
+    if (automatic) grid.splice(position, 0, table.grid.every(w => w > 0) ? table.grid[position - 1] : 0);
     else {
       const old = fixedColumnWidths(table, this.sectionWritingWidth);
       total = Math.round(old.reduce((a,b) => a+b, 0));
@@ -1217,6 +1244,14 @@ export class TextDocument {
     this.checkpoint(); this.paragraphs.splice(index, 0, p); this.select(this.paragraphOffset(index)); this.didChange(); return true;
   }
   replaceAcrossCells(text, checkpoint, insertedImage) {
+    // A table the selection wholly encloses, with text outside it, goes with that text (as Select All, Delete
+    // empties a document), as it does when the selection also crosses a section break. The rest is replaced
+    // cell by cell.
+    if (this.removeEnclosedTables(checkpoint)) {
+      const [start, end] = this.range;
+      if (start !== end || text) this.replace(text, { checkpoint: false, insertedImage });
+      this.didChange(); return true;
+    }
     const [start, end] = this.range, groups = []; let at = 0;
     const removedBodyFields=this.hasBodyFields?new Set(bodyFieldRanges(this.paragraphs).filter(r=>start<=r.start&&end>=r.end&&(start<r.start||end>r.end)).map(r=>r.field.id)):undefined;
     // A surrounding selection owns the wrappers it removes, even when the
@@ -1234,6 +1269,38 @@ export class TextDocument {
       this.replace(i ? '' : text, { checkpoint: false, insertedImage: i ? undefined : insertedImage, removedPictureControls, removedBodyFields });
     }
     this.didChange(); return true;
+  }
+  /** Remove the tables wholly inside a selection that reaches past them; the selection keeps the rest. */
+  removeEnclosedTables(checkpoint) {
+    const [start, end] = this.range, offsets = [0];
+    for (const p of this.paragraphs) offsets.push(offsets.at(-1) + paragraphLength(p) + 1);
+    // Each table's paragraphs (with those of the tables nested in it) are one run of indexes.
+    const tableOf = new Map(this.tables.flatMap(table => tableCells(table).map(cell => [cell.id, table]))), first = new Map(), last = new Map();
+    this.paragraphs.forEach((p, i) => {
+      for (let table = tableOf.get(p.cellId); table; table = tableOf.get(table.parentCellId)) { if (!first.has(table)) first.set(table, i); last.set(table, i); }
+    });
+    const spans = this.tables.filter(table => first.has(table)).map(table => {
+      const from = offsets[first.get(table)], to = offsets[last.get(table) + 1] - 1;
+      return start <= from && to <= end && (start < from || to < end) ? { table, from, to } : null;
+    }).filter(Boolean);
+    // A table nested in an enclosed table goes with it.
+    const enclosedCells = new Set(spans.flatMap(span => tableCells(span.table).map(cell => cell.id)));
+    const outer = spans.filter(span => !span.table.parentCellId || !enclosedCells.has(span.table.parentCellId)).sort((a, b) => b.from - a.from);
+    if (!outer.length) return false;
+    if (checkpoint) this.checkpoint();
+    let removed = 0;
+    for (const { table } of outer) {
+      const state = tableContent(this, table);
+      this.paragraphs.splice(state.start, state.count);
+      this.tables = this.tables.filter(t => t !== table);
+      removeOrphanedTables(this);
+      repairStructuralBookmarks(this.paragraphs, state.bookmarks, this.tables, table.id);
+      normalizeBlockBookmarkScopes(this.paragraphs, this.tables);
+      removeUnanchoredComments(this, state.comments);
+      removed += offsets[state.start + state.count] - offsets[state.start];
+    }
+    this.selection = { anchor: start, focus: end - removed };
+    return true;
   }
   snapshot() { return { ...this.documentSnapshot(), ...this.typingSnapshot() }; }
   /** A copy of the document itself, which changes only with a new revision (didChange). */
@@ -1324,7 +1391,23 @@ export class TextDocument {
     delete run.image; delete run.contentControl; delete run.positionalTab; delete run.noteMark; delete run.bodySymbol; delete run.noBreakHyphen; delete run.breakClear; delete run.field; delete run.revision; delete run.math;
     // Boundary typing is plain text; strictly interior edits extend the link.
     const link = hyperlinkAt(this.paragraphs, position);
-    if (!link || position <= link.start || position >= link.end) delete run.link;
+    if (!link || position <= link.start || position >= link.end) {
+      // Nor does it look like a link: typed beside one, it takes the colour, underline and character style
+      // of the text before the link (as after a link just made, showLink), or after it when the link
+      // starts the paragraph. A paragraph that is only the link keeps its look.
+      const ended = run.link ? hyperlinkAt(this.paragraphs, position, 'backward') : null;
+      const range = ended?.end === position ? ended : run.link && link?.start === position ? link : null;
+      if (range) {
+        const { index, offset } = locate(this.paragraphs, range.start), end = offset + range.end - range.start;
+        const beside = offset > 0 ? this.formatAt(range.start, 'backward') : end < paragraphLength(this.paragraphs[index]) ? this.formatAt(range.end, 'forward') : null;
+        if (beside && !beside.link) {
+          const look = { color: beside.color, underline: beside.underlineStyle !== 'none', underlineStyle: beside.underlineStyle, underlineColor: beside.underlineColor };
+          Object.assign(run, look); run.overrides = { ...run.overrides, ...look };
+          run.styleId = beside.styleId || null; run.styleChanged = true;
+        }
+      }
+      delete run.link;
+    }
     if (this.typingStyle) { run.styleId = this.typingStyle.id || null; run.styleChanged = true; }
     Object.assign(run, this.typingFormat); run.overrides = { ...run.overrides, ...this.typingFormat };
     if (this.stylesEnabled) {
@@ -1791,6 +1874,8 @@ export class TextDocument {
     return true;
   }
   findMatches(query, options) {
+    // With Track Changes on, deleted text is not found: replacing it would only insert the replacement again.
+    if (this.trackChanges && !this.trackingInternal) options = { ...options, skipDeleted: true };
     // Advanced options (special characters, wildcards, formatting) use the advanced matcher.
     if (options?.advanced) return advancedFind(this.paragraphs, query, options, { styles: this.styles, numbering: this.numbering });
     return findText(this.paragraphs, query, options);
@@ -1967,8 +2052,15 @@ export class TextDocument {
         // The author's own pending insertions simply disappear; other text is marked
         // deleted (another reviewer's insertion keeps its insertion beneath the deletion).
         const me = this.revisionAuthor || 'Author';
-        const removals = nearbyRevisionRanges(this.paragraphs, start, end).filter(r => r.type === 'ins' && r.author === me && r.start < end && r.end > start)
+        let removals = nearbyRevisionRanges(this.paragraphs, start, end).filter(r => r.type === 'ins' && r.author === me && r.start < end && r.end > start)
           .map(r => [Math.max(start, r.start), Math.min(end, r.end)]);
+        // A MACROBUTTON prompt is a placeholder to type over: it goes with its field, as it does untracked, and only
+        // the typed text is tracked. Marked deleted, it left a field whose label could not be saved, and every
+        // save failed.
+        if (this.hasMacroButtons) {
+          const prompts = bodyFieldRanges(this.paragraphs).filter(r => r.field.type === 'MACROBUTTON' && start <= r.start && r.end <= end && r.start < r.end).map(r => [r.start, r.end]);
+          if (prompts.length) removals = [...removals, ...prompts].sort((a, b) => a[0] - b[0]).reduce((out, [a, b]) => { const last = out.at(-1); if (last && a <= last[1]) last[1] = Math.max(last[1], b); else out.push([a, b]); return out; }, []);
+        }
         const deletion = deletionRevision = this.newRevision('del');
         // Deleting next to the author's own deletion from moments ago (Backspace or Delete held down) extends it,
         // as typing extends an insertion, so it stays one change even when it crosses a clock second.
@@ -2039,7 +2131,7 @@ export class TextDocument {
     const run = { ...this.typingRun(at), text: OBJECT, field: { ...field }, overrides: {} };
     delete run.styleChanged; delete run.revision;
     p.runs = normalize([...sliceRuns(p.runs, 0, location.offset), run, ...sliceRuns(p.runs, location.offset)]);
-    for (const marker of [...(p.bookmarks || []), ...(p.fieldMarkers || [])]) if (marker.offset > location.offset) marker.offset++;
+    shiftMarkersPastObject(p, location.offset);
     this.selection = { anchor: at + 1, focus: at + 1 };
     this.didChange(); return true;
   }
@@ -2054,7 +2146,7 @@ export class TextDocument {
     const at = this.range[0], location = locate(this.paragraphs, at), p = this.paragraphs[location.index];
     const run = { text: OBJECT, math: { xml: math.xml, text: math.text }, styleId: null, directFormat: {}, hasDirectProperties: false, styleManaged: true, properties: '', overrides: {} };
     p.runs = normalize([...sliceRuns(p.runs, 0, location.offset), run, ...sliceRuns(p.runs, location.offset)]);
-    for (const marker of [...(p.bookmarks || []), ...(p.fieldMarkers || [])]) if (marker.offset > location.offset) marker.offset++;
+    shiftMarkersPastObject(p, location.offset);
     this.selection = { anchor: at + 1, focus: at + 1 };
     this.didChange(); return true;
   }
@@ -2067,7 +2159,7 @@ export class TextDocument {
     // With Track Changes on the reference is an insertion like typed text, so rejecting it removes the note.
     if (this.trackChanges && !this.trackingInternal) run.revision = this.newRevision('ins');
     p.runs = normalize([...sliceRuns(p.runs, 0, location.offset), run, ...sliceRuns(p.runs, location.offset)]);
-    for (const marker of [...(p.bookmarks || []), ...(p.fieldMarkers || [])]) if (marker.offset > location.offset || marker.offset === location.offset && marker.edge === 'end' && marker.comment) marker.offset++;
+    shiftMarkersPastObject(p, location.offset, { commentEnds: true });
     this.hasNoteMarks = true;
     this.selection = { anchor: at + 1, focus: at + 1 };
     this.didChange(); return true;
@@ -2258,8 +2350,10 @@ export class TextDocument {
     const first = this.paragraphs[a.index], last = this.paragraphs[b.index];
     // Removing an empty paragraph's mark removes that paragraph: the following
     // paragraph keeps its own style and properties, as when Backspace at the
-    // start of a heading deletes the empty line above it.
-    const emptyFirst = !text && !crossesSection && b.index === a.index + 1 && b.offset === 0 && !first.runs.length
+    // start of a heading deletes the empty line above it. Deleting whole
+    // paragraphs (from a paragraph's start to the start of a later one) likewise
+    // leaves the paragraph after them as it was.
+    const emptyFirst = !text && !crossesSection && b.index > a.index && a.offset === 0 && b.offset === 0
       && !blockBoundary && !persistentBlock && !persistent && sameValue(first.blockControls, last.blockControls);
     const boundaryRuns = controlCaret && start === end ? splitControlCaretRuns(first.runs, a.offset, controlCaret.side === 'inside' ? { ...controlCaret, side: 'before' } : controlCaret) : undefined;
     const lines = text.split('\n');

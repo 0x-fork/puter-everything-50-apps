@@ -123,6 +123,112 @@ test('an invited editor keeps edits made after the owner stopped sharing', async
   await ownerContext.close(); await guestContext.close();
 });
 
+test('Save As in a shared document goes on in a copy the others do not see', async ({ browser }) => {
+  test.setTimeout(120000);
+  const ownerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const owner = await ownerContext.newPage();
+  await owner.goto('/mock.html?user=ada#/new');
+  await expect(owner.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await text(owner).fill('Quarterly plan.');
+  await expect(status(owner)).toHaveAttribute('aria-label', 'Saved to Puter');
+  const link = await shareForEditing(owner);
+  const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const guest = await guestContext.newPage();
+  await guest.goto(link.replace('mock.html', 'mock.html?user=bob'));
+  await expect.poll(() => text(guest).evaluate(el => el.value), { timeout: 15000 }).toBe('Quarterly plan.');
+  await owner.getByRole('button', { name: 'File', exact: true }).click();
+  const view = owner.getByRole('dialog', { name: 'File' });
+  await view.getByRole('tab', { name: 'Save' }).click();
+  await view.getByRole('textbox', { name: 'New file name' }).fill('Private copy');
+  await view.getByRole('button', { name: 'Save As', exact: true }).click();
+  await expect(view.getByRole('status')).toHaveText('Saved. You are now editing the copy.');
+  await owner.keyboard.press('Escape');
+  await expect(owner.locator('.cl-banner')).toContainText('your own copy now, which is not shared');
+  await text(owner).evaluate(el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); el.dispatchEvent(new Event('select')); });
+  await text(owner).pressSequentially(' Private note.');
+  await expect(status(owner)).toHaveAttribute('aria-label', 'Saved to Puter');
+  // The copy's text stays out of the shared document.
+  await guest.waitForTimeout(2000);
+  expect(await text(guest).evaluate(el => el.value)).toBe('Quarterly plan.');
+  await ownerContext.close(); await guestContext.close();
+});
+
+test('a guest leaving a shared document with changes the others have not received is asked first', async ({ browser }) => {
+  test.setTimeout(120000);
+  const ownerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const owner = await ownerContext.newPage();
+  await owner.goto('/mock.html?user=ada#/new');
+  await expect(owner.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await text(owner).fill('Quarterly plan.');
+  await expect(status(owner)).toHaveAttribute('aria-label', 'Saved to Puter');
+  const link = await shareForEditing(owner);
+  const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const guest = await guestContext.newPage();
+  await guest.goto(link.replace('mock.html', 'mock.html?user=bob'));
+  await expect.poll(() => text(guest).evaluate(el => el.value), { timeout: 15000 }).toBe('Quarterly plan.');
+  await guestContext.setOffline(true);
+  await text(guest).evaluate(el => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); el.dispatchEvent(new Event('select')); });
+  await text(guest).pressSequentially(' Offline note.');
+  await expect(guest.locator('.cl-chip')).toContainText('waiting', { timeout: 15000 });
+  // The owner saves the file, so nothing is "unsaved" here; the changes are still in this tab only.
+  expect(await warnsOnUnload(guest)).toBe(true);
+  await guest.getByRole('button', { name: 'All Documents' }).click();
+  const question = guest.getByRole('dialog', { name: 'Leave without saving?' });
+  await expect(question).toContainText('have not reached the shared document yet');
+  await question.getByRole('button', { name: 'Keep editing' }).click();
+  expect(await guest.evaluate(() => window.__docs.current.kind)).toBe('editor');
+  // Back online, leaving delivers them first and asks nothing.
+  await guestContext.setOffline(false);
+  await guest.getByRole('button', { name: 'All Documents' }).click();
+  await expect(guest.getByRole('heading', { name: 'Your documents' })).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => text(owner).evaluate(el => el.value), { timeout: 15000 }).toBe('Quarterly plan. Offline note.');
+  await ownerContext.close(); await guestContext.close();
+});
+
+test('an autosave refused because another window changed the file says so once, with Save a Copy', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('Mine');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Saved to Puter');
+  // Time stamps are whole seconds: the other window writes in a later one.
+  await page.waitForTimeout(1100);
+  await page.evaluate(async () => { const { path } = window.__docs.current.view.doc; await puter.fs.write(path, await puter.fs.read(path)); });
+  await text(page).press('End');
+  await page.keyboard.type(' and more');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Not saved');
+  const notice = page.locator('.toast', { hasText: 'changed in another window' });
+  await expect(notice).toHaveCount(1);
+  // Further edits fail the same way without repeating it.
+  await page.keyboard.type(' still');
+  await page.waitForTimeout(2500);
+  await expect(notice).toHaveCount(1);
+  await notice.getByRole('button', { name: 'Save a Copy' }).click();
+  const view = page.getByRole('dialog', { name: 'File' });
+  await expect(view.getByRole('tab', { name: 'Save' })).toHaveAttribute('aria-selected', 'true');
+  await view.getByRole('textbox', { name: 'New file name' }).fill('Mine kept');
+  await view.getByRole('button', { name: 'Save As', exact: true }).click();
+  await expect(view.getByRole('status')).toHaveText('Saved. You are now editing the copy.');
+  await page.keyboard.press('Escape');
+  await expect(status(page)).toHaveAttribute('aria-label', 'Saved to Puter');
+});
+
+test('leaving a template before it has opened asks nothing, since nothing in it is the user\'s', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // A slow first visit: the editor's code takes a while to arrive.
+  let release;
+  const arrived = new Promise(resolve => { release = resolve; });
+  await page.route(/engine-chunk\.js/, async route => { await arrived; await route.continue(); });
+  await page.goto('/mock.html#/home');
+  await expect(page.getByRole('heading', { name: 'Your documents' })).toBeVisible();
+  await page.evaluate(() => { location.hash = '#/new/letter'; });
+  await expect.poll(() => page.evaluate(() => window.__docs.current?.kind)).toBe('editor');
+  expect(await warnsOnUnload(page)).toBe(false);
+  await page.evaluate(() => { location.hash = '#/home'; });
+  await expect(page.getByRole('heading', { name: 'Your documents' })).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  release();
+  expect(Object.keys(await drive(page))).toEqual([]);
+});
+
 test('File > Save: pressing Save As twice saves one copy and says so', async ({ page }) => {
   await openEditor(page);
   await text(page).fill('Original');

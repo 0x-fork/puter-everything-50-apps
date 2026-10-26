@@ -392,6 +392,20 @@ test('a table of authorities for all categories lists them in category order', a
   await expect.poll(() => engineText(page)).toMatch(/\nCases\nSmith v\. Jones\t1\nStatutes\nClean Air Act\t1\n?$/);
 });
 
+test('Smart Lookup says plainly why it has no answer, once', async ({ page }) => {
+  await openEditor(page);
+  await page.keyboard.type('The aphelion of an orbit is far.');
+  await expect.poll(() => engineText(page)).toBe('The aphelion of an orbit is far.');
+  // Puter's SDK rejects with its own error object, not an Error: the pane explained it and a toast said "[object Object]".
+  await page.evaluate(() => { puter.ai.chat = async () => { throw { success: false, error: { code: 'insufficient_funds', message: 'Insufficient funds' } }; }; const m = window.__docs.current.view.engine.model, at = m.text.indexOf('aphelion'); m.select(at + 2); });
+  await onTab(page, 'references');
+  await ribbon(page).getByRole('button', { name: 'Smart Lookup', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Smart Lookup' });
+  await expect(pane.getByRole('status')).toHaveText('Your Puter AI allowance has run out for now.');
+  await page.waitForTimeout(300);
+  await expect(page.locator('.toast')).toHaveCount(0);
+});
+
 test('Smart Lookup explains the selection, and the menus offer References commands', async ({ page }) => {
   await openEditor(page);
   await page.keyboard.type('The aphelion of an orbit is far.');
@@ -425,4 +439,88 @@ test('the References tab fits a phone screen', async ({ page }) => {
   const box = await page.getByRole('dialog', { name: 'Caption' }).boundingBox();
   expect(box.width).toBeLessThanOrEqual(390);
   await shot(page, 'caption-390');
+});
+
+test('the Bookmarks and Go To dialogs leave out the hidden bookmarks a table of contents adds', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await openEditor(page);
+  await typeDocument(page);
+  await page.evaluate(() => { const engine = window.__docs.current.view.engine, m = engine.model; engine.execute(() => { m.select(m.text.indexOf('Engines')); m.addBookmark('Mine'); m.select(0); return true; }); engine.focus(); });
+  await onTab(page, 'references');
+  await ribbon(page).getByRole('button', { name: 'Table of Contents', exact: true }).click();
+  await page.getByRole('menuitem', { name: /^Classic/ }).click();
+  await expect.poll(() => page.evaluate(() => window.__docs.current.view.engine.bookmarks.filter(b => b.name.startsWith('_Toc')).length)).toBeGreaterThan(0);
+  await (await onTab(page, 'insert')).getByRole('button', { name: 'Bookmarks', exact: true }).click();
+  const list = page.getByRole('listbox', { name: 'Document bookmarks', exact: true });
+  await expect(list.locator('option')).toHaveText([/^Mine · page 1$/]);
+  await page.getByRole('dialog', { name: 'Bookmarks' }).getByRole('button', { name: 'Done', exact: true }).click();
+  await page.locator('.ed-statusbar').getByRole('button', { name: /^Page 1 of 1/ }).click();
+  const goTo = page.getByRole('dialog', { name: 'Go To' });
+  await goTo.getByRole('listbox', { name: 'Go to what' }).selectOption('bookmark');
+  await expect(goTo.locator('select:not([size]) option')).toHaveText(['Mine']);
+  expect(errors).toEqual([]);
+});
+
+test('changing a cited source\'s tag in Manage Sources keeps its citations', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await openEditor(page);
+  await page.evaluate(() => { const engine = window.__docs.current.view.engine, m = engine.model; engine.execute(() => { m.replace('Claim one. Claim two.'); m.select('Claim one'.length); return true; }); engine.focus(); });
+  await onTab(page, 'references');
+  await ribbon(page).getByRole('button', { name: 'Insert Citation', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Add New Source…' }).click();
+  const create = page.getByRole('dialog', { name: 'Create Source' });
+  await create.getByLabel('Author', { exact: true }).fill('Lovelace, Ada');
+  await create.getByLabel('Title', { exact: true }).fill('Notes on engines');
+  await create.getByLabel('Year', { exact: true }).fill('2020');
+  await create.locator('button[type=submit]').click();
+  await expect.poll(() => engineText(page)).toBe('Claim one (Lovelace, 2020). Claim two.');
+  await ribbon(page).getByRole('button', { name: 'Manage Sources', exact: true }).click();
+  const manager = page.getByRole('dialog', { name: 'Source Manager' });
+  await manager.getByLabel('Current list', { exact: true }).selectOption({ index: 0 });
+  await manager.getByRole('button', { name: 'Edit…' }).click();
+  const edit = page.getByRole('dialog', { name: 'Edit Source' });
+  await edit.getByLabel('Tag name').fill('Ada2020');
+  await edit.locator('button[type=submit]').click();
+  await expect(edit).toBeHidden();
+  await manager.locator('button[type=submit]').click();
+  await expect.poll(() => engineText(page)).toBe('Claim one (Lovelace, 2020). Claim two.');
+  await page.evaluate(() => window.__docs.current.view.engine.focus());
+  await page.keyboard.press('F9');
+  await expect.poll(() => engineText(page)).toBe('Claim one (Lovelace, 2020). Claim two.');
+  expect(await page.evaluate(() => window.__docs.current.view.engine.session.body.paragraphs.flatMap(p => (p.fieldMarkers || []).map(m => m.field.instruction)).filter(Boolean))).toEqual(expect.arrayContaining([expect.stringContaining('Ada2020')]));
+  expect(errors).toEqual([]);
+});
+
+test('a cross-reference to a footnote numbered from 1 on each page shows the number on its page', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await openEditor(page);
+  await page.evaluate(() => { const engine = window.__docs.current.view.engine, m = engine.model; engine.execute(() => { m.replace('Alpha para\fBeta para\fGamma para'); return true; }); });
+  await onTab(page, 'references');
+  for (const [word, note] of [['Alpha', 'Note one'], ['Beta', 'Note two'], ['Gamma', 'Note three']]) {
+    await page.evaluate(w => { const engine = window.__docs.current.view.engine; if (engine.session.path !== null) engine.editStory(null); const m = engine.session.body; m.select(m.text.indexOf(w) + w.length); engine.focus(); }, word);
+    await ribbon(page).getByRole('button', { name: 'Insert Footnote', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.__docs.current.view.engine.session.path)).not.toBeNull();
+    await page.keyboard.type(note);
+  }
+  await page.evaluate(() => { const engine = window.__docs.current.view.engine; engine.editStory(null); engine.model.select(engine.model.text.length); engine.focus(); });
+  await ribbon(page).getByRole('button', { name: 'Footnote and Endnote Settings', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Footnote and Endnote' });
+  await settings.getByLabel('Numbering').selectOption('eachPage');
+  await settings.getByRole('button', { name: 'Apply' }).click();
+  await settings.getByRole('button', { name: 'Cancel' }).click();
+  await expect(settings).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.__docs.current.view.engine.layout.footnoteAreas.map(a => a.notes.map(n => n.display).join()))).toEqual(['1', '1', '1']);
+  await page.evaluate(() => { const engine = window.__docs.current.view.engine; engine.model.select(engine.model.text.length); engine.focus(); });
+  await page.keyboard.type(' See note ');
+  await ribbon(page).getByRole('button', { name: 'Cross-reference', exact: true }).click();
+  const reference = page.getByRole('dialog', { name: 'Cross-reference' });
+  await reference.getByLabel('Reference type').selectOption('footnote');
+  await expect(reference.getByLabel('For which item').locator('option')).toHaveText(['1 Note one', '1 Note two', '1 Note three']);
+  await reference.getByLabel('For which item').selectOption({ index: 2 });
+  await reference.getByLabel('Insert reference to').selectOption('number');
+  await reference.getByRole('button', { name: 'Insert' }).click();
+  await expect.poll(() => engineText(page)).toMatch(/See note 1$/);
+  await page.keyboard.press('F9');
+  await expect.poll(() => engineText(page)).toMatch(/See note 1$/);
+  expect(errors).toEqual([]);
 });

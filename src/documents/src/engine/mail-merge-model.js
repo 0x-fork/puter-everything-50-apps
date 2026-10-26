@@ -41,7 +41,9 @@ const displayText = text => String(text ?? '').replace(/\r\n?|\n/g, '\v');
 export function insertMergeField(model, instruction, text = null) {
   const field = newMergeField(instruction);
   const shown = displayText(text ?? placeholderResults([{ code: instruction, type: fieldKeyword(instruction) }])[0] ?? '');
-  if (model.range[0] !== model.range[1]) model.replaceUntracked('', { checkpoint: false });
+  // Replacing a selection is an ordinary edit: with Track Changes on, the selection is marked deleted
+  // and the field follows it, marked inserted, as typing over the selection would be.
+  if (model.range[0] !== model.range[1]) model.replace('', { checkpoint: false });
   let at = model.range[0];
   const ranges = model.paragraphs.some(p => p.fieldMarkers?.length) ? bodyFieldRanges(model.paragraphs) : [];
   // A field is not placed inside another merge field's result: it goes after that field.
@@ -49,7 +51,7 @@ export function insertMergeField(model, instruction, text = null) {
   if (inside) { at = inside.end; model.select(at); }
   // Typing at an empty field result fills it; a new field beside it must leave it empty.
   const empty = new Set(ranges.filter(r => r.start === at && r.end === at).map(r => r.field.id));
-  if (shown) model.replaceUntracked(shown, { checkpoint: false });
+  if (shown) model.replace(shown, { checkpoint: false });
   const { index, offset } = paragraphAt(model.paragraphs, at);
   const p = model.paragraphs[index];
   for (const marker of p.fieldMarkers || []) if (marker.type === 'end' && empty.has(marker.field.id)) marker.offset = offset;
@@ -73,6 +75,37 @@ export function mergeFieldRanges(model) {
 /** Whether the document has any merge fields. */
 export const hasMergeFields = model => mergeFieldRanges(model).some(f => MERGE_TYPES.has(f.type));
 
+/** The run holding document position `position` (the one starting there), or null. */
+function runAt(paragraphs, position) {
+  const { index, offset } = paragraphAt(paragraphs, position);
+  let at = 0;
+  for (const run of paragraphs[index].runs) { if (offset < at + run.text.length) return run; at += run.text.length; }
+  return null;
+}
+// What a result run's formatting is made of: everything but its text and the objects and annotations it holds.
+const NOT_FORMATTING = ['text', 'image', 'contentControl', 'positionalTab', 'noteMark', 'bodySymbol', 'noBreakHyphen', 'breakClear', 'field', 'revision', 'formatRevision', 'math', 'link'];
+const resultFormatting = run => { const out = structuredClone(run); for (const key of NOT_FORMATTING) delete out[key]; return out; };
+
+/** Runs with the plain text in [from, to) given `formatting`; text a line break or object holds keeps its own. */
+function withFormatting(runs, from, to, formatting) {
+  const out = []; let at = 0;
+  const plain = run => !run.image && !run.math && !run.field && !run.noteMark && !run.bodySymbol && !run.noBreakHyphen && !run.breakClear && !run.contentControl;
+  const push = run => {
+    const last = out.at(-1);
+    if (last && plain(last) && plain(run) && JSON.stringify({ ...last, text: '' }) === JSON.stringify({ ...run, text: '' })) last.text += run.text;
+    else out.push(run);
+  };
+  for (const run of runs) {
+    const start = at, end = at + run.text.length; at = end;
+    if (end <= from || start >= to || !plain(run)) { push({ ...run }); continue; }
+    const a = Math.max(from, start) - start, b = Math.min(to, end) - start;
+    if (a) push({ ...run, text: run.text.slice(0, a) });
+    push({ ...structuredClone(formatting), text: run.text.slice(a, b) });
+    if (b < run.text.length) push({ ...run, text: run.text.slice(b) });
+  }
+  return out;
+}
+
 /** Replace field results in place (no tracking); returns how many changed. */
 export function applyMergeResults(model, fields, results) {
   const text = model.text, changes = [];
@@ -90,7 +123,15 @@ export function applyMergeResults(model, fields, results) {
       model.select(range.start, range.end);
       model.typingFormat = {}; model.typingStyle = null; model.typingDirectCleared = false;
       if (range.start === range.end && !value) continue;
+      // A result emptied for a recipient without a value keeps its formatting on the field, so the next
+      // value (or the placeholder) is bold again where the field was bold, not like the text before it.
+      if (range.end > range.start) { const run = runAt(model.paragraphs, range.start); if (run) range.field.resultFormatting = resultFormatting(run); }
       model.replaceUntracked(value, { checkpoint: false });
+      const saved = range.start === range.end && value && range.field.resultFormatting;
+      if (saved) {
+        const { index } = paragraphAt(model.paragraphs, range.start), p = model.paragraphs[index], from = range.start - offsetOf(model.paragraphs, index), to = from + value.length;
+        p.runs = withFormatting(p.runs, from, to, saved);
+      }
     }
   } finally { model.trackChanges = tracking; }
   const max = model.text.length;
@@ -221,7 +262,11 @@ export function insertEnvelope(model, { width, height, delivery = '', returnAddr
   model.select(deliveryStart, deliveryStart + deliveryText.length);
   model.setParagraphFormat({ spaceBefore, spaceAfter: 0, indentLeft: left, firstLine: 0, alignment: 'left' });
   if (fontSize && deliveryText) model.setRunFormat({ fontSize });
-  if (deliveryField) { model.select(deliveryStart); insertMergeField(model, deliveryField); }
+  // The envelope is written untracked, its address field with it.
+  if (deliveryField) {
+    const tracking = model.trackChanges; model.trackChanges = false;
+    try { model.select(deliveryStart); insertMergeField(model, deliveryField); } finally { model.trackChanges = tracking; }
+  }
   if (!empty) {
     const { settings, xml } = envelopeSection(width, height);
     const index = paragraphAt(model.paragraphs, deliveryStart).index;

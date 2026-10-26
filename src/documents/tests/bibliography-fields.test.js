@@ -5,7 +5,7 @@ import { DocxPackage, createDocx, WRITING_STYLES } from '../src/engine/docx.js';
 import { TextDocument, paragraph } from '../src/engine/model.js';
 import { bodyFieldRanges } from '../src/engine/body-fields.js';
 import { BIB_NS, parseSources } from '../src/engine/bibliography.js';
-import { readBibliographyPart, writeBibliographyPart, insertCitation, insertBibliography, updateCitations, updateBibliographies, citationFields, convertToText, styleOf } from '../src/engine/bibliography-fields.js';
+import { readBibliographyPart, writeBibliographyPart, insertCitation, insertBibliography, updateCitations, updateBibliographies, citationFields, convertToText, styleOf, renameCitedTag } from '../src/engine/bibliography-fields.js';
 
 let dom;
 beforeAll(() => { dom = new JSDOM(); globalThis.DOMParser = dom.window.DOMParser; globalThis.XMLSerializer = dom.window.XMLSerializer; });
@@ -89,5 +89,38 @@ describe('citations and bibliography fields', () => {
     convertToText(d, range);
     expect(bodyFieldRanges(d.paragraphs)).toEqual([]);
     expect(d.text.startsWith('(Lovelace)')).toBe(true);
+  });
+});
+
+describe('updating citations keeps the caret where it was', () => {
+  it('so a citation inserted after an update goes where the caret is', async () => {
+    const { d } = await setup();
+    const second = { ...book, tag: 'Lov20b', fields: { ...book.fields, Title: 'A sketch of the engine' } };
+    d.select(0, d.text.length); d.replace('Claim one. Claim two.');
+    d.select('Claim one'.length); insertCitation(d, { tags: ['Lov20'] }, [book], 'apa');
+    const caret = d.text.indexOf('Claim two') + 'Claim two'.length;
+    d.select(caret);
+    // A second source by the same author and year turns the first citation into "2020a" or "2020b".
+    expect(updateCitations(d, [book, second], 'apa')).toBe(1);
+    expect(d.text).toMatch(/^Claim one \(Lovelace, 2020[ab]\)\. Claim two\.$/);
+    expect(d.range).toEqual([caret + 1, caret + 1]);
+    insertCitation(d, { tags: ['Lov20b'] }, [book, second], 'apa');
+    expect(d.text).toMatch(/^Claim one \(Lovelace, 2020[ab]\)\. Claim two \(Lovelace, 2020[ab]\)\.$/);
+  });
+});
+
+describe('changing a cited source\'s tag', () => {
+  it('points its citations, including those that cite several sources, at the new tag', async () => {
+    const { pkg, d } = await setup();
+    d.select(7); insertCitation(d, { tags: ['Lov20'], pages: '4' }, [book, article], 'apa');
+    d.select(d.text.length); insertCitation(d, { tags: ['Hop19', 'lov20'] }, [book, article], 'apa');
+    const renamed = { ...book, tag: 'Ada2020' };
+    expect(renameCitedTag(d, 'Lov20', 'Ada2020')).toBe(2);
+    expect(citationFields(d.paragraphs).map(r => r.citation.tags)).toEqual([['Ada2020'], ['Hop19', 'Ada2020']]);
+    expect(citationFields(d.paragraphs)[0].citation.pages).toBe('4');
+    updateCitations(d, [renamed, article], 'apa');
+    expect(d.text).toContain('(Lovelace, 2020, p. 4)');
+    expect(d.text).toContain('(Hopper, 2019; Lovelace, 2020)');
+    expect(strFromU8(unzipSync(await save(pkg, d))['word/document.xml'])).not.toContain('Lov20');
   });
 });

@@ -392,6 +392,25 @@ test('AI grammar suggestions are opt-in, marked and applied as ordinary edits', 
   expect(await page.evaluate(() => window.__prompts.length)).toBe(1);
 });
 
+test('an AI suggestion is accepted while a header is being edited', async ({ page }) => {
+  await fakeAi(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const input = await newDocument(page, 'Thanks alot for the review.');
+  await onTab(page, 'review');
+  await review(page).getByRole('button', { name: 'Editor', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Editor pane' });
+  await pane.getByRole('checkbox', { name: /Suggest with/ }).check();
+  await pane.getByRole('button', { name: 'Check with AI' }).click();
+  const item = pane.locator('.rv-ai-item');
+  await expect(item).toContainText('alot → a lot');
+  await (await onTab(page, 'insert')).locator('#ribbon-panel-insert').getByRole('button', { name: 'Header', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Edit Header' }).click();
+  await expect(page.locator('#ribbon-tab-headerFooter')).toHaveAttribute('aria-selected', 'true');
+  await item.getByRole('button', { name: 'Accept' }).click();
+  await expect(input).toHaveValue('Thanks a lot for the review.');
+  await expect(page.locator('.toast')).toHaveCount(0);
+});
+
 test('Translate puts the selection\'s translation in a pane to insert', async ({ page }, info) => {
   await fakeAi(page);
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -623,5 +642,146 @@ test('a comment being written survives edits elsewhere in the document', async (
   });
   await expect.poll(comments).toEqual([['Half written and finished', 'beta'], ['Elsewhere', 'gamma']]);
   await expect(input).toHaveValue('More Intro Alpha beta gamma.');
+  expect(errors).toEqual([]);
+});
+
+test('a comment card that grows while a reply is typed pushes the cards below it down', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const input = await newDocument(page, 'Alpha beta gamma delta.\nSecond line here.\nThird line.');
+  await onTab(page, 'review');
+  for (const [start, end, text] of [[6, 10, 'First comment'], [24, 30, 'Second comment']]) {
+    await select(input, start, end);
+    await review(page).getByRole('button', { name: 'New Comment', exact: true }).click();
+    await page.locator('.ed-comment-draft textarea').fill(text);
+    await page.locator('.ed-comment-draft').getByRole('button', { name: 'Post' }).click();
+  }
+  const cards = page.locator('.ed-comment-card');
+  await expect(cards).toHaveCount(2);
+  await cards.first().click();
+  const reply = cards.first().locator('.wcc-reply textarea');
+  await reply.click();
+  await reply.pressSequentially('First line');
+  for (let i = 0; i < 5; i++) { await reply.press('Shift+Enter'); await reply.pressSequentially(`More text ${i}`); }
+  // The second card sits below the first, however tall the first has grown.
+  await expect.poll(() => cards.evaluateAll(nodes => {
+    const [first, second] = nodes.map(n => n.getBoundingClientRect());
+    return second.top >= first.bottom;
+  })).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test('choosing a comment in the Reviewing Pane selects its text after edits before it', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const input = await newDocument(page, 'Alpha beta gamma delta.');
+  await onTab(page, 'review');
+  await select(input, 6, 10);
+  await review(page).getByRole('button', { name: 'New Comment', exact: true }).click();
+  await page.locator('.ed-comment-draft textarea').fill('About beta');
+  await page.locator('.ed-comment-draft').getByRole('button', { name: 'Post' }).click();
+  await (await reviewButton(page, 'Reviewing Pane', 'Tracking')).click();
+  const item = page.getByRole('complementary', { name: 'Reviewing Pane' }).locator('.review-pane-item');
+  await expect(item).toHaveCount(1);
+  await input.focus();
+  await select(input, 0);
+  await page.keyboard.type('Some more words ');
+  await expect(input).toHaveValue('Some more words Alpha beta gamma delta.');
+  await item.click();
+  await expect.poll(() => input.evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd))).toBe('beta');
+  expect(errors).toEqual([]);
+});
+
+test('typing before a comment moves its card without rebuilding the comment column', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/mock.html#/new');
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await input.fill('Alpha beta gamma delta.');
+  await onTab(page, 'review');
+  await select(input, 6, 10);
+  await review(page).getByRole('button', { name: 'New Comment', exact: true }).click();
+  await page.locator('.ed-comment-draft textarea').fill('About beta');
+  await page.locator('.ed-comment-draft').getByRole('button', { name: 'Post' }).click();
+  const card = page.locator('.ed-comment-card');
+  await expect(card).toHaveCount(1);
+  await input.focus();
+  await select(input, 0);
+  const top = await card.evaluate(node => { node.dataset.probe = 'kept'; return node.getBoundingClientRect().top; });
+  // Rebuilding every card on each keystroke made typing slow in a document with many comments.
+  await page.keyboard.type('Intro');
+  await page.keyboard.press('Enter');
+  await expect(input).toHaveValue('Intro\nAlpha beta gamma delta.');
+  await expect(card).toHaveAttribute('data-probe', 'kept');
+  // The card still follows its anchor down to the next line, and still selects the words it is on.
+  await expect.poll(() => card.evaluate(node => node.getBoundingClientRect().top)).toBeGreaterThan(top + 10);
+  await card.click();
+  await expect.poll(() => page.evaluate(() => { const model = window.__docs.current.view.engine.model; return model.text.slice(...model.range); })).toBe('beta');
+  expect(errors).toEqual([]);
+});
+
+test('the Reviewing Pane orientation chosen in Tracking Options applies at once and the dialog shows the current one', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await newDocument(page, 'Alpha beta gamma delta.');
+  await onTab(page, 'review');
+  await (await reviewButton(page, 'Reviewing Pane', 'Tracking')).click();
+  const pane = page.getByRole('complementary', { name: 'Reviewing Pane' });
+  await expect(pane).toHaveAttribute('data-orientation', 'vertical');
+  const options = async () => {
+    await page.locator('#ribbon-panel-review [aria-label="Tracking Options"]').evaluate(b => b.click());
+    return page.getByRole('dialog', { name: 'Tracking Options' });
+  };
+  let dialog = await options();
+  await dialog.getByLabel('Reviewing Pane orientation').selectOption('horizontal');
+  await dialog.getByRole('button', { name: 'OK', exact: true }).click();
+  await expect(pane).toHaveAttribute('data-orientation', 'horizontal');
+  // Back to vertical from the ribbon; the dialog then offers vertical, and OK keeps it.
+  await page.locator('#ribbon-panel-review [aria-label="Reviewing Pane options"]').evaluate(b => b.click());
+  await page.getByRole('menuitemradio', { name: 'Reviewing Pane Vertical' }).click();
+  await expect(pane).toHaveAttribute('data-orientation', 'vertical');
+  dialog = await options();
+  await expect(dialog.getByLabel('Reviewing Pane orientation')).toHaveValue('vertical');
+  await dialog.getByRole('button', { name: 'OK', exact: true }).click();
+  await expect(pane).toHaveAttribute('data-orientation', 'vertical');
+  expect(errors).toEqual([]);
+});
+
+test('typing before a comment leaves the Comments pane list as it is', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/mock.html#/new');
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await input.fill('Alpha beta gamma delta.');
+  await page.evaluate(() => { const engine = window.__docs.current.view.engine; engine.execute(() => engine.model.addComment({ author: 'Grace', text: 'About beta', range: [6, 10] })); });
+  await onTab(page, 'review');
+  await page.evaluate(() => document.querySelector('#ribbon-panel-review [aria-label="Show Comments options"]')?.click());
+  await page.getByRole('menuitemradio', { name: 'List' }).click();
+  const item = page.getByRole('complementary', { name: 'Comments pane' }).locator('.rv-comment');
+  await expect(item).toHaveCount(1);
+  await item.evaluate(node => { node.dataset.probe = 'kept'; });
+  await input.focus();
+  await select(input, 0);
+  await page.keyboard.type('Intro ');
+  await expect(input).toHaveValue('Intro Alpha beta gamma delta.');
+  // Rebuilding the whole list at every keystroke slowed typing in a much-commented document.
+  await expect(item).toHaveAttribute('data-probe', 'kept');
+  await item.click();
+  await expect.poll(() => page.evaluate(() => { const model = window.__docs.current.view.engine.model; return model.text.slice(...model.range); })).toBe('beta');
+  expect(errors).toEqual([]);
+});
+
+test('correcting a misspelled possessive keeps its ’s', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const input = await newDocument(page, 'I saw recieve’s notice.');
+  await select(input, 0);
+  await input.press('F7');
+  await expect(page.locator('.ed-proof-context mark')).toHaveText('recieve’s', { timeout: 15000 });
+  await expect(page.locator('.ed-proof-suggestion').first()).toHaveText('receive');
+  await page.locator('.ed-proof-actions').getByRole('button', { name: 'Change', exact: true }).click();
+  await expect(input).toHaveValue('I saw receive’s notice.');
   expect(errors).toEqual([]);
 });

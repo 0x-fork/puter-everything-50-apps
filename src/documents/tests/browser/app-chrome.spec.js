@@ -431,3 +431,62 @@ test('on a phone, panes open together stay within reach below the page', async (
   const bottoms = () => page.evaluate(() => [document.querySelector('.styles-pane'), document.querySelector('.canvas-editor-content')].map(node => Math.round(node.getBoundingClientRect().bottom)));
   await expect.poll(async () => { const [pane, column] = await bottoms(); return pane <= column; }).toBe(true);
 });
+
+test('dialogs put their buttons at the end of the row', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('Two words');
+  // Word Count, Zoom and Share lay out their buttons with .modal-actions, which once had no style of its own:
+  // the buttons sat at the start of the row, unlike every other dialog's.
+  for (const [menu, item, name, button] of [['Tools', /^Word Count…/, 'Word Count', 'Close'], ['View', /^Zoom…/, 'Zoom', 'OK'], ['Tools', /^Share…/, /^Share/, 'Done']]) {
+    await (await openMenu(page, menu)).getByRole('menuitem', { name: item }).click();
+    const dialog = page.locator('.modal-root:not(.closing)').getByRole('dialog', { name });
+    const gap = await dialog.locator('.modal-actions').getByRole('button', { name: button, exact: true }).evaluate(b => {
+      const panel = b.closest('.modal-panel');
+      return Math.round(panel.getBoundingClientRect().right - parseFloat(getComputedStyle(panel).paddingRight) - b.getBoundingClientRect().right);
+    });
+    expect(Math.abs(gap)).toBeLessThanOrEqual(2);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+  }
+});
+
+test('the zoom slider reads its value as a percentage', async ({ page }) => {
+  await openEditor(page);
+  const slider = page.getByRole('slider', { name: 'Zoom slider' });
+  await expect(slider).toHaveAttribute('aria-valuetext', '100%');
+  await page.getByRole('button', { name: 'Zoom In', exact: true }).click();
+  await expect(slider).toHaveValue('110');
+  await expect(slider).toHaveAttribute('aria-valuetext', '110%');
+  await slider.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(slider).toHaveAttribute('aria-valuetext', '109%');
+});
+
+test('on a phone, Preferences opens as a full-width sheet like the other dialogs', async ({ page }) => {
+  await openEditor(page, 390);
+  await text(page).focus();
+  await page.keyboard.press('ControlOrMeta+,');
+  const panel = page.locator('.modal-root:not(.closing) .modal-panel');
+  await expect(panel).toHaveAttribute('aria-label', 'Preferences');
+  // Its desktop width (96vw) applied on phones too, leaving it inset 8px from both edges.
+  expect(await panel.evaluate(node => { const box = node.getBoundingClientRect(); return [Math.round(box.left), Math.round(box.width)]; })).toEqual([0, 390]);
+});
+
+test('Enter in the Tabs dialog with no position typed is OK, not an error', async ({ page }) => {
+  await openEditor(page);
+  await text(page).fill('Tabbed\ttext');
+  await (await openMenu(page, 'Format')).getByRole('menuitem', { name: /^Tabs…/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Tabs' });
+  await dialog.getByRole('spinbutton', { name: 'Default tab stops (in)' }).fill('1');
+  await dialog.getByRole('textbox', { name: 'Tab stop position (in)' }).focus();
+  // Enter in the empty position field said "Enter a tab stop position." and kept the dialog open.
+  await page.keyboard.press('Enter');
+  await expect(dialog).toHaveCount(0);
+  expect(await page.evaluate(() => window.__docs.current.view.engine.model.pageSettings.defaultTabStop)).toBe(1440);
+  // With a position typed, Enter still sets that stop and keeps the dialog open for the next one.
+  await (await openMenu(page, 'Format')).getByRole('menuitem', { name: /^Tabs…/ }).click();
+  await dialog.getByRole('textbox', { name: 'Tab stop position (in)' }).fill('2');
+  await page.keyboard.press('Enter');
+  await expect(dialog.getByRole('listbox', { name: 'Tab stops' }).getByRole('option')).toHaveCount(1);
+  await expect(dialog).toBeVisible();
+});

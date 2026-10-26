@@ -12,12 +12,12 @@ import { promptDialog, confirmDialog } from '../ui/modal.js';
 import { drawShapeThumbnail } from '../ui/shape-controls.js';
 import { small } from '../ui/ribbon.js';
 import * as P from '../lib/puter.js';
-import { imageFileFromSource } from '../lib/imagegen.js';
+import { imageFileFromSource, generationError } from '../lib/imagegen.js';
 import { galleryItems, pagePreview, textPreview } from './insert-gallery.js';
 import { openDateTime, openFieldDialog, openFormatPageNumbers, openSymbolDialog, openEquationDialog, openIconsDialog, openDiagramDialog, openSignatureDialog, openDropCapDialog, openGenerateDialog, recentSymbols, rememberSymbol, diagramSketch } from './insert-dialogs.js';
 import { COVER_DESIGNS, insertCoverPage, removeCoverPage, coverPageRange } from '../engine/cover-pages.js';
 import { HEADER_DESIGNS, PAGE_NUMBER_DESIGNS, writeStoryLines, removePageNumberParagraphs, storyPageField } from '../engine/header-footer-designs.js';
-import { TEXT_BOX_DESIGNS, WORDART_STYLES, textBoxParams, wordArtParams, signatureLineParams, textShapeXml } from '../engine/text-designs.js';
+import { TEXT_BOX_DESIGNS, WORDART_STYLES, WORDART_PROMPT, textBoxParams, wordArtParams, signatureLineParams, textShapeXml } from '../engine/text-designs.js';
 import { SHAPE_PRESETS, LINE_PRESETS, UNFILLED_PRESETS, DEFAULT_SHAPE_STYLE, shapeDrawingXml } from '../engine/authored-shapes.js';
 import { readDrawingFragment, placeDrawing, freshDrawingAssetId, nextDrawingId, nextDrawingOrder, EMU_PER_INCH } from '../engine/inserted-drawings.js';
 import { pictureFragment, fittedSize } from '../engine/picture-insert.js';
@@ -98,7 +98,8 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
       const revision = engine.session.revision, model = engine.model;
       const fragment = await build(engine, replace?.id ?? nextDrawingId(model), nextDrawingOrder(model));
       const ok = await placeDrawing(engine, fragment, { replace, revision });
-      if (ok) { onChange(); if (edit) base.editDrawingText?.(); }
+      // `edit` may say what to select in the drawing's text: the sample text a new box shows.
+      if (ok) { onChange(); if (edit) base.editDrawingText?.(typeof edit === 'function' ? edit() : undefined); }
       return ok;
     } catch (e) { fail(e); return false; }
   }
@@ -159,7 +160,11 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
       { label: 'This Device…', icon: 'folderOpen', disabled: !engine, onSelect: () => pictureInput.click() },
       ...(P.canPickFiles() ? [{ label: 'From Puter…', icon: 'pictures', disabled: !engine, onSelect: async () => { try { const file = await P.pickImage(); if (file) await insertPictureFile(file); } catch (e) { fail(e); } } }] : []),
       ...(P.canMakeImages() ? [{ label: 'Generate with AI…', icon: 'pictures', disabled: !engine, onSelect: () => openGenerateDialog({ onClose: () => queueMicrotask(() => editor()?.focus()),
-        generate: async prompt => imageFileFromSource(await P.makeImage(prompt), prompt), onInsert: file => insertPictureFile(file) }) }] : []),
+        generate: async prompt => {
+          let image;
+          try { image = await P.makeImage(prompt); } catch (e) { throw generationError(e); }
+          return imageFileFromSource(image, prompt);
+        }, onInsert: file => insertPictureFile(file) }) }] : []),
       ...(canCapture() ? [{ separator: true }, { label: 'Screenshot…', icon: 'screenshot', disabled: !engine, onSelect: screenshot }] : []),
     ];
   }
@@ -267,6 +272,18 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
         return sceneFragment(engine, diagramDrawingXml({ layout, items, colors, id, ...size, anchor: current?.image.anchor || null }));
       }, { replace: current?.image || null });
     } });
+  }
+  /** A double-click on a drawing: edit a chart's data, a diagram's items or a text box's text. */
+  function openSelectedDrawing() {
+    const engine = ready(), image = engine?.model.selectedImage; if (!image) return false;
+    if (image.kind === 'chart') { commands.editChart(); return true; }
+    if (selectedDiagram()) { insertDiagram(); return true; }
+    let frames = [];
+    try { frames = pkg().drawingTextFrames(image, engine.model.assets); } catch { return false; }
+    // A drawing with several text frames has them listed in its menu; one with a single frame opens it.
+    if (frames.length !== 1 || frames[0].reason) return false;
+    base.editDrawingText?.();
+    return true;
   }
   function diagramItems() {
     const sample = [{ text: 'One', children: [] }, { text: 'Two', children: [] }, { text: 'Three', children: [] }];
@@ -393,13 +410,16 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     const lines = [0, 1, 2].map(i => ({ x: x + 4, y: y + 5 + i * 6, h: 2, w: Math.max(6, w - 10 - i * 6), color: design.shape.fill && design.shape.fill !== 'FFFFFF' && !design.shape.fill.startsWith('F') && !design.shape.fill.startsWith('D') ? '#FFFFFF' : '#2F5597' }));
     return pagePreview([...body, ...lines], { bands: [{ x, y, w, h, color: fill === 'none' ? '#FFFFFF' : fill, stroke: stroke === 'none' ? (fill === 'none' ? '#2F5597' : undefined) : stroke }], width: 56 });
   }
+  // A new box opens for editing with its sample text selected, so typing replaces it; text it was made from stays.
   function insertTextBoxDesign(design, rect = null) {
+    let prompt = null;
     insertDrawing((engine, id, order) => {
       const text = rect ? '' : selectedText(engine);
+      prompt = text ? null : design.prompt;
       if (rect) engine.model.select(rect.position);
       const placement = rect ? { width: rect.dragged ? Math.max(EMU_PER_INCH / 4, rect.width) : null, height: rect.dragged ? Math.max(EMU_PER_INCH / 8, rect.height) : null, anchor: { horizontal: 'page', vertical: 'page', x: rect.x, y: rect.y, wrap: 'square', behind: false, order } } : {};
       return sceneFragment(engine, textShapeXml(textBoxParams(design, { id, order, text, textWidth: textWidth(engine), ...placement })));
-    }, { edit: true });
+    }, { edit: () => ({ select: prompt }) });
   }
   function textBoxItems() {
     const engine = ready();
@@ -414,7 +434,12 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     return galleryItems([{ items: WORDART_STYLES.map(style => ({ label: style.name, preview: textPreview('A', wordArtCss(style)), disabled: !engine, onSelect: () => insertWordArt(style) })) }], { columns: 4, size: 'small', label: 'WordArt styles' });
   }
   function insertWordArt(style) {
-    insertDrawing((engine, id, order) => sceneFragment(engine, textShapeXml(wordArtParams(style, { id, order, text: selectedText(engine) || 'Your text here', textWidth: textWidth(engine) }))), { edit: true });
+    let prompt = null;
+    insertDrawing((engine, id, order) => {
+      const text = selectedText(engine);
+      prompt = text ? null : WORDART_PROMPT;
+      return sceneFragment(engine, textShapeXml(wordArtParams(style, { id, order, text: text || WORDART_PROMPT, textWidth: textWidth(engine) })));
+    }, { edit: () => ({ select: prompt }) });
   }
   function insertSignatureLine() {
     if (!ready()) return;
@@ -535,7 +560,13 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
         const { decodeTextFile } = await import('../lib/importers.js');
         const raw = decodeTextFile(await file.arrayBuffer(), /\.html?$/i.test(file.name) ? 'html' : null);
         if (/\.(md|markdown)$/i.test(file.name)) { const { markdownHtml } = await import('../lib/markdown-html.js'); fragment = formatted ? htmlFragment(markdownHtml(raw)) : null; text = raw; }
-        else if (/\.html?$/i.test(file.name)) { fragment = formatted ? htmlFragment(raw) : null; text = new DOMParser().parseFromString(raw, 'text/html').body.textContent || ''; }
+        else if (/\.html?$/i.test(file.name)) {
+          // Without formatting (in a table cell, say) the page's text goes in as its paragraphs, not as the markup's
+          // raw text content, which runs paragraphs together and includes the text of scripts and styles.
+          const converted = htmlFragment(raw);
+          fragment = formatted ? converted : null;
+          text = converted ? converted.paragraphs.map(p => p.text).join('\n') : '';
+        }
         else text = raw.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
       }
       run(engine, () => fragment ? pasteFragment(engine.model, fragment) : engine.model.replace(text));
@@ -720,7 +751,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
   }, { signal: keyAbort.signal, capture: true });
 
   const commands = {
-    insertRibbon, coverPageItems, pictureItems, insertPictureFile, openShapes, insertShapeAt, insertIcons, insertDiagram, diagramItems, screenshot,
+    insertRibbon, coverPageItems, pictureItems, insertPictureFile, openShapes, insertShapeAt, insertIcons, insertDiagram, diagramItems, screenshot, openSelectedDrawing,
     headerItems, pageNumberItems, formatPageNumbers, removePageNumbers,
     insertPageNumber: (event, button) => openMenu({ anchor: button || document.activeElement, label: 'Page Number', minWidth: 220, items: pageNumberItems(), pointer: !!event?.detail, onClose: event?.detail ? () => editor()?.focus() : null }),
     textBoxItems, insertTextBox: () => insertTextBoxDesign(TEXT_BOX_DESIGNS[0]), wordArtItems, insertWordArt, insertSignatureLine,

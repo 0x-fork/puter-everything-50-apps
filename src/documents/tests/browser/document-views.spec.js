@@ -111,6 +111,12 @@ test('Outline view edits text, levels and order through the Outlining tab, with 
   await page.keyboard.press('End');
   await page.keyboard.type(' Really.');
   await expect(input).toHaveValue(/The final plan\. Really\./);
+  // Undo takes back typing a word at a time, as in the page views, not a character at a time.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(input).toHaveValue(/The final plan\. \n/);
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+  await expect(input).toHaveValue(/The final plan\. Really\./);
+  await page.keyboard.press('End');
   // Tab demotes, Shift+Tab promotes; Enter splits the paragraph.
   await page.keyboard.press('Enter');
   await page.keyboard.type('Next step');
@@ -126,6 +132,28 @@ test('Outline view edits text, levels and order through the Outlining tab, with 
   const xml = strFromU8(parts(saved)['word/document.xml']);
   expect(xml.indexOf('Results')).toBeLessThan(xml.indexOf('Background'));
   expect(xml).toMatch(/<w:pStyle w:val="Heading1"\/><\/w:pPr><w:r>(<w:rPr>.*?<\/w:rPr>)?<w:t[^>]*>Background/);
+  expect(errors).toEqual([]);
+});
+
+test('Outline view moves a section selected by its symbol as a whole, with the keyboard or the tab', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await headings(page);
+  // The page view's text box stays in the document, out of the accessibility tree, while the outline is shown.
+  const input = page.locator('textarea.canvas-input');
+  await (await viewTab(page)).getByRole('button', { name: 'Outline', exact: true }).click();
+  await expect(page.getByRole('tree', { name: 'Document outline' })).toBeVisible();
+  // Introduction's symbol selects it with Background and their text; Move Down takes all of it past Results.
+  await page.locator('.outline-row', { hasText: 'Introduction' }).locator('.outline-symbol').click();
+  await expect(page.locator('.outline-row.is-selected')).toHaveCount(4);
+  await ribbon(page).getByRole('button', { name: 'Move Down', exact: true }).click();
+  await expect(input).toHaveValue(/^Results\nThe final plan\.\nIntroduction\nThe plan in brief\.[^\n]*\nBackground\nWhy the plan matters\.$/);
+  await page.locator('.outline-row', { hasText: 'Introduction' }).locator('.outline-symbol').click();
+  await page.keyboard.press('Shift+Alt+ArrowUp');
+  await expect(input).toHaveValue(/^Introduction\nThe plan in brief\.[^\n]*\nBackground\nWhy the plan matters\.\nResults\nThe final plan\.$/);
+  // Pressing Alt before Shift keeps the selection: Alt on its own is not an edit.
+  await page.locator('.outline-row', { hasText: 'Introduction' }).locator('.outline-symbol').click();
+  await page.keyboard.press('Alt+Shift+ArrowDown');
+  await expect(input).toHaveValue(/^Results\nThe final plan\.\nIntroduction\nThe plan in brief\.[^\n]*\nBackground\nWhy the plan matters\.$/);
   expect(errors).toEqual([]);
 });
 
@@ -224,6 +252,9 @@ test('zoom: dialog presets, many pages, text width and Ctrl + wheel', async ({ p
   await (await viewTab(page)).getByRole('button', { name: 'Zoom', exact: true }).click();
   // A closing dialog lingers for its exit animation; use the open one.
   const dialog = page.locator('.modal-root:not(.closing)').getByRole('dialog', { name: 'Zoom' });
+  // The preset the zoom is at starts chosen.
+  await expect(dialog.getByRole('radio', { name: '100%' })).toBeChecked();
+  await expect(dialog.getByRole('radio', { checked: true })).toHaveCount(1);
   await dialog.getByText('75%').click();
   await expect(slider).toHaveValue('75');
   await dialog.getByRole('gridcell', { name: '2 by 1 pages' }).click();
@@ -251,6 +282,23 @@ test('zoom: dialog presets, many pages, text width and Ctrl + wheel', async ({ p
   await expect(slider).toHaveValue(now);
 });
 
+test('the Zoom dialog fits its fields inside the dialog', async ({ page }) => {
+  await page.goto('/playground.html');
+  await page.getByRole('button', { name: 'New', exact: true }).click();
+  await (await viewTab(page)).getByRole('button', { name: 'Zoom', exact: true }).click();
+  const dialog = page.locator('.modal-root:not(.closing)').getByRole('dialog', { name: 'Zoom' });
+  await expect(dialog).toBeVisible();
+  // The form was wider than the dialog's content box: the Percent field ran into the right edge and the dialog scrolled sideways.
+  const fit = await dialog.evaluate(panel => {
+    const box = panel.getBoundingClientRect(), padding = parseFloat(getComputedStyle(panel).paddingRight);
+    const field = panel.querySelector('input[aria-label="Percent"]').getBoundingClientRect();
+    return { scrolls: panel.scrollWidth > panel.clientWidth, gap: Math.round(box.right - padding - field.right) };
+  });
+  expect(fit.scrolls).toBe(false);
+  expect(fit.gap).toBeGreaterThanOrEqual(0);
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+});
+
 test('cancelling the Zoom dialog keeps the page following the window width', async ({ page }) => {
   await page.goto('/playground.html');
   await page.getByRole('button', { name: 'New', exact: true }).click();
@@ -261,8 +309,14 @@ test('cancelling the Zoom dialog keeps the page following the window width', asy
   const fitted = await pageWidth();
   await (await viewTab(page)).getByRole('button', { name: 'Zoom', exact: true }).click();
   const dialog = page.locator('.modal-root:not(.closing)').getByRole('dialog', { name: 'Zoom' });
+  await expect(dialog.getByRole('radio', { name: 'Page width' })).toBeChecked();
   await dialog.getByText('200%').click();
   await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(zoom).toHaveValue('fit');
+  // OK with Page width still chosen keeps the page following the window, rather than fixing its scale.
+  await (await viewTab(page)).getByRole('button', { name: 'Zoom', exact: true }).click();
+  await expect(dialog.getByRole('radio', { name: 'Page width' })).toBeChecked();
+  await dialog.getByRole('button', { name: 'OK' }).click();
   await expect(zoom).toHaveValue('fit');
   // Still Page Width, the page follows a narrower window.
   await page.setViewportSize({ width: 1000, height: 900 });

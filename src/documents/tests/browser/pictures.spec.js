@@ -164,6 +164,17 @@ test('shape styles, fill, outline, effects, WordArt and Format pane', async ({ p
   await ribbon.getByRole('button', { name: 'Format Shape', exact: true }).click();
   const pane = page.getByRole('complementary', { name: 'Format pane' });
   await expect(pane.getByRole('heading', { name: 'Format Shape' })).toBeVisible();
+  // The sections are tabs of one tab panel: one tab stop, with the arrows, Home and End moving between them.
+  const sections = pane.getByRole('tablist', { name: 'Format sections' });
+  await expect(pane.getByRole('tabpanel', { name: 'Fill & Line' })).toBeVisible();
+  await sections.getByRole('tab', { name: 'Fill & Line' }).focus();
+  await page.keyboard.press('End');
+  await expect(sections.getByRole('tab', { name: 'Layout & Properties' })).toBeFocused();
+  await expect(pane.getByRole('tabpanel', { name: 'Layout & Properties' })).toBeVisible();
+  await page.keyboard.press('Home');
+  await expect(sections.getByRole('tab', { name: 'Fill & Line', selected: true })).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(pane.getByRole('button', { name: 'Close Format pane' })).toBeFocused();
   await pane.getByRole('spinbutton', { name: 'Width' }).fill('2.5'); await pane.getByRole('spinbutton', { name: 'Width' }).press('Enter');
   await shot(page, 'format-pane');
   await pane.getByRole('button', { name: 'Close Format pane' }).click();
@@ -204,26 +215,30 @@ test('selection pane, align, group and ungroup', async ({ page }, info) => {
   const ribbon = await insertShape(page, 'Rectangle', { x: 460, y: 470 });
   await ribbon.getByRole('button', { name: 'Selection Pane', exact: true }).click();
   const pane = page.getByRole('complementary', { name: 'Selection pane' });
-  await expect(pane.getByRole('option')).toHaveCount(2);
+  await expect(pane.getByRole('listitem')).toHaveCount(2);
+  // A list of buttons (a listbox's options cannot hold the name and visibility buttons); selected objects are current.
+  await expect(pane.getByRole('listbox')).toHaveCount(0);
+  await expect(pane.getByRole('listitem').nth(1).getByRole('button')).toHaveCount(2);
+  await expect(pane.locator('[aria-current="true"]')).toHaveCount(1);
   await shot(page, 'selection-pane');
   // Rename and select both from the pane.
-  const first = pane.getByRole('option').first().locator('.pic-selection-name');
+  const first = pane.getByRole('listitem').first().locator('.pic-selection-name');
   await first.dblclick();
   await pane.getByRole('textbox').fill('Blue box'); await pane.getByRole('textbox').press('Enter');
-  await expect(pane.getByRole('option').first()).toContainText('Blue box');
-  await pane.getByRole('option').nth(1).locator('.pic-selection-name').click({ modifiers: ['Shift'] });
+  await expect(pane.getByRole('listitem').first()).toContainText('Blue box');
+  await pane.getByRole('listitem').nth(1).locator('.pic-selection-name').click({ modifiers: ['Shift'] });
   await ribbon.getByRole('button', { name: 'Align', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Align Top' }).click();
-  await pane.getByRole('option').first().locator('.pic-selection-name').click();
-  await pane.getByRole('option').nth(1).locator('.pic-selection-name').click({ modifiers: ['Shift'] });
+  await pane.getByRole('listitem').first().locator('.pic-selection-name').click();
+  await pane.getByRole('listitem').nth(1).locator('.pic-selection-name').click({ modifiers: ['Shift'] });
   await ribbon.getByRole('button', { name: 'Group', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Group', exact: true }).click();
-  await expect(pane.getByRole('option')).toHaveCount(1);
+  await expect(pane.getByRole('listitem')).toHaveCount(1);
   let saved = await save(page, info, 'grouped');
   expect(saved.xml('word/document.xml')).toMatch(/<wpg:wgp>/);
   await ribbon.getByRole('button', { name: 'Group', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Ungroup' }).click();
-  await expect(pane.getByRole('option')).toHaveCount(2);
+  await expect(pane.getByRole('listitem')).toHaveCount(2);
   saved = await save(page, info, 'ungrouped');
   expect(saved.xml('word/document.xml')).not.toMatch(/<wpg:wgp>/);
   expect(saved.xml('word/document.xml')).toMatch(/name="Blue box"/);

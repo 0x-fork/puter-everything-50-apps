@@ -154,3 +154,43 @@ it('does not adopt another window’s changes as its own while renaming', async 
   expect(doc.path).toBe(path);
   expect(await files.get(path).blob.text()).toBe('other window');
 });
+
+it('reports an autosave refused for another window\'s change, which nothing retries, and leaves an explicit save to throw', async () => {
+  const doc = await open();
+  const conflicts = [];
+  doc.addEventListener('conflict', (e) => conflicts.push(e.detail.message));
+  await puter.fs.write(path, new Blob(['other window']));
+  puter.fs.write.mockClear();
+  doc.changed();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(conflicts).toEqual([expect.stringMatching(/changed in another window/)]);
+  expect(doc.status).toBe('error');
+  // No retry follows on its own.
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(conflicts).toHaveLength(1);
+  // An explicit save reports through its rejection instead.
+  await expect(doc.save()).rejects.toThrow(/another window/);
+  expect(conflicts).toHaveLength(1);
+  expect(puter.fs.write).not.toHaveBeenCalled();
+});
+
+it('keeps the file as the drive has it as a version, and a save waiting for that writes only afterwards', async () => {
+  versioning.enabled = true;
+  const doc = await open();
+  const order = [];
+  puter.fs.readdir = vi.fn(async () => []);
+  const write = puter.fs.write;
+  puter.fs.write = vi.fn(async (name, blob, options) => { order.push(name.includes('.versions/') ? 'version' : 'file'); return write(name, blob, options); });
+  doc.changed();
+  const keeping = doc.keepFileVersion({ label: 'Before the shared changes' });
+  const saving = doc.save();
+  const version = await keeping;
+  expect(await saving).toBe(true);
+  expect(version.path).toMatch(/^Documents\/\.versions\/Report\//);
+  expect(await files.get(version.path).blob.text()).toBe('original');
+  // The version is written first; the file only once it is kept.
+  expect(order[0]).toBe('version');
+  expect(order.filter((w) => w === 'file')).toHaveLength(1);
+  expect(order.at(-1)).toBe('file');
+  expect(await files.get(path).blob.text()).toBe('my edits');
+});

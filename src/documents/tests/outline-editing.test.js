@@ -4,7 +4,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { createDocx, DocxPackage, WRITING_STYLES } from '../src/engine/docx.js';
 import { TextDocument, paragraph } from '../src/engine/model.js';
 import { StorySession } from '../src/engine/story-session.js';
-import { outlineRows, outlineUnits, outlineLevelOf, moveOutlineBlock, moveOutlineSection, setOutlineLevels, promotedLevel, demotedLevel,
+import { outlineRows, outlineUnits, outlineLevelOf, moveOutlineBlock, moveOutlineSection, moveOutlineSelection, setOutlineLevels, promotedLevel, demotedLevel,
   deleteOutlineSection, insertOutlineHeading, styleForOutlineLevel, BODY_LEVEL } from '../src/engine/outline-editing.js';
 
 let dom;
@@ -71,10 +71,82 @@ describe('moving sections', () => {
     // A section cannot be dropped into itself.
     expect(moveOutlineSection(model, id('Intro'), id('Intro body'))).toBe(false);
   });
+  it('moves selected rows together: a selected section as a section, other rows one unit at a time', async () => {
+    const { session, model, id } = await outlineDocument(SPEC);
+    // The Intro section, chosen by its outline symbol, in the order the rows were selected.
+    session.run(m => moveOutlineSelection(m, ['Intro', 'Intro body', 'Detail', 'Detail body'].map(id), 1));
+    expect(texts(model)).toEqual(['Results', 'Results body', 'Intro', 'Intro body', 'Detail', 'Detail body', '']);
+    session.run(m => moveOutlineSelection(m, ['Detail body', 'Intro', 'Detail', 'Intro body'].map(id), -1));
+    expect(texts(model)).toEqual(SPEC.map(([text]) => text));
+    // Two body rows pass the one row next to them, and never pass the document's final paragraph.
+    session.run(m => moveOutlineSelection(m, [id('Intro body'), id('Detail')], 1));
+    expect(texts(model)).toEqual(['Intro', 'Detail body', 'Intro body', 'Detail', 'Results', 'Results body', '']);
+    expect(moveOutlineSelection(model, [id('Results'), id('Results body')], 1)).toBe(false);
+    // A collapsed heading in the selection takes its hidden rows along.
+    const fresh = await outlineDocument(SPEC);
+    fresh.session.run(m => moveOutlineSelection(m, [fresh.id('Intro body'), fresh.id('Detail')], 1, { collapsed: each => each === fresh.id('Detail') }));
+    expect(texts(fresh.model)).toEqual(['Intro', 'Results', 'Intro body', 'Detail', 'Detail body', 'Results body', '']);
+  });
   it('refuses to move section breaks', async () => {
     const { model, id } = await outlineDocument(SPEC);
     model.paragraphs[3].sectionEnd = { ...model.pageSettings };
     expect(() => moveOutlineBlock(model, id('Intro'), 1)).toThrow(/section breaks/);
+  });
+});
+
+describe('sections that ranges or Track Changes reach', () => {
+  const saveable = (pkg, model) => pkg.export(model.paragraphs, model.pageSettings, model.numbering, model.styles, model.tables, model.assets, undefined, model.comments);
+  it('refuses to move a section past text that a bookmark or comment from it reaches into', async () => {
+    const { pkg, session, model, id } = await outlineDocument(SPEC);
+    model.comments = [];
+    // From "Intro body" into "Results body", so moving Results up past Intro's section would end it before it starts.
+    model.select(model.text.indexOf('body'), model.text.indexOf('Results body') + 3); model.addBookmark('Span');
+    const before = texts(model);
+    expect(() => session.run(m => moveOutlineBlock(m, id('Results'), -1))).toThrow(/bookmark, comment or field/);
+    expect(texts(model)).toEqual(before);
+    expect(() => saveable(pkg, model)).not.toThrow();
+    // A section the range does not reach into still moves.
+    session.run(m => moveOutlineBlock(m, id('Detail'), -1));
+    expect(texts(model).slice(0, 2)).toEqual(['Intro', 'Detail']);
+    const reach = model.paragraphs.findIndex(p => texts({ paragraphs: [p] })[0] === 'Intro body');
+    model.paragraphs.forEach(p => { delete p.bookmarks; });
+    model.select(model.paragraphOffset(reach) + 2, model.text.indexOf('Results body') + 3);
+    model.addComment({ author: 'A', text: 'Across' });
+    expect(() => moveOutlineBlock(model, id('Results'), -1)).toThrow(/bookmark, comment or field/);
+  });
+  it('keeps bookmarks and comments of a deleted section where it was, as deleting its text would', async () => {
+    const { pkg, session, model, id } = await outlineDocument(SPEC);
+    model.comments = [];
+    model.select(model.text.indexOf('Detail body'), model.text.indexOf('Results body') + 7); model.addBookmark('Span');
+    model.select(model.text.indexOf('Detail body'), model.text.indexOf('Detail body') + 6);
+    const inside = model.addComment({ author: 'A', text: 'Inside' });
+    model.replyToComment(inside, { author: 'B', text: 'Reply' });
+    model.select(model.text.indexOf('Intro body'), model.text.indexOf('Detail body') + 6);
+    const across = model.addComment({ author: 'A', text: 'Across' });
+    session.run(m => deleteOutlineSection(m, id('Detail')));
+    expect(texts(model)).toEqual(['Intro', 'Intro body', 'Results', 'Results body', '']);
+    const bookmark = model.bookmarks.find(b => b.name === 'Span');
+    expect(model.text.slice(bookmark.start, bookmark.end)).toBe('Results\nResults');
+    // No comment is left without an anchor: the one inside is now a point where the section was.
+    const anchors = Object.fromEntries(model.commentList.map(c => [c.id, model.text.slice(c.start, c.end)]));
+    expect(model.comments).toHaveLength(3);
+    expect(anchors[across]).toBe('Intro body\n');
+    expect(anchors[inside]).toBe('');
+    expect(model.commentList.find(c => c.id === inside).start).toBe(model.text.indexOf('Results'));
+    expect(() => saveable(pkg, model)).not.toThrow();
+    session.undo();
+    expect(texts(model)).toEqual(SPEC.map(([text]) => text));
+    expect(model.comments).toHaveLength(3);
+  });
+  it('marks a deleted section as a tracked deletion, and refuses an untracked move, with Track Changes on', async () => {
+    const { session, model, id } = await outlineDocument(SPEC);
+    model.trackChanges = true; model.revisionAuthor = 'Reviewer';
+    expect(() => session.run(m => moveOutlineBlock(m, id('Results'), -1))).toThrow(/Track Changes/);
+    session.run(m => deleteOutlineSection(m, id('Detail')));
+    expect(texts(model)).toEqual(SPEC.map(([text]) => text));
+    expect(model.revisions.map(r => [r.type, model.text.slice(r.start, r.end)])).toEqual([['del', 'Detail\nDetail body\n']]);
+    model.resolveRevisions(false);
+    expect(model.revisions).toEqual([]);
   });
 });
 

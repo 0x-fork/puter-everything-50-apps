@@ -54,7 +54,7 @@ export function setAutosaveEnabled(on) {
 
 export function needsUnloadWarning(doc) {
   if (!doc) return false;
-  return doc.dirty || doc.status === 'saving' || !!doc._saving;
+  return (doc.dirty && !doc.untouchedTemplate) || doc.status === 'saving' || !!doc._saving;
 }
 
 /**
@@ -116,6 +116,14 @@ export class Doc extends EventTarget {
 
   get dirty() {
     return this.version !== this.savedVersion;
+  }
+
+  /**
+   * A new document from a built-in template that the editor has not laid out yet, nor the user renamed: unsaved, but
+   * nothing in it is the user's, so leaving it loses nothing.
+   */
+  get untouchedTemplate() {
+    return !!this.template && !this.exporter && !this.blob && !this.pendingImport && !this._deleted && this.version === 1;
   }
 
   get fileName() {
@@ -334,6 +342,8 @@ export class Doc extends EventTarget {
       const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
       this._setStatus(offline ? 'offline' : 'error', e?.message || String(e));
       if (!auto) throw e;
+      // Nothing retries a file another window took over, and nobody pressed Save to hear of it: the view says so.
+      if (e?.conflict) this.dispatchEvent(new CustomEvent('conflict', { detail: { message: e.message } }));
       // Try again later; a transient failure should not lose the edit. Offline,
       // nothing can succeed until the connection is back, and the app saves then.
       // A file another window took over is not retried on its own: the same answer would come back every time.
@@ -375,6 +385,20 @@ export class Doc extends EventTarget {
       if (!this.path) return null;
       if (this._snapshotting) await this._snapshotting;
       const v = await saveVersion(this.path, await this.toBlob(), { meta: { ...this.versionMeta?.(), ...meta }, uid: this.uid });
+      if (v) this.lastVersionAt = v.time;
+      return v;
+    });
+  }
+
+  /**
+   * Keep the file as the drive has it now as a version, before anything here writes over it: the state of a shared
+   * document replacing it on reopening, say. Taken under the file lock, so a save waits for it. Resolves the version,
+   * or null when the file has no history.
+   */
+  keepFileVersion(meta = {}) {
+    return this._withFileLock(async () => {
+      if (!versioning.enabled || !this.path || this._deleted) return null;
+      const v = await saveVersion(this.path, await P.readFile(this.path), { meta: { ...this.versionMeta?.(), ...meta }, uid: this.uid });
       if (v) this.lastVersionAt = v.time;
       return v;
     });
@@ -431,8 +455,12 @@ export class Doc extends EventTarget {
     });
   }
 
-  _emitPath({ copy = false } = {}) {
-    this.dispatchEvent(new CustomEvent('path', { detail: { path: this.path, name: this.name, copy } }));
+  /**
+   * The document has another file. `copy`: the file it came from stays as it was. `savedAs`: the user chose to go on
+   * in a copy (Save As, Save a Copy), a new document of their own; what was shared from the original stays with it.
+   */
+  _emitPath({ copy = false, savedAs = false } = {}) {
+    this.dispatchEvent(new CustomEvent('path', { detail: { path: this.path, name: this.name, copy, savedAs } }));
   }
 
   /** Path changes share the save lock so no write can finish at an obsolete path. */
@@ -581,7 +609,7 @@ export class Doc extends EventTarget {
         this.lastSaved = Date.now();
         this.lastVersionAt = undefined;
         this.savedVersion = version;
-        this._emitPath({ copy });
+        this._emitPath({ copy, savedAs: copy && !first });
         if (first) this._snapshot(blob);
         // Edits made while the dialog was open keep the doc dirty, and now have a file to autosave to.
         this._setStatus(this.dirty ? 'unsaved' : 'saved');
@@ -644,7 +672,7 @@ export class Doc extends EventTarget {
       this.lastVersionAt = undefined;
       this.savedVersion = version;
       this._setStatus(this.dirty ? 'unsaved' : 'saved');
-      this._emitPath({ copy: true });
+      this._emitPath({ copy: true, savedAs: true });
       return null;
     } catch (e) {
       if (cancelled()) {

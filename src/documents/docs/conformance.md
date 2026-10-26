@@ -3459,7 +3459,7 @@ above. Tables and images remain next.
 | Counters and restart | §17.9.8 `lvlOverride`, §17.9.10 `lvlRestart`, §17.9.25–26 `start`/`startOverride` | Counters advance in document order and continue across intervening ordinary paragraphs. Deeper levels restart after the designated or any earlier level; zero means never restart. Missing starts default to zero. Full level overrides replace abstract levels; `startOverride` wins over a level's start, including later restarts. |
 | Label formats | §17.9.4 `isLgl`, §17.9.11 `lvlText`, §17.9.17 `numFmt`, §17.18.59 `ST_NumberFormat` | Literal text survives for bullet and none as well as numeric formats. Expand `%1`–`%9`; none/bullet references contribute no numeric text, including under legal numbering. Other legal references use decimal. Following the native divergence documented below, a deeper-level reference suppresses the whole label. Latin letters repeat after Z (AA, BB, …), as specified for English. |
 | Label placement | §17.9.7 `lvlJc`, §17.9.22 `pPr`, §17.9.24 `rPr`, §17.9.28 `suff`, §17.18.84 `ST_TabJc` | Left/center/right labels at the first-line anchor; suffix tab, space or nothing. Level paragraph properties currently cover physical indents and custom tabs. Legacy `num` tabs apply to the label suffix, not ordinary text tabs. Wrapped lines use the continuation indent. Marker size/bold/italic/single underline contribute to line metrics and painting. |
-| Editing | Application behavior | Accessible Bulleted list and Numbered list toggles, level changes through indent buttons or Alt+Shift+Left/Right, and Restart numbering at 1. Restart allocates a separate instance for the contiguous remainder, preserves current ancestor values, and stops before a shallower level. Enter continues a list; Enter on an empty item or Backspace at its start removes numbering. Mixed selections, split/merge, undo/redo and selection restoration are tested. |
+| Editing | Application behavior | Accessible Bulleted list and Numbered list toggles, level changes through indent buttons or Alt+Shift+Left/Right, and Restart numbering at 1. Restart allocates a separate instance for the contiguous remainder, preserves current ancestor values, and stops before a shallower level. Enter continues a list; Enter on an empty nested item moves it up one level, and on an empty top-level item (or Backspace at an item's start) removes numbering. Mixed selections, split/merge, undo/redo and selection restoration are tested. |
 | Geometry and save | Source-offset and package preservation contracts | Labels have no editable offsets and appear once per paragraph, including across page breaks. Clicking a label resolves to the first text position. Formatting and text changes retain caret/selection and pagination. Text-only edits leave numbering bytes intact; restarts clone original instance XML so unused overrides survive. New definitions append using unused IDs; missing numbering parts receive relationships and content types. |
 
 Native numbering divergence: Part 1 §17.9.11 says to ignore references to levels
@@ -5470,8 +5470,11 @@ on typing, including a locked field, but preserves and formats its instruction
 on italic application. Moving right crosses the prompt as one unit. These
 behaviors are implemented with instruction-backed atomic prompt ranges. Clicking
 or selecting inside a prompt selects its complete visible label; arrow movement
-crosses it, and replacement/deletion removes its field. Boundary typing inserts
-outside it. Find replacement expands a hit to its owning prompt and replaces
+crosses it, and replacement/deletion removes its field. With Track Changes on the
+prompt and its field are still removed (untracked, as a placeholder typed over) and
+only the typed text is a tracked insertion (`w:ins`); a deleted MACROBUTTON field
+(`w:del` around its `fldChar`/`w:delInstrText` runs) is not written. Boundary typing
+inserts outside it. Find replacement expands a hit to its owning prompt and replaces
 multiple hits in the same prompt once. Formatting retains the field. Whole-prompt
 bookmarks and hyperlinks are emitted outside the instruction. Undo restores the
 original package, including unchanged parts and caches.
@@ -7250,8 +7253,59 @@ counts the segmenter's words inside runs of these scripts and keeps the
 whitespace rule elsewhere; spelling skips words with no Latin letter, since
 only the English dictionary is loaded. Remaining gaps: Ctrl+Arrow word
 movement still treats a run of these scripts as one word; Tai Tham, Tai Viet
-and New Tai Lue (also class SA) are not segmented; CJK and East Asian kinsoku
-rules (§17.3.1.16) remain separate.
+reference application's. Ctrl+Arrow word movement (and a selection collapsed by
+it) steps to the same dictionary boundaries inside a run of these scripts, as
+Option+Arrow and double-click already did; `tests/word-navigation.test.js`
+covers Thai and Khmer, and Latin, Greek and Chinese runs keep the native
+reference's units. Remaining gaps: word count
+and spelling still treat a run of these scripts as one word; Tai Tham, Tai Viet
+and New Tai Lue (also class SA) are not segmented. Chinese and Japanese
+breaking is described in the next section.
+
+## Chinese and Japanese line breaking
+
+ECMA-376 Part 1 §17.3.3.31 (`t`) does not define where a line may break.
+§17.3.1.16 (`kinsoku`) controls the East Asian rules for the first and last
+character of a line, and the settings part's `noLineBreaksAfter` and
+`noLineBreaksBefore` (§17.15.1) can replace their character lists, which
+otherwise follow the application's defaults. This engine applies the default
+rules to every paragraph.
+Chinese and Japanese are written without spaces, and a line may break before or
+after any ideograph or kana (UAX #14 line-break class ID,
+https://www.unicode.org/reports/tr14/), including beside Latin text and
+digits. Before, only spaces were break opportunities, so a Chinese run after
+English words moved whole to the next line, leaving the line before half
+empty, and Chinese or Japanese text was split by the forced grapheme break
+wherever the width ran out, starting lines with `。`, `」` or small kana.
+
+A boundary next to a Han, Hiragana, Katakana or Bopomofo character, CJK
+punctuation (U+3001–U+303F), the middle dot and prolonged sound mark, or a
+fullwidth or halfwidth form is now a break opportunity, shared by paragraph
+layout, the floating-object word check, justification contraction and AutoFit
+intrinsic minimum widths, the same opportunities Thai uses. The East Asian line
+rules are applied with the default Japanese and Chinese lists: no break before
+closing punctuation (`、。，．：；？！）」』】〕〉》”’`), small kana, the iteration
+marks, the prolonged sound mark `ー`, the ellipsis `…`, hyphens, straight quotes
+and halfwidth equivalents, none after opening punctuation and currency signs
+(`（「『【〔〈《“‘$£¥`), and none inside a doubled dash `——`. Spaces, tabs,
+inline objects and Hangul keep the existing rules, so Korean still wraps between
+words. Breaks are chosen by character, not by the `lang` value, and no source
+text or package part is rewritten.
+
+`tools/cjk_wrap_fixture.py` manually constructs `public/fixtures/cjk-wrap.docx`
+(English followed by Chinese, Japanese with brackets and small kana, Chinese
+quotation, dash, ellipsis and title punctuation, Chinese across source runs,
+and Korean). `tests/cjk-line-breaking.test.js` covers layout at every width,
+intrinsic widths, editing, undo and package preservation;
+`tests/browser/cjk-wrap.spec.js` checks the line rules with browser canvas
+measurement through editing, undo, export and reopen. No native reference was
+recorded: line positions follow the browser's fonts, not a reference
+application's. Remaining gaps: `w:kinsoku w:val="0"`, `w:wordWrap`,
+`w:overflowPunct` (hanging punctuation), `w:topLinePunct`, custom
+`noLineBreaksAfter`/`noLineBreaksBefore` lists and `strictFirstAndLastChars` are
+not read; justified Chinese and Japanese lines stretch only their spaces, not
+the gaps between characters; word movement, word count and spelling still treat
+a run of ideographs as one word.
 
 ## Body editing with retained nonempty headers and footers
 
@@ -13119,7 +13173,10 @@ another custom XML store; the identifier alone does not prove inactivity.
 
 The editable importer accepts an unresolved `w15:dataBinding` only after its
 absolute child-element XPath selects no node in any related package custom XML
-store. The resolver compares namespace URIs, supports positive positional
+store, nor in the core (Part 2 §11) or extended document properties parts, which
+document-property controls map through their built-in store IDs. A control bound
+to a stored title, for example, stays read-only rather than saving edited text the
+stored property would replace. The resolver compares namespace URIs, supports positive positional
 predicates per parent, and retains the original binding and custom data. The
 saved control contents remain editable through the existing persistent rich/plain
 control model. No external stores are fetched. Missing or invalid store parts,
@@ -21260,6 +21317,19 @@ measured regression after deferring projection to unmatched stories; it is not
 a whole-document performance certificate.
 
 
+### Deleting whole paragraphs (2026-10-26)
+
+Paragraph properties live on the paragraph mark (§17.3.1.26 `pPr`, §17.3.1.29).
+A deletion from the start of a paragraph to the start of a later one removes
+those paragraphs with their marks, so the paragraph after them keeps its own
+mark's style and properties, as removing an empty paragraph already did; before,
+it took the first deleted paragraph's (a Heading 2 after a deleted Heading 1
+became Heading 1). Accepting such a tracked deletion (`w:del` on the runs and on
+the marks' `w:rPr`, §17.13.5) behaves the same. A deletion that starts
+inside a paragraph, including Backspace at a paragraph's start, still merges
+into the first paragraph and keeps its formatting. Unit tests cover the
+deletion, undo and the accepted tracked deletion.
+
 ### Section-break editing and inherited stories (2026-10-05)
 
 ECMA-376 Part 1 17.6.17–18 and 17.10.2/17.10.5 describe section storage
@@ -21592,7 +21662,7 @@ document end and extension. Caret movement only; no OOXML change.
 Copy and cut previously put only plain text on the clipboard, so pasting, even
 within the same document, dropped headings, lists and emphasis. A text-only
 selection now also carries HTML (headings, lists, bold/italic/underline/strike,
-super/subscript, color, highlight, size, font and http(s)/mailto links), which
+super/subscript, color, highlight, size, font and http(s)/mailto/tel links), which
 other applications paste with formatting; the editor's own fragment is embedded
 in that HTML for an exact paste back. Paste inserts the text, then applies
 paragraph styles (§17.7.4, matched by id then name), alignment, list kind and
@@ -21602,10 +21672,23 @@ the final partial paragraph keeps the destination's formatting. HTML from
 other applications maps semantic tags and common inline styles; plain values
 (not bold, black) leave the destination's formatting. Selections or destinations
 with tables, fields, content controls, pictures or notes keep the plain-text
-path, as does a plain-text-only clipboard. Unit tests cover HTML conversion and
+path, as does a plain-text-only clipboard. On that path an object's U+FFFC
+placeholder is never copied as a character: a field copies its result (§17.16),
+an equation its text, a note reference the number or mark it shows (§17.11.14),
+and a picture its alternative text; pasted text drops U+FFFC, so a copy pasted
+back adds no invisible stray characters. Unit tests cover HTML conversion and
 embedded fragments; browser regressions cover in-document round trips, cut, the
 Edit menu, HTML from other web editors, undo, export and the plain fallbacks. The
 exported document.xml, styles.xml and numbering.xml pass `npm run check:conformance`.
+
+A selected PNG, JPEG or TIFF picture on its own (not a chart, diagram or
+drawing) copies as an HTML `<img>` with its bytes as a data URL, its displayed
+size and its alternative text (`wp:docPr/@descr`, §20.4.2.5) beside the plain
+alternative-text fallback, so pasting it here (keyboard, Edit menu or Paste
+Special's HTML format) inserts it as a new inline picture (§20.4.2.8) of the
+same size, scaled down to fit the column. Crop, effects, rotation and a
+floating position are not carried; a cropped picture pastes whole at its own
+proportions. The picture's context menu now offers Cut and Copy.
 
 ### Long formatted pastes (2026-10-05)
 
@@ -21648,12 +21731,24 @@ with the existing mdast libraries with raw HTML disabled; HTML uses the importer
 existing body cleanup. Both then go through the formatted-paste conversion:
 headings become Heading 1–6 (§17.7.4), lists become bullet or numbered paragraphs
 with nesting levels (§17.9), and bold, italic, underline, strikethrough,
-super/subscript, color and http(s)/mailto links become run properties and
+super/subscript, color and http(s), mailto and tel links become run properties and
 hyperlinks (§17.3.2, §17.16.22). Known limits: tables become tab-separated
 paragraphs, code blocks keep their line breaks without a monospace font,
 quotations are not indented and pictures are omitted. Loading adds no undo step;
 the document autosaves like other imports. Browser regressions cover Markdown and
 HTML structure, links, script removal, autosave, export and reopen.
+
+### Style-sheet formatting in imported HTML (2026-10-26)
+
+HTML that sets formatting through its style sheet rather than inline styles
+(Google Docs and LibreOffice exports, many web pages) lost its bold, italics,
+underlines and alignment on import, because the conversion reads inline styles
+only. Before conversion, each style rule's font-weight, font-style,
+text-decoration-line, vertical-align and text-align are now written onto the
+elements it selects, in document order and never over an element's own style
+attribute; specificity is not compared. Colors are not carried, so a page's
+dark theme cannot make text invisible on a white page. A browser regression
+imports class-styled HTML.
 
 ### Link appearance (2026-10-05)
 
@@ -21662,7 +21757,11 @@ them. A new link now takes the document's Hyperlink character style when it has
 one (§17.7.4.17 rStyle), and otherwise blue (0563C1) single-underlined direct
 formatting (§17.3.2.6 color, §17.3.2.40 u); changing an existing
 link's address keeps its look. Text typed straight after a new link continues
-with the formatting from before it. Links pasted or imported from HTML or
+with the formatting from before it, and so does text typed at the end of any
+existing link, or before a link that starts its paragraph (color, underline
+and character style come from the text on the link's other side; a paragraph
+that is only the link keeps its look; other run properties carry on).
+Links pasted or imported from HTML or
 Markdown without their own color get the same look. The style or formatting is
 part of the same undo step as the link. Model-level hyperlink APIs are
 unchanged. Browser regressions cover insertion, wrapping a selection, address
@@ -22040,8 +22139,15 @@ Supported subset:
 - Unchanged documents save byte for byte; a note whose reference is deleted is removed on save.
   The macOS reference application opens new notes with their numbers and separator.
 
+Notes are kept whole: on each page the notes that fit beneath their reference lines stay, in order,
+and the first that does not moves to the next page with its reference line, so a page referencing
+more notes than it can hold keeps its body text and passes the rest on (reserving every note of
+the page had emptied pages and drawn notes over the body). A note too tall to fit beneath its
+reference line on any page starts the next page with that line, and is cut off at the page edge.
+`tests/tall-footnotes.test.js` covers both.
+
 Gaps: notes that do not fit split across pages in the native reference but are kept whole here (the continuation
-separator is not drawn); numbering that restarts each page or section, custom reference marks,
+separator is not drawn, and a note taller than the room beneath its reference is cut off); numbering that restarts each page or section, custom reference marks,
 endnotes, notes containing tables, bookmarks or comments, and footnotes in headers/footers still
 open read-only or display only. Next/Previous Footnote and Show Notes are not offered yet.
 Tests: `tests/footnotes.test.js`.
@@ -23101,8 +23207,9 @@ Gaps: break points are a heuristic, not a dictionary; ambiguous English
 divisions (stress-dependent single consonants) may differ from desktop word
 processors, and only English is hyphenated. Table AutoFit minimum widths ignore
 automatic break points. Line positions of hyphenated text are not claimed to match
-any other renderer. The East Asian `w:kinsoku`-style line rules and
-`w:hyphenationZone` interaction with justification compression are not
+any other renderer. The East Asian `w:kinsoku` line rules apply only with their
+default character lists (see Chinese and Japanese line breaking), and the
+`w:hyphenationZone` interaction with justification compression is not
 modeled.
 ## Design tab: themes, style sets, watermarks and page fill effects (2026-10-13)
 
@@ -23202,7 +23309,12 @@ shells. Supported authoring subset:
   after insert/delete/split of columns, cell splits and Draw Table lines;
   `w:gridSpan` (§17.4.17) and `w:vMerge` restart/continue (§17.4.84) for
   rectangular merges, splits into rows × columns, split table and Draw/Eraser.
-  Merging keeps each non-empty cell's paragraphs in reading order.
+  Merging keeps each non-empty cell's paragraphs in reading order. A column
+  inserted into an AutoFit table (§17.4.52 `autofit`) is written with the width
+  of the column beside it, never a zero-width `w:gridCol`; only a grid that
+  holds no widths (AutoFit to contents) keeps an unsized one.
+- Deleting a selection that wholly encloses a table and text around it removes
+  the whole `w:tbl`; a selection reaching only into a table clears its cells.
 - Rows that end early: Delete Cells → Shift cells left and Insert Cells → Shift
   cells right write `w:gridAfter` (§17.4.14) with an automatic `w:wAfter`
   (§17.4.85–86); shifting up/down moves cell content within unmerged columns.
@@ -23333,7 +23445,30 @@ Supported subset:
 - Text cut and pasted while tracking becomes a move: `moveFrom`/`moveTo` wrappers with
   `moveFromRangeStart/End` and `moveToRangeStart/End` named pairs per paragraph. Imported moves keep
   their range names. Moves display in green with double strikethrough/underline and accept or reject
-  as deletions/insertions.
+  as deletions/insertions. A paragraph inside a move range it does not wholly contain (a range
+  between paragraphs around moved paragraphs, or one opened in one paragraph and closed in another)
+  is rewritten on save with its moves in their own named range, as edited moves are, so editing
+  elsewhere neither drops the range markers nor leaves an end without its start
+  (`tests/move-range-docx.test.js`).
+- Changes tracked inside an inline rich-text or plain-text content control (§17.5.2.29
+  `sdtContent`; §17.13.5.18 `ins`, §17.13.5.14 `del`) are saved: a tracked deletion keeps the
+  control's text, so it now counts as a change of the control and its contents are rewritten
+  with the `w:del` wrapper instead of reusing the source runs. Inline control contents may hold
+  `ins`/`del`/`moveFrom`/`moveTo` wrappers of runs (one deletion nested in an insertion), also
+  within a hyperlink there, with `delText` in deleted runs, so such a document reopens editable.
+  The paragraphs of a paragraph or cell plain-text control may hold the same wrappers. Other wrapper contents keep the
+  read-only fallback (`tests/control-revisions-docx.test.js`).
+- A paragraph whose mark is a tracked insertion or deletion (§17.13.5.16/.14 in `pPr/rPr`) is read
+  with the markup-compatibility context of its ancestors, as other paragraphs are. Its floating
+  drawings' ignorable `wp14:sizeRelH`/`sizeRelV` (declared ignorable on the document root, as on
+  every anchor desktop word processors write) no longer make the document open read-only, including
+  after a tracked deletion of a paragraph holding a picture (`tests/tracked-mark-drawings.test.js`).
+- A comment whose range starts, ends or lies inside an inline rich-text content control
+  (§17.13.4.4 `commentRangeStart`, §17.13.4.3 `commentRangeEnd`, §17.13.4.5 `commentReference`)
+  is written with its markers and reference mark inside `sdtContent`, as desktop word processors
+  also write it; the reader accepts them there, so such a document reopens editable instead of
+  read-only. A plain-text control may hold them too; its comment reference mark is not part of
+  the control's text or its single formatting. Picture controls keep the stricter contents.
 - `revisionView` `insDel`/`formatting` are written from Show Markup; `doNotTrackMoves` and
   `doNotTrackFormatting` from Tracking Options and honored while editing. `hideSpellingErrors` and
   `hideGrammaticalErrors` are written from the Spelling menu. `writeProtection recommended="1"` is
@@ -23443,7 +23578,11 @@ processors read, and keeps its recipient list inside the document.
   not use it, and they will report the merge's data source as unavailable.
 - **Merged output**: Edit Individual Documents copies the saved body once per
   output document, replaces every merge field (and its nested fields) with
-  plain result runs (line breaks as `w:br`), separates copies with next-page
+  plain result runs (line breaks as `w:br`); a cached result that spans
+  paragraphs (§17.16.18: the paragraph marks between `separate` and `end`
+  belong to the result) loses those paragraphs, and the text after the field
+  joins the paragraph the field starts in, ended by the mark after the field.
+  It separates copies with next-page
   section breaks cloned from the final `w:sectPr` (a directory runs copies
   together), removes later copies' bookmarks and comment anchors, renumbers
   `wp:docPr` ids, and drops `w:mailMerge` and the recipient part.
@@ -23843,8 +23982,13 @@ Advanced options search the joined document text (paragraph marks as `^p`), head
 ^+ ^= ^^`, find-only `^? ^# ^$ ^w ^g`, replace-only `^&`. Wildcards (case-sensitive): `? * [ ] [!]
 {n,m} @ < > ( )` and `\1`–`\9` in the replacement. Formatting conditions cover run properties,
 paragraph properties and paragraph/character styles; replacement formatting is applied through the
-ordinary formatting commands after the text replacement, in one transaction. Not supported: sounds
-like, all word forms, and replacing with paragraph marks inside table cells.
+ordinary formatting commands after the text replacement, in one transaction. `^g` matches inline
+pictures only; no pattern (`^g`, `^?`, wildcards) matches a field, equation or note reference, and
+`^p` never matches the paragraph mark that ends a section (`w:sectPr` in `w:pPr`; a section break is
+Word's `^b`, not supported here). With Track Changes on, text tracked as deleted (`w:del`) is not
+found, so a second Replace All does not insert its replacement again; with it off, deleted text is
+found and replacing it is an ordinary edit. Not supported: sounds like, all word forms, `^b`, and
+replacing with paragraph marks inside table cells.
 
 ### Paste
 
@@ -23908,8 +24052,14 @@ Code: [engine/document-views.js](../src/engine/document-views.js) (screen geomet
 - Move Up/Down and Navigation-pane dragging reorder whole paragraphs (`w:p`) and tables (`w:tbl`),
   a heading together with the paragraphs it leads. Sections (`w:sectPr` in `w:pPr`), frames
   (`w:framePr`) and block-level content controls are not moved (the command reports why). The
-  document's closing empty paragraph stays last. Deleting a section in the Navigation pane removes
-  its paragraphs; new headings are empty paragraphs with the heading style.
+  document's closing empty paragraph stays last. A move that would put a bookmark, comment or field
+  end (§17.13.6.2 `bookmarkEnd`, §17.13.4.3 `commentRangeEnd`, §17.16.18 `fldChar`) before its start
+  is refused, and so is any move with Track Changes on, since a reorder is not recorded as a
+  revision. Deleting a section in the Navigation pane removes its paragraphs and keeps their
+  bookmark and comment markers where the section was, as deleting the text does; a field that runs
+  out of the section blocks the deletion. With Track Changes on the section is marked deleted
+  (§17.13.5.14 `w:del`, paragraph-mark deletions) instead. New headings are empty paragraphs with
+  the heading style.
 - Gaps: master documents and subdocuments (`w:subDoc`, the `masterPages` view) are not supported;
   outline numbering linked to headings follows the existing numbering support only.
 ## Picture and shape effects, preset picture geometry and hidden drawings (2026-10-13)

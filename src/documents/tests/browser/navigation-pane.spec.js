@@ -109,3 +109,38 @@ test('the Headings tree moves, expands and collapses with the arrow keys', async
   await expect(item('Introduction')).toBeFocused();
   expect(errors).toEqual([]);
 });
+
+test('Shift+Enter in a new search goes to the last result, Enter to the first', async ({ page }) => {
+  const input = await headingsDocument(page);
+  await input.press('ControlOrMeta+f');
+  const pane = page.getByRole('complementary', { name: 'Navigation' });
+  const search = pane.getByRole('searchbox', { name: 'Search document' });
+  await search.fill('plan');
+  await expect(pane.getByRole('status')).toHaveText('3 results');
+  await search.press('Shift+Enter');
+  await expect(pane.getByRole('status')).toHaveText('Result 3 of 3');
+  expect(await input.evaluate(el => el.selectionStart)).toBe(await input.evaluate(el => el.value.lastIndexOf('plan')));
+  await search.fill('plan ');
+  await search.fill('plan');
+  await search.press('Enter');
+  await expect(pane.getByRole('status')).toHaveText('Result 1 of 3');
+});
+
+test('Escape in the Navigation search clears it and returns to the document; with no search it closes the pane', async ({ page }) => {
+  const input = await headingsDocument(page);
+  await input.press('ControlOrMeta+f');
+  const pane = page.getByRole('complementary', { name: 'Navigation' });
+  const search = pane.getByRole('searchbox', { name: 'Search document' });
+  await search.fill('plan');
+  await search.press('Enter');
+  await expect(pane.getByRole('status')).toHaveText('Result 1 of 3');
+  await search.press('Escape');
+  await expect(input).toBeFocused();
+  await expect(search).toHaveValue('');
+  await expect(pane).toBeVisible();
+  // The caret stays at the result that was chosen.
+  expect(await input.evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd))).toBe('plan');
+  await search.press('Escape');
+  await expect(pane).toBeHidden();
+  await expect(input).toBeFocused();
+});

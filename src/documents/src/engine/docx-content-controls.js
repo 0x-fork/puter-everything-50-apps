@@ -75,6 +75,21 @@ function attributes(node, names = [], ns = W) {
   if ([...node.attributes].some(a => a.namespaceURI !== XMLNS && !(a.namespaceURI === ns && names.includes(a.localName)))) fail(`unsupported ${node.localName} attributes`);
   if ([...node.childNodes].some(n => [3, 4].includes(n.nodeType) && n.textContent.trim())) fail('text outside runs');
 }
+const REVISIONS = ['ins', 'del', 'moveFrom', 'moveTo'];
+const isRevision = n => n.namespaceURI === W && REVISIONS.includes(n.localName);
+// The items of inline control contents with tracked-change wrappers replaced by the runs they
+// hold (a deletion may sit inside another reviewer's insertion); null when a wrapper holds anything else.
+function trackedRuns(nodes, depth = 0) {
+  const result = [];
+  for (const node of nodes) {
+    if (!isRevision(node)) { result.push(node); continue; }
+    const inner = depth < 1 ? trackedRuns(children(node), depth + 1) : children(node);
+    if (!inner?.some(n => n.namespaceURI === W && n.localName === 'r') || inner.some(n => n.namespaceURI !== W || !['r', 'proofErr', 'bookmarkStart', 'bookmarkEnd'].includes(n.localName))) return null;
+    result.push(...inner);
+  }
+  return result;
+}
+const deletedRun = r => ['del', 'moveFrom'].includes(r.parentElement?.localName) && r.parentElement.namespaceURI === W;
 function leaf(node, names = [], ns = W) { attributes(node, names, ns); if (children(node).length) fail(`nested ${node.localName} properties`); }
 function on(node) {
   if (!node) return false;
@@ -206,9 +221,14 @@ export function contentControlReader(readRunProperties, parts = {}) {
       if (children(end).length > 1 || children(end).some(p => p.namespaceURI !== W || p.localName !== 'rPr')) fail('unsupported end properties');
       for (const p of children(end)) readRunProperties(p);
     }
-    const allowed = kind === 'cell' ? ['tc'] : kind === 'block' ? ['p', 'tbl', 'sdt', 'bookmarkStart', 'bookmarkEnd'] : ['r', 'hyperlink', 'proofErr', 'bookmarkStart', 'bookmarkEnd'];
+    // A text control may hold a comment's range ends and its reference mark (§17.13.4).
+    const commentable = kind === 'inline' && !picture;
+    const allowed = kind === 'cell' ? ['tc'] : kind === 'block' ? ['p', 'tbl', 'sdt', 'bookmarkStart', 'bookmarkEnd'] : ['r', 'hyperlink', 'proofErr', 'bookmarkStart', 'bookmarkEnd', ...(commentable ? ['commentRangeStart', 'commentRangeEnd'] : [])];
     const emptyRichInline = kind === 'inline' && persistent && !plain && !picture;
-    if (!children(content).length && !emptyRichInline || children(content).some(r => r.namespaceURI !== W || !allowed.includes(r.localName))) fail('empty or unsupported contents');
+    // Tracked insertions and deletions (§17.13.5) wrap a text control's runs, as the editor
+    // itself writes them when changes are tracked inside the control; check the runs they hold.
+    const inlineItems = kind === 'inline' && !picture ? trackedRuns(children(content)) : children(content);
+    if (inlineItems === null || !children(content).length && !emptyRichInline || inlineItems.some(r => r.namespaceURI !== W || !allowed.includes(r.localName))) fail('empty or unsupported contents');
     if (kind === 'cell' && children(content).length !== 1) fail('cell wrappers without exactly one cell');
     if (persistent && kind === 'cell' && children(child(content, 'tc')).some(n => n.namespaceURI === W && ['tbl', 'sdt'].includes(n.localName))) fail('persistent controls around tables or nested blocks');
     if (plain) {
@@ -218,10 +238,11 @@ export function contentControlReader(readRunProperties, parts = {}) {
       // actual plain-text contents must stay in a single paragraph/cell.
       // Typing replaces the cache; formatting still targets the whole control.
       if (kind !== 'inline' && (!paragraphs.length || paragraphs.length !== 1 && !placeholder || children(container).some(n => n.namespaceURI !== W || !['p', ...(kind === 'cell' ? ['tcPr'] : [])].includes(n.localName)))) fail('plain-text controls spanning multiple paragraphs or tables');
-      const runs = (kind === 'inline' ? children(content) : paragraphs.flatMap(p => children(p))).filter(n => n.localName !== 'pPr');
-      if (!runs.length || runs.some(n => n.namespaceURI !== W || !['r', 'proofErr', 'bookmarkStart', 'bookmarkEnd'].includes(n.localName))) fail('non-text plain-control contents');
-      for (const r of runs.filter(n => n.localName === 'r')) if (children(r).some(n => n.namespaceURI !== W || !['rPr', 't', 'tab', 'br', 'cr', 'lastRenderedPageBreak'].includes(n.localName))) fail('non-text plain-control runs');
-      const formats = runs.filter(n => n.localName === 'r').map(r => readRunProperties(child(r, 'rPr')));
+      const runs = kind === 'inline' ? inlineItems : paragraphs.flatMap(p => trackedRuns(children(p).filter(n => n.localName !== 'pPr')) || [null]);
+      if (!runs.length || runs.some(n => !n || n.namespaceURI !== W || !['r', 'proofErr', 'bookmarkStart', 'bookmarkEnd', ...(commentable ? ['commentRangeStart', 'commentRangeEnd'] : [])].includes(n.localName))) fail('non-text plain-control contents');
+      const referenceMark = r => commentable && children(r).some(n => n.namespaceURI === W && n.localName === 'commentReference') && children(r).every(n => n.namespaceURI === W && ['rPr', 'commentReference'].includes(n.localName));
+      for (const r of runs.filter(n => n.localName === 'r' && !referenceMark(n))) if (children(r).some(n => n.namespaceURI !== W || !['rPr', deletedRun(r) ? 'delText' : 't', 'tab', 'br', 'cr', 'lastRenderedPageBreak'].includes(n.localName))) fail('non-text plain-control runs');
+      const formats = runs.filter(n => n.localName === 'r' && !referenceMark(n)).map(r => readRunProperties(child(r, 'rPr')));
       const signature = r => JSON.stringify([r.styleId, r.directFormat]);
       if (!placeholder && formats.some(r => signature(r) !== signature(formats[0]))) fail('mixed formatting in a plain-text control');
     }
@@ -237,17 +258,17 @@ export function contentControlReader(readRunProperties, parts = {}) {
       })) fail('non-picture control drawings');
     }
     // The drawing reader still validates each picture's supported contents.
-    if (kind === 'inline') for (const item of children(content)) {
-      if (['bookmarkStart', 'bookmarkEnd'].includes(item.localName)) continue;
-      const runs = item.localName === 'hyperlink' ? children(item) : [item];
-      if (!runs.length || runs.some(r => r.namespaceURI !== W || !['r', 'proofErr', 'bookmarkStart', 'bookmarkEnd'].includes(r.localName))) fail('unsupported hyperlink contents');
+    if (kind === 'inline') for (const item of inlineItems) {
+      if (['bookmarkStart', 'bookmarkEnd', 'commentRangeStart', 'commentRangeEnd'].includes(item.localName)) continue;
+      const runs = item.localName === 'hyperlink' ? trackedRuns(children(item)) : [item];
+      if (!runs?.length || runs.some(r => r.namespaceURI !== W || !['r', 'proofErr', 'bookmarkStart', 'bookmarkEnd'].includes(r.localName))) fail('unsupported hyperlink contents');
       for (const r of runs) {
         if (r.localName === 'proofErr') {
           // Spelling/grammar range markers are annotations, not control text.
           // Keep them in the retained shell; they impose no editing lock.
           leaf(r, ['type']);
           if (!['spellStart', 'spellEnd', 'gramStart', 'gramEnd'].includes(r.getAttributeNS(W, 'type'))) fail('invalid proofing marker type');
-        } else if (r.localName === 'r' && children(r).some(t => t.namespaceURI !== W || !['rPr', 't', 'tab', 'br', 'cr', 'lastRenderedPageBreak', ...(!plain&&!picture?['fldChar','instrText']:[]), ...(persistent || picture ? ['drawing'] : [])].includes(t.localName))) fail('non-text contents');
+        } else if (r.localName === 'r' && children(r).some(t => t.namespaceURI !== W || !['rPr', deletedRun(r) ? 'delText' : 't', 'tab', 'br', 'cr', 'lastRenderedPageBreak', ...(!plain&&!picture?['fldChar','instrText']:[]), ...(commentable?['commentReference']:[]), ...(persistent || picture ? ['drawing'] : [])].includes(t.localName))) fail('non-text contents');
       }
     }
     const prompt = persistent && !picture ? placeholderRuns(child(child(pr, 'placeholder'), 'docPart')?.getAttributeNS(W, 'val'), kind) : undefined;

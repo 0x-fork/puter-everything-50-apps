@@ -130,7 +130,9 @@ plus a notice; it composes with the document's own Restrict Editing guard.
 and kept until the room accepts it; the title bar shows *Offline · N waiting*; changes go out when
 the connection returns, also after a reload of the same room in this browser (Yjs updates are
 idempotent, so a change delivered twice is harmless). Changes refused for good (access removed)
-are dropped and the person is told.
+are dropped and the person is told. In a tab that does not save the file (a guest's), changes the
+room has not received exist nowhere else: closing the tab warns, and leaving the document sends
+them first and asks when they cannot go out.
 
 ## Saving the file
 
@@ -140,9 +142,18 @@ when the owner has several open (presence entries say which tabs can write). It 
 tab's `Doc` stops saving (`setSaving(false)`): their edits reach the file through the room, so they
 are never "unsaved". When the owner is away the room keeps the changes and the owner's next visit
 saves them. Version snapshots continue to be taken by the writing tab and record who saved them.
+When the owner reopens a shared document and the room's state differs from the file (changes made
+while the owner was away, or a change to the file the room never saw: another app, a visit that
+could not reach the room), the file as it was is kept as a version, *Before the shared changes*,
+before the room's state is saved over it, and the owner is told.
 
 When sharing stops or access is removed, the document stays open as the person's own copy, with
 **Save a Copy** to keep it.
+
+Save As and Save a Copy in a shared document go on in a new document of the person's own: the tab
+leaves the room once the changes made before the copy are delivered, so nothing typed in the copy
+reaches the others or, through the room, the original file. A guest's copy saves like any other
+document from then on.
 
 ## Share dialog
 

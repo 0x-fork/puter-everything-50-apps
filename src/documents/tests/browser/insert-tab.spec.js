@@ -357,3 +357,33 @@ test('Text from File reads Unicode and Windows text files as opening them does',
   await expect.poll(() => input.inputValue()).toBe('Start\nGrüße 😀\nZweite Zeile\nCafé €5');
   expect(errors).toEqual([]);
 });
+
+test('Text from File puts a web page in a table cell as its paragraphs, without its scripts or styles', async ({ page }) => {
+  const { input, errors, ribbon } = await start(page, { text: 'Start' });
+  await ribbon.getByRole('button', { name: 'Insert table', exact: true }).click();
+  await page.getByRole('button', { name: 'Insert', exact: true }).click();
+  await ribbon.getByRole('button', { name: 'Object', exact: true }).click();
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('menuitem', { name: 'Text from File…' }).click();
+  await (await chooser).setFiles({ name: 'page.html', mimeType: 'text/html', buffer: Buffer.from('<!doctype html><html><head><title>Page</title></head><body><style>p { color: red }</style><script>var secret = 1;</script>\n<h1>Heading</h1>\n<p>First\n   paragraph.</p><p>Second<br>line</p></body></html>') });
+  await expect.poll(() => input.inputValue()).toContain('Heading\nFirst paragraph.\nSecond');
+  expect(await input.inputValue()).not.toMatch(/color: red|secret/);
+  // The caret was in the table's first cell, where formatting does not carry: the text went in there.
+  await expect(ribbon.page().getByRole('tab', { name: 'Table Design' })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('a picture Puter AI could not make is explained in plain words', async ({ page }) => {
+  await page.goto('/mock.html#/new');
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  // The SDK rejects with its own error object rather than an Error.
+  await page.evaluate(() => { puter.ai.txt2img = async () => { throw { success: false, error: { code: 'insufficient_funds', message: 'Insufficient funds' } }; }; });
+  await (await onTab(page, 'insert')).locator('#ribbon-panel-insert').getByRole('button', { name: 'Pictures', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Generate with AI…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Generate a Picture' });
+  await dialog.getByRole('textbox', { name: 'Describe the picture' }).fill('A lighthouse at dawn');
+  await dialog.getByRole('button', { name: 'Generate', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Your Puter AI allowance has run out for now.');
+  await expect(dialog).not.toContainText('Generating');
+  await expect(dialog.getByRole('button', { name: 'Generate', exact: true })).toBeEnabled();
+});

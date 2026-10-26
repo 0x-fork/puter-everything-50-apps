@@ -7,7 +7,7 @@ import { parseXml } from './docx-xml.js';
 import { bodyFieldRanges } from './body-fields.js';
 import { BIB_NS, newGuid, parseSources, serializeSources, parseCitation, citationInstruction, bibliographyInstruction } from './bibliography.js';
 import { CITATION_STYLES, DEFAULT_STYLE, citationContext, formatBibliography, formatCitation } from './citation-styles.js';
-import { fieldsOfType, newBodyField, writeBlockField, writeInlineField } from './generated-fields.js';
+import { fieldsOfType, newBodyField, setFieldInstruction, writeBlockField, writeInlineField } from './generated-fields.js';
 
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
 const CUSTOM_XML = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml';
@@ -88,6 +88,17 @@ export function styleOf(data) {
 export function citationFields(paragraphs) {
   return bodyFieldRanges(paragraphs).filter(r => r.field.type === 'CITATION').map(r => ({ ...r, citation: parseCitation(r.field.instruction) })).filter(r => r.citation);
 }
+/** Point the citations of source `from` at its new tag `to` (a source's tag was changed); returns how many changed. */
+export function renameCitedTag(doc, from, to) {
+  const same = tag => String(tag).toLowerCase() === String(from).toLowerCase();
+  let changed = 0;
+  for (const { field } of citationFields(doc.paragraphs).filter(r => r.citation.tags.some(same))) {
+    const range = citationFields(doc.paragraphs).find(r => r.field.id === field.id);
+    const citation = { ...range.citation, tags: range.citation.tags.map(tag => same(tag) ? to : tag) };
+    if (setFieldInstruction(doc, range, citationInstruction({ ...citation, lcid: citation.lcid || '1033' }))) changed++;
+  }
+  return changed;
+}
 /** Tags in order of first citation. */
 export const citedTags = paragraphs => [...new Set(citationFields(paragraphs).flatMap(r => r.citation.tags))];
 
@@ -101,18 +112,33 @@ export function citationRuns(citation, sources, style, context) {
 const sameRuns = (doc, range, runs) => doc.text.slice(range.start, range.end) === runs.map(r => r.text).join('');
 
 /** Refresh every CITATION result for `sources` in `style`; returns the number of changed fields. */
+/**
+ * Rewrite a field's result with `write()` and return where `selection` is now in the text. Writing a result
+ * leaves the caret at its end; an update put the caret at the end of the last field it rewrote, so the
+ * citation inserted next landed there.
+ */
+function selectionAfter(doc, selection, range, write) {
+  const length = doc.text.length;
+  write();
+  const delta = doc.text.length - length, end = range.end + delta;
+  const keep = position => position >= range.end ? position + delta : position > range.start ? Math.min(position, end) : position;
+  return { anchor: keep(selection.anchor), focus: keep(selection.focus) };
+}
+
 export function updateCitations(doc, sources, style) {
   const context = citationContext(style, sources, citedTags(doc.paragraphs));
   let changed = 0;
   const fields = citationFields(doc.paragraphs);
+  let selection = { ...doc.selection };
   for (let i = fields.length - 1; i >= 0; i--) {
     const range = citationFields(doc.paragraphs)[i];
     if (range.field.locked) continue;
     const runs = citationRuns(range.citation, sources, style, context);
     if (sameRuns(doc, range, runs)) continue;
-    writeInlineField(doc, { existing: range, runs });
+    selection = selectionAfter(doc, selection, range, () => writeInlineField(doc, { existing: range, runs }));
     changed++;
   }
+  if (changed) doc.select(selection.anchor, selection.focus);
   return changed;
 }
 
@@ -141,15 +167,17 @@ export function bibliographyRows(doc, sources, style) {
 /** Rebuild every BIBLIOGRAPHY result; returns the number rebuilt. */
 export function updateBibliographies(doc, sources, style) {
   let count = 0;
+  let selection = { ...doc.selection };
   for (let i = fieldsOfType(doc.paragraphs, 'BIBLIOGRAPHY').length - 1; i >= 0; i--) {
     const existing = fieldsOfType(doc.paragraphs, 'BIBLIOGRAPHY')[i];
     if (existing.field.locked || !existing.whole) continue;
     const rows = bibliographyRows(doc, sources, style);
     const current = doc.paragraphs.slice(existing.first, existing.last + 1).map(p => p.runs.map(r => r.text).join('')).join('\n');
     if (current === rows.map(r => r.runs.map(x => x.text).join('')).join('\n')) continue;
-    writeBlockField(doc, { existing, rows });
+    selection = selectionAfter(doc, selection, existing, () => writeBlockField(doc, { existing, rows }));
     count++;
   }
+  if (count) doc.select(selection.anchor, selection.focus);
   return count;
 }
 

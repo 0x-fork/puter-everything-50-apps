@@ -8,7 +8,7 @@
  * undoable step. Tables appear as one row and are edited in the other views.
  */
 import { el, isComposing, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
-import { outlineRows, outlineUnits, subtreeEnd, moveOutlineBlock, setOutlineLevels, promotedLevel, demotedLevel, BODY_LEVEL } from '../engine/outline-editing.js';
+import { outlineRows, outlineUnits, subtreeEnd, moveOutlineBlock, moveOutlineSelection, setOutlineLevels, promotedLevel, demotedLevel, BODY_LEVEL } from '../engine/outline-editing.js';
 
 const INDENT = 26;
 const LEVEL_NAMES = [...Array.from({ length: 9 }, (_, i) => `Level ${i + 1}`), 'Body Text'];
@@ -190,6 +190,9 @@ export function createOutlineView({ editor, readOnly, error, onState = () => {} 
     if (ok && focus) focus();
     return ok && changed;
   }
+  // Typing in one place is one undo step per word, as in the page views (CanvasEditor.typeText):
+  // a character typed where the last one ended joins its step, unless it starts a new word.
+  let typingGroup = null;
   function commitText(id, text) {
     if (composing || !text.isContentEditable) return;
     const ed = engine(), row = rows.find(r => r.id === id);
@@ -199,12 +202,18 @@ export function createOutlineView({ editor, readOnly, error, onState = () => {} 
     let prefix = 0; while (prefix < old.length && prefix < value.length && old[prefix] === value[prefix]) prefix++;
     let suffix = 0; while (suffix < old.length - prefix && suffix < value.length - prefix && old[old.length - 1 - suffix] === value[value.length - 1 - suffix]) suffix++;
     const offset = caretOffset(text);
+    const inserted = value.slice(prefix, value.length - suffix), typed = !!inserted && prefix === old.length - suffix;
+    const group = typingGroup;
+    const merge = typed && !!group && group.id === id && group.at === prefix && group.revision === ed.session.revision && group.path === ed.session.path
+      && !(/\S/u.test(inserted[0]) && /\s/u.test(group.last));
+    typingGroup = null;
     const ok = ed.execute(() => {
       const index = ed.model.paragraphs.findIndex(p => p.id === id);
       const start = ed.model.paragraphOffset(index);
       ed.model.select(start + prefix, start + old.length - suffix);
-      ed.model.replace(value.slice(prefix, value.length - suffix));
-    }, e => error(e));
+      ed.model.replace(inserted);
+    }, e => error(e), { record: !merge });
+    if (ok && typed) typingGroup = { id, at: prefix + inserted.length, revision: ed.session.revision, path: ed.session.path, last: inserted.at(-1) };
     render();
     if (!ok) { text.textContent = old; }
     placeCaret(text, offset);
@@ -244,13 +253,12 @@ export function createOutlineView({ editor, readOnly, error, onState = () => {} 
   }
   function move(direction) {
     const ids = targets(); if (!ids.length) return;
-    const id = direction < 0 ? ids[0] : ids.at(-1), focus = focusedId;
+    const focus = focusedId;
     const offset = focus && rowNodes.get(focus) ? caretOffset(rowNodes.get(focus).children[1]) : 0;
-    const withSubtree = collapsedTarget(id) || selectedIds.size > 0;
     run(model => {
-      // A selection of several rows moves as a block: move its first or last unit repeatedly.
-      if (ids.length > 1 && !withSubtree) return ids.map(each => moveOutlineBlock(model, each, direction, { withSubtree: false })).some(Boolean);
-      return moveOutlineBlock(model, id, direction, { withSubtree });
+      // Selected rows (a section chosen by its outline symbol, or a Shift-selected run of rows) move as one block.
+      if (selectedIds.size) return moveOutlineSelection(model, ids, direction, { collapsed: each => collapsed.has(each) });
+      return moveOutlineBlock(model, ids[0], direction, { withSubtree: collapsedTarget(ids[0]) });
     }, { focus: () => focusRow(focus, offset) });
   }
   function toggle(id, open = collapsed.has(id)) {
@@ -312,7 +320,8 @@ export function createOutlineView({ editor, readOnly, error, onState = () => {} 
     const selection = window.getSelection(), collapsedCaret = selection.isCollapsed;
     if (e.key === 'Backspace' && !mod && collapsedCaret && caretOffset(text) === 0) { if (mergeWith(id, -1)) handled(); else handled(); return; }
     if (e.key === 'Delete' && !mod && collapsedCaret && caretOffset(text) === text.textContent.length) { if (mergeWith(id, 1)) handled(); else handled(); }
-    if (selectedIds.size && !e.shiftKey) { selectedIds.clear(); markSelected(); }
+    // A modifier pressed on its own (Alt before Shift in Alt+Shift+↓) is the start of a command, not an edit.
+    if (selectedIds.size && !e.shiftKey && !['Alt', 'Control', 'Meta', 'Shift', 'CapsLock', 'AltGraph'].includes(e.key)) { selectedIds.clear(); markSelected(); }
   }
 
   /* ---- View options ---- */

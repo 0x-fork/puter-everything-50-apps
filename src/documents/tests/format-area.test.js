@@ -112,6 +112,30 @@ it('contributes Format, Edit and View menu items and text/list context items', (
   area.destroy();
 });
 
+it('moves between the styles pane views with the arrow keys, one tab stop for all three', () => {
+  const doc = documentWith(['Head', 'Body one']);
+  const engine = fakeEngine(doc);
+  const area = createFormatArea({ editor: () => engine, pkg: () => ({ readOnly: false }), error: e => { throw e; }, host: () => document.body });
+  document.body.append(area.pane.node);
+  area.commands.stylesPane();
+  const tabs = [...area.pane.node.querySelectorAll('[role="tab"]')];
+  const panel = area.pane.node.querySelector('[role="tabpanel"]');
+  expect(tabs.map(tab => tab.tabIndex)).toEqual([0, -1, -1]);
+  expect(panel.getAttribute('aria-labelledby')).toBe(tabs[0].id);
+  tabs[0].focus();
+  tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  expect(area.pane.view).toBe('inspector');
+  expect(document.activeElement).toBe(tabs[1]);
+  expect(tabs.map(tab => tab.tabIndex)).toEqual([-1, 0, -1]);
+  expect(panel.getAttribute('aria-labelledby')).toBe(tabs[1].id);
+  tabs[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+  expect(area.pane.view).toBe('reveal');
+  tabs[2].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  expect(area.pane.view).toBe('styles');
+  expect(document.activeElement).toBe(tabs[0]);
+  area.destroy();
+});
+
 it('applies a style from the styles pane and selects contiguous instances in one selection', () => {
   const doc = documentWith(['Head', 'Body one', 'Body two']);
   const engine = fakeEngine(doc);
@@ -124,6 +148,12 @@ it('applies a style from the styles pane and selects contiguous instances in one
   expect(doc.paragraphStyle).toBe('Heading1');
   area.refresh();
   expect(area.pane.node.querySelector('.styles-pane-current-name').textContent).toBe('Heading 1');
+  // The styles are a list of buttons (a listbox's options cannot hold buttons); the selection's style is the current one.
+  const list = area.pane.node.querySelector('[aria-label="Apply a style"]');
+  expect(list.getAttribute('role')).toBe('list');
+  expect([...list.children].every(row => row.getAttribute('role') === 'listitem')).toBe(true);
+  expect([...list.querySelectorAll('[aria-current="true"]')].map(b => b.getAttribute('aria-label'))).toEqual(['Apply Heading 1 (paragraph style)']);
+  expect(list.nextElementSibling.textContent).not.toBe('false');
   // Normal: the two body paragraphs are adjacent, so they become one selection.
   doc.select(doc.text.indexOf('Body one'));
   area.refresh();

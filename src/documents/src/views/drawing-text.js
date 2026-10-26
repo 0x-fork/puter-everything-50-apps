@@ -1,10 +1,13 @@
 import { el } from '../ui/dom.js';
 import { openModal } from '../ui/modal.js';
 import { CanvasEditor } from '../engine/canvas-editor.js';
+import { shapeTextWidth } from '../engine/shape-text-layout.js';
+
+const MARGIN = 360; // Twips around the draft's text.
 
 // A rich draft owns its own positions and local history. Apply publishes one
 // drawing mutation to the document history; cancel never changes the document.
-export function openDrawingText({ engine, pkg, image, frame }) {
+export function openDrawingText({ engine, pkg, image, frame, select = null }) {
   const descriptor = pkg.drawingTextFrames(image, engine.model.assets)[frame];
   if (!descriptor || descriptor.reason) throw new Error(descriptor?.reason || 'This drawing text is unavailable.');
   const assets = {}, images = new Map();
@@ -43,15 +46,25 @@ export function openDrawingText({ engine, pkg, image, frame }) {
     host, error,
     el('div.row.row-end', {}, tool('Cancel', () => modal.close()), apply));
   const modal = openModal({ title: 'Edit drawing text', content, wide: true, onClose: () => { abort.abort(); draft?.destroy(); } });
+  // The draft's lines are as long as the frame's, so its text wraps where the drawing's will.
+  let writing = 9000 - 2 * MARGIN;
+  try {
+    const node = pkg.drawingTextSources(image, engine.model.assets[image.assetId])[frame]?.node, width = node ? Math.round(shapeTextWidth(node) * 15) : 0;
+    if (Number.isFinite(width) && width > 0) writing = width;
+  } catch { /* the default width */ }
+  const pageWidth = Math.max(1440, Math.min(31680, writing + 2 * MARGIN));
   try {
     draft = new CanvasEditor(host, {
       paragraphs: descriptor.paragraphs, tables: descriptor.tables, styles: engine.model.styles, numbering: engine.model.numbering,
       assets, images, borrowImages: true,
-      pageSettings: { width: 9000, left: 360, right: 360, top: 360, bottom: 360, compatibilityMode: engine.model.pageSettings.compatibilityMode },
+      pageSettings: { width: pageWidth, left: MARGIN, right: MARGIN, top: MARGIN, bottom: MARGIN, compatibilityMode: engine.model.pageSettings.compatibilityMode },
       inputLabel: 'Drawing text', onError: report,
       protectedPageFields: true,
     });
     draft.input.setAttribute('data-testid', 'drawing-text-input');
+    // A new drawing's sample text starts selected, so typing replaces it.
+    const at = select ? draft.model.text.indexOf(select) : -1;
+    if (at >= 0) draft.model.select(at, at + select.length);
     draft.focus();
   } catch (e) { modal.close(); throw e; }
   return modal;

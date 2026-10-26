@@ -90,7 +90,7 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
   }
 
   /* ---- Sessions ---- */
-  async function begin(client, link) {
+  async function begin(client, link, { reopened = false } = {}) {
     const engine = editor(); if (!engine) return null;
     const { LiveSession } = await loadLive();
     // The editor closed while the room was being joined: leave it rather than run a session no one sees.
@@ -98,8 +98,17 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
     const api = engineApi();
     const me = user();
     const commentGuard = api?.protectionGuard({ edit: 'comments', enforcement: true }, { name: me.name, email: me.name });
+    const fileText = engine.session?.body?.text;
     live = new LiveSession({ engine, doc, client, link, user: me, baseAssets: Object.keys(pkg()?.assets || {}), commentGuard,
       onApplied: () => onChange(), onError: e => error(e) });
+    // Reopening a document it shared, the owner sees the room's state, which the file is then saved to. The room may lack
+    // what the file has: a change made outside it (another app, a session that could not reach the room). The file as it
+    // was is kept as a version before anything writes over it.
+    if (reopened && fileText !== undefined && engine.session.body.text !== fileText && doc.keepFileVersion) {
+      doc.keepFileVersion({ label: 'Before the shared changes' })
+        .then(v => { if (v && !destroyed) toast('The shared document had changes this file did not, and they are shown now. The file as it was is kept in Version History.', { icon: 'info', duration: 10000 }); })
+        .catch(e => console.warn('[documents] the file could not be kept as a version', e));
+    }
     for (const name of ['people', 'status', 'saver']) live.addEventListener(name, () => { renderPeople(); onChange(); });
     for (const name of ['role', 'mode', 'single', 'conflict']) live.addEventListener(name, e => { renderBanner(e); renderPeople(); onChange(); });
     live.addEventListener('ended', e => {
@@ -115,6 +124,19 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
     return live;
   }
 
+  /**
+   * Save As and Save a Copy go on in a new document of the user's own. It is not the shared one: this tab leaves the
+   * room, with the changes made before the copy delivered, so nothing typed in the copy reaches the others (or, through
+   * the room, the original file). A guest's copy is theirs to save from here on.
+   */
+  const onPath = e => {
+    if (!live || !e.detail?.savedAs) return;
+    live.end(null);
+    setBanner('You are editing your own copy now, which is not shared. Everyone else goes on with the shared document.');
+    onChange();
+  };
+  doc.addEventListener?.('path', onPath);
+
   /** After the editor opened: join the room the document came from, or the one its owner shared before. */
   async function attach() {
     try {
@@ -127,7 +149,7 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
       if (!local && doc.path && !readOnly()) {
         const { reconnect } = await loadLive();
         const found = await reconnect(doc.path, user());
-        if (found) await begin(found.client, found.link);
+        if (found) await begin(found.client, found.link, { reopened: true });
       }
     } catch (e) { error(e); }
   }
@@ -198,9 +220,22 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
     { separator: true },
   ];
 
+  /**
+   * Whether this tab has changes to a shared document that it does not save itself (a guest's, another owner tab's)
+   * and that have not reached the room: they are nowhere else yet. The browser keeps them for the next visit to the
+   * document from here, which the person may never make.
+   */
+  const undelivered = () => !!live && doc.writes === false && live.pending > 0;
+
   return {
     avatars, banner, attach, share, ensureShared, extendTab, extendMenu, shareItems,
     get live() { return live; },
+    get undelivered() { return undelivered(); },
+    /** Send those changes now (before leaving the document); resolves whether none are left. */
+    async deliver() {
+      if (undelivered()) await live.deliver();
+      return !undelivered();
+    },
     commands: {
       share,
       /** Who is in the document, for the title bar: [{ name, color, role, me }]. */
@@ -210,6 +245,7 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
     refresh() { renderChip(); },
     destroy() {
       destroyed = true; dialog?.close();
+      doc.removeEventListener?.('path', onPath);
       // A room joined from an invitation whose session never began (the editor closed while opening, or could
       // not open the document) is left here; a session that began leaves it when it ends.
       if (!live && doc.collab?.client) doc.collab.client.close().catch(() => {});

@@ -71,6 +71,17 @@ test('an HTML file opens with its structure', async ({ page }) => {
   expect(await state(page, 'Two')).toMatchObject({ numbers: 'true' });
 });
 
+test('an HTML file keeps the bold, italics and alignment its style sheet gives (as Google Docs exports write them)', async ({ page }) => {
+  await importFile(page, 'plan.html', 'text/html', '<html><head><style>.c1{color:#000000;font-weight:400}.c3{font-weight:700}.c4{font-style:italic}.c5{text-align:center}</style></head><body><p class="c5"><span class="c1">Centered</span></p><p><span class="c1">We will </span><span class="c1 c3">ship</span><span class="c1"> the </span><span class="c4 c1">first</span><span class="c1"> version, </span><span class="c3" style="font-weight:400">not this</span>.</p></body></html>');
+  await expect(input(page)).toHaveValue('Centered\nWe will ship the first version, not this.');
+  expect(await state(page, 'ship')).toMatchObject({ bold: 'true', italic: 'false' });
+  expect(await state(page, 'first')).toMatchObject({ bold: 'false', italic: 'true' });
+  // A rule never overrides the element's own style attribute.
+  expect(await state(page, 'not this')).toMatchObject({ bold: 'false' });
+  await state(page, 'Centered');
+  await expect(page.getByRole('button', { name: 'Align center', exact: true })).toHaveAttribute('aria-pressed', 'true');
+});
+
 test('a Word template opens for editing and saves as a document', async ({ page }, info) => {
   // A .dotx differs from a .docx in its main part's content type.
   const parts = unzipSync(readFileSync(new URL('../../public/fixtures/two-paragraphs.docx', import.meta.url)));
@@ -91,4 +102,17 @@ test('a Word template opens for editing and saves as a document', async ({ page 
   expect(types).toContain('wordprocessingml.document.main+xml');
   expect(types).not.toContain('template.main+xml');
   await reopenDocx(page, input(page), path, `Dear Rosa, ${original}`);
+});
+
+test('a text file too long to open shows why, with ways forward', async ({ page }) => {
+  await page.goto('/mock.html#/home');
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Import', exact: true }).first().click();
+  // Past the editor's page limit: the import fails once the editor is already showing.
+  const lines = Array.from({ length: 9000 }, (_, i) => `Line ${i + 1}`).join('\n');
+  await (await chooser).setFiles({ name: 'long.txt', mimeType: 'text/plain', buffer: Buffer.from(lines) });
+  const message = page.locator('.canvas-message.editor-error');
+  await expect(message).toBeVisible({ timeout: 15000 });
+  await expect(message).toContainText('up to 200 pages');
+  await expect(message.getByRole('button', { name: 'Back to documents', exact: true })).toBeInViewport();
 });

@@ -2,7 +2,8 @@ import { isNoteStoryKind } from './footnotes.js';
 import { StorySession } from './story-session.js';
 import { decodeShape } from './canvas-shapes.js';
 import { wordPosition, optionWordPosition } from './word-navigation.js';
-import { carriesFormatting, copyFragment, fragmentHtml, htmlFragment, pasteFragment, formattedPasteFits } from './clipboard-fragment.js';
+import { carriesFormatting, copyFragment, fragmentHtml, htmlFragment, pasteFragment, formattedPasteFits, copiesPicture, pictureHtml, htmlPicture } from './clipboard-fragment.js';
+import { xmlAttributeText } from './text-limits.js';
 import { showLink } from './link-appearance.js';
 import { revisionView } from './revisions.js';
 
@@ -11,7 +12,7 @@ const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navi
 import { inlineControlCaret, adjacentInlineControl, moveInlineControlCaret, documentStartControlCaret, moveInlineControlHomeEnd, emptyControlPointerCaret, pointerControlSelection } from './content-control-caret.js';
 import { paintControlCarets } from './canvas-control-caret.js';
 import { paintStoryChrome, storyBoundaries } from './canvas-story-chrome.js';
-import { paintInsertionCaret } from './canvas-caret.js';
+import { paintInsertionCaret, paintCompositionUnderline } from './canvas-caret.js';
 import { cellTextLocalPoint } from './cell-text-direction.js';
 import { pageStorySelectionLayout } from './page-story-positions.js';
 import { pageStoryAtPoint } from './page-story-hit.js';
@@ -63,7 +64,7 @@ const QUIET_PAINT_MS = 600;
 
 /** Canvas paint surface plus a real textarea for native input, composition and accessible text. */
 export class CanvasEditor {
-  constructor(host, { paragraphs, pageSettings, numbering, styles, tables, pageStories, comments = null, trackChanges, assets = {}, images = new Map(), borrowImages = false, drawingLayouts, inputLabel, readOnly = false, protectedPageFields = false, onChange = () => {}, onSelection = () => {}, onSave = () => {}, onLink = () => {}, onOpenLink = () => {}, onLinkClick = () => {}, onError = () => {}, onContextMenu = () => {}, onUpdateFields = null, correctTyping = null, linkTyping = null, measure = null } = {}) {
+  constructor(host, { paragraphs, pageSettings, numbering, styles, tables, pageStories, comments = null, trackChanges, assets = {}, images = new Map(), borrowImages = false, drawingLayouts, inputLabel, readOnly = false, protectedPageFields = false, onChange = () => {}, onSelection = () => {}, onSave = () => {}, onLink = () => {}, onOpenLink = () => {}, onLinkClick = () => {}, onError = () => {}, onContextMenu = () => {}, onUpdateFields = null, correctTyping = null, linkTyping = null, measure = null, preparePicture = null } = {}) {
     this.host = host;
     this.inputLabel = inputLabel;
     this.readOnly = readOnly;
@@ -76,6 +77,8 @@ export class CanvasEditor {
     this.onChange = onChange; this.onSelection = onSelection; this.onSave = onSave; this.onError = onError;
     this.correctTyping = correctTyping; this.linkTyping = linkTyping;
     this.onUpdateFields = onUpdateFields;
+    // Turns a picture file into one the session can hold (the app scales down large photos and screenshots).
+    this.preparePicture = preparePicture;
     this.onLink = onLink; this.onOpenLink = onOpenLink; this.onLinkClick = onLinkClick; this.visitedLinks = new Set();
     this.zoom = 1;
     // The document view laid out on screen (document-views.js); null is Print Layout.
@@ -153,7 +156,10 @@ export class CanvasEditor {
         this.syncInput(); this.paint();
       }
       this.composition = entry;
+      // Where the composed text begins in the native field, and what it is so far (compositionRange).
+      this.compositionStart = this.input.selectionStart; this.compositionText = '';
     });
+    listen(this.input, 'compositionupdate', e => { if (this.composition) this.compositionText = e.data || ''; });
     listen(this.input, 'compositionend', () => this.finishComposition());
     listen(this.input, 'select', () => this.nativeSelection());
     listen(this.input, 'keyup', () => this.nativeSelection());
@@ -167,8 +173,8 @@ export class CanvasEditor {
     listen(this.input, 'paste', e => {
       if (this.composition || !e.clipboardData) return;
       e.preventDefault();
-      const text = e.clipboardData.getData('text/plain');
-      // A copied picture or screenshot arrives as a file with no text beside it.
+      const text = e.clipboardData.getData('text/plain').replace(/\ufffc/g, '');
+      // A copied picture or screenshot arrives as a file with no text beside it (or only an object's U+FFFC).
       const picture = !text && [...(e.clipboardData.files || [])].find(file => PASTED_PICTURE.test(file.type));
       if (picture) { if (!this.readOnly) this.insertImageFile(picture).catch(error => this.onError(error)); return; }
       this.pasteData(text, e.clipboardData.getData('text/html'));
@@ -413,11 +419,18 @@ export class CanvasEditor {
     if (this.viewOnly && this.session.path !== null) this.editStory(null);
     this.onSelection?.();
   }
-  async insertImageFile(file) {
+  /** Insert a picture file at the selection, at its own size or `size` (EMUs, as copied), within the column. */
+  async insertImageFile(file, size = {}) {
     if (this.readOnly || this.viewOnly) return false;
-    if (file.size > 10 * 1024 * 1024) throw new Error('Choose a PNG, JPEG or TIFF image up to 10 MB.');
+    if (!this.preparePicture && file.size > 10 * 1024 * 1024) throw new Error('Choose a PNG, JPEG or TIFF image up to 10 MB.');
     this.finishComposition();
-    const path = this.session.path, revision = this.session.revision, selection = { ...this.model.selection }, bytes = new Uint8Array(await file.arrayBuffer()), info = imageInfo(bytes), asset = { bytes, mime: info.mime };
+    const path = this.session.path, revision = this.session.revision, selection = { ...this.model.selection };
+    // A pasted photo or screenshot can be larger than the session holds; it is scaled down as Insert > Pictures does.
+    if (this.preparePicture) {
+      file = await this.preparePicture(file);
+      if (file.size > 10 * 1024 * 1024) throw new Error('Choose a PNG, JPEG or TIFF image up to 10 MB.');
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer()), info = imageInfo(bytes), asset = { bytes, mime: info.mime };
     validateImageAssets(this.model.assets, asset);
     const bitmap = await decodeImage(asset);
     if (this.destroyed) { bitmap.close(); return false; }
@@ -428,10 +441,12 @@ export class CanvasEditor {
     const cellPage = cell ? { ...p, left: cell.x + context.cell.margins.left / 15, right: p.width - cell.x - cell.width + context.cell.margins.right / 15 } : p;
     const format = paragraphFormat(paragraph, this.model.numbering), edges = [true, false].map(first => paragraphEdges(format, cellPage, first));
     const width = Math.min(...edges.map(e => e.right - e.left));
-    const height = Math.max(1, (p.height - p.top - p.bottom) / (format.lineRule === 'auto' ? format.lineSpacing : 1) - 32), scale = Math.min(1, width / bitmap.width, height / bitmap.height);
+    const sized = size.width > 0 && size.height > 0, natural = sized ? { width: size.width / EMU_PER_PX, height: size.height / EMU_PER_PX } : bitmap;
+    const height = Math.max(1, (p.height - p.top - p.bottom) / (format.lineRule === 'auto' ? format.lineSpacing : 1) - 32), scale = Math.min(1, width / natural.width, height / natural.height);
     let id; do { id = `canvas-image-${++nextAsset}`; } while (this.model.assets[id]);
     this.model.assets[id] = asset; this.images.set(id, bitmap);
-    const ok = this.execute(() => this.model.insertImage(id, { width: Math.max(1, Math.floor(bitmap.width * scale * EMU_PER_PX)), height: Math.max(1, Math.floor(bitmap.height * scale * EMU_PER_PX)), alt: '' }));
+    const extent = key => Math.max(1, Math.floor(scale === 1 && sized ? size[key] : natural[key] * scale * EMU_PER_PX));
+    const ok = this.execute(() => this.model.insertImage(id, { width: extent('width'), height: extent('height'), alt: xmlAttributeText(String(size.alt || '')) }));
     if (!ok) { delete this.model.assets[id]; this.images.delete(id); bitmap.close(); }
     this.focus(); return ok;
   }
@@ -501,12 +516,44 @@ export class CanvasEditor {
   redo() { this.travelHistory('redo'); }
   setZoom(value) {
     if (!Number.isFinite(value)) return;
-    this.zoom = Math.max(0.1, Math.min(2, value));
+    const zoom = Math.max(0.1, Math.min(2, value)), anchor = zoom !== this.zoom ? this.viewAnchor() : null;
+    this.zoom = zoom;
     this.resizeCanvases();
+    // The text in the middle of the view stays there: keeping the scroll offset instead showed another
+    // part of a long document, pages away, after each zoom step.
+    if (anchor) {
+      const r = this.canvases[anchor.index]?.getBoundingClientRect();
+      if (r) {
+        // Whole pixels: a page scrolled to a fractional position is resampled, which blurs it.
+        if (!anchor.atStart) this.host.scrollTop = Math.round(this.host.scrollTop + r.top + anchor.y * zoom - anchor.top);
+        this.host.scrollLeft = Math.round(this.host.scrollLeft + r.left + anchor.x * zoom - anchor.left);
+      }
+    }
+  }
+  /**
+   * The page point at the middle of the visible part of the view, and where it is on screen.
+   * `atStart`: the view shows the start of the document, which it keeps showing.
+   */
+  viewAnchor() {
+    if (!this.canvases?.length) return null;
+    const host = this.host.getBoundingClientRect();
+    const top = Math.max(host.top, 0), bottom = Math.min(host.bottom, window.innerHeight), left = Math.max(host.left, 0), right = Math.min(host.right, window.innerWidth);
+    if (bottom <= top || right <= left) return null;
+    const x = (left + right) / 2, y = (top + bottom) / 2;
+    let best = null;
+    this.canvases.forEach((canvas, index) => {
+      const r = canvas.getBoundingClientRect(), distance = Math.max(r.top - y, 0, y - r.bottom) + Math.max(r.left - x, 0, x - r.right);
+      if (!best || distance < best.distance) best = { index, r, distance };
+    });
+    // A point between pages or beside them is kept relative to the nearest page.
+    return { index: best.index, x: (x - best.r.left) / this.zoom, y: (y - best.r.top) / this.zoom, left: x, top: y, atStart: this.host.scrollTop <= 0 };
   }
   setAccessible(value) {
     this.accessible = value;
     this.host.classList.toggle('accessible-editing', value);
+    // The hidden field follows the caret with inline offsets and the caret's height (positionInput);
+    // shown as the text, it takes the size Text mode gives it. Leaving Text mode places it again (paint).
+    if (value) for (const property of ['left', 'top', 'height']) this.input.style.removeProperty(property);
     this.syncInput(); this.paint(); this.focus();
   }
   /**
@@ -594,15 +641,17 @@ export class CanvasEditor {
       const geometry = this.layout.pages[index] || this.layout.page;
       canvas.dataset.page = index;
       const ratio = window.devicePixelRatio || 1;
+      // Shown at exactly its backing store's size: the browser draws a canvas at a whole number of
+      // CSS pixels, so a fractional page size (A4, fit-width and slider zooms, or any odd number of
+      // device pixels on a 2x display) would otherwise be resampled, which blurs every page.
+      const cssWidth = Math.max(1, Math.round(geometry.width * this.zoom)), cssHeight = Math.max(1, Math.round(geometry.height * this.zoom));
+      const width = Math.round(cssWidth * ratio), height = Math.round(cssHeight * ratio);
       // Assigning a dimension clears and reallocates the canvas even when unchanged, and pages
       // off screen are repainted only later: keep the backing store of pages that kept their size.
-      const width = Math.round(geometry.width * this.zoom * ratio), height = Math.round(geometry.height * this.zoom * ratio);
       if (canvas.width !== width) canvas.width = width;
       if (canvas.height !== height) canvas.height = height;
-      // Shown at exactly its backing store's size: a fractional page size (A4, fit-width and
-      // slider zooms) would otherwise make the browser resample, and blur, every page.
-      canvas.style.width = `${width / ratio}px`;
-      canvas.style.height = `${height / ratio}px`;
+      canvas.style.width = `${cssWidth}px`;
+      canvas.style.height = `${cssHeight}px`;
     });
     this.pages.style.gap = `${this.layout.page.gap * this.zoom}px`;
     this.syncInput(); this.paint(); this.onSelection();
@@ -710,6 +759,8 @@ export class CanvasEditor {
     const caret = caretRect(this.selectionLayout, this.model.selection.focus, this.caretAffinity, this.caretPage);
     const found = printing ? [] : this.findHighlightRects();
     const tinted = printing ? [] : this.rangeTintRects();
+    const composing = printing ? null : this.compositionRange();
+    const composedRects = composing ? selectionRects(this.selectionLayout, ...composing) : [];
     for (const index of indices || canvases.keys()) {
       const canvas = canvases[index], ctx = canvas.getContext('2d'), geometry = this.layout.pages[index] || this.layout.page;
       // A canvas keeps its pixels and drawing state between paints (resizeCanvases keeps unchanged sizes).
@@ -917,6 +968,8 @@ export class CanvasEditor {
             ctx.restore();
           });
         }
+        // Spelling marks belong to the body's text: a picture in front of the text covers them as it covers the words.
+        if (!pageStory && !printing) for (const overlay of this.overlays) if (overlay.spelling) overlay(ctx, index, geometry);
         paintFloating(false);
       }
       for (const label of this.lineNumbers || []) if (label.page === index) {
@@ -925,8 +978,9 @@ export class CanvasEditor {
       }
       if (geometry.pageBorders?.zOrder !== 'back') for (const border of pageBorders) paintParagraphBorder(ctx, border);
       if (storyChrome && storyChrome.active !== 'body') paintStoryChrome(ctx, geometry, storyChrome.bounds, storyChrome.active);
-      if (!printing) for (const overlay of this.overlays) overlay(ctx, index, geometry);
+      if (!printing) for (const overlay of this.overlays) if (!overlay.spelling) overlay(ctx, index, geometry);
       if (!printing && controlRects) paintControlCarets(ctx, controlRects, index, scale);
+      if (composedRects.length) paintCompositionUnderline(ctx, composedRects, this.selectionLayout.lines, index, scale);
       if (!printing && start === end && caret.page === index && document.activeElement === this.input && !this.accessible) {
         const line = lineAtPosition(this.selectionLayout, this.model.selection.focus, this.caretAffinity, this.caretPage);
         const clip = line.cellClip;
@@ -1276,7 +1330,10 @@ export class CanvasEditor {
     if (this.unit?.presses === 2 && this.unit.model === this.model && this.unit.path === this.session.path) return;
     const pos = this.point(e);
     if (this.pointImage) {
-      this.model.select(this.pointImage.start, this.pointImage.end); this.focus(); this.onSelection(); return;
+      this.model.select(this.pointImage.start, this.pointImage.end); this.focus(); this.onSelection();
+      // Double-clicking a drawing opens what it holds for editing, where the app can (onOpenDrawing).
+      if (!this.readOnly && !this.viewOnly && this.model.selectedImage) this.onOpenDrawing?.(this.model.selectedImage);
+      return;
     }
     const word = this.wordAt(e, pos);
     if (word) { this.model.select(word.start, word.end); this.focus(); this.onSelection(); }
@@ -1743,6 +1800,16 @@ export class CanvasEditor {
     this.model.select(a, b, same ? selection.controlCaret : undefined, same ? selection.controlSelection : undefined);
     this.model.typingFormat = typingFormat; this.model.typingStyle = typingStyle; this.model.typingDirectCleared = typingDirectCleared;
   }
+  /**
+   * The text an input method is still composing, as document offsets, or null. With Track Changes on,
+   * the text the composition replaced stays in the document before it, struck out, but not in the field.
+   */
+  compositionRange() {
+    if (!this.composition || this.compositionStart == null || !this.compositionText) return null;
+    const start = this.compositionStart + Math.max(0, this.inputText.length - this.input.value.length);
+    const end = Math.min(start + this.compositionText.length, this.model.text.length);
+    return end > start ? [start, end] : null;
+  }
   finishComposition() {
     if (!this.composition) return;
     const before = this.composition;
@@ -1770,13 +1837,27 @@ export class CanvasEditor {
     if (html) e.clipboardData.setData('text/html', html);
     if (cut) this.execute(() => this.model.replace(''));
   }
-  /** The selection as plain text, and as formatted HTML when it holds only text. */
+  /** Whether the selection is one picture that copies as itself (see clipboardData). */
+  copiesPicture() { return copiesPicture(this.model); }
+  /** The selection as plain text, and as formatted HTML when it holds only text or one picture. */
   clipboardData() {
-    const fragment = copyFragment(this.model);
-    return { text: this.model.clipboardText(), html: fragment ? fragmentHtml(fragment) : '' };
+    const picture = pictureHtml(this.model);
+    const fragment = !picture && copyFragment(this.model);
+    // A note reference copies as the number or mark it shows on the page.
+    const noteText = (run, at) => {
+      const shown = this.selectionLayout.lines.find(line => line.start <= at && at < line.end)?.fragments?.find(f => f.noteMark && f.start === at)?.text;
+      return (shown || '').replace(/[\u200b\u2002]/g, '');
+    };
+    return { text: this.model.clipboardText(noteText), html: picture || (fragment ? fragmentHtml(fragment) : '') };
   }
   /** Paste with the clipboard's formatting where the document can take it, else as plain text. */
   pasteData(text, html = '') {
+    // U+FFFC stands in for an object (a picture, field or note) in other applications' text, and is
+    // this document's own placeholder for one: pasted as a character it would be an invisible stray.
+    text = String(text || '').replace(/\ufffc/g, '');
+    // A picture copied here comes back as the picture, not as its plain-text stand-in.
+    const picture = htmlPicture(html);
+    if (picture) { if (!this.readOnly && !this.viewOnly) this.insertImageFile(picture.file, picture).catch(error => this.onError(error)); return; }
     const fragment = html && carriesFormatting(this.model) && !this.model.tableContext ? htmlFragment(html) : null;
     if (fragment && fragment.paragraphs.some(p => p.text) && formattedPasteFits(fragment) && this.execute(() => pasteFragment(this.model, fragment), () => {}, undefined, true)) return;
     if (text) this.execute(() => this.model.replace(text));
