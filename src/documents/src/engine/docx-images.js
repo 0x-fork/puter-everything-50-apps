@@ -11,7 +11,7 @@ import { drawingStyleReader, drawingEffectColor } from './docx-drawing-style.js'
 import { readDrawingMetadata, readDrawingCreationId } from './docx-drawing-metadata.js';
 import { readDrawingHyperlink, drawingHyperlinkWriter } from './docx-drawing-hyperlinks.js';
 import { readShapeExtensions } from './docx-shape-extensions.js';
-import { parseXml } from './docx-xml.js';
+import { parseXml, setContentTypeOverride } from './docx-xml.js';
 import { UnsupportedDocumentError } from './errors.js';
 import { imageInfo, validateImage, normalizeCrop, normalizedRotation, imageExtents, CROP_SIDES } from './images.js';
 import { strToU8 } from 'fflate';
@@ -23,7 +23,7 @@ import { readDrawingEffects } from './docx-drawing-effects.js';
 import { pictureResolution } from './picture-resolution.js';
 import { readPictureTile } from './picture-tiles.js';
 import { DGM, readDiagramDrawing } from './docx-diagram-drawing.js';
-import { relationshipPartPath, relativePartTarget } from './package-part-paths.js';
+import { partPathForUrl, relationshipPartPath, relativePartTarget } from './package-part-paths.js';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 export const WP = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing';
@@ -442,7 +442,7 @@ export function imageReader(parts, assets, readParagraph, readSchemeColor, readS
       if (!relId || matches.length !== 1) fail('missing or ambiguous image relationships');
       const rel = matches[0]; if (rel.getAttribute('Type') !== `${R}/image` || rel.hasAttribute('TargetMode') && rel.getAttribute('TargetMode') !== 'Internal') fail('external or non-image relationships');
       let url, path;
-      try { url = new URL(rel.getAttribute('Target'), `https://docx.invalid/${sourcePart}`); path = decodeURIComponent(url.pathname).slice(1); } catch { fail('invalid image targets'); }
+      try { url = new URL(rel.getAttribute('Target'), `https://docx.invalid/${sourcePart}`); path = partPathForUrl(parts, url); } catch { fail('invalid image targets'); }
       if (url.origin !== 'https://docx.invalid' || url.search || url.hash || !parts[path]) fail('missing or external image parts');
       const bytes = parts[path],wmfViewport={width:width/9525,height:height/9525}; let info;
       try { info = vector ? svgInfo(bytes) : isEmf(bytes) ? emfInfo(bytes,{inspectText:opacity!==1}) : isWmf(bytes) ? wmfInfo(bytes,wmfViewport) : imageInfo(bytes); } catch (e) { fail(e.message); }
@@ -559,9 +559,7 @@ export function imageWriter(parts, paragraphs, assets, doc, sourcePart = 'word/d
       }
     }
     parts[part.path] = part.bytes;
-    if (part.contentType && ![...types.documentElement.children].some(n => n.localName === 'Override' && n.getAttribute('PartName') === `/${part.path}`)) {
-      const type = types.createElementNS(types.documentElement.namespaceURI, 'Override'); type.setAttribute('PartName', `/${part.path}`); type.setAttribute('ContentType', part.contentType); types.documentElement.append(type);
-    }
+    if (part.contentType) setContentTypeOverride(types, `/${part.path}`, part.contentType);
   }
   for (const image of images) {
     validateImage(image);
@@ -571,11 +569,12 @@ export function imageWriter(parts, paragraphs, assets, doc, sourcePart = 'word/d
     const info = imageInfo(asset.bytes);
     rels ||= parts[relPath] ? parseXml(parts[relPath]) : parseXml(`<Relationships xmlns="${REL}"/>`);
     types ||= parseXml(parts['[Content_Types].xml']);
-    let index = 1, path; do { path = `word/media/canvas-image${index++}.${info.mime === 'image/png' ? 'png' : info.mime === 'image/tiff' ? 'tiff' : 'jpg'}`; } while (parts[path]);
+    const extension = { 'image/png': 'png', 'image/tiff': 'tiff', 'image/gif': 'gif' }[info.mime] || 'jpg';
+    let index = 1, path; do { path = `word/media/canvas-image${index++}.${extension}`; } while (parts[path]);
     const ids = new Set(children(rels.documentElement).map(n => n.getAttribute('Id'))); let id = 'rImage1', number = 1; while (ids.has(id)) id = `rImage${++number}`;
     const rel = rels.createElementNS(REL, 'Relationship'); for (const [key, value] of Object.entries({ Id: id, Type: `${R}/image`, Target: relativePartTarget(sourcePart, path) })) rel.setAttribute(key, value);
     rels.documentElement.append(rel); parts[path] = asset.bytes; relations.set(image.assetId, id);
-    const type = types.createElementNS(types.documentElement.namespaceURI, 'Override'); type.setAttribute('PartName', `/${path}`); type.setAttribute('ContentType', info.mime); types.documentElement.append(type);
+    setContentTypeOverride(types, `/${path}`, info.mime);
   }
   if (rels) { parts[relPath] = strToU8(serialize(rels)); parts['[Content_Types].xml'] = strToU8(serialize(types)); }
   const writeDrawingLink = drawingHyperlinkWriter(parts, images, sourcePart);
@@ -585,10 +584,13 @@ export function imageWriter(parts, paragraphs, assets, doc, sourcePart = 'word/d
     // another, which could repeat an id in use, and a part with repeated ids no longer opens for editing.
     const frameProperties = image.shell && drawing.getElementsByTagNameNS(WP, 'docPr')[0];
     if (frameProperties && Number.isInteger(image.id) && frameProperties.getAttribute('id') !== String(image.id)) frameProperties.setAttribute('id', String(image.id));
+    // A shape Word stores as alternate content (a DrawingML choice with a VML fallback) is
+    // laid out from its selected branch's drawing; that drawing's frame is the one rewritten.
+    const frameHost = image.shell && drawing.namespaceURI === MC && drawing.localName === 'AlternateContent' ? alternateBranch(drawing).firstElementChild : drawing;
     // A changed wrapping rewrites the whole frame, including the position and layer it records.
-    if (image.wrapChanged && image.shell) reframeDrawing(doc, drawing, image);
+    if (image.wrapChanged && image.shell) reframeDrawing(doc, frameHost, image);
     else if (image.anchorChanged && image.shell) {
-      const anchor = drawing.getElementsByTagNameNS(WP, 'anchor')[0];
+      const anchor = frameHost.getElementsByTagNameNS(WP, 'anchor')[0];
       if (!anchor) throw new Error('The source drawing has no editable floating anchor.');
       anchor.setAttribute('behindDoc', image.anchor.behind ? '1' : '0');
       anchor.setAttribute('relativeHeight', String(image.anchor.order));

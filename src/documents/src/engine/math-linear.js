@@ -2,7 +2,7 @@
 // The syntax is a practical subset of the UnicodeMath linear format with a few
 // TeX control words. Parsing is forgiving: anything that does not build up is
 // kept as literal text, so typing never fails half-way through an equation.
-import { MATH, linearMath } from './office-math.js';
+import { MATH, MATH_DEPTH_LIMIT, linearMath, mathPlainText } from './office-math.js';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 
@@ -34,6 +34,11 @@ const SIGNS = new Set('+-−±∓');
 const ROOT_DEGREE = { '∛': '3', '∜': '4' };
 
 const run = (text, plain = false) => ({ type: 'run', text, ...(plain ? { plain } : {}) });
+// Structures nest at most this deep. Deeper input stays literal text, as input that does not build
+// up does, so parsing never exhausts the stack and the markup stays well inside the depth Office
+// Math readers walk (MATH_DEPTH_LIMIT): each level adds at most a few elements.
+const MAX_NESTING = 48;
+const literal = tok => tok.t === 'text' ? [{ type: 'text', text: tok.v }] : tok.t === 'glue' ? [] : [run(tok.t === 'tex' || tok.t === 'accent' ? `\\${tok.v}` : tok.v)];
 
 function tokenize(source) {
   // Split precomposed accented Latin letters so x̂-style accents build up.
@@ -118,7 +123,7 @@ const unwrap = nodes => nodes.length === 1 && nodes[0].type === 'delim' && ['()'
 const isOperand = n => n.type !== 'space' && n.type !== 'slash' && !n.op;
 
 class Parser {
-  constructor(tokens) { this.k = tokens; this.i = 0; }
+  constructor(tokens) { this.k = tokens; this.i = 0; this.depth = 0; }
   peek() { return this.k[this.i]; }
   skipSpace() { while (this.peek()?.t === 'space') this.i++; }
   stops(tok, ctx) {
@@ -136,7 +141,7 @@ class Parser {
       else if (tok.t === 'op') { items.push({ ...run(tok.v), op: true }); this.i++; }
       else items.push(...this.term(ctx));
     }
-    return fractions(items);
+    return fractions(items, MAX_NESTING - this.depth);
   }
   term(ctx) {
     const nodes = this.primary(ctx);
@@ -144,7 +149,7 @@ class Parser {
     return [...nodes.slice(0, -1), ...this.postfix(nodes.at(-1), ctx)];
   }
   marks(node) {
-    while (this.peek()?.t === 'comb') node = accent(this.k[this.i++].v, [node]);
+    for (let level = this.depth; this.peek()?.t === 'comb' && level < MAX_NESTING; level++) node = accent(this.k[this.i++].v, [node]);
     return node;
   }
   postfix(node, ctx) {
@@ -163,20 +168,26 @@ class Parser {
     return found;
   }
   scriptOperand(ctx) {
+    // Signs lead an operand, as in x^-1 or x^+-2.
+    const signs = [];
+    for (let tok; (tok = this.peek())?.t === 'op' && SIGNS.has(tok.v) && !this.stops(tok, ctx); this.i++) signs.push(run(tok.v));
+    const rest = this.operand(ctx);
+    return signs.length ? [...signs, ...(rest || [])] : rest;
+  }
+  operand(ctx) {
     const tok = this.peek();
-    if (!tok || this.stops(tok, ctx)) return null;
-    if (tok.t === 'op') {
-      if (!SIGNS.has(tok.v)) return null;
-      this.i++;
-      const rest = this.scriptOperand(ctx);
-      return [{ ...run(tok.v) }, ...(rest || [])];
-    }
+    if (!tok || this.stops(tok, ctx) || tok.t === 'op') return null;
     if (['space', 'slash', 'sub', 'sup', 'amp', 'at', 'close', 'glue'].includes(tok.t)) return null;
     if (tok.t === 'word' && !tok.fn && !FUNCS.has(tok.v)) { this.i++; return [this.marks(run(tok.v))]; }
     const nodes = this.primary(ctx);
     return nodes.length ? unwrap([...nodes.slice(0, -1), this.marks(nodes.at(-1))]) : null;
   }
   primary(ctx) {
+    if (this.depth >= MAX_NESTING) return literal(this.k[this.i++]);
+    this.depth++;
+    try { return this.structure(ctx); } finally { this.depth--; }
+  }
+  structure(ctx) {
     const tok = this.k[this.i++];
     switch (tok.t) {
       case 'num': case 'sym': return [run(tok.v)];
@@ -295,8 +306,9 @@ function accent(mark, e) {
 
 // Builds a/b from the operands either side of each slash, left to right, so
 // a/b/c is (a/b)/c. An operand is the run of terms up to an operator or space.
-function fractions(items) {
-  const out = [];
+// A chain like a/b/c/… nests one level per slash; past `budget` levels a slash stays literal.
+function fractions(items, budget = MAX_NESTING) {
+  const out = [], levels = new Map();
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (item.type !== 'slash') { out.push(item); continue; }
@@ -304,8 +316,10 @@ function fractions(items) {
     while (out.length && isOperand(out.at(-1))) num.unshift(out.pop());
     let j = i + 1; const den = [];
     while (j < items.length && isOperand(items[j])) den.push(items[j++]);
-    if (!num.length || !den.length) { out.push(...num, { ...run(item.text), op: true }); continue; }
-    out.push({ type: 'frac', ...(item.noBar ? { noBar: true } : {}), num: unwrap(num), den: unwrap(den) });
+    const level = 1 + Math.max(0, ...num.map(n => levels.get(n) || 0));
+    if (!num.length || !den.length || level > budget) { out.push(...num, { ...run(item.text), op: true }); continue; }
+    const frac = { type: 'frac', ...(item.noBar ? { noBar: true } : {}), num: unwrap(num), den: unwrap(den) };
+    levels.set(frac, level); out.push(frac);
     i = j - 1;
   }
   return out.filter(n => n.type !== 'space').map(n => n.op ? run(n.text) : n);
@@ -382,6 +396,152 @@ export function ommlToLinear(xml) {
   // Retained fragments may rely on namespace prefixes declared by an ancestor.
   if (!root) root = parse(`<root xmlns:m="${MATH}" xmlns:w="${W}">${xml}</root>`)?.firstElementChild;
   return root ? linearMath(root).replace(/[ \t\r\n]+/g, ' ').trim() : '';
+}
+
+/*
+ * Linear text that builds the same equation again, for Edit Equation. The display form above (the
+ * equation's text in the document) is easy to read but loses structure when typed back: a binomial
+ * reads as a fraction, a matrix as brackets, ∛x as 3√x. This one writes each structure in the input
+ * syntax above. Structures that syntax has no form for keep their contents.
+ */
+const editableRoot = xml => {
+  const parse = text => { const doc = new DOMParser().parseFromString(text, 'application/xml'); return doc.getElementsByTagName('parsererror').length ? null : doc.documentElement; };
+  return parse(xml) || parse(`<root xmlns:m="${MATH}" xmlns:w="${W}">${xml}</root>`)?.firstElementChild || null;
+};
+const ACCENT_NAMES = Object.fromEntries(Object.entries(ACCENTS).filter(([name, chr]) => !['bar', 'top', 'bot'].includes(name) && chr.length === 1).map(([name, chr]) => [chr, name]));
+const SPECIAL = new Set([...'()[]{}⟨⟩⌊⌋⌈⌉|‖^_/¦&@▒√∛∜■█"\\\'', ...NARY, ...OPS]);
+const mathKids = (node, name) => [...(node?.children || [])].filter(n => n.namespaceURI === MATH && (!name || n.localName === name));
+const mathChild = (node, name) => mathKids(node, name)[0] || null;
+const mathVal = (node, name) => mathChild(node, name)?.getAttributeNS(MATH, 'val') ?? mathChild(node, name)?.getAttribute('m:val') ?? null;
+const runText = node => [...node.getElementsByTagNameNS(MATH, 't'), ...node.getElementsByTagNameNS(W, 't')].map(t => t.textContent).join('');
+const plainRun = node => mathVal(mathChild(node, 'rPr'), 'sty') === 'p' || !!mathChild(mathChild(node, 'rPr'), 'nor');
+// One character, a number or a run of Latin letters reads back as one operand of a script or fraction.
+const single = text => [...text].length === 1 ? !SPECIAL.has(text) && !/[\s\p{M}]/u.test(text) : /^\d+(\.\d+)?$/.test(text) || /^[A-Za-z]+$/.test(text) && !FUNCS.has(text);
+const singleChar = text => [...text].length === 1 && single(text) || /^\d+(\.\d+)?$/.test(text);
+
+/** Items of an argument (m:e, m:num, m:sub...): [{ text, kind: 'op' | 'run' | 'plain' | structure name }]. */
+function editableItems(node) {
+  const items = [];
+  for (const child of [...(node?.children || [])]) {
+    if (child.namespaceURI === W) { if (child.localName === 'r') { const text = runText(child); if (text) items.push({ text, kind: 'run' }); } continue; }
+    if (child.namespaceURI !== MATH || /Pr$/.test(child.localName)) continue;
+    if (child.localName === 'r') {
+      const text = runText(child);
+      if (!text) continue;
+      if (plainRun(child) && !text.includes('"')) { items.push({ text: `"${text}"`, kind: 'plain' }); continue; }
+      // Operators stand alone; other characters join the runs beside them.
+      for (const ch of [...text]) {
+        if (OPS.has(ch === '−' ? '-' : ch) || OPS.has(ch)) items.push({ text: ch, kind: 'op' });
+        else if (items.at(-1)?.kind === 'run') items.at(-1).text += ch;
+        else items.push({ text: ch, kind: 'run' });
+      }
+      continue;
+    }
+    items.push({ text: editableNode(child), kind: child.localName, node: child });
+  }
+  return items;
+}
+// A space ends a script, a fraction's operand and a function's argument; it builds into nothing.
+function spaced(previous, item) {
+  if (!previous || previous.kind === 'op' || item.kind === 'op') return false;
+  if (previous.kind === 'f' || item.kind === 'f') return true;
+  const text = kind => kind === 'run' || kind === 'plain';
+  if (text(previous.kind) && text(item.kind)) return false;
+  // Letters on both sides would read as one word.
+  if (text(previous.kind)) return /[A-Za-z]$/.test(previous.text) && /^[A-Za-z\\]/.test(item.text);
+  return previous.kind !== 'd';
+}
+function editableSequence(node) {
+  let out = '', previous = null;
+  for (const item of editableItems(node)) { if (spaced(previous, item)) out += ' '; out += item.text; previous = item; }
+  return out;
+}
+const bracket = text => `(${text})`;
+// A script's operand, as scriptOperand reads it: one operand, or a bracketed group it unwraps.
+function scriptArgument(node) {
+  const items = editableItems(node);
+  if (items.length === 1 && items[0].kind === 'run' && single(items[0].text)) return items[0].text;
+  if (items.length === 2 && items[0].kind === 'op' && SIGNS.has(items[0].text) && items[1].kind === 'run' && single(items[1].text)) return items[0].text + items[1].text;
+  return bracket(editableSequence(node));
+}
+// A fraction's numerator or denominator: a single character or number as it is, anything else bracketed.
+function fractionPart(node) {
+  const items = editableItems(node);
+  return items.length === 1 && items[0].kind === 'run' && singleChar(items[0].text) ? items[0].text : bracket(editableSequence(node));
+}
+// The base of a script or mark: one operand the script attaches to.
+function base(node) {
+  const items = editableItems(node);
+  if (items.length === 1 && (items[0].kind === 'run' && singleChar(items[0].text) || ['d', 'acc', 'bar'].includes(items[0].kind) && !/^\w+\(/.test(items[0].text))) return items[0].text;
+  return bracket(editableSequence(node));
+}
+// Structures nested more deeply than Office Math's depth limit (each spans two or more elements)
+// read back as their plain text rather than exhausting the stack.
+let editableDepth = 0;
+function editableNode(node) {
+  if (editableDepth >= MATH_DEPTH_LIMIT / 2) return mathPlainText(node);
+  editableDepth++;
+  try { return editableStructure(node); } finally { editableDepth--; }
+}
+function editableStructure(node) {
+  const e = mathChild(node, 'e');
+  switch (node.localName) {
+    case 'oMathPara': return mathKids(node, 'oMath').map(editableNode).join(' ');
+    case 'oMath': return editableSequence(node);
+    case 'f': return `${fractionPart(mathChild(node, 'num'))}${mathVal(mathChild(node, 'fPr'), 'type') === 'noBar' ? '¦' : '/'}${fractionPart(mathChild(node, 'den'))}`;
+    case 'sSup': return `${base(e)}^${scriptArgument(mathChild(node, 'sup'))}`;
+    case 'sSub': return `${base(e)}_${scriptArgument(mathChild(node, 'sub'))}`;
+    case 'sSubSup': return `${base(e)}_${scriptArgument(mathChild(node, 'sub'))}^${scriptArgument(mathChild(node, 'sup'))}`;
+    case 'rad': {
+      const degree = editableSequence(mathChild(node, 'deg')), body = editableSequence(e);
+      const items = editableItems(e);
+      return degree ? `√(${degree}&${body})` : items.length === 1 && items[0].kind === 'run' && singleChar(items[0].text) ? `√${body}` : `√${bracket(body)}`;
+    }
+    case 'd': {
+      const pr = mathChild(node, 'dPr'), open = mathVal(pr, 'begChr') ?? '(', close = mathVal(pr, 'endChr') ?? ')', parts = mathKids(node, 'e').map(editableSequence);
+      return `${open}${parts.join(mathVal(pr, 'sepChr') ?? '|')}${close}`;
+    }
+    case 'nary': {
+      const pr = mathChild(node, 'naryPr'), sub = mathChild(node, 'sub'), sup = mathChild(node, 'sup');
+      const scripts = `${editableSequence(sub) ? `_${scriptArgument(sub)}` : ''}${editableSequence(sup) ? `^${scriptArgument(sup)}` : ''}`;
+      return `${mathVal(pr, 'chr') ?? '∫'}${scripts} ${editableSequence(e)}`;
+    }
+    case 'func': {
+      const name = mathChild(node, 'fName'), [only] = mathKids(name);
+      let fname;
+      if (mathKids(name).length === 1 && only.localName === 'limLow') fname = `${runText(mathChild(only, 'e'))}_${scriptArgument(mathChild(only, 'lim'))}`;
+      else if (mathKids(name).length === 1 && ['sSup', 'sSub', 'sSubSup'].includes(only.localName)) {
+        const word = runText(mathChild(only, 'e'));
+        fname = `${FUNCS.has(word) ? word : `\\operatorname{${word}}`}${mathChild(only, 'sub') ? `_${scriptArgument(mathChild(only, 'sub'))}` : ''}${mathChild(only, 'sup') ? `^${scriptArgument(mathChild(only, 'sup'))}` : ''}`;
+      } else { const word = runText(name); fname = FUNCS.has(word) ? word : `\\operatorname{${word}}`; }
+      // The argument is the terms up to the next space or operator, or one bracketed group.
+      const items = editableItems(e), simple = items.length && items.every(item => item.kind === 'run' || ['sSup', 'sSub', 'sSubSup', 'acc', 'bar'].includes(item.kind)) && items.length === 1 || items.length > 1 && items.every(item => item.kind === 'run');
+      const argument = items.length === 1 && items[0].kind === 'd' ? items[0].text : simple ? items.map(item => item.text).join('') : bracket(editableSequence(e));
+      return `${fname} ${argument}`;
+    }
+    case 'acc': {
+      const chr = mathVal(mathChild(node, 'accPr'), 'chr') ?? '̂', items = editableItems(e);
+      if (items.length === 1 && items[0].kind === 'run' && singleChar(items[0].text) && [...items[0].text].length === 1 && /\p{M}/u.test(chr)) return `${items[0].text}${chr}`;
+      return ACCENT_NAMES[chr] ? `${ACCENT_NAMES[chr]}${bracket(editableSequence(e))}` : `${base(e)}${chr}`;
+    }
+    case 'bar': {
+      const top = (mathVal(mathChild(node, 'barPr'), 'pos') ?? 'bot') === 'top', items = editableItems(e);
+      if (items.length === 1 && items[0].kind === 'run' && [...items[0].text].length === 1 && single(items[0].text)) return `${items[0].text}${top ? '̅' : '̲'}`;
+      return `${top ? 'overline' : 'underline'}${bracket(editableSequence(e))}`;
+    }
+    case 'm': return `■(${mathKids(node, 'mr').map(row => mathKids(row, 'e').map(editableSequence).join('&')).join('@')})`;
+    case 'eqArr': return `█(${mathKids(node, 'e').map(editableSequence).join('@')})`;
+    case 'limLow': return `${base(e)}_${scriptArgument(mathChild(node, 'lim'))}`;
+    case 'limUpp': return `${base(e)}^${scriptArgument(mathChild(node, 'lim'))}`;
+    // Structures the input syntax has no form for (boxes, group characters, phantoms, prescripts) keep their text.
+    default: return linearMath(node);
+  }
+}
+
+/** Linear text for existing Office Math markup that builds the same equation again when typed back. */
+export function ommlToEditableLinear(xml) {
+  const root = editableRoot(xml);
+  return root ? editableNode(root).replace(/[\r\n]+/g, ' ').trim() : '';
 }
 
 export const EQUATION_GALLERY = [

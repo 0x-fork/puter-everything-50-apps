@@ -107,6 +107,25 @@ export function macroButtonSelection(ranges, start, end) {
   return [start,end];
 }
 
+/**
+ * Set (or, with null, clear) the tracked change a field's code is part of. Both of its markers hold the field;
+ * they can be separate copies when the field spans paragraphs, so each is updated.
+ */
+export function setFieldRevision(paragraphs, id, revision) {
+  for (const p of paragraphs) if (p.fieldMarkers?.some(m => m.field.id === id)) p.fieldMarkers = p.fieldMarkers.map(m => {
+    if (m.field.id !== id) return m;
+    const field = { ...m.field }; if (revision) field.revision = structuredClone(revision); else delete field.revision;
+    return { ...m, field };
+  });
+}
+/** Remove whole fields (both markers) whose result text is already gone. */
+export function removeFields(paragraphs, ids) {
+  for (const p of paragraphs) if (p.fieldMarkers?.some(m => ids.has(m.field.id))) {
+    p.fieldMarkers = p.fieldMarkers.filter(m => !ids.has(m.field.id));
+    if (!p.fieldMarkers.length) delete p.fieldMarkers;
+  }
+}
+
 export function placeBodyFields(paragraphs, ranges) {
   const output = paragraphs.map(p => { const copy = { ...p }; delete copy.fieldMarkers; return copy; });
   const events = ranges.flatMap(r => [{ position:r.start, type:'start', field:r.field, order:r.startOrder, link:r.startLink, contentControlId:r.contentControlId }, { position:r.end, type:'end', field:r.field, order:r.endOrder, link:r.endLink, contentControlId:r.contentControlId }]).sort((a,b)=>a.position-b.position || (a.order??0)-(b.order??0));
@@ -126,6 +145,11 @@ export function placeBodyFields(paragraphs, ranges) {
  * start of a field the new one was inserted before), or end an empty field the result filled.
  */
 export const newFieldEndOrder = (p, offset, order) => Math.min(order, ...(p.fieldMarkers || []).filter(m => m.offset === offset).map(m => (m.order ?? 0) - 1));
+/**
+ * The order of a new field's start marker at `offset` in paragraph p: after the field markers already there, which
+ * end the fields just before it. Ordered before them, the new field began inside the field before it.
+ */
+export const newFieldStartOrder = (p, offset, order) => Math.max(order, ...(p.fieldMarkers || []).filter(m => m.offset === offset).map(m => (m.order ?? 0) + 1));
 
 // Whole-cell/row deletion removes its field markers with the owned paragraphs.
 // New blank cells must never inherit those markers from a formatting template.

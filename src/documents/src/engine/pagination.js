@@ -222,11 +222,14 @@ function paginateSegments(segments, page, maxPages, startY, paginateParagraphs, 
     capacity = bottom - top;
   };
   bounds();
-  let y = startY, previousAfter = 0, previous = null, previousLine = null, occupied = startY > top, deferredAfter = 0, shadeAfter = 0;
+  // A continuous section's region starts below the sections above it on the same page: that page is
+  // occupied even though the region's own top is where it starts (continuous-columns.js).
+  let y = startY, previousAfter = 0, previous = null, previousLine = null, occupied = startY > top || !!page.startsOccupied, deferredAfter = 0, shadeAfter = 0;
   const advance = (physical = false) => {
     const next = physical && page.flowColumns ? (Math.floor(pageIndex / page.flowColumns) + 1) * page.flowColumns : pageIndex + 1;
     if (next >= maxPages) throw new Error(`This preview supports up to ${Math.floor(maxPages / (page.flowColumns || 1))} pages. Reduce the document length or adjust its formatting.`);
-    pageIndex = next; bounds(); y = top; previousAfter = 0; occupied = false; activeBands.length = 0;
+    // The other columns on that shared page are as short as the first: rules that move text on, move it on.
+    pageIndex = next; bounds(); y = top; previousAfter = 0; occupied = !!page.startsOccupied && next < (page.flowColumns || 1); activeBands.length = 0;
   };
   const place = (line, anchorBefore = 0) => {
     if (floatingBreak(line) && exceeds(y + line.height + borderOutset(line.paragraphFrame?.borders.bottom), bottom)) y = Math.max(top + borderOutset(line.paragraphFrame?.borders.top), bottom - borderOutset(line.paragraphFrame?.borders.bottom) - line.height);
@@ -461,15 +464,18 @@ function paginateSegments(segments, page, maxPages, startY, paginateParagraphs, 
             if (occupied) nextPage(); else y = freshTop();
             continue;
           }
+          // Moving on helps when the next physical page has the room this one lacks: the columns left
+          // on a page shared with an earlier section, or a page under a taller header, can have less.
+          const ahead = occupied ? textCapacityAt(page.flowColumns ? (Math.floor(pageIndex / page.flowColumns) + 1) * page.flowColumns : pageIndex + 1) : textCapacity;
           // Move the first line forward instead of leaving it alone. On an empty
           // page a single fitting line is unavoidable, so always make progress.
-          if (end - start === 1 && (occupied || y > freshTop()) && !exceeds(lineHeight(content[start]) + lineFitHeight(content[start + 1]), textCapacity)) {
+          if (end - start === 1 && (occupied || y > freshTop()) && !exceeds(lineHeight(content[start]) + lineFitHeight(content[start + 1]), Math.max(textCapacity, ahead))) {
             if (occupied) nextPage(); else y = freshTop();
             continue;
           }
           // Reserve a preceding line for a final singleton if that pair can fit.
           if (content.length - end === 1 && end - start >= 2 && !exceeds(lineHeight(content[end - 1]) + lineFitHeight(content[end]), textCapacity)) {
-            if (end - start === 2 && occupied && !exceeds(segmentFitHeight(segment), textCapacity)) { nextPage(); continue; }
+            if (end - start === 2 && occupied && !exceeds(segmentFitHeight(segment), Math.max(textCapacity, ahead))) { nextPage(); continue; }
             // Don't exchange one unavoidable singleton for another on this page.
             if (end - start > 2) end--;
           }

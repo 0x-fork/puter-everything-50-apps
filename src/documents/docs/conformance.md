@@ -3459,7 +3459,7 @@ above. Tables and images remain next.
 | Counters and restart | §17.9.8 `lvlOverride`, §17.9.10 `lvlRestart`, §17.9.25–26 `start`/`startOverride` | Counters advance in document order and continue across intervening ordinary paragraphs. Deeper levels restart after the designated or any earlier level; zero means never restart. Missing starts default to zero. Full level overrides replace abstract levels; `startOverride` wins over a level's start, including later restarts. |
 | Label formats | §17.9.4 `isLgl`, §17.9.11 `lvlText`, §17.9.17 `numFmt`, §17.18.59 `ST_NumberFormat` | Literal text survives for bullet and none as well as numeric formats. Expand `%1`–`%9`; none/bullet references contribute no numeric text, including under legal numbering. Other legal references use decimal. Following the native divergence documented below, a deeper-level reference suppresses the whole label. Latin letters repeat after Z (AA, BB, …), as specified for English. |
 | Label placement | §17.9.7 `lvlJc`, §17.9.22 `pPr`, §17.9.24 `rPr`, §17.9.28 `suff`, §17.18.84 `ST_TabJc` | Left/center/right labels at the first-line anchor; suffix tab, space or nothing. Level paragraph properties currently cover physical indents and custom tabs. Legacy `num` tabs apply to the label suffix, not ordinary text tabs. Wrapped lines use the continuation indent. Marker size/bold/italic/single underline contribute to line metrics and painting. |
-| Editing | Application behavior | Accessible Bulleted list and Numbered list toggles, level changes through indent buttons or Alt+Shift+Left/Right, and Restart numbering at 1. Restart allocates a separate instance for the contiguous remainder, preserves current ancestor values, and stops before a shallower level. Enter continues a list; Enter on an empty nested item moves it up one level, and on an empty top-level item (or Backspace at an item's start) removes numbering. Mixed selections, split/merge, undo/redo and selection restoration are tested. |
+| Editing | Application behavior | Accessible Bulleted list and Numbered list toggles, level changes through indent buttons or Alt+Shift+Left/Right (Control+Shift+Left/Right on a Mac, where Option+Shift+Left/Right selects by word), and Restart numbering at 1. Restart allocates a separate instance for the contiguous remainder, preserves current ancestor values, and stops before a shallower level. Enter continues a list; Enter on an empty nested item moves it up one level, and on an empty top-level item (or Backspace at an item's start) removes numbering. Mixed selections, split/merge, undo/redo and selection restoration are tested. |
 | Geometry and save | Source-offset and package preservation contracts | Labels have no editable offsets and appear once per paragraph, including across page breaks. Clicking a label resolves to the first text position. Formatting and text changes retain caret/selection and pagination. Text-only edits leave numbering bytes intact; restarts clone original instance XML so unused overrides survive. New definitions append using unused IDs; missing numbering parts receive relationships and content types. |
 
 Native numbering divergence: Part 1 §17.9.11 says to ignore references to levels
@@ -4421,7 +4421,11 @@ The read-only preview parses ordinary story paragraphs using the document's
 styles and paints them at header/footer distances. The field parser retains
 simple and complex field XML (§17.16), including split instruction runs and
 cached results. PAGE, NUMPAGES and SECTIONPAGES use layout counts; optional
-MERGEFORMAT is accepted. Automatic PAGE/NUMPAGES in page stories refresh even when locked; locked SECTIONPAGES retains its cached text (see the reference controls below). Reflow does
+MERGEFORMAT is accepted. Automatic PAGE/NUMPAGES in page stories refresh even when locked; locked SECTIONPAGES retains its cached text (see the reference controls below). The body is laid
+out again until the counts its headers and footers were measured with are the counts it produces.
+Counts that alternate (a Roman NUMPAGES whose next value is shorter, so the page count flips back)
+settle on the first layout that left its headers and footers at least the room they take; the
+reference application updates such fields once instead. Reflow does
 not overwrite source field XML or the source package. Paragraph shading and
 borders use story coordinates, separately from body selection and hit testing.
 
@@ -5607,6 +5611,17 @@ reference and measured Franklin Gothic Demi mismatch. Browser regressions
 compare registered-face advances to a separately loaded reference; mandatory
 unit cases cover the same selection distinction without depending on host fonts.
 This does not solve general line metrics, synthesized styles or missing fonts.
+
+Bounded lookups (2026-10-26): Chrome on macOS can block the page's thread inside
+`FontFace.load()` for the `local()` name of an on-demand system font that is not
+downloaded (NanumGothic, NanumMyeongjo, Osaka in headless Chrome); while it is stuck,
+lookups of other missing names stall too. A DOCX or Hanword file naming such a font
+froze while opening. Every `local()` lookup (document fonts, exact-face variants,
+metafile fonts, Hanword replacements) is now asked first in a worker with a 2 s
+deadline, 250 ms once a lookup has stalled. A name not answered in time counts as
+not installed under that name and falls back as before (the CSS family check still
+finds a family the browser can render); the page loads only names a worker found.
+`tests/local-font-probe.test.js`, `tests/browser/stuck-font-lookup.spec.js`.
 ## Rotated preset lines inside drawing groups
 
 ECMA-376 Part 1 §§20.1.7.5–20.1.7.6 and §20.1.10.3 define group/shape
@@ -5790,7 +5805,11 @@ restart changes parity inserts a completely blank page. This extends the literal
 next-page behavior in §17.6.22. Parity is compared with the next logical value
 of the preceding section, not the physical document index. These filler pages
 have no story, count toward NUMPAGES and the existing 200-page resource limit,
-and do not count toward SECTIONPAGES. Preflight and the editor use the same
+and do not count toward SECTIONPAGES. The blank page before an odd- or even-page
+section (§17.18.77) takes the page number in between, so a following section that
+continues numbering starts on the requested parity; PAGE fields, odd/even story
+selection and the body's header/footer clearance all read that same sequence.
+Preflight and the editor use the same
 pagination inputs, so exceeding the limit falls back before editor attachment.
 
 Four independent 13-section fixtures and retained reference PDFs cover 99 physical
@@ -7380,10 +7399,12 @@ continuous across the intervening picture. Caret affinity distinguishes the
 end of the left interval from the beginning of the right interval. Original
 anchor XML and unrelated package parts survive body edits and exact undo.
 
-The supported subset remains unrotated drawings without nonzero effect extents,
-numeric column/paragraph positions, and paragraph text outside table cells.
-Other coordinate bases, contour wrapping and wrapped drawings inside tables
-remain unsupported. A failure to settle page placement reports a layout error
+The supported subset remains unrotated drawings without nonzero effect extents
+and paragraph text outside table cells. Positions may be numeric column/paragraph
+offsets or, since review round 6, page/margin offsets and alignment (see "Square
+wrapping against the page or margin" in that section). Line-relative and
+paragraph-aligned wrapped positions and wrapped drawings inside tables remain
+unsupported. A failure to settle page placement reports a layout error
 instead of painting text against stale exclusions.
 
 The retained Arial controls expose a separate existing exact-line baseline
@@ -8854,6 +8875,13 @@ table cells, caret hit testing and vertical navigation use each region's
 column geometry. Balancing operates on measured blocks and preserves keep
 groups that fit at full height; candidate regions must contain their actual
 line/cell geometry. Ordinary next-page sections retain their existing path.
+A region that starts below earlier sections on a shared page treats that page
+(and each of its columns) as already occupied: keep-lines, keep-with-next,
+page-break-before and widow/orphan control move a paragraph on to the next
+column or page there, as they do part-way down a page within one section.
+Balancing also keeps widow and orphan control: a shorter region is rejected
+when it leaves one line of a controlled paragraph alone in a column where the
+full-height layout did not.
 
 A shared page uses its first occupying section's header/footer. Later pages
 use the continuing section's stories. Section page totals count every occupied
@@ -18052,7 +18080,7 @@ ECMA-376 Part 1 §§17.9 (numbering definitions and levels), 17.3.1.19 (`numPr`)
 
 `levelFor` identifies definition failures explicitly. Import records the limitation before permitting display-only paragraph resolution; subsequent display-only model construction retains the same approximation. Strict resolution and editing still reject the definition, unsafe package export stays disabled, and the source package is unchanged. This does not implement unsupported number formats or reconstruct unknown level geometry: available paragraph/style formatting is retained, while the rejected level's marker and level-only properties remain unavailable. Counter relationships involving a rejected level, structural numbering-part failures, and unrelated later layout failures still require further work.
 
-Original controls generated by `tools/numbering_definition_recovery_fixture.py` cover direct/inherited unsupported formats, missing instances, missing levels and unsupported overrides in body, table-cell and header content. Missing definitions are intentional semantic defects despite valid XML. Unit checks cover supported sibling counters, retained rich content, strict editing rejection and unrelated style-error propagation; browser checks compare pixels and body/header geometry against the same content without the failed list reference and verify original-file download. All six fixture packages pass the applicable transitional XML schema checks. These controls establish recovery behavior, not native reference layout equivalence.
+Since review round 6, a reference to a missing instance (or to an instance whose abstract definition is missing) is no longer a preview limitation: the paragraph is unnumbered and the document stays editable (see "Lists referring to missing definitions" in that section). Original controls generated by `tools/numbering_definition_recovery_fixture.py` cover direct/inherited unsupported formats, missing instances, missing levels and unsupported overrides in body, table-cell and header content. Missing definitions are intentional semantic defects despite valid XML. Unit checks cover supported sibling counters, retained rich content, strict editing rejection and unrelated style-error propagation; browser checks compare pixels and body/header geometry against the same content without the failed list reference and verify original-file download. All six fixture packages pass the applicable transitional XML schema checks. These controls establish recovery behavior, not native reference layout equivalence.
 
 ## Section alignment recovery (2026-09-29)
 
@@ -21734,7 +21762,8 @@ with nesting levels (§17.9), and bold, italic, underline, strikethrough,
 super/subscript, color and http(s), mailto and tel links become run properties and
 hyperlinks (§17.3.2, §17.16.22). Known limits: tables become tab-separated
 paragraphs, code blocks keep their line breaks without a monospace font,
-quotations are not indented and pictures are omitted. Loading adds no undo step;
+quotations are not indented and pictures are omitted (the notice bar says how
+many were left out). Loading adds no undo step;
 the document autosaves like other imports. Browser regressions cover Markdown and
 HTML structure, links, script removal, autosave, export and reopen.
 
@@ -21881,6 +21910,18 @@ word took one Undo per character. A contiguous run of Backspace (or of Delete)
 presses is now one step; moving the caret, clicking,
 typing, switching direction or any other edit starts a new one. A browser
 regression covers both keys, undo and redo.
+
+### Backspace in complex scripts (2026-10-26)
+
+The caret still stops only between whole characters (grapheme clusters), but
+Backspace now takes back the last code point of the cluster before it, as text
+fields do: a Devanagari, Bengali or Tamil vowel sign or conjunct consonant, a Thai
+vowel or tone mark, an Arabic mark or a combining accent, rather than the whole
+syllable. Emoji sequences, flags, keycaps and variation sequences go whole. So does
+a cluster whose remainder would join the character after the caret (a virama
+before a consonant), and any cluster while Track Changes is on, where the
+struck-out mark would stay inside it. Delete still removes the whole cluster after
+the caret. `tests/backspace-clusters.test.js` covers these cases.
 
 ### Status bar menus (2026-10-05)
 
@@ -22084,11 +22125,20 @@ Supported subset:
   Enter record insertions; Delete/Backspace/selection replacement record deletions; deleting your
   own pending insertion removes it outright.
 - Accept/Reject this change, and move to next, all changes, and all changes and stop tracking.
+  Rejecting one deletion of another reviewer's insertion (`w:del` inside `w:ins`) brings the insertion
+  back; rejecting a selection or all changes rejects both, so Reject All leaves no change behind.
   Accepting a deletion that crosses a field's begin or end (§17.16.18) removes the text on either
   side of the boundary separately; the field keeps the rest of its result.
 - Inserting a footnote or endnote reference (§17.11.14 `footnoteReference`, §17.11.7
   `endnoteReference`) records the reference run as an insertion, written inside `w:ins`.
 - Replace All records each replacement as a deletion of the found text and an insertion.
+- A caption, cross-reference, citation, bibliography or table of contents inserted with Track Changes on is
+  recorded as a tracked insertion (`w:ins`, with its paragraph marks) when the command inserts one stretch of
+  text. A command that also renumbers or rewrites other text (a caption before existing ones, an IEEE citation,
+  a rebuilt table) is applied untracked, and with tracking locked it is refused.
+- Updating fields (Update Fields, Update page references, mail merge previews) is not itself tracked; a
+  result that was wholly a tracked insertion or deletion keeps that change after the update. The field's
+  begin/separate/end characters are written outside `w:ins`/`w:del` (an approximation).
 - All Markup (inline colour, underline and strikethrough with left-margin change bars), Simple
   Markup and No Markup (deleted text hidden), and Original (inserted text hidden).
 - Unchanged documents save byte for byte; revisions survive untracked edits and round trips.
@@ -22212,6 +22262,48 @@ Tests: `tests/captions.test.js`.
 Clause: §17.3.2.41 `vanish`. Documents with hidden text no longer open read-only. Hidden runs stay in
 the text (search, copy and save keep them) and are laid out with no width; `revisionView.showHidden`
 lets a Show/Hide ¶ control lay them out. Tests: `tests/hidden-text.test.js`.
+
+## Long block content controls (2026-10-26)
+
+ECMA-376 Part 1 §17.5.2 (`w:sdt`, `w:sdtContent`): a block-level control may hold any number of
+paragraphs, as when a template wraps the whole body in one. Each paragraph inside refers to the
+control, and paragraph copies (editing, undo, the open-time signatures) copied it. The control kept
+its complete source XML and a signature listing every paragraph's text, so memory grew with the
+square of its length: 2,000 paragraphs took 2.4 s to open, 5,000 failed with "Invalid string
+length" and 8,000 crashed the tab. A block, row or cell control's contents are always written from
+the document, so its retained shell now keeps only `w:sdtPr`/`w:sdtEndPr` and an empty
+`w:sdtContent`, and its signature is a digest. Inline controls, whose unchanged contents are written
+from the shell, keep it whole. Test: `tests/long-block-control.test.js`.
+
+## Long style inheritance chains (2026-10-26)
+
+ECMA-376 Part 1 §17.7.4.3 (`basedOn`) sets no limit on the length of a style inheritance chain.
+The style lists (toolbar gallery, Styles pane, style dialogs) check every style by resolving its
+whole chain, which costs the square of the longest chain, and the toolbar refreshed its list on
+every keystroke: with a chain 3,000 styles long each key took over five seconds. The checked list is
+now kept for the styles and numbering it was computed from (edits replace those objects), so typing
+stays immediate; opening such a document still checks the chain once. Cyclic chains still open
+read-only as before. Test: `tests/style-choice-cache.test.js`.
+
+## Document nesting limit (2026-10-26)
+
+ECMA-376 Part 1 sets no limit on how deeply `w:hyperlink`, `w:fldSimple`, `w:smartTag`,
+`w:customXml`, `w:sdt`, revisions, nested `w:tbl` or `m:oMath` content may nest. The readers walk
+the XML recursively, so a generated or hostile file nested thousands of levels deep exhausted the
+stack ("Maximum call stack size exceeded") and did not open; tables nested 800 deep took half a
+minute. A part whose elements nest more than 800 levels deep (`MAX_XML_DEPTH`; real documents stay
+far below, tables nested 60 deep are about 200 levels) is now refused by the structured reader with
+the issue "content nested more than 800 levels deep", and the document opens as a read-only
+preview of each paragraph's text (and equation characters), read without recursion. Formatting,
+macro-button labels and projected field results are not shown in that preview, and the original
+file downloads unchanged. Documents over the browser's own XML nesting limit (about 5,000 levels in
+Chrome) still fail with "The DOCX contains invalid XML." Tests: `tests/docx-nesting-limit.test.js`,
+`tests/browser/deep-nesting.spec.js`.
+
+The body's (and a block content control's) paragraphs were also gathered with one spread
+`push(...)` call, which runs out of stack at roughly 120,000 entries: a file with 150,000 empty
+paragraphs reported "Maximum call stack size exceeded". They are now appended one by one, and
+such a file reaches the 200-page preview limit with its own message.
 
 ## Equations (2026-10-09)
 
@@ -23305,6 +23397,12 @@ and `docx.js` (styles part). Regressions: `tests/table-editing.test.js`,
 and rewrite only changed declarations; untouched rows and cells keep their source
 shells. Supported authoring subset:
 
+- Placement: with the caret in an empty paragraph, or at the start of a paragraph,
+  Insert Table puts the `w:tbl` before that paragraph, as Word does, instead of
+  splitting it and leaving an empty paragraph above the table. Inside a paragraph,
+  and in a paragraph that directly follows a table at the same level (two adjacent
+  `w:tbl` elements would read as one table), the paragraph is split around the table.
+
 - Grid and spans: `w:tblGrid`/`w:gridCol` (§17.4.48/§17.4.16) are rewritten
   after insert/delete/split of columns, cell splits and Draw Table lines;
   `w:gridSpan` (§17.4.17) and `w:vMerge` restart/continue (§17.4.84) for
@@ -23537,7 +23635,9 @@ package, layout or read-only status; it is not written to the file (it is not `w
 
 **Exports.** Web page, Markdown and plain-text exports are readable approximations of the body
 (headings, paragraphs, lists, tables, links, bold/italic/underline/strike/super/subscript); headers,
-footers, notes, comments, pictures and page layout are omitted. They are not OOXML output.
+footers, notes, comments, pictures and page layout are omitted. They are not OOXML output. They
+read the text with tracked changes accepted (§17.13.5), and a heading numbered through a list
+(§17.9) stays a heading with its number written before its text.
 ### Mailings: envelopes, labels and mail merge (2026-10-13)
 
 The Mailings tab stores mail merge as WordprocessingML that other word
@@ -23584,8 +23684,10 @@ processors read, and keeps its recipient list inside the document.
   joins the paragraph the field starts in, ended by the mark after the field.
   It separates copies with next-page
   section breaks cloned from the final `w:sectPr` (a directory runs copies
-  together), removes later copies' bookmarks and comment anchors, renumbers
-  `wp:docPr` ids, and drops `w:mailMerge` and the recipient part.
+  together), removes later copies' bookmarks and comment anchors, gives later
+  copies their own copies of the footnotes and endnotes they refer to
+  (§17.11.14 `footnoteReference`, §17.11.7 `endnoteReference`: one reference per
+  note), renumbers `wp:docPr` ids, and drops `w:mailMerge` and the recipient part.
 - **Envelopes and labels**: an envelope is its own section with a page size
   of the envelope (§17.6.13 `pgSz`, landscape `orient`), placed first, or the
   whole page setup of an empty document. Label sheets are fixed-layout tables
@@ -23726,7 +23828,10 @@ claim of full OOXML conformance or of layout fidelity with other consumers.
   with `mc:Ignorable="w14"` on the drawing (ECMA-376 Part 3 §10.2.1); warped text (`a:prstTxWarp`
   other than `textNoShape`) is not produced. The signature line is a text box (an X over a rule of
   low lines, signer, title, date line) with the instructions as alternative text; it is not a
-  digital-signature object.
+  digital-signature object. Text boxes wrap text squarely and WordArt and signature lines top and
+  bottom (`wp:wrapSquare`, `wp:wrapTopAndBottom`); in a table cell, where wrapped drawings are not
+  laid out yet, they are written in front of the text (`wp:wrapNone`), and the wrapping choices for
+  drawings in table cells are limited to in line, behind and in front of text.
 - **Diagrams**: an original approach rather than a diagram-definition (`dgm`) part. Eleven layouts
   (list, process, timeline, cycle, hierarchy, Venn, radial, matrix, pyramid) are generated as one
   `wpg:wgp` group (§20.4) of preset shapes with shape text, alpha fills (`a:alpha` §20.1.2.3.1) for
@@ -23735,6 +23840,9 @@ claim of full OOXML conformance or of layout fidelity with other consumers.
   `Diagram: <layout> (<colors>)` followed by the indented outline; Edit Diagram reads it back and
   replaces the group in one undo step. Diagrams edited in another application keep their XML but
   regenerate from their description when edited here.
+  Gaps between items shrink as items crowd in (together at most a third of the frame), so a list,
+  process, pyramid or organization chart of 15–30 items keeps every shape visible rather than
+  zero-sized; text in shapes that small is still shrunk only to 8 pt. `tests/diagram-builder.test.js`.
 - **Charts** (§21.2 DrawingML charts): `c:chartSpace` parts with literal data (`c:strLit`,
   `c:numLit`), explicit text properties and no external workbook. Column and bar
   (`c:barChart`, `c:barDir` `col`/`bar`; clustered, stacked, percentStacked), line with or without
@@ -23795,8 +23903,23 @@ claim of full OOXML conformance or of layout fidelity with other consumers.
   `m:limLoc`, `m:subHide`/`m:supHide`), delimiters `m:d` (`m:begChr`/`m:endChr`), functions
   `m:func`, limits `m:limLow`, accents `m:acc`, bars `m:bar`, matrices `m:m` and equation arrays
   `m:eqArr`, with child elements in schema order. Equations are atomic objects: the canvas shows
-  their linear text; the editor dialog previews them as MathML. Gaps: alignment points in equation
-  arrays, delimiter separators, nested superscripts, two-dimensional canvas rendering.
+  their linear text; the editor dialog previews them as MathML. Edit Equation shows a selected
+  equation in the input syntax, so that updating it unchanged builds the same structures (binomials
+  as `m:type="noBar"` fractions, `m:m`, `m:eqArr`, `m:deg`, multi-letter accents and bars). Gaps:
+  alignment points in equation arrays, delimiter separators, nested superscripts, two-dimensional
+  canvas rendering; an edited equation loses structures the input syntax has no form for (`m:box`,
+  `m:borderBox`, `m:groupChr`, `m:phant`, `m:sPre`, `m:limUpp` outside a function name, an n-ary
+  operand followed by more terms before a relation) and run formatting other than plain style.
+- Nesting depth: an equation's structure is read to 400 elements deep (about 200 nested
+  structures, far beyond Word's own equations). Deeper content shows, previews and reads into Edit
+  Equation as its plain characters instead of exhausting the stack; its `m:oMath` XML is still
+  saved unchanged. A part nested more than 800 elements deep in all opens as a read-only text
+  preview (see Document nesting limit). Tests: `tests/office-math.test.js`,
+  `tests/browser/deep-equation.spec.js`.
+  Typed linear input builds structures at most 48 levels deep (a chain such as `a/b/c/…` or a
+  stack of accents counts one level per step); deeper brackets, roots, operators, accents and
+  slashes stay literal characters, as other input that does not build up does. Tests:
+  `tests/math-linear.test.js`.
 
 ### Symbols
 
@@ -24234,3 +24357,36 @@ document base, file system or custom protocol handling); level properties outsid
 the subset above remain unsupported; no claim of reference-application pixel
 equivalence for list paragraph properties.
 
+
+## DOCX reading and writing: review round 6
+
+Files from other producers that opened read-only, or lost content on save, without a
+reason in the document itself. Each row has a unit regression that fails without the fix.
+
+| Feature | Specification basis | Supported subset and evidence |
+| --- | --- | --- |
+| Explicit left-to-right direction | ECMA-376 Part 1 §17.3.1.6 `bidi` (paragraph), §17.6.1 `bidi` (section), §17.17.4 on/off values | A paragraph, section or list-level (§17.9.23 numbering `pPr`) `w:bidi` whose value is off (`0`, `false`, `off`) states the default direction and no longer opens the document read-only. The element is kept in place through edits and save. An enabled `w:bidi` (absent value, `1`, `true`, `on`) still opens read-only because right-to-left paragraph and section layout are not implemented. `tests/rtl-preview.test.js`; the edited export passes `check:conformance`. |
+| Recorded previous table grid | §17.4.48 `tblGrid` (CT_TblGrid: `gridCol*`, then optional `tblGridChange`), §17.13.5.33 `tblGridChange` | A `w:tblGridChange` as the grid's last child, with an integer `w:id` and one `w:tblGrid` of `gridCol` elements, no longer opens the document read-only (some producers write it unchanged in every table). The current `gridCol` list is laid out; the record is kept in the table shell, and when an edit rewrites the grid (inserted or resized columns) it is carried over after the new columns. Malformed or misplaced records still open read-only. Accepting or rejecting the recorded grid change is not offered. `tests/producer-table-quirks.test.js`; the edited export passes `check:conformance`. |
+| Unitless decimal table measurements | §17.4.87 CT_TblWidth `w` (ST_MeasurementOrPercent), §17.4.42 `tcMar`, §17.4.43 `tblCellMar`, §17.4.44 `tblCellSpacing` | Table, cell and indent widths, cell margins and cell spacing written as a decimal without units (`9360.0`, `100.0`; Google Docs exports do this) are not schema-valid but no longer open read-only: they are read as the nearest whole twip (or fiftieth of a percent), and a saved table states those whole values, so the export is schema-valid. Other malformed values (`9360.`, `.5`, `1e3`, `9360,0`) still open read-only. `tests/producer-table-quirks.test.js`, `tests/canvas-cell-margins.test.js`. |
+| Revision UTC times | §17.13.5.18 `ins`, §17.13.5.14 `del`, §17.13.5.22/.25 `moveFrom`/`moveTo`, §17.13.5.29/.31 `pPrChange`/`rPrChange` (CT_TrackChange); [MS-DOCX] `w16du:dateUtc`; Part 3 §10.2.1 `Ignorable` | Current Word writes `w16du:dateUtc` beside `w:date` on every tracked change. Documents with tracked insertions, deletions, moves or paragraph marks carrying it opened read-only ("revision attribute w16du:dateUtc"); they now open for editing. The value is kept with the revision and written back on rewritten insertions, deletions, moves, paragraph marks and recorded formatting changes, but only while the part's root still declares the namespace and lists it in `mc:Ignorable`; otherwise it is left out. Revisions made in this editor have no UTC time. `tests/tracked-changes.test.js`; the edited export passes `check:conformance` (standard MCE view). |
+| Theme pictures across packages | §20.1.6.9 `theme`, §20.1.4.1.7 `bgFillStyleLst`, §20.1.8.14 `blipFill`, §20.1.8.13 `blip` `r:embed`; Part 2 §9.3 relationships | Applying theme XML that came from another package (Browse for Themes with a `.thmx`, a saved custom theme, or the saved default theme) copied picture fills whose `r:embed` IDs named relationships of the source package, leaving references the saved document could not resolve. A picture fill whose IDs do not resolve from the target theme part (to an existing part, or an external target) is now replaced by a plain `phClr` fill, and any other unresolved relationship attribute is dropped; resolvable pictures (re-applying a document's own theme) and theme XML without relationship attributes are written unchanged. The theme's pictures themselves are not imported. `tests/design-themes.test.js`; the theme part passes `check:conformance`. |
+| Field data on begin delimiters | §17.16.18 `fldChar` (CT_FldChar: `fldData`, `ffData`, `numberingChange`), §17.16.17 `fldData`, §17.16.5.1 `ADDIN` | Reference managers (EndNote's `ADDIN EN.CITE` with its nested `EN.CITE.DATA`) store base64 citation data in `w:fldData` on the begin delimiter. Any delimiter child opened the document read-only ("field delimiter child content"). A single `w:fldData` (text only) on a begin delimiter is now accepted, left unread, and kept with the delimiter in the field's retained envelope through edits and save, including in fields nested in another field's instruction. Form-field data (`ffData`), `numberingChange` and children of separate/end delimiters still open read-only. `tests/retained-fields.test.js`; the edited export passes `check:conformance`. |
+| Emoji stored as symbol extensions | ECMA-376 Part 3 §10.2.1 `AlternateContent`, §10.2.2 `Choice`, §10.2.3 `Fallback`; [MS-DOCX] `w16se:symEx` | Word stores each emoji as `mc:AlternateContent` with a `w16se:symEx` Choice (font and code point) and a `w:t` Fallback holding the character. Run-level alternate content other than one drawing opened the document read-only. When the selected branch (here the Fallback, since `w16se` is not understood) consists only of `w:t` elements, its text is now read as ordinary run text and the document opens for editing. Untouched paragraphs are saved byte for byte with their wrappers; a paragraph rewritten by an edit keeps the emoji as text in the run and drops the Choice it does not understand, as Part 3 permits. Other selected branches keep the read-only preview. `tests/alternate-run-recovery.test.js`. |
+| Omitted or empty table grid | §17.4.48 `tblGrid`, §17.4.17 implicit grid columns, §17.4.53 `tblLayout` | An automatically sized table whose `w:tblGrid` is empty or omitted (some converters write `<w:tblGrid/>`) no longer opens read-only: the grid is rebuilt from the rows as zero-width columns, which automatic layout sizes from the content. An omitted grid is written as the rebuilt grid when the table is saved, as the schema requires; an empty one is kept. Fixed-layout tables still need grid widths and open read-only without them. `tests/producer-table-quirks.test.js`; exports pass `check:conformance`. |
+| Theme references without a theme part | §17.3.2.6 `color` (`themeColor`, `themeTint`, `themeShade`), §17.3.2.26 `rFonts` (`asciiTheme` …), §11.3.10 theme part (optional) | A package with no theme relationship whose run, paragraph or style declarations name a theme color or theme font beside an explicit value (`w:val`, `w:ascii` …, as producers write them) opened read-only. The explicit value, which is the producer's resolved color or font, is now shown, and the theme attributes are kept in the XML through edits and save. A theme reference without an explicit value, or a theme relationship that does not resolve, still opens read-only. Applying a Design theme later adds a theme part, and the references then resolve against it. `tests/canvas-colors.test.js`. |
+| GIF pictures | §20.2.2.5 `pic:pic`, §20.1.8.14 `blipFill`; Part 2 content type `image/gif` | A document whose picture part is a GIF (web graphics and logos pasted into documents keep that format) opened read-only ("pictures with This image is not a supported PNG, JPEG or TIFF"). GIF payloads (`GIF87a`/`GIF89a`) are now read with their logical-screen size, decoded by the browser (the first frame of an animation is shown), and kept byte for byte with their relationship and content type. A GIF placed by the editor is saved as a `.gif` part declared `image/gif`, not under a `.jpg` name. BMP and WebP picture parts still open read-only. `tests/canvas-images.test.js`. |
+| Final paragraph of an empty body | §17.2.2 `body` (block content is optional), §17.4.38 `tbl`, §17.6.17 final `sectPr`, §17.7.4.17 default paragraph style | A body with no paragraphs, whose last paragraph ends a section, or that ends in a table (python-docx and other generators write reports that way) gets a paragraph to type in. After a final table there was none, so nothing could be typed below the table; elsewhere it was the editor's built-in paragraph, so it ignored the document's default style (spacing, line height, alignment, font size) and every save wrote it with a full set of direct paragraph properties. It is now read as an empty `w:p`: it takes the document's styles, it is written only once something is typed or set in it (so saves leave the body's structure and the spelling state as they were), and text typed into it is saved without built-in formatting. `tests/canvas-docx.test.js`. |
+| Restarted list instances | §17.9.15 `num`, §17.9.18 `numId`; [MS-DOCX] `w16cid:durableId` on `num` | Restart Numbering clones the source `w:num` (so unused overrides and extensions survive) under a new `numId`. The clone kept the source's `w16cid:durableId`, so two instances shared an identifier that must be unique. The durable identifier is now left off the clone (Word assigns one); the source instance keeps its own. `tests/canvas-numbering.test.js`. |
+| Spelling marks in headers and footers | §17.13.8.1 `proofErr`, §17.10.4 `hdr`, §17.10.2 `ftr` | Word saves `w:proofErr` marks around words it flagged, including in headers and footers (a company name in the header). Any such mark made the whole document open read-only ("unsupported header/footer structure"). Paragraph-level `proofErr` in a header or footer is now accepted and ignored: an untouched story keeps it byte for byte, and an edited story is written without the cached marks, which Word recomputes. Bookmarks, tracked changes and other paragraph content in headers and footers still open read-only. `tests/page-story-proofing.test.js`. |
+| Percent-encoded part names | ECMA-376 Part 2 §9.1.1 part names (percent-encoded IRIs), Annex A ZIP item names; Part 1 §21.1.2.3 `blip` `r:embed` | Picture, chart and diagram relationship targets were looked up only as decoded ZIP item names, so a package that stores an item as its encoded part name (`word/media/image%201.png`) opened read-only ("missing or external image parts"). The decoded item is still preferred; the encoded item is now used when only it exists. Part bytes and relationships are kept as they were. `tests/canvas-images.test.js`. |
+| Wrapping shapes stored as alternate content | Part 3 §10.2.1 `AlternateContent`; Part 1 §20.4.2.3 `anchor`, §20.4.2.8 `inline` | Word stores shapes, text boxes and groups as `mc:AlternateContent` with a DrawingML choice and a VML fallback, retained whole. Changing such a shape's Wrap Text option made every later save fail ("The drawing has no frame to rewrite") because the writer looked for the frame on the wrapper. The frame of the selected branch's `w:drawing` is now rewritten (moves likewise update that branch's anchor); the VML fallback is kept as authored, so consumers that read the fallback still show the earlier placement. `tests/image-wrap.test.js`; the export passes `check:conformance`. |
+| Formatting page fields in headers and footers | §17.16.18 `fldChar`, §17.16.19 `fldSimple`, §17.3.2 run properties | A field in a header, footer or text box is one atomic run holding its retained envelope. Character formatting applied over it (selecting "Page 1 of 2" and pressing Bold) was accepted by the editor but made every later save fail ("Editing page-field results or their formatting is not supported"). The formatting and character style are now written onto every run of the envelope (delimiters, instruction and result), as a word processor formats a field, and read back on reopening. Changing a field's result text is still refused. `tests/page-story-field-format.test.js`, `tests/story-export.test.js`; the footer passes `check:conformance`. |
+| Citation and bibliography content controls | §17.5.2.6 `citation`, §17.5.2.4 `bibliography`, §17.5.2.13 `docPartObj`; §17.16.5.8 `CITATION`, §17.16.5.7 `BIBLIOGRAPHY` | Word wraps every citation it inserts in a content control marked `w:citation`, and the bibliography list in one marked `w:bibliography` inside a "Bibliographies" building block. Either marker opened the document read-only ("content controls with unsupported citation properties"). Both are now read as rich content controls: their fields are edited, refreshed (Update Citations and Bibliography) and saved as other citation and bibliography fields, and the controls with their markers are kept. `tests/citation-controls.test.js`. |
+| Pictures pasted from web pages | §17.16.5 `INCLUDEPICTURE`, §17.16.18 `fldChar` | Word turns pictures pasted from a web page into `INCLUDEPICTURE "url" \* MERGEFORMATINET` fields whose cached result is the picture. The instruction was unsupported, so such documents opened read-only. In the body the field is now retained: its picture result is shown and edited as an ordinary picture, the envelope and URL are kept through edits, and the link is never fetched or refreshed. In headers, footers and text boxes a field is shown by its result text alone, so a field whose result holds a picture there still opens read-only, with the picture shown in the preview. `tests/retained-fields.test.js`. |
+| Square wrapping against the page or margin | §20.4.2.3 `anchor`, §20.4.2.10 `positionH` and §20.4.2.11 `positionV` (`relativeFrom` page, margin, column, paragraph, topMargin, bottomMargin; `posOffset` or `align`), §20.4.2.17 `wrapSquare`, §20.4.2.19 `wrapTight`, §20.4.2.18 `wrapThrough` | Templates place square-wrapped logos and pictures against the page or margin, or align them there (right of the margin, top of the page). Only column and paragraph offsets were read, so any other position opened the whole document read-only ("floating pictures with unsupported positionH" or "nonzero text distances"). Square, tight and through wraps now take horizontal page/margin/column bases and vertical page/margin/topMargin/bottomMargin/paragraph bases, each as an offset or (except paragraph) an alignment. The frame is placed by the same positioning used for unwrapped objects, and text on its page flows around its rectangle and wrap distances, including text before the anchor. Moving the picture writes an offset on the same base; otherwise its anchor XML is saved unchanged. Unit (`tests/square-wrap-page-anchors.test.js`: five coordinate combinations with frame, hit test and wrap checks, byte-identical save, edit/reopen, move) and browser (`tests/browser/square-wrap-page-anchors.spec.js`: painted position, edit, download, reopen) regressions; the export passes `check:conformance`. Remaining gaps: line-relative and paragraph-aligned wrapped positions, character-relative and inside/outside-margin bases, and wrapped drawings in table cells still open read-only; in section columns layout still falls back to read-only. |
+| Lists referring to missing definitions | §17.3.1.19 `numPr`, §17.9.18 `numId`, §17.9.15 `num`, §17.9.2 `abstractNumId`; §17.7 style hierarchy | A paragraph or style whose `w:numId` names a `w:num` the numbering part does not define (or whose `w:abstractNumId` names no `w:abstractNum`), including when the package has no numbering part, opened the whole document read-only ("The list references a missing numbering definition."). Word shows such a paragraph without a number. It is now unnumbered and editable; its `w:numPr` stays in the saved XML unless a list is applied, which writes a defined reference. Other lists keep their counters. A definition that is present but unreadable (an unsupported format, a missing level, a malformed override) still opens a read-only preview. Unit (`tests/numbering-definition-recovery.test.js`: editable open, unnumbered paragraphs, sibling counters, byte-identical save, edited numPr retained, list applied and reopened) and browser (`tests/browser/numbering-definition-recovery.spec.js`: pixels and geometry equal the same document without the reference, now editable) regressions. |
+| Empty hyperlinks | §17.16.22 `hyperlink` (CT_Hyperlink: zero or more run-level children) | A hyperlink with no content (`<w:hyperlink r:id="…"/>`, one holding only an empty run, or only a bookmark; producers leave these behind after the link text is deleted) opened the whole document read-only ("empty hyperlinks"). The schema allows an empty wrapper and it shows nothing, so it is now read as no link: untouched paragraphs keep it byte for byte, and a paragraph rewritten after an edit keeps its text and bookmarks but has no wrapper there (its relationship stays in the package). Unit regression `tests/empty-hyperlinks.test.js` (four variants in a body paragraph and a table cell: editable open, byte-identical save, edit and reopen, bookmark kept); edited exports pass `check:conformance`. |
+| Line feeds inside run text | §17.3.3.31 `t`, §17.3.3.8 `delText` (text content and `xml:space`), §17.3.3.1 `br`, §17.3.3.4 `cr` | A line feed or carriage return inside `w:t` or `w:delText` (generators that pretty-print XML or copy multi-line strings write them) opened the whole document read-only ("line breaks inside text runs"). It is whitespace, not a break, and Word shows it as a space, so it is now read as one space (the read-only preview also stopped showing it as a line break). Untouched paragraphs keep their XML; an edited paragraph saves spaces. Gaps: whitespace inside a `w:t` without `xml:space="preserve"` is not collapsed; a carriage return written as a character reference in an untouched paragraph is saved as a line feed when another part of the document is edited (both are whitespace). Unit regression `tests/text-run-newlines.test.js` (preserved, character-reference, pretty-printed and tracked-deletion text: editable open, byte-identical save, edits elsewhere and inside, reopen); the edited export passes `check:conformance`. |
+| Content type entries for created parts | ECMA-376 Part 2 §10.1.2 content types stream (`Override`, at most one per part name), §9.1.1 part names (compared case-insensitively) | Creating core properties, settings, numbering, styles, a header or footer, footnotes, endnotes or a picture part appended an `Override` without looking for one already naming that part. A package that kept an entry for a part it no longer contains (as some tools leave behind) was saved with two entries for the same part name, which is an invalid package. Every creator now sets the part's entry through one helper that reuses (and corrects the content type of) an existing entry, matching part names without regard to case, and removes repeats. Unit regression `tests/content-type-overrides.test.js`: a package with leftover entries for all eight kinds, each part created, exactly one entry per name with the needed type, and the result reopens; its XML parts pass `check:conformance` (the checker does not validate the content types stream). Comments, bibliography and mail-merge parts already checked for an entry and are unchanged. |
+| Tracked field code | §17.13.5.18 `ins`, §17.13.5.14 `del` (CT_RunTrackChange: runs, no `fldSimple`), §17.16.18 `fldChar`, §17.16.23 `instrText`, §17.16 `delInstrText` (deleted field code), §17.3.3.8 `delText` | A field inserted or deleted with Track Changes on has its code (begin, instruction, separator and end delimiters) inside the `w:ins` or `w:del`, and a deleted field's instruction is `w:delInstrText`. `w:delInstrText` made the whole document open read-only ("visible content inside a body field instruction"). A tracked field opened editable lost its tracking on save: the delimiters were written outside the change, so rejecting an inserted field (or accepting a deleted one), here or in Word, left an empty field behind, and accepting or rejecting here did the same. A field whose begin, separator and end delimiters sit in one change now keeps that change; saving writes its delimiters (and `w:delInstrText` for a deletion) inside the change, merged with its result; accepting or rejecting the change, at the caret, over a selection or for all changes, removes or keeps the whole field, and a deletion of another reviewer's insertion resolves as its text does. A field only partly inside a change keeps the earlier behaviour. Unit regression `tests/tracked-field-codes.test.js` (inserted, deleted and deleted-inserted fields: open, byte-identical save, delimiters inside the change after an edit, reopen, accept/reject all, at the caret and by reviewer, undo); edited exports pass `check:conformance`. Gaps: tracked fields in headers, footers and text boxes are not handled; a tracked field with an empty result (an index entry) is resolved only by resolving a stretch or all changes, and is not listed as a change of its own. |
+| Fields inserted or deleted while tracking | §17.13.5.18 `ins`, §17.13.5.14 `del`, §17.16.18 `fldChar` | With Track Changes on, inserting a field (Date and Time, Field, page numbers placed in the body, captions and cross-references) marked only its result inserted, and deleting a selection that took a whole field marked only its result deleted. Saved, the field's delimiters sat outside the change, so rejecting the insertion (or accepting the deletion) in Word, or here after reopening, left an empty field. The field's code is now part of the change: a field inserted while tracking (or added by a command whose insertion is then tracked) records the insertion; a deletion that takes a whole field, by the same rule an untracked deletion removes it (the selection reaches past at least one end), records the deletion, nested in another reviewer's insertion where there is one; the author's own inserted field is removed outright. Selecting exactly the result and deleting it deletes only the result, as it does untracked. Unit regression `tests/tracked-field-codes.test.js` (tracked insert, tracked command insertion, whole-field deletion saved, reopened and accepted, result-only deletion, own and other reviewers' fields). |

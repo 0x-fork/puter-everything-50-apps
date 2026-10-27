@@ -45,7 +45,7 @@ function colorStrip(colors) {
 export function createDesignTab({ editor, pkg, error, onChange = () => {}, commands: base = {} }) {
   /** A gallery choice in a menu closes the menus and returns to the document before acting. */
   const choose = action => () => { closeMenu(); editor()?.focus(); action(); };
-  const ready = () => { const engine = editor(); return engine && !pkg()?.readOnly ? engine : null; };
+  const ready = () => { const engine = editor(); return engine && !pkg()?.readOnly && !engine.viewOnly ? engine : null; };
   const editable = () => !!ready() && !!base.changePackage;
   let api = null;
   const loading = design().then(module => { api = module; onChange(); }).catch(() => {});
@@ -344,8 +344,8 @@ export function createDesignTab({ editor, pkg, error, onChange = () => {}, comma
     const spacing = menuButton('Paragraph Spacing', 'paragraphSpacing', spacingItems, { size: 'small', text: 'Paragraph Spacing' });
     const effects = menuButton('Theme Effects', 'effects', effectItems, { size: 'small', text: 'Effects' });
     const setDefault = command('Set as Default', 'setDefault', setAsDefault, { text: 'Set as Default' });
-    const more = command('More Style Sets', 'more', e => openMenu({ anchor: more, label: 'Style Sets', minWidth: 300, pointer: !!e?.detail, onClose: () => editor()?.focus(), items: kit.inDocument(styleSetItems()) }));
-    more.classList.add('ribbon-gallery-more');
+    const more = command('More Style Sets', 'more', e => openMenu({ anchor: more, label: 'Style Sets', minWidth: 300, pointer: !!e?.detail, onClose: e?.detail ? () => editor()?.focus() : null, items: kit.inDocument(styleSetItems()) }));
+    more.classList.add('ribbon-gallery-more'); more.setAttribute('aria-haspopup', 'menu');
     more.addEventListener('mousedown', e => e.preventDefault());
     for (const control of [themes, colors, fonts, effects]) when(control, () => engineReady() && editable());
     when(spacing, () => engineReady() && !!base.paragraphSpacingItems);

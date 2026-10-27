@@ -8,6 +8,8 @@ import { pasteFragment } from '../src/engine/clipboard-fragment.js';
 import { insertBodyField } from '../src/engine/field-results.js';
 import { bodyFieldRanges } from '../src/engine/body-fields.js';
 import { insertCrossReference, referenceTargets } from '../src/engine/captions.js';
+import { updateSequenceFields } from '../src/engine/field-update.js';
+import { insertMergeField, mergeFieldRanges, applyMergeResults } from '../src/engine/mail-merge-model.js';
 
 let dom;
 beforeAll(() => { dom = new JSDOM(); globalThis.DOMParser = dom.window.DOMParser; globalThis.XMLSerializer = dom.window.XMLSerializer; });
@@ -219,8 +221,32 @@ describe('tracked change edge cases', () => {
     expect(xml).toMatch(/<w:ins [^>]*w:author="Ada"[^>]*><w:del [^>]*w:author="Me"[^>]*><w:r><w:delText xml:space="preserve">theirs<\/w:delText><\/w:r><\/w:del><\/w:ins>/);
     const again = await open(await save(pkg, model));
     expect(summary(again.model)).toEqual([['del', 'Me', 'theirs']]);
-    again.model.resolveRevisions(false);
+    // Rejecting the deletion alone (at the caret) brings Ada's insertion back.
+    again.model.select(4); again.model.resolveRevisions(false, ...again.model.range);
     expect(summary(again.model)).toEqual([['ins', 'Ada', 'theirs']]);
+  });
+  it('rejects another reviewer\'s insertion under a deletion with Reject All, leaving the original text', async () => {
+    const files = unzipSync(trackedDocx());
+    files['word/document.xml'] = strToU8(`<w:document xmlns:w="${W}"><w:body><w:p><w:r><w:t xml:space="preserve">A </w:t></w:r><w:ins w:id="1" w:author="Ada" w:date="2026-01-01T00:00:00Z"><w:r><w:t>theirs</w:t></w:r></w:ins><w:r><w:t xml:space="preserve"> B</w:t></w:r></w:p><w:p><w:r><w:t>Next</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`);
+    const { pkg, model } = await open(zipSync(files));
+    model.select(2, 13); model.replace('');
+    expect(summary(model)).toEqual([['del', 'Me', 'theirs B\nNe', '¶']]);
+    const again = await open(await save(pkg, model));
+    again.model.resolveRevisions(false);
+    expect(again.model.text).toBe('A  B\nNext');
+    expect(again.model.revisions).toEqual([]);
+    // Rejecting a selection rejects both changes in it too; with Ada's changes hidden, only the deletion goes.
+    const selected = await open(await save(pkg, model));
+    selected.model.resolveRevisions(false, 0, 8);
+    expect(summary(selected.model)).toEqual([['del', 'Me', ' B\nNe', '¶']]);
+    expect(selected.model.text).toBe('A  B\nNext');
+    const shown = await open(await save(pkg, model));
+    shown.model.resolveRevisions(false, undefined, undefined, { only: change => change.author !== 'Ada' });
+    expect(summary(shown.model)).toEqual([['ins', 'Ada', 'theirs']]);
+    expect(shown.model.text).toBe('A theirs B\nNext');
+    const undone = await open(await save(pkg, model));
+    undone.model.resolveRevisions(false); undone.model.undo();
+    expect(summary(undone.model)).toEqual([['del', 'Me', 'theirs B\nNe', '¶']]);
   });
   it('never marks a table cell\'s final paragraph mark as deleted', async () => {
     const files = unzipSync(trackedDocx());
@@ -446,3 +472,77 @@ it('replaces thousands of matches with Track Changes on in linear time', () => {
   doc.resolveRevisions(true);
   expect(doc.paragraphs[1999].runs.map(r => r.text).join('')).toBe("Clause 1999: the Contractor shall notify the Contractor's agent.");
 }, 120000);
+
+describe('fields inside tracked changes', () => {
+  const seq = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> SEQ Figure \\* ARABIC </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
+  const withField = wrapper => {
+    const files = unzipSync(trackedDocx());
+    files['word/document.xml'] = strToU8(`<w:document xmlns:w="${W}"><w:body><w:p><w:r><w:t xml:space="preserve">Figure </w:t></w:r>${wrapper(seq)}<w:r><w:t xml:space="preserve"> caption</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`);
+    return zipSync(files);
+  };
+  it('keeps a field result a reviewer inserted marked inserted when the field updates', async () => {
+    const { pkg, model } = await open(withField(x => `<w:ins w:id="1" w:author="Ada" w:date="2026-01-01T00:00:00Z">${x}</w:ins>`));
+    expect(updateSequenceFields(model)).toBe(1);
+    expect(summary(model)).toEqual([['ins', 'Ada', '1']]);
+    expect(model.trackChanges).toBe(true);
+    const again = await open(await save(pkg, model));
+    expect(summary(again.model)).toEqual([['ins', 'Ada', '1']]);
+    again.model.resolveRevisions(false);
+    expect(again.model.text).toBe('Figure  caption');
+  });
+  it('keeps a deleted field result deleted when the field updates', async () => {
+    const { pkg, model } = await open(withField(x => `<w:del w:id="1" w:author="Ada" w:date="2026-01-01T00:00:00Z">${x.replace(/<w:t>/g, '<w:delText>').replace(/<\/w:t>/g, '</w:delText>')}</w:del>`));
+    expect(summary(model)).toEqual([['del', 'Ada', '7']]);
+    updateSequenceFields(model);
+    expect(summary(model)).toEqual([['del', 'Ada', '1']]);
+    const again = await open(await save(pkg, model));
+    again.model.resolveRevisions(true);
+    expect(again.model.text).toBe('Figure  caption');
+  });
+  it('keeps a merge field inserted with Track Changes on marked inserted while previewing recipients', async () => {
+    const { model } = await open(trackedDocx());
+    model.select(model.text.length); insertMergeField(model, ' MERGEFIELD First ');
+    expect(summary(model).at(-1)).toEqual(['ins', 'Me', '«First»']);
+    applyMergeResults(model, mergeFieldRanges(model), ['Alexander']);
+    expect(summary(model).at(-1)).toEqual(['ins', 'Me', 'Alexander']);
+    applyMergeResults(model, mergeFieldRanges(model), ['Bo']);
+    expect(summary(model).at(-1)).toEqual(['ins', 'Me', 'Bo']);
+    model.resolveRevisions(false);
+    expect(model.text).toBe('Keep  removed end.Second');
+  });
+});
+
+describe('revision UTC times', () => {
+  const W16DU = 'http://schemas.microsoft.com/office/word/2023/wordml/word16du';
+  const utcDocx = ({ ignorable = true } = {}) => {
+    const files = unzipSync(trackedDocx({ track: false }));
+    const utc = ' w16du:dateUtc="2026-01-01T08:00:00Z"';
+    files['word/document.xml'] = strToU8(`<w:document xmlns:w="${W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w16du="${W16DU}"${ignorable ? ' mc:Ignorable="w16du"' : ''}><w:body>`
+      + `<w:p><w:pPr><w:rPr><w:ins w:id="9" w:author="Ada" w:date="2026-01-01T00:00:00Z"${utc}/></w:rPr></w:pPr><w:r><w:t xml:space="preserve">Keep </w:t></w:r><w:ins w:id="1" w:author="Ada" w:date="2026-01-01T00:00:00Z"${utc}><w:r><w:t>added</w:t></w:r></w:ins><w:del w:id="2" w:author="Grace" w:date="2026-01-02T00:00:00Z"${utc}><w:r><w:delText xml:space="preserve"> removed</w:delText></w:r></w:del><w:r><w:rPr><w:b/><w:rPrChange w:id="6" w:author="Grace" w:date="2026-01-02T00:00:00Z"${utc}><w:rPr/></w:rPrChange></w:rPr><w:t xml:space="preserve"> end.</w:t></w:r></w:p>`
+      + `<w:p><w:r><w:t>Second</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`);
+    return zipSync(files);
+  };
+  const utcTimes = bytes => {
+    const doc = new DOMParser().parseFromString(strFromU8(unzipSync(bytes)['word/document.xml']), 'application/xml');
+    return [...doc.getElementsByTagNameNS(W16DU, '*'), ...doc.getElementsByTagNameNS(W, '*')].filter(n => n.hasAttributeNS(W16DU, 'dateUtc')).map(n => n.localName).sort();
+  };
+  it('opens insertions and deletions that carry a UTC time for editing and keeps the time when saved', async () => {
+    const source = utcDocx(), { pkg, model } = await open(source);
+    expect(pkg.readOnly).toBeFalsy();
+    expect(summary(model)).toEqual([['ins', 'Ada', 'added'], ['del', 'Grace', ' removed'], ['format', 'Grace', ' end.'], ['ins', 'Ada', '\n', '¶']]);
+    expect(unzipSync(await save(pkg, model))).toEqual(unzipSync(source));
+    // Editing the paragraph rewrites it; each recorded revision keeps its UTC time, new ones have none.
+    model.trackChanges = true; model.select(0); model.replace('New ');
+    const saved = await save(pkg, model);
+    expect(utcTimes(saved)).toEqual(['del', 'ins', 'ins', 'rPrChange']);
+    const reopened = await open(saved);
+    expect(reopened.pkg.readOnly).toBeFalsy();
+    expect(reopened.model.revisions.find(r => r.type === 'ins' && reopened.model.text.slice(r.start, r.end) === 'added')).toBeTruthy();
+  });
+  it('leaves out the UTC time when the part does not declare it ignorable', async () => {
+    const { pkg, model } = await open(utcDocx({ ignorable: false }));
+    expect(pkg.readOnly).toBeFalsy();
+    model.select(0); model.replace('New ');
+    expect(utcTimes(await save(pkg, model))).toEqual([]);
+  });
+});

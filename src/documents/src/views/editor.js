@@ -1,7 +1,8 @@
 import { MAX_FONT_SIZE } from '../engine/font-size.js';
 import { stepFontSize, FALLBACK_SIZES } from '../lib/fontsize.js';
 import { countWords } from '../core/text.js';
-import { previewNotice, pictureFontNotice, scriptFontNotice } from './preview-notice.js';
+import { previewNotice, pictureFontNotice, scriptFontNotice, omittedPictureNotice } from './preview-notice.js';
+import { importNotice } from '../ui/importnotice.js';
 import { createCanvasRulers } from '../ui/canvas-rulers.js';
 import { openParagraphBorders, paragraphBorderLabel } from './paragraph-borders.js';
 import { openCellAlignment } from './cell-alignment.js';
@@ -83,6 +84,7 @@ import { openCustomizeKeyboard } from './customize-keyboard.js';
 import { MARKUP_VIEWS } from './review.js';
 import { documentHtml, documentMarkdown, documentPlainText } from '../lib/document-export.js';
 import { recentFiles } from '../lib/recent.js';
+import { importableFiles, nothingImportable } from '../lib/importfiles.js';
 import { madeFiles, withMade } from '../lib/made.js';
 import { listVersions } from '../lib/versions.js';
 import { publishPage, findSite, unpublishPage } from '../lib/publish.js';
@@ -109,6 +111,12 @@ import { openCompareDialog } from './compare-dialog.js';
 export const FLUSH_STALL_MS = 15000;
 
 /** First canvas milestone. Cloud persistence remains owned by Doc. */
+/** Whether `file` starts as a ZIP package does (a DOCX under another name). */
+async function isZipPackage(file) {
+  try { const head = new Uint8Array(await file.slice(0, 4).arrayBuffer()); return head[0] === 0x50 && head[1] === 0x4b && head[2] === 3 && head[3] === 4; }
+  catch { return false; }
+}
+
 export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromTemplate, local = false }) {
   const printAbort = new AbortController();
   let printing = false;
@@ -123,24 +131,36 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     try {
       await engine.fontRefresh;
       // A page range and copies from File > Print choose and repeat sheets; the browser's dialog does the rest.
-      const capture = () => {
-        const sheets = engine.printSheets();
-        const chosen = Array.isArray(pages) && pages.length ? pages.map(n => sheets[n - 1]).filter(Boolean) : sheets;
+      // Only the chosen pages are painted.
+      const capture = async () => {
+        const range = Array.isArray(pages) && pages.length ? pages : null;
+        const sheets = engine.printSheets(range && range.map(n => n - 1));
+        const chosen = range ? range.map(n => sheets[n - 1]).filter(Boolean) : [...sheets];
+        if (copies <= 1) return chosen;
+        // Every copy shows one picture of each page: copies of the painted canvases took the memory of
+        // a document's worth of print-resolution pages for each copy.
+        const pictures = await Promise.all(chosen.map(sheetPicture));
+        pictureUrls.push(...pictures);
+        for (const sheet of chosen) sheet.width = sheet.height = 0;
         const out = [];
-        for (let copy = 0; copy < Math.max(1, copies); copy++) out.push(...(copy ? chosen.map(cloneSheet) : chosen));
+        for (let copy = 0; copy < copies; copy++) out.push(...chosen.map((sheet, i) => sheetImage(sheet, pictures[i])));
         return out;
       };
-      const printed = await printPages({ host, signal: printAbort.signal, capture });
-      if (!printed && !destroyed) error(new Error('The document could not be prepared for printing. Please try again.'));
+      const pictureUrls = [];
+      try {
+        const printed = await printPages({ host, signal: printAbort.signal, capture });
+        if (!printed && !destroyed) error(new Error('The document could not be prepared for printing. Please try again.'));
+      } finally { for (const url of pictureUrls) URL.revokeObjectURL(url); }
     } catch (e) { if (!destroyed) error(e); }
     finally { printing = false; if (!destroyed) printButton.disabled = !engine; }
   }
-  function cloneSheet(sheet) {
-    const copy = document.createElement('canvas');
-    copy.className = sheet.className; copy.style.cssText = sheet.style.cssText;
-    copy.width = sheet.width; copy.height = sheet.height;
-    copy.getContext('2d')?.drawImage(sheet, 0, 0);
-    return copy;
+  // A printed page as a picture its copies share (lossless, at the canvas's own resolution).
+  const sheetPicture = sheet => new Promise((resolve, reject) => sheet.toBlob(blob => blob ? resolve(URL.createObjectURL(blob)) : reject(new Error('The document could not be prepared for printing. Please try again.')), 'image/png'));
+  function sheetImage(sheet, url) {
+    const image = document.createElement('img');
+    image.className = sheet.className; image.style.cssText = sheet.style.cssText; image.alt = '';
+    image.src = url;
+    return image;
   }
   // The clipboard commands the context menu and the Edit menu share. Each works on the selection as it was when
   // chosen: a write that resolves after the selection or document moved on leaves the document alone.
@@ -160,7 +180,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       if (html && typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
         await navigator.clipboard.write([new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }), 'text/html': new Blob([html], { type: 'text/html' }) })]);
       } else await navigator.clipboard.writeText(text);
-      if (cut && !destroyed && engine === editor && revision === editor.session.revision && JSON.stringify(selection) === JSON.stringify(editor.model.range)) editor.execute(() => editor.model.replace(''));
+      if (cut && !destroyed && engine === editor && revision === editor.session.revision && JSON.stringify(selection) === JSON.stringify(editor.model.range)) editor.deleteSelection();
     } catch (e) { if (!destroyed) error(e); }
     if (!destroyed) engine?.focus();
   };
@@ -264,9 +284,14 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const button = (label, action, attrs = {}) => el('button.btn', { type: 'button', onclick: action, ...attrs }, label);
   // A tool with a shortcut names it in its tooltip and carries it for the menus that list the same command.
   const tool = (label, name, action, { shortcut = null, ...attrs } = {}) => el('button.icon-btn.canvas-tool', { type: 'button', disabled: true, 'aria-label': label, title: shortcut ? `${label} (${shortcut})` : label, dataset: { icon: name, ...(shortcut ? { shortcut } : {}) }, onclick: action, ...attrs }, iconEl(name, 19));
-  const openInput = el('input', { type: 'file', accept: '.docx', hidden: true, 'aria-label': 'Open DOCX file', onchange: () => {
+  // Open takes what Import on the documents screen takes (Hanword, Markdown, HTML, text), as File > Open says.
+  const openInput = el('input', { type: 'file', accept: P.IMPORT_ACCEPT, hidden: true, 'aria-label': 'Open DOCX file', onchange: async () => {
     const file = openInput.files?.[0]; openInput.value = '';
-    if (file) importFile(file);
+    if (!file) return;
+    // A file the picker let through under "All files" is named rather than opened as a document that then fails.
+    // A package under another name (a download saved as .zip or without an extension) still opens, as it used to.
+    if (!importableFiles([file]).length && !await isZipPackage(file)) { toast(nothingImportable([file], { picked: true }), { icon: 'alert' }); return; }
+    importFile(file);
   } });
   const error = e => toast(e?.message || String(e), { icon: 'alert', duration: 8000 });
   const download = async () => {
@@ -464,8 +489,9 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       engine.model.select(target.position); engine.caretAffinity = 'forward'; engine.caretPage = null;
       engine.focus(); engine.revealCaret(); engine.onSelection();
     },
-    pages: () => { engine?.flushPaint?.(); return engine?.canvases || []; }, currentPage: () => engine?.caretPageIndex ?? 0,
+    pages: () => engine?.canvases || [], flushPages: () => engine?.flushPaint?.(), currentPage: () => engine?.caretPageIndex ?? 0,
     search: text => { try { return engine?.model.findMatches(text, {}) || []; } catch { return []; } },
+    version: () => (engine ? [engine, engine.session.revision, engine.session.body.revision, engine.session.path, engine.model, engine.model.revision, engine.model.trackChanges] : null),
     text: () => engine?.model.text || '', selectMatch: match => engine?.selectMatch(match), highlight: matches => engine?.setFindHighlights(matches),
     headingActions: () => editorCommands.headingActions || null });
   outlinePanel.node.id = 'canvas-outline-panel';
@@ -544,9 +570,19 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     ] });
   };
   const spacingInput = (key, label) => {
+    // The value already applied (Enter, then leaving the field) is not applied again.
+    const unchanged = () => !!engine && input.value !== '' && Number(input.value) === engine.model.paragraphFormatting[key];
     const input = el('input.canvas-spacing', { type: 'number', min: 0, max: 600, step: 'any', disabled: true, 'aria-label': label, placeholder: 'Mixed', onchange: () => {
       if (input.value === '' || !input.checkValidity()) { input.reportValidity(); update(); return; }
-      engine?.setParagraphFormat({ [key]: Number(input.value) });
+      if (!unchanged()) engine?.setParagraphFormat({ [key]: Number(input.value) });
+    },
+    // Enter applies a typed value and goes back to the document, as in the indent fields, also when nothing changed.
+    onkeydown: e => {
+      if (e.key !== 'Enter' || isComposing(e)) return;
+      e.preventDefault();
+      if (input.value !== '' && !input.checkValidity()) { input.reportValidity(); return; }
+      if (input.value !== '' && !unchanged()) input.dispatchEvent(new Event('change'));
+      engine?.focus();
     } });
     return input;
   };
@@ -668,14 +704,14 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const customZoom = el('option', { value: 'custom', hidden: true });
   zoom.append(customZoom);
   const zoomControl = {
-    set(value) {
+    set(value, at) {
       singlePages();
       if (value === 'fit') { zoom.value = 'fit'; fitWidth(); syncZoom(); return; }
       const scale = Math.max(0.1, Math.min(2, Number(value)));
       const preset = [...zoom.options].find(o => o !== customZoom && Number(o.value) === scale);
       if (preset) zoom.value = preset.value;
       else { customZoom.value = String(scale); customZoom.textContent = `${Math.round(scale * 100)}%`; customZoom.hidden = false; zoom.value = customZoom.value; }
-      engine?.setZoom(scale); syncZoom();
+      engine?.setZoom(scale, at); syncZoom();
     },
     /** The zoom as chosen: 'fit' while the page follows the window's width, otherwise the scale. */
     get value() { return zoom.value === 'fit' ? 'fit' : engine?.zoom ?? 1; },
@@ -944,7 +980,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       { id: 'keyboard', label: 'Keyboard', controls: [
         { type: 'button', label: 'Customize Keyboard', hint: 'Give any command a shortcut of your own.', action: 'Customize…', run: () => editorCommands.customizeKeyboard() },
         { type: 'button', label: 'Keyboard shortcuts', hint: `${MOD_KEY}+/`, action: 'Show', run: () => editorCommands.openShortcuts() },
-        { type: 'button', label: 'KeyTips', hint: `Press and release ${IS_MAC ? 'Option' : 'Alt'} to label the ribbon with keys.`, action: 'Show', run: () => chrome.showKeyTips() },
+        { type: 'button', label: 'KeyTips', hint: `Press and release ${IS_MAC ? 'Option' : 'Alt'} to label the ribbon with keys.`, action: 'Show', closes: true, run: () => chrome.showKeyTips() },
       ] },
     ];
     return openPreferences({ sections, section, onClose: () => queueMicrotask(() => engine?.focus()) });
@@ -1027,7 +1063,11 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (andDownload) P.downloadBlob(blob, P.ensureDocx(title.value || 'Untitled document').replace(/\.docx$/i, '.pdf'));
     return blob;
   };
-  const collab = createCollaboration({ editor: () => (failed ? null : engine), pkg: () => pkg, doc, local, error, onChange: () => update(), documentName: () => title.value, user: collabUser,
+  // Edits made while the document is shared are undone through the room, not the editor's history: an earlier
+  // Design change undone afterwards would reopen the package as it was then, without them.
+  // The pictures each package had when it was opened: its parts hold their bytes, which pictures added later lack.
+  const openedAssets = new WeakMap();
+  const collab = createCollaboration({ editor: () => (failed ? null : engine), pkg: () => pkg, baseAssets: () => openedAssets.get(pkg) || Object.keys(pkg?.assets || {}), doc, local, error, onChange: () => { if (collab?.live) { designVersions.undo = []; designVersions.redo = []; } update(); }, documentName: () => title.value, user: collabUser,
     saveFirst: () => save(), exportDocx: exportDocxBlob, exportPdf: exportPdfBlob, signIn: async () => !session.signedOut || await session.signIn(), readOnly: () => !!pkg?.readOnly });
   const versionHistory = createVersionHistory({ editor: () => (failed ? null : engine), pkg: () => pkg, doc, error, author: () => session.username, live: () => collab.live,
     restoreFile: version => restoreVersionFile(version, { confirm: false }), onChange: () => fitWidth(),
@@ -1106,7 +1146,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     previewPages: async (into, max) => {
       if (!engine) return;
       await engine.fontRefresh;
-      const sheets = engine.printSheets();
+      // Only the pages shown are painted.
+      const sheets = engine.printSheets(Array.from({ length: max }, (_, i) => i));
       into.replaceChildren(...sheets.slice(0, max).map((sheet, i) => {
         const scale = 150 / sheet.width, thumb = document.createElement('canvas');
         thumb.width = Math.round(sheet.width * scale); thumb.height = Math.round(sheet.height * scale);
@@ -1489,7 +1530,10 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (doc.exporter) saveButton.disabled = false;
     refreshTitle();
   }
+  // A name typed in the title and not confirmed yet (Enter, or the keyboard leaving the field, confirms it).
+  let titleTyped = false;
   const onTitle = async () => {
+    titleTyped = false;
     const name = title.value.trim() || 'Untitled document';
     title.value = name;
     try {
@@ -1504,11 +1548,11 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     } catch (e) { title.value = doc.name; refreshTitle(); error(e); }
   };
   title.addEventListener('change', onTitle);
-  title.addEventListener('input', refreshTitle);
+  title.addEventListener('input', () => { titleTyped = true; refreshTitle(); });
   title.addEventListener('keydown', e => {
     if (isComposing(e)) return;
     if (e.key === 'Enter') { e.preventDefault(); title.blur(); engine?.focus(); }
-    if (e.key === 'Escape') { e.preventDefault(); title.value = doc.name; refreshTitle(); title.blur(); engine?.focus(); }
+    if (e.key === 'Escape') { e.preventDefault(); titleTyped = false; title.value = doc.name; refreshTitle(); title.blur(); engine?.focus(); }
   });
   doc.addEventListener('status', updateStatus);
   // An autosave refused because another window changed the file is not tried again, so the user hears of it, once
@@ -1555,12 +1599,13 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       linkTyping: (text, end) => autolinkEnabled() ? linkCandidateBefore(text, end) : null,
       preparePicture: pictureFile,
     });
+    created.onPagesPainted = pages => { if (engine === created) outlinePanel.pagesPainted(pages); };
     // Double-clicking a chart, diagram or text box edits it (insert-tab.js).
     created.onOpenDrawing = () => { if (!pkg.readOnly) editorCommands.openSelectedDrawing?.(); };
     // Undo past the editor's own history steps back through design-wide changes.
     created.onHistoryEnd = direction => {
       const list = direction === 'undo' ? designVersions.undo : designVersions.redo;
-      if (!list.length || reopening) return false;
+      if (!list.length || reopening || collab.live) return false;
       stepDesignVersion(direction);
       return true;
     };
@@ -1583,15 +1628,12 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     }
     const previous = engine, range = [...previous.model.range], scrollTop = host.scrollTop, scrollLeft = host.scrollLeft, scale = previous.zoom;
     previous.destroy(); releasePictures();
-    pkg = opened.pkg; decodedPictures = opened.images;
+    pkg = opened.pkg; decodedPictures = opened.images; openedAssets.set(pkg, Object.keys(pkg.assets || {}));
     engine = createEngine(CanvasEditor, opened.images, opened.measure);
     engine.setZoom(scale);
     const length = engine.model.text.length;
     engine.model.select(Math.min(range[0], length), Math.min(range[1], length));
-    editorCommands.restoreMarks(engine);
-    proofing.attach(engine);
-    reviewTools.attach(engine);
-    engineApi().attachShapeEditing(engine, error, () => pkg);
+    attachTools(engine);
     engine.relayout();
     host.scrollTop = scrollTop; host.scrollLeft = scrollLeft;
     doc.changed(); update(); updateStatus();
@@ -1599,9 +1641,28 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (!document.activeElement?.closest?.('.menu, .modal-root')) engine.focus();
     return true;
   }
+  /**
+   * The tools that work through the engine: paste options, proofing, table and picture gestures, review marks.
+   * A package reopened in place (a design change, or its undo) has a new engine, which needs every one of them:
+   * those left on the old one pasted from the menus into it, out of sight, and lost table and picture handling.
+   */
+  function attachTools(editor) {
+    editorCommands.restoreMarks(editor);
+    formatArea.attach(editor);
+    proofing.attach(editor);
+    tables.attach(editor);
+    reviewTools.attach(editor);
+    engineApi().attachShapeEditing(editor, error, () => pkg);
+    pictures.attach(editor);
+  }
   /** Apply a package change: transform(blob) resolves to the changed package (a Blob) or null for none. */
   async function changePackage(transform) {
-    if (!engine || pkg?.readOnly || reopening) return false;
+    // Viewing mode, and a shared document held read-only while it connects, change nothing: the reopened editor
+    // would also have come back editable.
+    if (!engine || pkg?.readOnly || engine.viewOnly || reopening) return false;
+    // The editor reopens on the changed package, which the room does not hold: the others would not get it, and
+    // the editor would stop sharing with them.
+    if (collab.live) { error(new Error('Themes, style sets, watermarks and page backgrounds cannot be changed while the document is shared. Stop sharing to change them.')); return false; }
     engine.finishComposition();
     reopening = true;
     try {
@@ -1617,6 +1678,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   }
   async function stepDesignVersion(direction) {
     const from = direction === 'undo' ? designVersions.undo : designVersions.redo, to = direction === 'undo' ? designVersions.redo : designVersions.undo;
+    if (collab.live || engine?.viewOnly) return;
     const entry = from.pop(); if (!entry) return;
     reopening = true;
     try { if (await reopenPackage(direction === 'undo' ? entry.before : entry.after)) to.push(entry); else from.push(entry); }
@@ -1625,7 +1687,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   }
   editorCommands.changePackage = changePackage;
   // The context menu's Undo and Redo also step through package-level (Design) changes.
-  editorCommands.packageHistory = () => ({ undo: designVersions.undo.length > 0, redo: designVersions.redo.length > 0 });
+  editorCommands.packageHistory = () => ({ undo: !collab.live && designVersions.undo.length > 0, redo: !collab.live && designVersions.redo.length > 0 });
   editorCommands.exportPackage = () => engine && !pkg?.readOnly ? engine.export(pkg) : null;
 
   const ready = (async () => {
@@ -1643,24 +1705,36 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     // A host that already opened the file (the local playground validates it first) hands it over once.
     const handed = doc.opened; doc.opened = null;
     const opened = handed || (doc.blob ? await openCanvasDocument(doc.blob) : await editorCommands.newDocumentDefaults?.(blank(), openCanvasDocument) || { pkg: blank(), images: new Map() });
-    pkg = opened.pkg;
+    pkg = opened.pkg; openedAssets.set(pkg, Object.keys(pkg.assets || {}));
     const images = opened.images; decodedPictures = images;
     await loadCanvasFonts();
     if (destroyed) { releasePictures(); return; }
     engine = createEngine(CanvasEditor, images, opened.measure);
-    if (importedText) {
+    // Documents keep to a number of pages. An imported file past it is described as a file too long to
+    // open, not as a limit of the "preview" it never reached.
+    const importing = action => {
+      try { action(); }
+      catch (e) {
+        const pages = /^This preview supports up to (\d+) pages/.exec(e?.message || '')?.[1];
+        if (pages) throw new Error(`This file is too long to open here. A document can have up to ${pages} pages, and this file would need more. Split it into shorter files and open each one.`);
+        throw e;
+      }
+    };
+    if (importedText) importing(() => {
       // The imported text is the starting point, not an edit: it adds no undo step.
       engine.session.run(() => { engine.model.replace(importedText); engine.model.select(0); }, () => engine.validateStory(), { record: false });
       engine.relayout();
-    }
+    });
+    // Pictures in a Markdown file or web page are not brought in yet: the notices say how many were left out.
+    const omittedPictures = importedHtml && /<img\b/i.test(importedHtml) ? new DOMParser().parseFromString(importedHtml, 'text/html').querySelectorAll('img').length : 0;
     if (importedHtml !== null) {
       const fragment = htmlFragment(importedHtml);
-      if (fragment) {
+      if (fragment) importing(() => {
         // In a new document every imported block keeps its own formatting.
         for (const p of fragment.paragraphs) p.mark = true;
         engine.session.run(() => { pasteFragment(engine.model, fragment); engine.model.select(0); }, () => engine.validateStory(), { record: false });
         engine.relayout();
-      }
+      });
     }
     if (doc.pendingImport) doc.pendingImport = null;
     if (template) {
@@ -1669,13 +1743,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
       engine.relayout();
       doc.template = null;
     }
-    editorCommands.restoreMarks(engine);
-    formatArea.attach(engine);
-    proofing.attach(engine);
-    tables.attach(engine);
-    reviewTools.attach(engine);
-    engineApi().attachShapeEditing(engine, error, () => pkg);
-    pictures.attach(engine);
+    attachTools(engine);
     rulers = createCanvasRulers({ host, surface, editor: () => engine, openParagraph: () => paragraphGeometry.click(), openPage: () => pageSetup.click() });
     // In a tablet-sized or narrow window (under 1024px) a page wider than the view at 100% opens at Fit
     // width, as on phones; desktop windows keep 100% and scroll.
@@ -1699,7 +1767,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (pkg.fieldsRecalculated && !pkg.readOnly) doc.changed();
     const previewIssues = [...(pkg.previewIssues || []), ...engine.storyLayout.unsupported.map(issue =>
       `${issue.path}, page ${issue.page + 1}: ${issue.message}`)];
-    const notices = [...(pkg.readOnly ? previewNotice({ ...pkg, previewIssues }) : []), ...pictureFontNotice(pkg)];
+    // A converted Hanword file says it is an editable copy, and lists what its conversion approximated.
+    const notices = [importNotice(doc.importInfo), ...(pkg.readOnly ? previewNotice({ ...pkg, previewIssues }) : []), ...pictureFontNotice(pkg), ...omittedPictureNotice(omittedPictures)].filter(Boolean);
     if (pkg.fieldRefreshIssues?.length) notices.push(el('div', {}, 'Some page references could not be updated. Cached results were retained. ', el('ul', {}, ...[...new Set(pkg.fieldRefreshIssues)].map(issue => el('li', {}, issue)))));
     message.replaceChildren(...notices);
     // update() may already have run while the editor attached; the script-font notice it added was just replaced.
@@ -1749,6 +1818,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     async flush() {
       if (destroyed) return true;
       engine?.finishComposition();
+      // A name still being typed in the title is the document's: All Documents and the window's close button leave the keyboard there.
+      if (titleTyped) await onTitle();
       // A clean document still waits for a rename or copy under way (doc.flush), or leaving would cancel it.
       if (doc.dirty && !doc.exporter) {
         // A template not laid out yet holds nothing of the user's: leaving it asks nothing.

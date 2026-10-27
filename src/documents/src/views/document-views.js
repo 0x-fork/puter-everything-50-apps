@@ -220,9 +220,7 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
       const from = engine.zoom, to = Math.max(0.1, Math.min(2, Math.round(from * Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0025)) * 100) / 100));
       if (to === from) return;
       // Keep the point under the pointer where it is.
-      const box = host.getBoundingClientRect(), x = e.clientX - box.left + host.scrollLeft, y = e.clientY - box.top + host.scrollTop;
-      w.setZoom?.(to);
-      host.scrollLeft = x * to / from - (e.clientX - box.left); host.scrollTop = y * to / from - (e.clientY - box.top);
+      w.setZoom?.(to, { clientX: e.clientX, clientY: e.clientY });
     } else if (sideToSide && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       // Side to side: the wheel turns pages across.
       e.preventDefault(); host.scrollLeft += e.deltaY;
@@ -231,7 +229,7 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
   // Safari's pinch gesture.
   let gestureZoom = null;
   host.addEventListener('gesturestart', e => { e.preventDefault(); gestureZoom = editor()?.zoom ?? 1; });
-  host.addEventListener('gesturechange', e => { e.preventDefault(); if (gestureZoom && mode !== 'read' && mode !== 'outline') w.setZoom?.(Math.max(0.1, Math.min(2, Math.round(gestureZoom * e.scale * 100) / 100))); });
+  host.addEventListener('gesturechange', e => { e.preventDefault(); if (gestureZoom && mode !== 'read' && mode !== 'outline') w.setZoom?.(Math.max(0.1, Math.min(2, Math.round(gestureZoom * e.scale * 100) / 100)), { clientX: e.clientX, clientY: e.clientY }); });
 
   /** View → Zoom: presets, fit choices, many pages and a percentage, previewed live. */
   function zoomDialog() {
@@ -259,6 +257,21 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
     const mark = (cols, rowsCount) => { manyLabel.textContent = `${cols} × ${rowsCount} pages`; for (const cell of grid.querySelectorAll('.view-many-cell')) cell.classList.toggle('is-on', cell.dataset.col <= cols && cell.dataset.row <= rowsCount); };
     grid.addEventListener('mouseleave', () => mark(...many));
     mark(...many);
+    // One Tab stop, on the pages chosen; the arrows move over the cells (marking as they go), Home and End along a row.
+    const cells = [...grid.querySelectorAll('.view-many-cell')];
+    const cellAt = (col, row) => cells.find(cell => Number(cell.dataset.col) === col && Number(cell.dataset.row) === row);
+    const tabStop = target => { for (const cell of cells) cell.tabIndex = cell === target ? 0 : -1; };
+    tabStop(cellAt(...many) || cells[0]);
+    grid.addEventListener('focusin', e => { if (e.target.matches?.('.view-many-cell')) tabStop(e.target); });
+    grid.addEventListener('keydown', e => {
+      const cell = e.target.closest?.('.view-many-cell');
+      if (!cell || isComposing(e) || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const col = Number(cell.dataset.col), row = Number(cell.dataset.row);
+      const keys = { ArrowRight: [col + 1, row], ArrowLeft: [col - 1, row], ArrowDown: [col, row + 1], ArrowUp: [col, row - 1], Home: [1, row], End: [4, row] };
+      if (!keys[e.key]) return;
+      e.preventDefault();
+      cellAt(...keys[e.key])?.focus();
+    });
     const disabledFit = mode !== 'print';
     if (disabledFit) for (const r of radios.slice(3)) { r.disabled = true; r.parentElement.title = 'Available in Print Layout'; }
     // The choice the zoom is at now starts checked: 100% at 100%, Page width while the page follows the window.

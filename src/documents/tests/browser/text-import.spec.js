@@ -37,7 +37,7 @@ async function state(page, text) {
 async function importFile(page, name, mimeType, source) {
   await page.goto('/mock.html#/new');
   await expect((await onTab(page, 'home')).getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
-  await page.locator('input[type=file][accept=".docx"]').setInputFiles({ name, mimeType, buffer: Buffer.from(source) });
+  await page.locator('input[type=file][aria-label="Open DOCX file"]').setInputFiles({ name, mimeType, buffer: Buffer.from(source) });
   await expect(page.getByRole('textbox', { name: 'Document name' })).toHaveValue(name.replace(/\.\w+$/, ''));
   await showAllTools(page); // the Paragraph style list is in the Formatting Pane
 }
@@ -113,6 +113,21 @@ test('a text file too long to open shows why, with ways forward', async ({ page 
   await (await chooser).setFiles({ name: 'long.txt', mimeType: 'text/plain', buffer: Buffer.from(lines) });
   const message = page.locator('.canvas-message.editor-error');
   await expect(message).toBeVisible({ timeout: 15000 });
-  await expect(message).toContainText('up to 200 pages');
+  // In words about the file, not about a preview it never reached.
+  await expect(message).toContainText('This file is too long to open here. A document can have up to 200 pages, and this file would need more. Split it into shorter files and open each one.');
+  await expect(message).not.toContainText('preview');
   await expect(message.getByRole('button', { name: 'Back to documents', exact: true })).toBeInViewport();
+});
+
+test('a Markdown file or web page says how many of its pictures were left out', async ({ page }) => {
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  await importFile(page, 'pictures.md', 'text/markdown', `# Trip\n\n![Beach](${png}) and ![Hill](https://example.com/hill.jpg)\n`);
+  await expect(input(page)).toHaveValue('Trip\nand');
+  await expect(page.locator('[data-omitted-pictures]')).toHaveText('The 2 pictures in this file were not imported: pictures in Markdown and web pages are left out. Add them with Insert > Pictures.');
+  await importFile(page, 'page.html', 'text/html', `<p>One <img src="${png}" alt="dot"> picture</p>`);
+  await expect(input(page)).toHaveValue('One picture');
+  await expect(page.locator('[data-omitted-pictures]')).toHaveText(/^The picture in this file was not imported/);
+  await importFile(page, 'plain.md', 'text/markdown', '# No pictures\n');
+  await expect(input(page)).toHaveValue('No pictures');
+  await expect(page.locator('[data-omitted-pictures]')).toHaveCount(0);
 });

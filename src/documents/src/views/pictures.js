@@ -62,6 +62,10 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
   const isPicture = image => !!image && kind(image) === 'picture';
   const isShape = image => !!image && ['shape', 'textBox'].includes(kind(image));
   const formattable = image => !!image && ['picture', 'shape', 'textBox', 'group'].includes(kind(image)) && !image.anchor?.relativeSize;
+  // Drawings in table cells do not wrap text yet: they stay in line, or in front of or behind the text.
+  const WRAPPING = ['square', 'tight', 'through', 'topAndBottom'];
+  const inTableCell = image => !!image && !!ready()?.model.paragraphs.some(p => p.cellId && p.runs.some(r => r.image === image));
+  const CELL_HINT = 'Not in table cells yet';
   const theme = () => themeColors(pkg()?.parts || {});
   const palette = () => ({ ...presets.FALLBACK_THEME, ...(theme() || {}) });
   /** The drawings Arrange commands act on: the multi-selection, or the selected drawing. */
@@ -161,12 +165,14 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
     }),
   };
   const themedColor = color => typeof color === 'object' && color?.scheme ? (theme() ? color : presets.resolveColor(color, palette())) : color;
-  /** The picture's pixel size at 96 pixels per inch, kept within the text column. */
+  /** The picture's pixel size at 96 pixels per inch, kept within the text column (or its table cell). */
   function naturalSize() {
     const engine = ready(); if (!engine) return null;
     const source = pictureSource(engine, selected());
     if (!source?.width) return null;
-    const page = engine.model.pageSettings, column = Math.max(IN, (page.width - page.left - page.right) * 635);
+    const model = engine.model, page = model.sectionPageSettings, context = model.tableContext;
+    const cell = context && engine.selectionLayout?.cells.find(box => box.id === context.cell.id);
+    const column = cell ? Math.max(IN / 4, (cell.width * 15 - context.cell.margins.left - context.cell.margins.right) * 635) : Math.max(IN, (page.width - page.left - page.right) * 635);
     const scale = Math.min(1, column / (source.width * EMU_PER_PX));
     return { width: Math.round(source.width * EMU_PER_PX * scale), height: Math.round(source.height * EMU_PER_PX * scale) };
   }
@@ -458,7 +464,7 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
     const engine = ready(), image = selected(); if (!engine || !image) return;
     engine.finishComposition();
     const { openLayoutDialog } = await import('./size-position.js');
-    openLayoutDialog({ engine, image, describe, tab, kind: kind(image), apply: async (edit, label) => {
+    openLayoutDialog({ engine, image, describe, tab, kind: kind(image), inTableCell: inTableCell(image), apply: async (edit, label) => {
       // Failures are shown in the dialog, which stays open.
       const engine = ready(), current = engine?.model.selectedImage;
       if (!current) throw new Error('Select the object again.');
@@ -495,7 +501,8 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
       { separator: true }, { custom: form }, ...more];
   }
   function pickColor(anchor, label, value, onPick, none) {
-    return openMenu({ anchor, label, className: 'pic-color-menu', minWidth: 260, items: colorItems({ label, value, onPick, none }), onClose: () => editor()?.focus() });
+    // Opened from the Format pane, which keeps the keyboard: closing goes back to the pane's color button.
+    return openMenu({ anchor, label, className: 'pic-color-menu', minWidth: 260, items: colorItems({ label, value, onPick, none }) });
   }
   const weightItems = (current, onPick) => presets.LINE_WEIGHTS.map(([label, width]) => ({ label, radio: true, checked: current === width, onSelect: () => onPick(width) }));
   const dashItems = (current, onPick) => presets.DASHES.map(([label, dash]) => ({ label, radio: true, checked: current === dash, onSelect: () => onPick(dash) }));
@@ -605,8 +612,9 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
   }
   function wrapItems() {
     const image = selected(), mode = wrapModeOf(image), ok = !!image && editable();
-    const chartLike = !!image && !formattable(image);
-    const option = (label, value, icon) => ({ label, icon, radio: true, checked: mode === value, disabled: !ok || chartLike && !['inline', 'square', 'topAndBottom', 'behind', 'front'].includes(value), onSelect: () => setWrap(value) });
+    const chartLike = !!image && !formattable(image), cell = inTableCell(image);
+    const option = (label, value, icon) => ({ label, icon, radio: true, checked: mode === value, disabled: !ok || chartLike && !['inline', 'square', 'topAndBottom', 'behind', 'front'].includes(value) || cell && WRAPPING.includes(value) && mode !== value,
+      ...(cell && WRAPPING.includes(value) && mode !== value ? { hint: CELL_HINT } : {}), onSelect: () => setWrap(value) });
     const vertical = image?.anchor && describe(image)?.frame?.vertical?.relativeFrom;
     const canFix = !!image?.anchor && image.anchor.wrap === 'none';
     return [option('In Line with Text', 'inline', 'wrapInline'), option('Square', 'square', 'wrapSquare'), option('Tight', 'tight', 'wrapTight'), option('Through', 'through', 'wrapThrough'),
@@ -617,11 +625,11 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
       { separator: true }, { label: 'More Layout Options…', icon: 'position', disabled: !ok, onSelect: () => openSizePosition('wrapping') }];
   }
   function positionItems() {
-    const image = selected(), ok = !!image && editable() && formattable(image);
+    const image = selected(), ok = !!image && editable() && formattable(image) && !inTableCell(image);
     const grid = el('div.menu-custom-grid.pic-position-grid', { role: 'group', 'aria-label': 'With Text Wrapping', dataset: { columns: '3' } },
       ...POSITION_PRESETS.map(preset => el('button.swatch.pic-position-item', { type: 'button', role: 'menuitem', tabindex: -1, disabled: !ok, 'aria-label': `Position in ${preset[1]} with Square Text Wrapping`, title: `Position in ${preset[1]} with Square Text Wrapping`,
         onclick: () => { closeMenu(); positionPreset(preset); } }, positionThumb(preset[2], preset[3]))));
-    return [{ label: 'In Line with Text', radio: true, checked: wrapModeOf(image) === 'inline', disabled: !ok, onSelect: () => setWrap('inline') }, { header: 'With Text Wrapping' }, { custom: grid },
+    return [{ label: 'In Line with Text', radio: true, checked: wrapModeOf(image) === 'inline', disabled: !image || !editable() || !formattable(image), onSelect: () => setWrap('inline') }, { header: inTableCell(image) ? `With Text Wrapping (${CELL_HINT.toLowerCase()})` : 'With Text Wrapping' }, { custom: grid },
       { separator: true }, { label: 'More Layout Options…', disabled: !image || !editable(), onSelect: () => openSizePosition('position') }];
   }
   const floating = () => !!selected() && isPositionedImage(selected()) && editable();
@@ -816,9 +824,9 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
       return { style, button };
     });
     pictureGallery.append(...pictureStyleButtons.map(i => i.button));
-    const pictureStylesMore = command('More Picture Styles', 'more', e => openMenu({ anchor: pictureStylesMore, label: 'Picture Styles', pointer: !!e?.detail, onClose: kit.focusEditor,
+    const pictureStylesMore = command('More Picture Styles', 'more', e => openMenu({ anchor: pictureStylesMore, label: 'Picture Styles', pointer: !!e?.detail, onClose: e?.detail ? kit.focusEditor : null,
       items: kit.inDocument(galleryItems([{ columns: 5, items: presets.PICTURE_STYLES.map(style => ({ label: style.name, preview: styleThumb(pictureSource(ready(), selected()), style, palette()), onSelect: () => commands.pictureStyle(style) })) }], { size: 'small', label: 'Picture Styles' })) }));
-    pictureStylesMore.classList.add('ribbon-gallery-more');
+    pictureStylesMore.classList.add('ribbon-gallery-more'); pictureStylesMore.setAttribute('aria-haspopup', 'menu');
     track(pictureStylesMore, pic);
     const border = menuButton('Picture Border', 'pictureBorder', () => outlineItems('Picture Border'), { size: 'small', text: 'Picture Border' });
     const effects = menuButton('Picture Effects', 'pictureEffects', () => effectsItems('Picture Effects'), { size: 'small', text: 'Picture Effects' });
@@ -857,9 +865,9 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
       }));
     };
     renderShapeGallery();
-    const shapeStylesMore = command('More Shape Styles', 'more', e => openMenu({ anchor: shapeStylesMore, label: 'Shape Styles', pointer: !!e?.detail, onClose: kit.focusEditor,
+    const shapeStylesMore = command('More Shape Styles', 'more', e => openMenu({ anchor: shapeStylesMore, label: 'Shape Styles', pointer: !!e?.detail, onClose: e?.detail ? kit.focusEditor : null,
       items: kit.inDocument(galleryItems(presets.SHAPE_STYLE_KINDS.map(k => ({ header: k.name, columns: 7, items: presets.shapeStyles(!!theme()).filter(s => s.kind === k.id).map(style => ({ label: style.name, preview: shapeStyleThumb(style, palette(), { width: 36, height: 28, text: 'Abc' }), onSelect: () => commands.shapeStyle(style) })) })), { size: 'small', label: 'Shape Styles' })) }));
-    shapeStylesMore.classList.add('ribbon-gallery-more');
+    shapeStylesMore.classList.add('ribbon-gallery-more'); shapeStylesMore.setAttribute('aria-haspopup', 'menu');
     track(shapeStylesMore, () => editable() && (isShape(selected())));
     const fillButton = menuButton('Shape Fill', 'shapeFill', () => fillItems('Shape Fill'), { size: 'small', text: 'Shape Fill' });
     const outlineButton = menuButton('Shape Outline', 'shapeOutline', () => outlineItems('Shape Outline'), { size: 'small', text: 'Shape Outline' });
@@ -1014,8 +1022,9 @@ export function createPictures({ editor, pkg, error, onChange = () => {}, base =
         const image = selected(); if (!image) return;
         const mode = wrapModeOf(image);
         const icons = [['In Line with Text', 'inline', 'wrapInline'], ['Square', 'square', 'wrapSquare'], ['Tight', 'tight', 'wrapTight'], ['Through', 'through', 'wrapThrough'], ['Top and Bottom', 'topAndBottom', 'wrapTopBottom'], ['Behind Text', 'behind', 'behindText'], ['In Front of Text', 'front', 'inFront']];
+        const cell = inTableCell(image);
         const grid = el('div.menu-custom-grid.pic-layout-grid', { role: 'group', 'aria-label': 'Text wrapping', dataset: { columns: '4' } },
-          ...icons.map(([label, value, icon]) => el('button.swatch.pic-layout-item', { type: 'button', role: 'menuitemradio', tabindex: -1, 'aria-checked': String(mode === value), 'aria-label': label, title: label, disabled: !editable() || (!formattable(image) && ['tight', 'through'].includes(value)),
+          ...icons.map(([label, value, icon]) => el('button.swatch.pic-layout-item', { type: 'button', role: 'menuitemradio', tabindex: -1, 'aria-checked': String(mode === value), 'aria-label': label, title: cell && WRAPPING.includes(value) ? `${label} (${CELL_HINT.toLowerCase()})` : label, disabled: !editable() || (!formattable(image) && ['tight', 'through'].includes(value)) || cell && WRAPPING.includes(value) && mode !== value,
             onclick: () => { closeMenu(); setWrap(value); } }, commandIconEl(icon, 20))));
         openMenu({ anchor, label: 'Layout Options', className: 'pic-layout-menu', minWidth: 210, items: [{ header: 'In Line with Text and With Text Wrapping' }, { custom: grid }, { separator: true },
           { label: 'Move with Text', radio: true, checked: !!image.anchor && describe(image)?.frame?.vertical?.relativeFrom !== 'page', disabled: !image.anchor || image.anchor.wrap !== 'none', onSelect: () => setMoveWithText(true) },

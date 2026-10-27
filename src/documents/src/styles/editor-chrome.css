@@ -158,6 +158,8 @@
 .ribbon-split.is-large { flex-direction: column; }
 .ribbon-split.is-large > .ribbon-large { height: 50px; padding-top: 1px; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .ribbon-split.is-large > .ribbon-split-arrow { width: 100%; height: 16px; border-top-left-radius: 0; border-top-right-radius: 0; }
+.ribbon-split.is-large > .ribbon-split-arrow:has(> .ribbon-split-label) { gap: 3px; padding: 0 4px; font-size: 12px; line-height: 1.1; white-space: nowrap; }
+:is(.ribbon-card, .ribbon-flyout) button:disabled > .ribbon-split-label { opacity: 0.5; }
 .ribbon-card button.ribbon-split-arrow, .ribbon-flyout button.ribbon-split-arrow {
   display: inline-flex; align-items: center; justify-content: center; min-width: 14px; width: 14px; height: 24px; padding: 0;
   border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--ed-ink-2);
@@ -259,6 +261,12 @@
 .ed-status-right { margin-left: auto; flex: none; }
 /* Between phone and desktop widths the language gives way, so the zoom controls stay whole. */
 .ed-status-left { flex: 0 1 auto; overflow: hidden; }
+/* The narrowest phones (and a desktop window zoomed to 400%) have no room for both halves on one line: the
+   right half goes under the left rather than cutting the page and word counts off. */
+@media (max-width: 420px) {
+  .ed-statusbar.canvas-statusbar { flex-wrap: wrap; row-gap: 0; }
+  .ed-status-left { flex-shrink: 0; max-width: 100%; }
+}
 .ed-status-item { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; white-space: nowrap; }
 button.ed-status-item:hover, .ed-status-view:hover, .ed-zoom-step:hover { background: var(--ed-hover); }
 .ed-statusbar .canvas-text-mode { margin-left: 0; padding: 0 6px; }
@@ -345,7 +353,8 @@ button.ed-status-item:hover, .ed-status-view:hover, .ed-zoom-step:hover { backgr
 /* Sort Text dialog */
 .ed-sort-row { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 8px; }
 .ed-sort-value { font-size: 13px; color: var(--ink); }
-.ed-sort-order { display: flex; gap: 18px; border: 0; padding: 0 0 0 98px; margin: 0; font-size: 13px; }
+/* A fieldset is as wide as its content by default; this one wraps its choices instead of widening a phone's sheet. */
+.ed-sort-order { display: flex; flex-wrap: wrap; gap: 8px 18px; min-width: 0; border: 0; padding: 0 0 0 98px; margin: 0; font-size: 13px; }
 .ed-sort-order label, .ed-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 
 /* Format Painter: a brush cursor over the pages while it is armed. */

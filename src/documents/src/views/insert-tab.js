@@ -19,12 +19,12 @@ import { COVER_DESIGNS, insertCoverPage, removeCoverPage, coverPageRange } from 
 import { HEADER_DESIGNS, PAGE_NUMBER_DESIGNS, writeStoryLines, removePageNumberParagraphs, storyPageField } from '../engine/header-footer-designs.js';
 import { TEXT_BOX_DESIGNS, WORDART_STYLES, WORDART_PROMPT, textBoxParams, wordArtParams, signatureLineParams, textShapeXml } from '../engine/text-designs.js';
 import { SHAPE_PRESETS, LINE_PRESETS, UNFILLED_PRESETS, DEFAULT_SHAPE_STYLE, shapeDrawingXml } from '../engine/authored-shapes.js';
-import { readDrawingFragment, placeDrawing, freshDrawingAssetId, nextDrawingId, nextDrawingOrder, EMU_PER_INCH } from '../engine/inserted-drawings.js';
+import { readDrawingFragment, placeDrawing, freshDrawingAssetId, nextDrawingId, nextDrawingOrder, carriedFrame, xmlEscape, EMU_PER_INCH } from '../engine/inserted-drawings.js';
 import { pictureFragment, fittedSize } from '../engine/picture-insert.js';
 import { imageInfo, MAX_IMAGE_SIDE, MAX_IMAGE_PIXELS } from '../engine/images.js';
 import { diagramDrawingXml, parseDiagramDescription, DIAGRAM_LAYOUTS } from '../engine/diagram-builder.js';
 import { insertBodyField, fieldInstruction, evaluateField, documentProperties, setFieldContextProvider, DOCUMENT_PROPERTY_NAMES, formatDatePicture } from '../engine/field-results.js';
-import { linearToOmml, ommlToLinear, EQUATION_GALLERY } from '../engine/math-linear.js';
+import { linearToOmml, ommlToLinear, ommlToEditableLinear, EQUATION_GALLERY } from '../engine/math-linear.js';
 import { ommlToMathml } from '../engine/omml-mathml.js';
 import { dropCapState, setDropCap } from '../engine/drop-caps.js';
 import { iconSvg } from '../lib/icon-library.js';
@@ -76,7 +76,13 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
   const fail = e => { error(e); editor()?.focus(); };
   const toBody = engine => { engine.finishComposition(); if (engine.session.path !== null) engine.editStory(null); };
   const activeKind = engine => engine?.session.path ? engine.pageStories?.stories[engine.session.path]?.kind : null;
-  const textWidth = engine => { const p = engine.model.pageSettings; return Math.max(EMU_PER_INCH, (p.width - p.left - p.right - (p.gutterAtTop ? 0 : p.gutter || 0)) * TWIP_EMU); };
+  // The width a new drawing fits at the caret: its section's text width, or its table cell's.
+  const textWidth = engine => {
+    const model = engine.model, p = model.sectionPageSettings, context = model.tableContext;
+    const box = context && engine.selectionLayout?.cells.find(cell => cell.id === context.cell.id);
+    const twips = box ? box.width * 15 - context.cell.margins.left - context.cell.margins.right : p.width - p.left - p.right - (p.gutterAtTop ? 0 : p.gutter || 0);
+    return Math.max(box ? EMU_PER_INCH / 2 : EMU_PER_INCH, twips * TWIP_EMU);
+  };
   const title = () => documentProperties(pkg()?.parts || {}).title || String(docName() || '').replace(/\.docx$/i, '') || 'Document Title';
   const today = () => new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
   /** Run an editor transaction, reporting failures; returns whether it applied. */
@@ -106,7 +112,16 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
   const afterSelectedDrawing = engine => { if (engine.model.selectedImage) { engine.model.select(engine.model.range[1]); engine.syncInput(); } };
   const sceneFragment = (engine, xml) => readDrawingFragment(xml, { sourceParts: pkg().parts, assetId: freshDrawingAssetId(engine.model) });
   const withDescription = (xml, text) => text ? xml.replace(/(<wp:docPr [^>]*?)(\/?>)/, (_, open, close) => `${open} descr="${String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/\n/g, '&#10;')}"${close}`) : xml;
-  const selectedText = engine => { const [a, b] = engine.model.range; return a === b ? '' : engine.model.text.slice(a, b).replace(/[\uFFFC\f\v\u000e]/g, '').trim(); };
+  // The text a new text box or WordArt takes from the selection it replaces. A selection that holds more than
+  // text (pictures, equations, notes, page or column breaks) or reaches across table cells stays where it is,
+  // and the new object goes after it.
+  const selectedText = engine => {
+    const model = engine.model, [a, b] = model.range;
+    if (a === b) return '';
+    const text = model.text.slice(a, b);
+    if (/[\uFFFC\f\u000e]/.test(text) || model.activeCellBlock || new Set(model.selectedParagraphs.map(p => p.cellId || null)).size > 1) { model.select(b); engine.syncInput(); return ''; }
+    return text.replace(/\v/g, '\n').trim();
+  };
 
   /* ---- Pages ---- */
   function coverPreview(design) {
@@ -134,7 +149,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
   }
 
   /* ---- Pictures ---- */
-  async function insertPictureFile(file) {
+  async function insertPictureFile(file, { alt = '' } = {}) {
     const engine = ready(); if (!engine || !file) return;
     try {
       engine.finishComposition(); afterSelectedDrawing(engine);
@@ -149,7 +164,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
         return;
       }
       // Other raster formats (GIF, WebP, BMP, AVIF) are stored as PNG, which every DOCX reader shows.
-      await engine.insertImageFile(await pictureFile(file)); onChange();
+      await engine.insertImageFile(await pictureFile(file), alt ? { alt } : {}); onChange();
     } catch (e) { fail(e); }
   }
   const pictureInput = el('input', { type: 'file', accept: 'image/png,image/jpeg,image/tiff,image/gif,image/webp,image/bmp,image/svg+xml,.svg,.tif,.tiff', hidden: true, 'aria-label': 'Insert picture file',
@@ -164,7 +179,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
           let image;
           try { image = await P.makeImage(prompt); } catch (e) { throw generationError(e); }
           return imageFileFromSource(image, prompt);
-        }, onInsert: file => insertPictureFile(file) }) }] : []),
+        }, onInsert: (file, { alt } = {}) => insertPictureFile(file, { alt }) }) }] : []),
       ...(canCapture() ? [{ separator: true }, { label: 'Screenshot…', icon: 'screenshot', disabled: !engine, onSelect: screenshot }] : []),
     ];
   }
@@ -191,7 +206,8 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     openIconsDialog({ onClose: () => queueMicrotask(() => editor()?.focus()), onInsert: async (icons, color) => {
       for (const icon of icons) {
         const svg = iconSvg(icon.id, { color, size: 96 }), { png } = await rasterize(new Blob([iconSvg(icon.id, { color, size: 192 })], { type: 'image/svg+xml' }), 192);
-        const ok = await insertDrawing((engine, id) => pictureFragment(engine.model, pkg().parts, { png, svg, width: EMU_PER_INCH, height: EMU_PER_INCH, id, name: `Graphic ${id}`, descr: icon.name, stem: 'canvas-icon' }), { body: false });
+        // An inch square, or narrower to fit a narrow table cell.
+        const ok = await insertDrawing((engine, id) => { const side = Math.round(Math.min(EMU_PER_INCH, textWidth(engine))); return pictureFragment(engine.model, pkg().parts, { png, svg, width: side, height: side, id, name: `Graphic ${id}`, descr: icon.name, stem: 'canvas-icon' }); }, { body: false });
         if (!ok) break;
         // The next icon follows this one rather than replacing it.
         const engine = ready(); if (engine) { engine.model.select(engine.model.range[1]); engine.syncInput(); }
@@ -266,10 +282,17 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     const engine = ready(); if (!engine) return;
     const current = layout ? null : selectedDiagram();
     openDiagramDialog({ initial: current || (layout ? { layout } : null), editing: !!current, onClose: () => queueMicrotask(() => editor()?.focus()), onInsert: ({ layout, colors, items }) => {
-      insertDrawing((engine, id) => {
+      insertDrawing(async (engine, id) => {
         const width = Math.min(textWidth(engine), 6 * EMU_PER_INCH), height = Math.round(Math.min(width * 0.56, 3.5 * EMU_PER_INCH));
         const size = current ? { width: current.image.width, height: current.image.height } : { width, height };
-        return sceneFragment(engine, diagramDrawingXml({ layout, items, colors, id, ...size, anchor: current?.image.anchor || null }));
+        const fragment = await sceneFragment(engine, diagramDrawingXml({ layout, items, colors, id, ...size, anchor: current?.image.anchor || null }));
+        if (!current) return fragment;
+        // An edited diagram keeps its frame (position, wrapping and its outline, distances, title, decorative
+        // mark, locks); only its shapes and the outline kept as its description are new.
+        const { image } = current;
+        const shell = carriedFrame(image.shell, fragment.image.shell, new Set())
+          .replace(/(<wp:docPr\b[^>]*?)\sdescr="[^"]*"/, '$1').replace(/<wp:docPr\b/, `$& descr="${xmlEscape(fragment.image.alt)}"`);
+        return { ...fragment, image: { ...fragment.image, ...(image.anchor ? { anchor: image.anchor } : {}), ...(image.title !== undefined ? { title: image.title } : {}), ...(image.decorative !== undefined ? { decorative: image.decorative } : {}), name: image.name, shell } };
       }, { replace: current?.image || null });
     } });
   }
@@ -403,6 +426,8 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
   }
 
   /* ---- Text boxes, WordArt, signature lines ---- */
+  // Drawings in table cells do not wrap text yet: one placed in a cell sits in front of the text.
+  const inCell = (engine, params) => engine.model.tableContext && params.anchor ? { ...params, anchor: { ...params.anchor, wrap: 'none' } } : params;
   function textBoxPreview(design) {
     const fill = design.shape.fill ? `#${design.shape.fill}` : 'none', stroke = design.shape.line ? `#${design.shape.line}` : 'none';
     const w = Math.min(70, design.width * 11), h = Math.min(90, design.height * 11), x = design.align === 'right' ? 80 - w : design.align === 'center' ? (85 - w) / 2 : 6, y = 26;
@@ -418,7 +443,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
       prompt = text ? null : design.prompt;
       if (rect) engine.model.select(rect.position);
       const placement = rect ? { width: rect.dragged ? Math.max(EMU_PER_INCH / 4, rect.width) : null, height: rect.dragged ? Math.max(EMU_PER_INCH / 8, rect.height) : null, anchor: { horizontal: 'page', vertical: 'page', x: rect.x, y: rect.y, wrap: 'square', behind: false, order } } : {};
-      return sceneFragment(engine, textShapeXml(textBoxParams(design, { id, order, text, textWidth: textWidth(engine), ...placement })));
+      return sceneFragment(engine, textShapeXml(inCell(engine, textBoxParams(design, { id, order, text, textWidth: textWidth(engine), ...placement }))));
     }, { edit: () => ({ select: prompt }) });
   }
   function textBoxItems() {
@@ -438,13 +463,13 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     insertDrawing((engine, id, order) => {
       const text = selectedText(engine);
       prompt = text ? null : WORDART_PROMPT;
-      return sceneFragment(engine, textShapeXml(wordArtParams(style, { id, order, text: text || WORDART_PROMPT, textWidth: textWidth(engine) })));
+      return sceneFragment(engine, textShapeXml(inCell(engine, wordArtParams(style, { id, order, text: text || WORDART_PROMPT, textWidth: textWidth(engine) }))));
     }, { edit: () => ({ select: prompt }) });
   }
   function insertSignatureLine() {
     if (!ready()) return;
     openSignatureDialog({ onClose: () => queueMicrotask(() => editor()?.focus()), onInsert: options => insertDrawing((engine, id, order) =>
-      sceneFragment(engine, withDescription(textShapeXml(signatureLineParams({ ...options, id, order })), `Signature line${options.signer ? ` for ${options.signer}` : ''}${options.instructions ? `. ${options.instructions}` : ''}`))) });
+      sceneFragment(engine, withDescription(textShapeXml(inCell(engine, signatureLineParams({ ...options, id, order, width: textWidth(engine) }))), `Signature line${options.signer ? ` for ${options.signer}` : ''}${options.instructions ? `. ${options.instructions}` : ''}`))) });
   }
 
   /* ---- Drop cap ---- */
@@ -555,19 +580,22 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
         text = source.text.replace(/[\uFFFC]/g, '').replace(/[\f\u000e]/g, '\n');
         if (!fragment) toast('Pictures, tables and fields in that file were inserted as text.', { icon: 'info' });
       } else {
-        // Decoded as opening the file decodes it: a byte order mark names UTF-16 (Notepad's "Unicode"), and a
+        // Decoded and read as opening the file reads it: a byte order mark names UTF-16 (Notepad's "Unicode"), and a
         // file that is not UTF-8 is read in the code page it was written in rather than as replacement characters.
-        const { decodeTextFile } = await import('../lib/importers.js');
-        const raw = decodeTextFile(await file.arrayBuffer(), /\.html?$/i.test(file.name) ? 'html' : null);
-        if (/\.(md|markdown)$/i.test(file.name)) { const { markdownHtml } = await import('../lib/markdown-html.js'); fragment = formatted ? htmlFragment(markdownHtml(raw)) : null; text = raw; }
-        else if (/\.html?$/i.test(file.name)) {
-          // Without formatting (in a table cell, say) the page's text goes in as its paragraphs, not as the markup's
-          // raw text content, which runs paragraphs together and includes the text of scripts and styles.
-          const converted = htmlFragment(raw);
+        // A web page gives its body without hidden content, menus and form controls, Markdown leaves out its front
+        // matter, and control characters go.
+        const { decodeTextFile, toInsertPayload } = await import('../lib/importers.js');
+        const kind = /\.(md|markdown)$/i.test(file.name) ? 'markdown' : /\.html?$/i.test(file.name) ? 'html' : 'text';
+        const raw = toInsertPayload(decodeTextFile(await file.arrayBuffer(), kind), kind).value;
+        if (kind !== 'text') {
+          // Without formatting (in a table cell, or a document with notes or fields) a web page's or Markdown file's
+          // text goes in as its paragraphs, not as the markup: the raw text content of a page runs paragraphs
+          // together and includes the text of scripts and styles, and Markdown would show its # and ** marks.
+          const converted = htmlFragment(kind === 'markdown' ? (await import('../lib/markdown-html.js')).markdownHtml(raw) : raw);
           fragment = formatted ? converted : null;
           text = converted ? converted.paragraphs.map(p => p.text).join('\n') : '';
         }
-        else text = raw.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+        else text = raw.replace(/\n+$/, '');
       }
       run(engine, () => fragment ? pasteFragment(engine.model, fragment) : engine.model.replace(text));
     } catch (e) { fail(e); }
@@ -609,7 +637,7 @@ export function createInsert({ editor, pkg, error, base = {}, docName = () => ''
     const engine = ready(); if (!engine) return;
     engine.finishComposition();
     const current = initial ? null : selectedMath();
-    openEquationDialog({ initial: initial?.linear ?? (current ? ommlToLinear(current.math.xml) : ''), display: initial?.display ?? /oMathPara/.test(current?.math.xml || ''), editing: !!current,
+    openEquationDialog({ initial: initial?.linear ?? (current ? ommlToEditableLinear(current.math.xml) : ''), display: initial?.display ?? /oMathPara/.test(current?.math.xml || ''), editing: !!current,
       onClose: () => queueMicrotask(() => editor()?.focus()), onInsert: placeEquation });
   }
   function equationItems() {

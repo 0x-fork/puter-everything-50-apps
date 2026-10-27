@@ -192,6 +192,52 @@ test('Read Mode turns pages, blocks typing, changes page colour and returns with
   await expect(page.locator('.canvas-host')).not.toHaveClass(/is-reading/);
 });
 
+test('Tab reaches the Read Mode tools and page buttons from the pages, and Shift+Tab comes back', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 640 });
+  await page.goto('/playground.html');
+  await page.getByRole('button', { name: 'Across pages', exact: true }).click();
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await expect(input).toHaveValue(/Every page/);
+  const before = await input.inputValue();
+  await (await viewTab(page)).getByRole('button', { name: 'Read Mode', exact: true }).click();
+  const toolbar = page.getByRole('toolbar', { name: 'Read Mode' });
+  await expect(page.locator('.canvas-host')).toBeFocused();
+  const reached = [];
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press('Tab');
+    reached.push(await page.evaluate(() => document.activeElement.getAttribute('aria-label') || document.activeElement.textContent.trim()));
+  }
+  for (const name of ['Tools', 'View', 'Edit Document', 'Next screen']) expect(reached, name).toContain(name);
+  // Back from the toolbar to the pages, where the arrows still turn them.
+  await toolbar.getByRole('button', { name: 'Tools' }).focus();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.locator('.canvas-host')).toBeFocused();
+  await page.keyboard.type('zz');
+  expect(await input.inputValue()).toBe(before);
+  await page.keyboard.press('Escape');
+  await expect(toolbar).toBeHidden();
+  // Editing again, Tab is the document's own key once more.
+  await expect(input).toBeFocused();
+});
+
+test('views without a horizontal ruler hide its tab-type button too', async ({ page }) => {
+  await page.goto('/playground.html');
+  await page.getByRole('button', { name: 'New', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Document text' }).fill('Some text');
+  const selector = page.locator('.canvas-tab-selector');
+  await expect(selector).toBeVisible();
+  const status = page.locator('.ed-statusbar');
+  await status.getByRole('button', { name: 'Outline', exact: true }).click();
+  await expect(page.locator('.canvas-ruler-top')).toBeHidden();
+  await expect(selector).toBeHidden();
+  await status.getByRole('button', { name: 'Read Mode', exact: true }).click();
+  await expect(page.getByRole('toolbar', { name: 'Read Mode' })).toBeVisible();
+  await expect(selector).toBeHidden();
+  await page.keyboard.press('Escape');
+  await status.getByRole('button', { name: 'Print Layout', exact: true }).click();
+  await expect(selector).toBeVisible();
+});
+
 test('Read Mode stays read-only after going to a heading from the Navigation pane', async ({ page }) => {
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   const input = await headings(page);
@@ -280,6 +326,36 @@ test('zoom: dialog presets, many pages, text width and Ctrl + wheel', async ({ p
   await expect(slider).toHaveValue('200');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(slider).toHaveValue(now);
+});
+
+test('the Zoom dialog\'s Many pages grid is one Tab stop that the arrow keys move over', async ({ page }) => {
+  await page.goto('/playground.html');
+  await page.getByRole('button', { name: 'Across pages', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Document text' })).toHaveValue(/Every page/);
+  await (await viewTab(page)).getByRole('button', { name: 'Zoom', exact: true }).click();
+  const dialog = page.locator('.modal-root:not(.closing)').getByRole('dialog', { name: 'Zoom' });
+  const grid = dialog.getByRole('grid', { name: 'Many pages' });
+  expect(await grid.getByRole('gridcell').evaluateAll(cells => cells.filter(c => c.tabIndex >= 0).length)).toBe(1);
+  await grid.getByRole('gridcell').first().focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(grid.getByRole('gridcell', { name: '2 by 1 pages' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(grid.getByRole('gridcell', { name: '2 by 2 pages' })).toBeFocused();
+  await expect(dialog.getByText('2 × 2 pages')).toBeVisible();
+  await page.keyboard.press('End');
+  await expect(grid.getByRole('gridcell', { name: '4 by 2 pages' })).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(grid.getByRole('gridcell', { name: '1 by 2 pages' })).toBeFocused();
+  expect(await grid.getByRole('gridcell').evaluateAll(cells => cells.filter(c => c.tabIndex >= 0).length)).toBe(1);
+  // Tab leaves the grid, and comes back to the cell it left.
+  await page.keyboard.press('Tab');
+  expect(await grid.evaluate(g => g.contains(document.activeElement))).toBe(false);
+  await page.keyboard.press('Shift+Tab');
+  await expect(grid.getByRole('gridcell', { name: '1 by 2 pages' })).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter');
+  await dialog.getByRole('button', { name: 'OK' }).click();
+  await expect(page.locator('.canvas-pages')).toHaveClass(/is-multipage/);
 });
 
 test('the Zoom dialog fits its fields inside the dialog', async ({ page }) => {

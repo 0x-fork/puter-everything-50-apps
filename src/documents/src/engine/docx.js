@@ -1,5 +1,6 @@
 import { writeTableStyleDefinition } from './docx-table-styles.js';
 import { MAX_DOCUMENT_CHARACTERS, DOCUMENT_CHARACTER_LIMIT_MESSAGE } from './text-limits.js';
+import { rejectFormatChange } from './revisions.js';
 import { pruneReleasedMedia } from './docx-media-release.js';
 import { invalidateProofingState } from './docx-proofing-state.js';
 import { completedSpelling, bodySpellingCache, proofingFingerprint } from './docx-proofing-cache.js';
@@ -22,7 +23,7 @@ import { readTextOutline, writeTextOutline, W14 } from './text-outline.js';
 import { readSectionColumns } from './section-columns.js';
 import { fontReader, writeFontProperties, removeFontProperty } from './docx-fonts.js';
 import { FONT_DEFAULTS } from './font-families.js';
-import { previewParagraphs } from './docx-preview.js';
+import { previewParagraphs, flatPreviewParagraphs } from './docx-preview.js';
 import { recordPreviewIssue } from './preview-issues.js';
 import { previewMacroButtons, readMacroButtonField, writeMacroButtonLabel } from './docx-macro-buttons.js';
 import { formatPageNumber } from './page-numbering.js';
@@ -85,7 +86,7 @@ import { resolvedFormat, geometryPatch, checkedRunFormat, PARAGRAPH_FLAGS } from
 import { levelParagraphPatch } from './numbering-paragraph.js';
 import { UnsupportedDocumentError } from './errors.js';
 export { UnsupportedDocumentError } from './errors.js';
-import { parseXml as xml, wordText } from './docx-xml.js';
+import { parseXml as xml, runText, setContentTypeOverride, xmlDepthExceeds } from './docx-xml.js';
 import { emptyNumbering, levelFor, listMarkers } from './numbering.js';
 import { readNumbering, writeNumbering } from './docx-numbering.js';
 import { validateIndent, normalizeTabStops } from './paragraph-geometry.js';
@@ -577,9 +578,8 @@ function saveSettings(parts, settings, related, path) {
     rel.setAttribute('Id', id); rel.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings'); rel.setAttribute('Target', path.slice('word/'.length));
     rels.documentElement.append(rel); parts[relPath] = strToU8(serialize(rels));
     const types = xml(parts['[Content_Types].xml']);
-    const type = types.createElementNS(types.documentElement.namespaceURI, 'Override');
-    type.setAttribute('PartName', '/' + path); type.setAttribute('ContentType', 'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml');
-    types.documentElement.append(type); parts['[Content_Types].xml'] = strToU8(serialize(types));
+    setContentTypeOverride(types, '/' + path, 'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml');
+    parts['[Content_Types].xml'] = strToU8(serialize(types));
   }
   parts[path] = strToU8(serialize(settings).replace(/^(<\?xml[^?]*encoding=)["'][^"']*["']/i, '$1"UTF-8"'));
 }
@@ -753,7 +753,7 @@ function writeStyles(parts, styles) {
     const relPath = 'word/_rels/document.xml.rels', rels = parts[relPath] ? xml(parts[relPath]) : xml(`<Relationships xmlns="${REL}"/>`);
     const ids = new Set(children(rels.documentElement).map(n => n.getAttribute('Id'))); let id = 'rStyles'; while (ids.has(id)) id += '_';
     const rel = rels.createElementNS(REL, 'Relationship'); rel.setAttribute('Id', id); rel.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles'); rel.setAttribute('Target', path.slice(5)); rels.documentElement.append(rel); parts[relPath] = strToU8(serialize(rels));
-    const types = xml(parts['[Content_Types].xml']), type = types.createElementNS(types.documentElement.namespaceURI, 'Override'); type.setAttribute('PartName', '/' + path); type.setAttribute('ContentType', 'application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml'); types.documentElement.append(type); parts['[Content_Types].xml'] = strToU8(serialize(types));
+    const types = xml(parts['[Content_Types].xml']); setContentTypeOverride(types, '/' + path, 'application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml'); parts['[Content_Types].xml'] = strToU8(serialize(types));
   }
   parts[path] = strToU8(serialize(doc).replace(/^(<\?xml[^?]*encoding=)["'][^"']*["']/i, '$1"UTF-8"'));
 }
@@ -783,11 +783,25 @@ export function createDocx(paragraphs = [paragraph()], pageSettings, numbering =
 
 let revisionIds = 0x3F000000;
 /** A w:ins or w:del element for a revision record (§17.13.5.18, §17.13.5.14). */
+// A revision's UTC time ([MS-DOCX] w16du:dateUtc), which current Word writes beside w:date.
+const W16DU = 'http://schemas.microsoft.com/office/word/2023/wordml/word16du';
+const MC_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+// It is written back only where the part's root still declares it ignorable, so
+// consumers that do not know the namespace can skip it.
+function ignorableUtcPrefix(doc) {
+  const root = doc.documentElement, prefix = root.lookupPrefix(W16DU);
+  return prefix && (root.getAttributeNS(MC_NS, 'Ignorable') || '').split(/\s+/).includes(prefix) ? prefix : null;
+}
+function writeRevisionDate(node, revision) {
+  if (revision.date) node.setAttributeNS(W, 'w:date', revision.date);
+  const prefix = revision.dateUtc && ignorableUtcPrefix(node.ownerDocument);
+  if (prefix) node.setAttributeNS(W16DU, `${prefix}:dateUtc`, revision.dateUtc);
+}
 function revisionElement(doc, revision) {
   const node = doc.createElementNS(W, revision.move ? (revision.type === 'del' ? 'w:moveFrom' : 'w:moveTo') : revision.type === 'del' ? 'w:del' : 'w:ins');
   node.setAttributeNS(W, 'w:id', String(revisionIds++));
   node.setAttributeNS(W, 'w:author', revision.author || '');
-  if (revision.date) node.setAttributeNS(W, 'w:date', revision.date);
+  writeRevisionDate(node, revision);
   return node;
 }
 /** Write (or clear) a tracked paragraph mark in pPr/rPr; revision elements come first there. */
@@ -812,7 +826,7 @@ function writeRunChange(properties, revision, make, previousProperties) {
   const change = make('rPrChange');
   change.setAttributeNS(W, 'w:id', revision.id || String(revisionIds++));
   change.setAttributeNS(W, 'w:author', revision.author || '');
-  if (revision.date) change.setAttributeNS(W, 'w:date', revision.date);
+  writeRevisionDate(change, revision);
   change.append(former); properties.append(change);
   return properties;
 }
@@ -876,7 +890,10 @@ function paragraphWriter(doc, styles, numbering, originals, writeImage, writeLin
         const pPr = child(node, 'pPr');
         if (p.formatRevision?.previous) {
           for (const n of children(pPr)) if (n.namespaceURI === W && n.localName === 'pPrChange') n.remove();
-          const previous = { ...p, ...p.formatRevision.previous };
+          // The paragraph as it was: formatting fields it has now but did not have then are left out (as rejecting
+          // the change leaves them out). Merged over the paragraph, they wrote the new formatting as the former.
+          const previous = { ...p };
+          rejectFormatChange(previous);
           const scratch = previous.shell ? doc.importNode(xml(previous.shell).documentElement, true) : make('p');
           writeParagraphFormat(scratch, previous, make, numbering);
           const former = child(scratch, 'pPr') || make('pPr');
@@ -884,7 +901,7 @@ function paragraphWriter(doc, styles, numbering, originals, writeImage, writeLin
           const change = make('pPrChange');
           change.setAttributeNS(W, 'w:id', p.formatRevision.id || String(revisionIds++));
           change.setAttributeNS(W, 'w:author', p.formatRevision.author || '');
-          if (p.formatRevision.date) change.setAttributeNS(W, 'w:date', p.formatRevision.date);
+          writeRevisionDate(change, p.formatRevision);
           change.append(former);
           let target = pPr; if (!target) { target = make('pPr'); node.prepend(target); }
           target.append(change);
@@ -925,7 +942,7 @@ function paragraphWriter(doc, styles, numbering, originals, writeImage, writeLin
         return writtenControls.get(control.id);
       };
       // Tracked runs sit in w:ins/w:del wrappers; neighbours with the same revision share one.
-      const matches = (node, revision) => node?.namespaceURI === W && node.localName === (revision.move ? (revision.type === 'del' ? 'moveFrom' : 'moveTo') : revision.type === 'del' ? 'del' : 'ins') && node.getAttributeNS(W, 'author') === (revision.author || '') && (node.getAttributeNS(W, 'date') || '') === (revision.date || '') && (moveNames.get(node) || '') === (revision.move ? revision.moveName || 'move' : '');
+      const matches = (node, revision) => node?.namespaceURI === W && node.localName === (revision.move ? (revision.type === 'del' ? 'moveFrom' : 'moveTo') : revision.type === 'del' ? 'del' : 'ins') && node.getAttributeNS(W, 'author') === (revision.author || '') && (node.getAttributeNS(W, 'date') || '') === (revision.date || '') && (node.getAttributeNS(W16DU, 'dateUtc') || '') === (revision.dateUtc && ignorableUtcPrefix(doc) ? revision.dateUtc : '') && (moveNames.get(node) || '') === (revision.move ? revision.moveName || 'move' : '');
       const place = (r, run) => {
         if (!run.revision) { parent.append(r); return; }
         const { inserted, ...revision } = run.revision;
@@ -968,9 +985,23 @@ function paragraphWriter(doc, styles, numbering, originals, writeImage, writeLin
             }
           }else {
           useLink(boundary.link,container);
-          if(boundary.type==='start' && boundary.field.simple && p.fieldMarkers.some(m=>m.type==='end'&&m.field.id===boundary.field.id)){
+          // A tracked field writes its delimiters inside its insertion or deletion, so accepting or rejecting it
+          // (here or in another editor) removes the whole field, not just its result. A simple field cannot sit
+          // in a revision (§17.13.5.18 CT_RunTrackChange), so a tracked one is written with delimiters.
+          const tracked=boundary.field.revision;
+          if(!tracked && boundary.type==='start' && boundary.field.simple && p.fieldMarkers.some(m=>m.type==='end'&&m.field.id===boundary.field.id)){
             const wrapper=bodyFieldSimpleShell(boundary.field,doc);fieldContainer().append(wrapper);fieldContainers.push({node:wrapper,id:boundary.field.id});
-          }else if(boundary.type==='end'&&fieldContainers.at(-1)?.id===boundary.field.id){fieldContainers.pop();}
+          }else if(!tracked && boundary.type==='end'&&fieldContainers.at(-1)?.id===boundary.field.id){fieldContainers.pop();}
+          else if(tracked){
+            for(const node of bodyFieldBoundary(boundary,doc)){
+              // Deleted field code is w:delInstrText (§17.16, deleted field code), as deleted text is w:delText.
+              if(tracked.type==='del')for(const code of [...node.getElementsByTagNameNS(W,'instrText')]){
+                const deleted=make('delInstrText');for(const attr of [...code.attributes])deleted.setAttributeNode(attr.cloneNode(true));
+                deleted.append(...code.childNodes);code.replaceWith(deleted);
+              }
+              place(node,{revision:tracked});
+            }
+          }
           else parent.append(...bodyFieldBoundary(boundary,doc));
           }
           continue;
@@ -994,11 +1025,23 @@ function paragraphWriter(doc, styles, numbering, originals, writeImage, writeLin
           useLink(run.link, writtenControls.get(control.id));
         } else useLink(run.link, fieldContainer());
         if (run.field) {
-          if (run.text !== OBJECT || Object.keys(run.overrides || {}).length || run.styleChanged) throw new Error('Editing page-field results or their formatting is not supported in page stories yet.');
+          if (run.text !== OBJECT) throw new Error('Editing page-field results is not supported in page stories yet.');
           const envelope = xml(`<w:p xmlns:w="${W}">${run.field.source}</w:p>`).documentElement;
           const segments = pageFieldSegments(envelope);
           if (segments.length !== 1 || !segments[0].field || segments[0].field.instruction !== run.field.instruction) throw new Error('Invalid retained page-story field.');
-          for (const child of [...envelope.children]) parent.append(doc.importNode(child, true));
+          // Formatting applied to the field (Bold over "Page 1 of 2") goes on every run of its envelope,
+          // delimiters, instruction and result alike, as a word processor formats a field.
+          const formatted = Object.keys(run.overrides || {}).length || run.styleChanged;
+          for (const source of [...envelope.children]) {
+            const node = doc.importNode(source, true);
+            if (formatted) for (const r of node.namespaceURI === W && node.localName === 'r' ? [node] : [...node.getElementsByTagNameNS(W, 'r')]) {
+              const old = child(r, 'rPr');
+              let properties = writeRunFormat(old || null, run.overrides || {}, make, inheritedStrike(run.styleId), inheritedCaps(run.styleId));
+              properties = writeRunStyle(properties, run.styleId, run.styleChanged, make);
+              if (properties && properties !== old) { old?.remove(); r.prepend(properties); }
+            }
+            parent.append(node);
+          }
           continue;
         }
         const r = make('r');
@@ -1131,11 +1174,13 @@ export class DocxPackage {
     }
   }
   static preview(parts) {
-    const doc = xml(parts['word/document.xml']);
+    const doc = xml(parts['word/document.xml'], { depthLimit: Infinity });
     const body = [...doc.documentElement.children].find(n => n.localName === 'body');
     if (!body) throw new Error('The DOCX has no document body.');
-    projectCachedFieldResults(body);
-    const paragraphs = previewParagraphs(body);
+    // Content nested beyond what the recursive readers handle still shows its text.
+    const deep = xmlDepthExceeds(doc.documentElement);
+    if (!deep) projectCachedFieldResults(body);
+    const paragraphs = deep ? flatPreviewParagraphs(body) : previewParagraphs(body);
     if (!paragraphs.length) paragraphs.push(paragraph());
     if (documentText(paragraphs).length > MAX_DOCUMENT_CHARACTERS) throw new Error(DOCUMENT_CHARACTER_LIMIT_MESSAGE);
     const pkg = new DocxPackage(parts, paragraphs, new Map(), DEFAULT_PAGE_SETTINGS, emptyNumbering(), emptyStyles());
@@ -1183,10 +1228,12 @@ export class DocxPackage {
     // declaration is ordinary inherited formatting, not unsupported direction.
     // Tracked formatting changes (rPrChange/pPrChange) are retained in the
     // property XML; the previous formatting they record is never displayed.
+    // Right-to-left paragraphs and sections (§17.3.1.6, §17.6.1) are guarded; an explicit
+    // off value (<w:bidi w:val="0"/>, written by several producers) is the default direction.
     const forbidden = ['bidi'];
     const recordedFormatting = node => { for (let a = node.parentNode; a; a = a.parentNode) if (a.namespaceURI === W && ['rPrChange', 'pPrChange'].includes(a.localName)) return true; return false; };
     for (const name of forbidden) {
-      const nodes = activeNodes.filter(n => n.namespaceURI === W && n.localName === name && !recordedFormatting(n));
+      const nodes = activeNodes.filter(n => n.namespaceURI === W && n.localName === name && enabled(n) && !recordedFormatting(n));
       if (nodes.length) unsupported(name);
     }
     for (const [index, section] of activeNodes.filter(n => n.namespaceURI === W && n.localName === 'sectPr').entries()) {
@@ -1257,14 +1304,15 @@ export class DocxPackage {
     // paragraphs, or opened or closed in another paragraph) cannot reuse its source XML:
     // that lacks the range's other marker. Saving writes its moves with their own ranges.
     const crossingMoves = new WeakSet();
+    const revisionTime = node => ({ author: node.getAttributeNS(W, 'author') || '', date: node.getAttributeNS(W, 'date') || '', ...(node.getAttributeNS(W16DU, 'dateUtc') ? { dateUtc: node.getAttributeNS(W16DU, 'dateUtc') } : {}) });
     const readRevision = node => {
-      for (const attr of [...node.attributes]) if (attr.namespaceURI !== 'http://www.w3.org/2000/xmlns/' && !(attr.namespaceURI === W && ['id', 'author', 'date', 'name'].includes(attr.localName))) throw new UnsupportedDocumentError(`revision attribute ${attr.name}`);
+      for (const attr of [...node.attributes]) if (attr.namespaceURI !== 'http://www.w3.org/2000/xmlns/' && !(attr.namespaceURI === W && ['id', 'author', 'date', 'name'].includes(attr.localName)) && !(attr.namespaceURI === W16DU && attr.localName === 'dateUtc')) throw new UnsupportedDocumentError(`revision attribute ${attr.name}`);
       const type = ['ins', 'moveTo'].includes(node.localName) ? 'ins' : 'del';
       const move = ['moveFrom', 'moveTo'].includes(node.localName);
-      return { type, author: node.getAttributeNS(W, 'author') || '', date: node.getAttributeNS(W, 'date') || '', ...(move ? { move: true, moveName: moveNames[node.localName === 'moveFrom' ? 'from' : 'to'] || '' } : {}) };
+      return { type, ...revisionTime(node), ...(move ? { move: true, moveName: moveNames[node.localName === 'moveFrom' ? 'from' : 'to'] || '' } : {}) };
     };
     // A recorded formatting change keeps its former formatting for rejection (§17.13.5.29/.30).
-    const changeMeta = change => ({ type: 'format', author: change.getAttributeNS(W, 'author') || '', date: change.getAttributeNS(W, 'date') || '', ...(change.getAttributeNS(W, 'id') ? { id: change.getAttributeNS(W, 'id') } : {}) });
+    const changeMeta = change => ({ type: 'format', ...revisionTime(change), ...(change.getAttributeNS(W, 'id') ? { id: change.getAttributeNS(W, 'id') } : {}) });
     const readRunChange = rPr => {
       const change = child(rPr, 'rPrChange'); if (!change) return null;
       const inner = child(change, 'rPr');
@@ -1287,6 +1335,8 @@ export class DocxPackage {
       for (const segment of pageFieldSegments(node)) {
         if (segment.node) normalized.appendChild(segment.node.cloneNode(true));
         else {
+          // A field here is shown by its result text alone, so a picture result (INCLUDEPICTURE) stays a preview.
+          if (segment.resultNodes.some(n => [...n.getElementsByTagNameNS(W, '*')].some(c => ['drawing', 'pict', 'object'].includes(c.localName)))) throw new UnsupportedDocumentError('pictures in header, footer or text box field results');
           const run = node.ownerDocument.createElementNS(W, 'w:r');
           // Body fields without MERGEFORMAT regenerate using instruction-run
           // formatting (paragraph defaults for a simple field's attribute).
@@ -1351,7 +1401,7 @@ export class DocxPackage {
         if (revisionNodes.length) {
           const pair = revisionNodes.length === 2 && revisionNodes[0].localName === 'ins' && revisionNodes[1].localName === 'del';
           if (context.drawingText || context.pageStory || revisionNodes.length > 1 && !pair) throw new UnsupportedDocumentError('tracked paragraph marks outside the main body');
-          markRevision = pair ? { ...readRevision(revisionNodes[1]), inserted: (({ author, date }) => ({ author, date }))(readRevision(revisionNodes[0])) } : readRevision(revisionNodes[0]);
+          markRevision = pair ? { ...readRevision(revisionNodes[1]), inserted: (({ type, ...time }) => time)(readRevision(revisionNodes[0])) } : readRevision(revisionNodes[0]);
           const source = node;
           node = node.cloneNode(true);
           // Keep the inherited markup-compatibility and namespace context (an ancestor's
@@ -1431,12 +1481,12 @@ export class DocxPackage {
           if (next.done) { pendingChildren.pop(); continue; }
           const t = next.value;
           if (t === rPr) continue;
-          if (!context.drawingText && !context.pageStory && t.namespaceURI === W && ['fldChar','instrText'].includes(t.localName)) {
-            push();bodyFields.token(t,r,textPosition,fieldMarkers,link);continue;
+          if (!context.drawingText && !context.pageStory && t.namespaceURI === W && (['fldChar','instrText'].includes(t.localName) || t.localName === 'delInstrText' && currentRevision?.type === 'del')) {
+            push();bodyFields.token(t,r,textPosition,fieldMarkers,link,currentRevision);continue;
           }
           if (!context.drawingText && !context.pageStory && bodyFields.inCode) { if (bodyFields.absorb(t, r)) continue; throw new UnsupportedDocumentError('visible content inside a body field instruction'); }
-          if (t.namespaceURI === W && t.localName === 't') text += wordText(t);
-          else if (t.namespaceURI === W && t.localName === 'delText' && currentRevision?.type === 'del') text += wordText(t);
+          if (t.namespaceURI === W && t.localName === 't') text += runText(t);
+          else if (t.namespaceURI === W && t.localName === 'delText' && currentRevision?.type === 'del') text += runText(t);
           else if (t.namespaceURI === W && t.localName === 'sym') {
             const font = t.getAttributeNS(W, 'font'), code = t.getAttributeNS(W, 'char');
             if (!font?.trim() || !/^[\da-f]{4}$/i.test(code || '') || t.children.length || t.textContent.trim() || [...t.attributes].some(a => a.namespaceURI !== 'http://www.w3.org/2000/xmlns/' && !(a.namespaceURI === W && ['font', 'char'].includes(a.localName)))) throw new UnsupportedDocumentError('malformed symbols');
@@ -1492,6 +1542,13 @@ export class DocxPackage {
           else if (t.namespaceURI === W && t.localName === 'drawing') pushDrawing(t, () => paragraphImageReader(t));
           else if (t.namespaceURI === MC && t.localName === 'AlternateContent') {
             const branch = alternateBranch(t);
+            // A selected branch of plain text, such as the Fallback of the symbol extension
+            // (w16se:symEx) Word writes for each emoji, is that text (Part 3 §10.2.1). A rewritten
+            // paragraph keeps the text and drops the choice this editor does not understand.
+            if (branch.children.length && [...branch.children].every(n => n.namespaceURI === W && n.localName === 't')) {
+              pendingChildren.push(children(branch)[Symbol.iterator]());
+              continue;
+            }
             if (branch.children.length !== 1 || branch.firstElementChild.namespaceURI !== W || branch.firstElementChild.localName !== 'drawing') {
               if (!preview) throw new UnsupportedDocumentError('alternate content other than one drawing');
               // Part 3 substitutes the selected branch's contents, which can
@@ -1550,7 +1607,7 @@ export class DocxPackage {
           const outer = currentRevision, revision = readRevision(r);
           // A deletion can nest inside another reviewer's insertion (a deleted insertion).
           if (outer && !(outer.type === 'ins' && revision.type === 'del' && !outer.inserted)) throw new UnsupportedDocumentError('nested revisions');
-          currentRevision = outer ? { ...revision, inserted: { author: outer.author, date: outer.date } } : revision;
+          currentRevision = outer ? { ...revision, inserted: { author: outer.author, date: outer.date, ...(outer.dateUtc ? { dateUtc: outer.dateUtc } : {}) } } : revision;
           try { for (const nested of children(r)) readInline(nested); }
           finally { currentRevision = outer; }
           return;
@@ -1567,7 +1624,9 @@ export class DocxPackage {
           // A rejected destination does not invalidate the wrapper's visible
           // contents. Preview them without an active link, retaining pictures
           // and supported formatting through the normal run reader.
-          const link = attempt(() => (context.pageStory ? storyLinkReaders.get(context.pageStory) : readLink)(r), undefined), before = runs.length, beforeFields=fieldMarkers.length;
+          // An empty wrapper (§17.16.22; some producers leave `<w:hyperlink/>` behind) shows nothing and
+          // links nothing; a paragraph rewritten after an edit simply has no wrapper there.
+          const link = attempt(() => (context.pageStory ? storyLinkReaders.get(context.pageStory) : readLink)(r), undefined);
           const content=preview||context.drawingText||context.pageStory?r:projectPrompts(r);
           for (const nested of children(content)) {
             if(macroPrompts.has(nested))bodyFields.prompt(macroPrompts.get(nested),children(nested),()=>textPosition,fieldMarkers,readRun,link);
@@ -1579,7 +1638,6 @@ export class DocxPackage {
             }
             else readRun(nested, link);
           }
-          if (runs.length === before && fieldMarkers.length === beforeFields) throw new UnsupportedDocumentError('empty hyperlinks');
         } else readRun(r);
       };
       for (const r of children(node)) {
@@ -1706,7 +1764,7 @@ export class DocxPackage {
             if (control.persistent && children(content).some(n => n.namespaceURI === W && n.localName === 'tbl'))
               throw new UnsupportedDocumentError('persistent controls around tables');
             control.scope = context.cellId || null;
-            result.push(...readBlocks(children(content), { ...context, blockControls: [...(context.blockControls || []), control] }, depth + 1, blockTables));
+            for (const block of readBlocks(children(content), { ...context, blockControls: [...(context.blockControls || []), control] }, depth + 1, blockTables)) result.push(block);
           } else if (node.localName === 'tbl') {
             if (context.blockControls?.some(control => control.persistent)) throw new UnsupportedDocumentError('persistent controls around tables');
             const parsed = readTable(node, readParagraph, stylesRoot, readColor, (contents, cellContext) => readBlocks(contents, { ...context, ...cellContext, ...((context.blockControls || cellContext.blockControls) ? { blockControls: [...(context.blockControls || []), ...(cellContext.blockControls || [])] } : {}) }, depth + 1, blockTables).map(p => ({ source: p.storySource || originals.get(p.id).xml, paragraph: p })), readBookmark, blockTables, p => resolveStyledParagraph(p, styles, numbering, { displayOnly: preview }), readControl, pageSettings.compatibilityMode, preview, readEffectsStyles, error => recordPreviewIssue(issues, error));
@@ -1740,7 +1798,7 @@ export class DocxPackage {
       }
       return result;
     };
-    paragraphs.push(...readBlocks(children(body)));
+    for (const p of readBlocks(children(body))) paragraphs.push(p);
     bodyFields.finish();
     const comments = attempt(() => readComments(parts), []);
     {
@@ -1776,7 +1834,16 @@ export class DocxPackage {
         if (!p.bookmarks?.length) delete p.bookmarks;
       }
     } catch (e) { throw new UnsupportedDocumentError(e.message); }
-    if (!paragraphs.length || paragraphs.at(-1).sectionEnd) paragraphs.push(paragraph());
+    // An empty body, one whose last paragraph ends a section, or one ending in a table (as some
+    // generators write it) still needs a final paragraph to type in, as word processors add one.
+    // Read it as an empty w:p so it takes the document's styles rather than built-in defaults,
+    // and an unedited save leaves the body as it was.
+    if (!paragraphs.length || paragraphs.at(-1).sectionEnd || paragraphs.at(-1).cellId) {
+      const added = readParagraph(doc.createElementNS(W, 'w:p'));
+      // Not in the source: saved only once something is typed or set in it.
+      const original = originals.get(added.id); if (original) original.added = true;
+      paragraphs.push(added);
+    }
     if (documentText(paragraphs).length > MAX_DOCUMENT_CHARACTERS) throw new Error(DOCUMENT_CHARACTER_LIMIT_MESSAGE);
     checkMarkers(paragraphs);
     const pkg = new DocxPackage(parts, paragraphs, originals, pageSettings, numbering, styles, tables, assets);
@@ -1801,7 +1868,8 @@ export class DocxPackage {
           if (preview) {
             projectControlContents(root);
             projectCachedFieldResults(root, styles, field => {
-              try { pageFieldInstruction(field.instruction); return false; }
+              // A picture result (INCLUDEPICTURE) shows as its picture in the preview.
+              try { pageFieldInstruction(field.instruction); return /^\s*INCLUDEPICTURE(?:\s|$)/i.test(field.instruction); }
               catch (error) {
                 if (!(error instanceof UnsupportedDocumentError)) throw error;
                 recordPreviewIssue(issues, error); return true;
@@ -1812,8 +1880,9 @@ export class DocxPackage {
           // In preview, let readBlocks recover locally instead of losing the story.
           if (children(root).some(n => n.namespaceURI !== W || !['p', 'tbl'].includes(n.localName))) unsupported('page story blocks not yet implemented');
           // Story bookmarks still need an editable identity scope.
-          // Runs, drawings, scoped hyperlinks and page fields use strict readers.
-          if (activeDescendants(root).filter(p => p.namespaceURI === W && p.localName === 'p').some(p => children(p).some(n => n.namespaceURI !== W || !['pPr', 'r', 'fldSimple', 'hyperlink'].includes(n.localName)))) unsupported('unsupported header/footer structure');
+          // Runs, drawings, scoped hyperlinks and page fields use strict readers. Proofing marks
+          // (§17.13.8.1 proofErr, cached spelling results) are left out of a rewritten story.
+          if (activeDescendants(root).filter(p => p.namespaceURI === W && p.localName === 'p').some(p => children(p).some(n => n.namespaceURI !== W || !['pPr', 'r', 'fldSimple', 'hyperlink', 'proofErr'].includes(n.localName)))) unsupported('unsupported header/footer structure');
           if (activeDescendants(root).some(n => n.namespaceURI === W && ['bookmarkStart', 'bookmarkEnd'].includes(n.localName))) unsupported('header/footer bookmark scope');
           if (activeDescendants(root).some(n => n.namespaceURI === W && forbidden.includes(n.localName) && !recordedFormatting(n))) unsupported('unsupported header/footer formatting');
           story.tables = [];
@@ -2237,6 +2306,8 @@ export class DocxPackage {
     const sectionSource = p => p.sectionProperties ? { xml: p.sectionProperties, settings: sourceSections.get(p.sectionProperties) || p.sectionEnd } : finalSource;
     if (section) writePageSettings(section, pageSettings, this.initialPageSettings, make, !this.originals.size);
     const writeParagraph = paragraphWriter(doc, styles, numbering, this.originals, writeImage, writeLink, sectionSource);
+    // The final paragraph the reader added to a body without one stays out of the file while it is untouched.
+    blocks = blocks.filter(block => { const original = block.type === 'paragraph' && this.originals.get(block.paragraph.id); return !(original?.added && original.signature === signature(block.paragraph)); });
     appendControlledBlocks(body, blocks.map(block => ({ ...block, blockControls: (block.type === 'table' ? block.table : block.paragraph).blockControls })), block => block.type === 'table' ? writeTable(block, doc, writeParagraph) : writeParagraph(block.paragraph), doc, null, section || null);
     const sectionParagraphs = paragraphs.filter(p => p.sectionEnd);
     const sourceSectionCount = this.paragraphs.filter(p => p.sectionEnd).length + 1;

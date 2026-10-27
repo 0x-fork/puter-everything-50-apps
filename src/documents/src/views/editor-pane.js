@@ -3,7 +3,7 @@
  * AI (off until the reader turns it on, and marked as AI), and document statistics with readability
  * scores computed on this device. Corrections are ordinary edits, one undo step each.
  */
-import { el, listItem } from '../ui/dom.js';
+import { el, listItem, listboxKeys } from '../ui/dom.js';
 import * as P from '../lib/puter.js';
 import { engineApi } from '../lib/engine-api.js';
 import { textStatistics, easeLabel } from '../lib/readability.js';
@@ -40,12 +40,15 @@ export function createEditorPane({ editor, pkg, proofing, error, onState = () =>
     reveal(editor(), m.start, m.end);
     const options = proofing.suggest(m.word);
     const editable = !pkg()?.readOnly;
+    const chooseItem = item => { for (const other of choice.children) other.setAttribute('aria-selected', String(other === item)); };
     const choice = el('div.rv-suggestions', { role: 'listbox', 'aria-label': `Suggestions for ${m.word}` }, ...(options.length ? options : []).map((option, i) => {
       const item = el('button.ed-proof-suggestion', { type: 'button', role: 'option', 'aria-selected': String(i === 0), dataset: { value: option }, disabled: !editable,
-        onclick: () => { for (const other of choice.children) other.setAttribute('aria-selected', String(other === item)); },
+        onclick: () => chooseItem(item),
         ondblclick: () => apply(option) }, option);
       return item;
     }));
+    // One Tab stop, on the chosen suggestion; the arrows move through the suggestions and choose as they go.
+    listboxKeys(choice, chooseItem);
     const selected = () => choice.querySelector('[aria-selected="true"]')?.dataset.value;
     const apply = option => { proofing.change(m, option); current = null; later(); };
     detail.replaceChildren(
@@ -117,8 +120,11 @@ export function createEditorPane({ editor, pkg, proofing, error, onState = () =>
       const found = await checkGrammar(paragraphs, { chat: prompt => P.aiChat(prompt), kinds: kinds.length ? kinds : ['grammar'], signal });
       if (signal.aborted) return;
       if (editor()?.session.body.revision !== revision) { aiStatus.textContent = 'The document changed during the check. Check again.'; return; }
-      aiSuggestions = found; ignoredSuggestions = new Set();
-      aiStatus.textContent = found.length ? `${found.length} ${found.length === 1 ? 'suggestion' : 'suggestions'}` : 'No grammar or style suggestions.';
+      // An object (a note reference, field or picture) was sent as a space. A suggestion that takes it in ("claim ."
+      // → "claim.") could not be accepted, and would delete the object if it were: it is not offered.
+      const body = editor()?.session.body.text || '';
+      aiSuggestions = found.filter(s => body.slice(s.start, s.end) === s.original); ignoredSuggestions = new Set();
+      aiStatus.textContent = aiSuggestions.length ? `${aiSuggestions.length} ${aiSuggestions.length === 1 ? 'suggestion' : 'suggestions'}` : 'No grammar or style suggestions.';
     } catch (e) { if (!signal.aborted) aiStatus.textContent = e.message; }
     finally { if (aiBusy?.signal === signal) aiBusy = null; renderAi(); onState(); }
   }

@@ -98,7 +98,8 @@ export const WORDART_STYLES = Object.freeze([
 
 /** Shape parameters for shapeDrawingXml from a text box design, at the given id and stacking order. */
 export function textBoxParams(design, { id, order = 1, text = '', textWidth = 6.5 * EMU_PER_INCH, x = null, y = 0, width = null, height = null, anchor: placement = null } = {}) {
-  const w = width ?? Math.round(design.width * EMU_PER_INCH), h = height ?? Math.round(design.height * EMU_PER_INCH);
+  // A design's width fits the text column or table cell it goes in.
+  const w = width ?? Math.round(Math.min(design.width * EMU_PER_INCH, textWidth)), h = height ?? Math.round(design.height * EMU_PER_INCH);
   const left = x ?? (design.align === 'right' ? Math.max(0, textWidth - w) : design.align === 'center' ? Math.max(0, (textWidth - w) / 2) : 0);
   return { id, name: `Text Box ${id}`, preset: design.preset || 'rect', width: w, height: h, ...design.shape,
     anchor: placement || { horizontal: 'column', vertical: 'paragraph', x: Math.round(left), y: Math.round(y), wrap: 'square', behind: false, order },
@@ -117,10 +118,12 @@ export function wordArtParams(style, { id, order = 1, text = WORDART_PROMPT, siz
 }
 
 /** A signature line: an X over a rule, then the signer's name and title; instructions travel as alt text. */
-export function signatureLineParams({ id, order = 1, signer = '', title = '', email = '', date = false } = {}) {
-  const width = Math.round(3 * EMU_PER_INCH), rows = 1 + [signer, title, email].filter(Boolean).length + (date ? 1 : 0);
-  // Text box paragraphs take no borders in this engine: the rule is a row of low lines after the X.
-  const paragraphs = [paragraphXml({ text: `X${'\u005F'.repeat(34)}`, run: { size: 14, color: '404040' }, spaceAfter: 0, spaceBefore: 12 })];
+export function signatureLineParams({ id, order = 1, signer = '', title = '', email = '', date = false, width: available = 3 * EMU_PER_INCH } = {}) {
+  const width = Math.round(Math.min(3 * EMU_PER_INCH, available)), rows = 1 + [signer, title, email].filter(Boolean).length + (date ? 1 : 0);
+  // Text box paragraphs take no borders in this engine: the rule is a row of low lines after the X, as many
+  // as fit on one line of the box between its insets (a 14 pt low line is at most about 7.8 pt wide).
+  const lowLines = Math.max(4, Math.floor(((width - 2 * 45720) / 12700 - 10) / 7.8) - 1);
+  const paragraphs = [paragraphXml({ text: `X${'\u005F'.repeat(lowLines)}`, run: { size: 14, color: '404040' }, spaceAfter: 0, spaceBefore: 12 })];
   for (const line of [signer, title, email]) if (line) paragraphs.push(paragraphXml({ text: line, run: { size: 10, color: '262626' }, spaceAfter: 0 }));
   if (date) paragraphs.push(paragraphXml({ text: 'Date: ____________', run: { size: 10, color: '595959' }, spaceAfter: 0 }));
   const height = Math.round((0.55 + rows * 0.2) * EMU_PER_INCH);

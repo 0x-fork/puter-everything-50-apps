@@ -86,3 +86,41 @@ test('moving the caret repaints only the pages on screen; a document of up to 80
   expect(short.painted).toBe(short.count);
   expect(short.stale).toBe(0);
 });
+
+test('a long selection is worked out once for all the pages painted after it', async ({page}) => {
+  const result = await page.evaluate(() => {
+    const last = editor.canvases.length - 1, page = Math.floor(last / 2);
+    editor.model.select(0, editor.model.text.length); editor.paint();
+    // Count what each paint reads of the layout: Select All spans every line of the document.
+    const real = editor.selectionLayout; let reads = 0;
+    editor.selectionLayout = new Proxy(real, {get: (target, key, receiver) => { if (key === 'lines') reads++; return Reflect.get(target, key, receiver); }});
+    editor.paint({pages: [page]}); const first = reads; reads = 0;
+    editor.paint({pages: [page + 1]}); const later = reads;
+    editor.selectionLayout = real;
+    const selected = pixels(page);
+    editor.model.select(0, 5); editor.paint({pages: [page]}); const short = pixels(page);
+    editor.model.select(0, 0); editor.paint({pages: [page]}); const none = pixels(page);
+    return {first, later, changed: selected !== short, cleared: short === none};
+  });
+  // The first page painted works the selection out; the next reuses it.
+  expect(result.later).toBeLessThan(result.first);
+  // Changing the selection still repaints the highlight.
+  expect(result.changed).toBe(true);
+  expect(result.cleared).toBe(true);
+});
+
+test('pages the view grows to show are painted, not only those a scroll or window resize shows', async ({page}) => {
+  await page.evaluate(async () => {
+    const host = editor.host;
+    host.style.cssText = 'position:fixed;left:0;top:0;width:1000px;height:120px;overflow:auto;background:#ddd';
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    host.scrollTop = host.scrollHeight / 2;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    editor.paintShownPages();
+  });
+  const before = await page.evaluate(() => editor.shownPages());
+  // A pane closes or Focus starts: the view grows without a window resize or scroll.
+  await page.evaluate(() => { editor.host.style.height = '800px'; });
+  await expect.poll(() => page.evaluate(() => editor.shownPages().length)).toBeGreaterThan(before.length);
+  await expect.poll(() => page.evaluate(() => editor.shownPages().filter(index => editor.stalePages.has(index)))).toEqual([]);
+});

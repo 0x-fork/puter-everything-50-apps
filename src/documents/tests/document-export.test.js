@@ -256,3 +256,98 @@ describe('exported links', () => {
     expect(back.paragraphs[0].runs.map(r => [r.text, r.link?.target ?? null])).toEqual([['Wow!', null], ['docs', 'https://example.com/'], [' and more', null]]);
   });
 });
+
+describe('tracked changes', () => {
+  // Typed with Track Changes off, then revised with it on: "old" deleted, "new" inserted, and the break between the paragraphs deleted.
+  const reviewed = () => {
+    const doc = new TextDocument([paragraph()], undefined, undefined, undefined, [], {}, { trackChanges: false });
+    doc.replace('Hello old world\nSecond part');
+    doc.trackChanges = true;
+    const at = doc.text.indexOf('old'); doc.select(at, at + 3); doc.replace('new');
+    const end = doc.text.indexOf('\n'); doc.select(end, end + 1); doc.replace('');
+    return doc;
+  };
+  it('exports the text as it reads with the changes accepted, leaving the document under review', () => {
+    const doc = reviewed();
+    expect(documentPlainText(doc)).toBe('Hello new worldSecond part\n');
+    expect(documentMarkdown(doc)).toBe('Hello new worldSecond part\n');
+    expect(body(documentHtml(doc))).toBe('<p>Hello new worldSecond part</p>');
+    expect(doc.revisions.map(r => r.type).sort()).toEqual(['del', 'del', 'ins']);
+    expect(doc.text).toBe('Hello oldnew world\nSecond part');
+  });
+});
+
+describe('Markdown web addresses next to other text', () => {
+  // Each character with its formatting: a reader may link part of an address, which splits its runs.
+  const styled = doc => doc.paragraphs.map(p => p.runs.flatMap(r => [...r.text].map(c => `${c}${r.bold ? 'b' : ''}${r.strikethrough && r.strikethrough !== 'none' ? 's' : ''}`)).join('|'));
+  const reopen = markdown => {
+    const doc = blankDoc(), fragment = htmlFragment(markdownHtml(markdown));
+    for (const p of fragment.paragraphs) p.mark = true;
+    pasteFragment(doc, fragment);
+    return doc;
+  };
+  it('reads back the text and formatting that follow a www. address', () => {
+    // A reader's www. link goes on to the next whitespace: it took the next run's markers, an escaped "<"
+    // and an address glued to it into its text, backslashes and all.
+    for (const [text, word, format] of [
+      ['See www.example.org<b> now'],
+      ['Go to www.example.org/start then', 'org/start', { strikethrough: 'single' }],
+      ['Go to www.example.org/start then', 'example.org/start', { strikethrough: 'single' }],
+      ['Site www.example.orgBold here', 'Bold here', { bold: true }],
+      ['Old www.example.org]http://b.example.com/a_b|c end'],
+    ]) {
+      const doc = blankDoc();
+      doc.replace(text);
+      if (word) { const at = text.indexOf(word); doc.select(at, at + word.length); doc.setRunFormat(format); }
+      expect(styled(reopen(documentMarkdown(doc)))).toEqual(styled(doc));
+    }
+  });
+  it('leaves a www. address that ends at a space or the paragraph end for readers to link', () => {
+    const doc = blankDoc();
+    doc.replace('Visit www.example.org today or www.example.net.');
+    expect(documentMarkdown(doc)).toBe('Visit www.example.org today or www.example.net.\n');
+  });
+});
+
+describe('Markdown text split between runs it writes alike', () => {
+  const reopen = markdown => {
+    const doc = blankDoc(), fragment = htmlFragment(markdownHtml(markdown));
+    for (const p of fragment.paragraphs) p.mark = true;
+    pasteFragment(doc, fragment);
+    return doc.paragraphs.map(p => p.runs.map(r => r.text).join(''));
+  };
+  it('reads back as the same text when the runs differ only in color', () => {
+    for (const [text, colored] of [['Read http://example.com/a_b now', 'p://example.com/a'], ['Write AT&amp;T as typed', 'amp;'], ['Keep &#65; as is', '#65']]) {
+      const doc = blankDoc();
+      doc.replace(text);
+      const at = text.indexOf(colored); doc.select(at, at + colored.length); doc.setRunFormat({ color: 'C00000' });
+      expect(doc.paragraphs[0].runs.length).toBeGreaterThan(1);
+      expect(reopen(documentMarkdown(doc))).toEqual([text]);
+    }
+  });
+});
+
+describe('Markdown text that starts the document', () => {
+  it('keeps a no-break space before what would start a list', () => {
+    const doc = blankDoc();
+    doc.replace(' + not an item\n 1. nor this');
+    const markdown = documentMarkdown(doc);
+    const back = blankDoc(), fragment = htmlFragment(markdownHtml(markdown));
+    for (const p of fragment.paragraphs) p.mark = true;
+    pasteFragment(back, fragment);
+    expect(back.paragraphs.map(p => p.runs.map(r => r.text).join(''))).toEqual([' + not an item', ' 1. nor this']);
+    expect(back.paragraphs.some(p => p.list)).toBe(false);
+  });
+});
+
+describe('web page lists numbered with letters or Roman numerals', () => {
+  it('keep their kind of numbering', () => {
+    const doc = blankDoc();
+    doc.replace('First\nSecond'); doc.select(0, doc.text.length); doc.toggleList('number');
+    const { numId } = doc.paragraphs[0].list, abstract = doc.numbering.abstracts[doc.numbering.instances[numId].abstractId];
+    for (const [format, type] of [['lowerLetter', 'a'], ['upperRoman', 'I'], ['decimal', null]]) {
+      abstract.levels[0] = { ...abstract.levels[0], format };
+      expect(body(documentHtml(doc))).toBe(`<ol${type ? ` type="${type}"` : ''}><li>First</li><li>Second</li></ol>`);
+    }
+  });
+});

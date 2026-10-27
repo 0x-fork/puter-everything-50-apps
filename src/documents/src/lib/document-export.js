@@ -5,7 +5,9 @@
  * fields, headers and footers, notes, comments and hidden text do not.
  */
 import { documentBlocks } from '../engine/tables.js';
-import { listKind, listMarkers } from '../engine/numbering.js';
+import { listKind, listMarkers, levelFor } from '../engine/numbering.js';
+import { TextDocument } from '../engine/model.js';
+import { hasRevisions } from '../engine/revisions.js';
 
 const OBJECT = '￼';
 const escapeHtml = text => String(text).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -24,6 +26,19 @@ export function headingLevel(p, styles) {
 function safeLink(run) {
   const target = run.link?.target;
   return typeof target === 'string' && /^(https?:|mailto:|tel:)/i.test(target) ? target : null;
+}
+/**
+ * The document as it reads with its tracked changes accepted: deleted text gone, inserted text kept, as the
+ * page shows it once reviewed. A copy is resolved, so the open document keeps its changes for review.
+ */
+function finalModel(model) {
+  if (!model?.paragraphs || !hasRevisions(model.paragraphs)) return model;
+  try {
+    const accepted = new TextDocument(model.paragraphs, model.pageSettings, model.numbering, model.stylesEnabled ? model.styles : undefined, model.tables || [], model.assets);
+    if (!model.stylesEnabled) accepted.styles = model.styles;
+    accepted.resolveRevisions(true);
+    return accepted;
+  } catch { return model; }
 }
 const kindOf = (p, numbering) => { try { return listKind(numbering, p.list); } catch { return null; } };
 function blocksOf(model) {
@@ -76,7 +91,11 @@ function runHtml(run, heading = false) {
   if (link) html = `<a href="${escapeHtml(link)}">${html}</a>`;
   return html;
 }
-function blocksHtml(blocks, model, numbers = itemNumbers(model)) {
+const LIST_TYPES = { lowerLetter: 'a', upperLetter: 'A', lowerRoman: 'i', upperRoman: 'I' };
+// A heading numbered through a list ("1.2 Scope") stays a heading, its number written before its text, as the
+// page shows it: written as a list item, it lost its heading level.
+const headingNumber = (p, level, markers) => (level && markers.get(p)?.replace(/\t$/, ' ')) || '';
+function blocksHtml(blocks, model, numbers = itemNumbers(model), markers = itemMarkers(model)) {
   // The open lists, outermost first; each holds an open item a deeper list nests in.
   let html = '';
   const lists = [];
@@ -88,12 +107,12 @@ function blocksHtml(blocks, model, numbers = itemNumbers(model)) {
       html += '<table>' + block.rows.map(row => '<tr>' + row.cells.filter(cell => cell.rowSpan !== 0).map(cell => {
         const span = (cell.span || 1) > 1 ? ` colspan="${cell.span}"` : '';
         const rows = cell.rowSpan > 1 ? ` rowspan="${cell.rowSpan}"` : '';
-        return `<td${span}${rows}>${blocksHtml(cell.content.map(c => c.type ? c : { type: 'paragraph', ...c }), model, numbers)}</td>`;
+        return `<td${span}${rows}>${blocksHtml(cell.content.map(c => c.type ? c : { type: 'paragraph', ...c }), model, numbers, markers)}</td>`;
       }).join('') + '</tr>').join('') + '</table>';
       continue;
     }
-    const p = paragraphOf(block);
-    const kind = kindOf(p, model.numbering), tag = kind === 'bullet' ? 'ul' : kind ? 'ol' : null;
+    const p = paragraphOf(block), level = headingLevel(p, model.styles);
+    const kind = level ? null : kindOf(p, model.numbering), tag = kind === 'bullet' ? 'ul' : kind ? 'ol' : null;
     if (!tag) closeLists();
     else {
       const depth = listLevel(p);
@@ -102,12 +121,13 @@ function blocksHtml(blocks, model, numbers = itemNumbers(model)) {
       if (lists.at(-1)?.depth === depth) html += '</li>';
       else {
         const start = tag === 'ol' ? numbers.get(p) ?? 1 : 1;
-        html += `<${tag}${start !== 1 ? ` start="${start}"` : ''}>`;
+        // A list numbered with letters or Roman numerals keeps them: "see (b)" still finds item b.
+        const type = tag === 'ol' ? LIST_TYPES[(() => { try { return levelFor(model.numbering, p.list).format; } catch { return null; } })()] : null;
+        html += `<${tag}${type ? ` type="${type}"` : ''}${start !== 1 ? ` start="${start}"` : ''}>`;
         lists.push({ tag, depth });
       }
     }
-    const level = headingLevel(p, model.styles);
-    const inner = p.runs.map(run => runHtml(run, !!level)).join('') || '<br>';
+    const inner = escapeHtml(headingNumber(p, level, markers)) + p.runs.map(run => runHtml(run, !!level)).join('') || '<br>';
     const alignment = p.format?.alignment;
     const align = ['center', 'right', 'both'].includes(alignment) ? ` style="text-align:${alignment === 'both' ? 'justify' : alignment}"` : '';
     html += tag ? `<li${align}>${inner}` : level ? `<h${level}${align}>${inner}</h${level}>` : `<p${align}>${inner}</p>`;
@@ -118,6 +138,7 @@ function blocksHtml(blocks, model, numbers = itemNumbers(model)) {
 
 /** A standalone, readable web page of the document. */
 export function documentHtml(model, { title = 'Document' } = {}) {
+  model = finalModel(model);
   const body = blocksHtml(blocksOf(model), model);
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -145,9 +166,14 @@ const mdEscape = text => text.replace(/([\\`*_[\]#<>|~])/g, '\\$1').replace(/&(?
 // as typed, backslashes and all. Trailing punctuation ends the sentence, not the address, as in GitHub's
 // autolinks. An address an autolink cannot carry (one with a pipe, which would split a table cell) and a
 // www. address that needs escapes start with a character reference instead, so no reader links them and
-// their escapes read back as text.
-const WEB_ADDRESS = /(?<![A-Za-z])(?:https?:\/\/|www\.)[^\s<>\u0000-\u001f\u007f]+/giu;
-function mdText(text) {
+// their escapes read back as text. So does a www. address that runs straight into more than whitespace (an
+// escaped "<", or the next run's text or emphasis markers): a reader's www. link goes on to the next
+// whitespace, and would take those characters, backslashes and markers into its text.
+const WEB_ADDRESS = /(?<![A-Za-z])(?:https?:\/\/[^\s<>\u0000-\u001f\u007f]+|www\.[^\s<>\u0000-\u001f\u007f]*)/giu;
+// An address written so that no reader links it: its first character, and that of any address inside it
+// ("www.a.org]http://b.org"), as a character reference.
+const unlinked = address => mdEscape(address).replace(/(?:https?:\/\/|www\.)/gi, start => `&#${start.charCodeAt(0)};${start.slice(1)}`);
+function mdText(text, next = '') {
   let out = '', at = 0;
   for (const match of text.matchAll(WEB_ADDRESS)) {
     let address = match[0];
@@ -158,7 +184,7 @@ function mdText(text) {
         else break;
       }
       out += `${mdEscape(text.slice(at, match.index))}<${address}>`;
-    } else if (mdEscape(address) !== address) out += `${mdEscape(text.slice(at, match.index))}&#${address.charCodeAt(0)};${mdEscape(address.slice(1))}`;
+    } else if (mdEscape(address) !== address || !/^[\s\u000e]?$/.test(text[match.index + address.length] ?? next)) out += `${mdEscape(text.slice(at, match.index))}${unlinked(address)}`;
     else continue;
     at = match.index + address.length;
   }
@@ -170,11 +196,12 @@ const escapeLineStart = line => line.replace(/^(?: {4,}|\t)/, space => `&#${spac
   .replace(/^( {0,3})([-+=])/, '$1\\$2').replace(/^( {0,3}\d{1,9})([.)])/, '$1\\$2');
 // Breaks stand as NUL (which document text cannot hold) until the paragraph knows how its lines break.
 const BREAK = '\0';
-// A run's escaped text, split around its core when the run writes markers, tags or a link around it.
-function runPieces(run, heading) {
+// A run's escaped text, split around its core when the run writes markers, tags or a link around it. `next`
+// is the character the paragraph's text goes on with after the run.
+function runPieces(run, heading, next) {
   const link = safeLink(run);
   // A link's text cannot hold another link, so an address in it stays escaped text.
-  const text = (link ? mdEscape : mdText)(runText(run)).replace(/[\v\f\u000e]/g, BREAK);
+  const text = (link ? mdEscape : mdText)(runText(run), next).replace(/[\v\f\u000e]/g, BREAK);
   const strike = run.strikethrough && run.strikethrough !== 'none', bold = run.bold && !heading;
   if (!/[^\s\0]/.test(text) || !(strike || run.italic || bold || ['superscript', 'subscript'].includes(run.verticalAlign) || link)) return { text };
   // Breaks at a run's edges stay outside its emphasis markers, as spaces do.
@@ -204,10 +231,33 @@ function runMarkdown(piece, before, after, touching = false) {
   if (piece.link) out = `[${out}](${piece.link.replace(/[()\s|]/g, encodeURIComponent)})`;
   return lead + out + trail;
 }
+/**
+ * A paragraph's runs joined where Markdown writes them alike: runs that differ only in what it cannot show
+ * (a font, a color, a language) are one text, escaped as a whole. Escaped apart, text split between them
+ * read back differently: "htt" and "p://example.com/a_b" were linked with a backslash in the address, and
+ * "&" and "amp;" became one ampersand.
+ */
+function markdownRuns(runs, heading) {
+  const key = run => [!!run.bold && !heading, !!run.italic, !!run.strikethrough && run.strikethrough !== 'none',
+    ['superscript', 'subscript'].includes(run.verticalAlign) ? run.verticalAlign : '', safeLink(run) || ''].join('\0');
+  const out = [];
+  let last = null;
+  for (const run of runs) {
+    const text = runText(run);
+    if (!text) continue;
+    const k = key(run);
+    if (last && last.key === k) last.run.text += text;
+    else { last = { key: k, run: { ...run, text, vanish: false } }; out.push(last); }
+  }
+  return out.map(entry => entry.run);
+}
 /** A paragraph's Markdown, its line, page and column breaks written as `lineBreak`. */
 // A break at either end of a paragraph has no line to start: Markdown would show a backslash there.
 const paragraphMarkdown = (p, heading = false, lineBreak = '\\\n') => {
-  const pieces = p.runs.map(run => runPieces(run, heading)).filter(piece => piece.text);
+  const runs = markdownRuns(p.runs, heading);
+  const texts = runs.map(runText), following = [];
+  for (let i = texts.length - 1, next = ''; i >= 0; i--) { following[i] = next; next = texts[i][0] || next; }
+  const pieces = runs.map((run, i) => runPieces(run, heading, following[i])).filter(piece => piece.text);
   const written = [];
   pieces.forEach((piece, i) => {
     const previous = written[i - 1] || '';
@@ -220,7 +270,7 @@ const paragraphMarkdown = (p, heading = false, lineBreak = '\\\n') => {
     .split(BREAK).map(escapeLineStart).join(heading ? ' ' : lineBreak);
 };
 function blocksMarkdown(blocks, model) {
-  const out = [], numbers = itemNumbers(model);
+  const out = [], numbers = itemNumbers(model), markers = itemMarkers(model);
   // The open list levels, outermost first: where each level's markers start and its items' text begins.
   let lists = [], previousList = null;
   for (const block of blocks) {
@@ -235,7 +285,7 @@ function blocksMarkdown(blocks, model) {
       previousList = null; lists = [];
       continue;
     }
-    const p = block.paragraph, kind = kindOf(p, model.numbering), level = headingLevel(p, model.styles);
+    const p = block.paragraph, level = headingLevel(p, model.styles), kind = level ? null : kindOf(p, model.numbering);
     const text = paragraphMarkdown(p, !!level);
     if (kind) {
       // A deeper item is indented to its parent item's text, which nests it under that item.
@@ -254,14 +304,17 @@ function blocksMarkdown(blocks, model) {
       continue;
     }
     previousList = null; lists = [];
-    if (level) out.push(`${'#'.repeat(level)} ${text.trim()}`);
+    if (level) out.push(`${'#'.repeat(level)} ${mdEscape(headingNumber(p, level, markers))}${text.trim()}`);
     else if (text.trim()) out.push(text);
   }
   return out.join('\n\n');
 }
 
 export function documentMarkdown(model) {
-  return `${blocksMarkdown(blocksOf(model), model).trim()}\n`;
+  model = finalModel(model);
+  // Only the separators go: a no-break space starting the text is the text's own, and without it a "+ " or
+  // "1. " after it would start a list.
+  return `${blocksMarkdown(blocksOf(model), model).replace(/^[ \n]+|[ \t\n]+$/g, '')}\n`;
 }
 
 /* ---- Plain text ---- */
@@ -276,6 +329,7 @@ function itemMarkers(model) {
   return markers;
 }
 export function documentPlainText(model) {
+  model = finalModel(model);
   const lines = [], markers = itemMarkers(model);
   // A list item keeps its number or bullet, indented two spaces a level, as text has no other way to show them.
   const marker = (p, indent = true) => markers.has(p) ? (indent ? '  '.repeat(listLevel(p)) : '') + markers.get(p) : '';

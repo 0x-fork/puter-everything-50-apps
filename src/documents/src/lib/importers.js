@@ -130,9 +130,10 @@ export function declaredCharset(bytes) {
  * UTF-16 (Notepad's "Unicode", PowerShell output); anything else is UTF-8.
  * A file that is not valid UTF-8 throughout reads in the encoding an HTML
  * file declares (a page saved by an older Korean, Japanese or Chinese word
- * processor names EUC-KR, Shift_JIS or GBK), else it is Windows-1252 when
- * nothing in it decodes as a UTF-8 character, so a legacy file reads as
- * text instead of replacement characters; a UTF-8 file with a damaged byte
+ * processor names EUC-KR, Shift_JIS or GBK). Without one, a file that reads
+ * mostly as damaged UTF-8 is a legacy file: a Korean, Japanese or Chinese
+ * code page when it reads as one, else Windows-1252, so it reads as text
+ * instead of replacement characters; a UTF-8 file with a damaged byte
  * (cut short, or with one stray byte pasted in) keeps its text and shows
  * one replacement character where the damage is, rather than turning to
  * mojibake throughout.
@@ -152,8 +153,59 @@ export function decodeTextFile(bytes, kind = null) {
     } catch { /* an encoding the platform does not know */ }
   }
   const utf8 = new TextDecoder('utf-8').decode(b);
-  if (/[^\x00-\x7f\ufffd]/.test(utf8)) return utf8;
+  // UTF-8 with a damaged byte or two reads mostly as characters. A legacy file reads mostly as replacement
+  // characters, with a few byte pairs that happen to be UTF-8 among them ("Spaß“" in Windows-1252 is one).
+  const valid = (utf8.match(/[^\x00-\x7f\ufffd]/g) || []).length, damaged = (utf8.match(/\ufffd/g) || []).length;
+  if (valid >= damaged) return utf8;
+  const cjk = legacyCjkText(b);
+  if (cjk != null) return cjk;
   try { return new TextDecoder('windows-1252').decode(b); } catch { return utf8; }
+}
+
+// The characters written most often in Korean and in Chinese text. Text in the other language, or in a
+// Western code page, read in the wrong encoding comes out as valid but rarely used characters.
+const KOREAN_COMMON = new Set('이다는의에하고을가지를로한기서도사으리자어나인일대수정시부전것보요해그면라아들주게국있제만적');
+const CHINESE_COMMON = new Set('的一是不了在人有我他这个们中来上大为和国地到以说时要就出会可也你对生能而子那得于着下自之年过发后作里用道行所然家种事成方多经么去法学如都同现当没动面起看定天分还进好小部其些主样理心她本前开但因只从想实日');
+
+/**
+ * The text of a file in a legacy Korean (EUC-KR, CP949), Japanese (Shift_JIS) or Simplified Chinese (GBK)
+ * code page, as Windows editors of those languages saved plain text; null when the bytes do not read as
+ * one. An encoding is taken only when every byte reads in it and the result looks like its language:
+ * mostly Hangul with the common syllables among it, Japanese with hiragana, or Chinese with its common
+ * characters, so a Western text (whose accented letters some of these code pages also accept) is left to
+ * Windows-1252.
+ */
+function legacyCjkText(b) {
+  const read = (encoding) => { try { return new TextDecoder(encoding, { fatal: true }).decode(b); } catch { return null; } };
+  // Counts over the first 64K characters: of those beyond ASCII, how many are the script's and how many of those common.
+  const count = (text, script, common) => {
+    let wide = 0, own = 0, usual = 0, hiragana = 0;
+    for (const ch of text.slice(0, 65536)) {
+      if (ch <= '\x7f') continue;
+      wide++;
+      if (/\p{Script=Hiragana}/u.test(ch)) hiragana++;
+      if (script.test(ch)) { own++; if (common?.has(ch)) usual++; }
+    }
+    return { own: wide ? own / wide : 0, common: own ? usual / own : 0, hiragana };
+  };
+  const candidates = [];
+  const korean = read('euc-kr');
+  if (korean) {
+    const { own, common } = count(korean, /\p{Script=Hangul}/u, KOREAN_COMMON);
+    if (own >= 0.5) candidates.push({ text: korean, score: common });
+  }
+  const japanese = read('shift_jis');
+  if (japanese) {
+    const { own, hiragana } = count(japanese, /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\u3000-\u303f\uff01-\uff5e\u30fc]/u);
+    if (hiragana && own >= 0.8) candidates.push({ text: japanese, score: 1 });
+  }
+  const chinese = read('gbk');
+  if (chinese) {
+    const { own, common } = count(chinese, /\p{Script=Han}/u, CHINESE_COMMON);
+    if (own >= 0.7) candidates.push({ text: chinese, score: common });
+  }
+  const best = candidates.filter((c) => c.score >= 0.1).sort((x, y) => y.score - x.score)[0];
+  return best ? best.text : null;
 }
 
 /**

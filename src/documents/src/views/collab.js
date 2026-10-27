@@ -14,6 +14,7 @@ import { toast } from '../ui/toast.js';
 import { engineApi } from '../lib/engine-api.js';
 import { canEmail, sendMail } from '../lib/mail-send.js';
 import { roleLabel, initials, colorFor } from '../collab/protocol.js';
+import { rememberedRoom } from '../collab/room-memory.js';
 import { openShareDialog, roleSentence } from './share-dialog.js';
 
 /** This tab's name in local sharing (tabs of one browser): ?name= in the address, or a guest name kept for the tab. */
@@ -28,11 +29,32 @@ export function localGuest() {
   return saved;
 }
 
+/**
+ * Keep the document from being changed until the returned function is called: the editor reads only, whatever
+ * Editing / Viewing mode is chosen meanwhile, and the mode chosen last applies afterwards.
+ */
+function holdEditing(engine) {
+  const original = engine?.setViewOnly;
+  if (typeof original !== 'function') return () => {};
+  const own = Object.hasOwn(engine, 'setViewOnly');
+  let wanted = !!engine.viewOnly, released = false;
+  engine.setViewOnly = on => { wanted = !!on; original.call(engine, true); };
+  original.call(engine, true);
+  return () => {
+    if (released) return;
+    released = true;
+    if (own) engine.setViewOnly = original; else delete engine.setViewOnly;
+    if (!engine.destroyed) original.call(engine, wanted);
+  };
+}
+
 const MODE_REASONS = { 'content controls without text': 'form fields that are still empty', 'line feeds inside a run': 'text this editor keeps as a single run' };
 
-export function createCollaboration({ editor, pkg, doc, local, error, onChange = () => {}, documentName, user, saveFirst, exportDocx, exportPdf, signIn = async () => true, readOnly = () => false }) {
+export function createCollaboration({ editor, pkg, doc, local, error, onChange = () => {}, documentName, user, saveFirst, exportDocx, exportPdf, signIn = async () => true, readOnly = () => false, baseAssets = () => Object.keys(pkg()?.assets || {}) }) {
   let live = null, starting = null, liveModule = null, dialog = null, destroyed = false;
   const loadLive = () => (liveModule ||= import('../collab/live.js'));
+  // The room an owner shared this file in, looked up while the editor loads rather than after.
+  const remembered = !local && doc.path && !doc.collab ? rememberedRoom(doc.path) : null;
 
   /* ---- Title bar: who is here ---- */
   const avatars = el('div.cl-presence', { hidden: true, role: 'group', 'aria-label': 'People in this document' });
@@ -99,7 +121,7 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
     const me = user();
     const commentGuard = api?.protectionGuard({ edit: 'comments', enforcement: true }, { name: me.name, email: me.name });
     const fileText = engine.session?.body?.text;
-    live = new LiveSession({ engine, doc, client, link, user: me, baseAssets: Object.keys(pkg()?.assets || {}), commentGuard,
+    live = new LiveSession({ engine, doc, client, link, user: me, baseAssets: baseAssets(), commentGuard,
       onApplied: () => onChange(), onError: e => error(e) });
     // Reopening a document it shared, the owner sees the room's state, which the file is then saved to. The room may lack
     // what the file has: a change made outside it (another app, a session that could not reach the room). The file as it
@@ -146,12 +168,23 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
         toast(roleSentence(client.role) || 'You joined the shared document.', { icon: 'info' });
         return;
       }
-      if (!local && doc.path && !readOnly()) {
-        const { reconnect } = await loadLive();
-        const found = await reconnect(doc.path, user());
-        if (found) await begin(found.client, found.link, { reopened: true });
+      if (!local && doc.path && !readOnly() && remembered) {
+        // The room's state replaces what the editor shows once it has been joined: anything typed before then
+        // would be lost. A document shared before reads only until its room has been joined. One that never
+        // was opens for editing at once (the lookup started while the editor loaded).
+        const saved = await remembered;
+        if (!saved?.server || !saved?.room || destroyed) return;
+        const release = holdEditing(editor());
+        try {
+          setBanner('Connecting to the shared document… You can edit it once it has opened.');
+          const { reconnect } = await loadLive();
+          const found = await reconnect(doc.path, user(), saved);
+          if (!live) setBanner('');
+          release();
+          if (found) await begin(found.client, found.link, { reopened: true });
+        } finally { release(); }
       }
-    } catch (e) { error(e); }
+    } catch (e) { if (!live) setBanner(''); error(e); }
   }
 
   /** Start sharing (once): the first invitation or link creates the room. */
@@ -174,6 +207,8 @@ export function createCollaboration({ editor, pkg, doc, local, error, onChange =
       const baseBytes = p?.parts ? zipSync(p.parts) : new Uint8Array(await exportDocx().arrayBuffer());
       const { client, link, reason } = await shareDocument({ engine, doc, user: user(), name: documentName() || 'Untitled document', baseBytes, local, progress });
       if (!await begin(client, link)) throw new Error('The document was closed.');
+      // Pictures added since the file was opened are not in the document the room starts from.
+      live.binding.shareOwnAssets();
       if (reason) toast('Others will see this document read-only while you edit it: it has content only one person can change at a time.', { icon: 'info', duration: 8000 });
       progress('');
       return live;

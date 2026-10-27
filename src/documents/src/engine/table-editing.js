@@ -909,6 +909,10 @@ export function sortTable(model, { keys, header = false, caseSensitive = false }
   const state = M.tableContent(model, table);
   model.checkpoint();
   table.rows.splice(first, sorted.length, ...sorted.map(item => item.row));
+  // Repeating as a header row belongs to the table's top rows: a row sorted into the body stops repeating and
+  // the row sorted into its place repeats instead (sorting with "Header row" leaves the header rows out).
+  const headers = rows.map(({ row }) => !!row.header);
+  sorted.forEach(({ row }, i) => { if (!!row.header !== headers[i]) { row.header = headers[i]; row.headerChanged = true; } });
   M.applyTableContent(model, table, state);
   validate(model);
   model.didChange(); return true;
@@ -944,6 +948,8 @@ function convertible(p) {
   if (p.sectionEnd) return 'Section breaks cannot become table cells.';
   if (p.fieldMarkers?.length || p.bookmarks?.length) return 'Text with fields, bookmarks or comments cannot be converted yet.';
   if (p.blockControls?.length || p.runs.some(r => r.contentControl || r.revision)) return 'Text in content controls or tracked changes cannot be converted yet.';
+  // Drawings in table cells do not wrap text yet.
+  if (p.runs.some(r => r.image?.anchor && r.image.anchor.wrap !== 'none')) return 'Text with a picture or shape that text wraps around cannot become a table yet. Set it to In Line with Text or In Front of Text first.';
   return null;
 }
 
@@ -1143,6 +1149,21 @@ export function clearCells(model) {
   const state = M.tableContent(model, table);
   const empty = placements.every(({ cell }) => { const content = state.byCell.get(cell.id) || []; return content.length === 1 && !paragraphText(content[0]); });
   if (empty) return false;
+  const saved = { tableId: table.id, top: block.top, bottom: block.bottom, left: block.left, right: block.right };
+  if (model.trackChanges) {
+    // With Track Changes on, each cell's text is marked deleted, as Delete marks a selection; the cells stay.
+    let changed = false, checkpoint = true;
+    for (const { cell } of [...placements].reverse()) {
+      const first = model.paragraphs.findIndex(p => p.cellId === cell.id), last = model.paragraphs.findLastIndex(p => p.cellId === cell.id);
+      if (first < 0) continue;
+      const start = model.paragraphOffset(first), end = model.paragraphOffset(last) + paragraphText(model.paragraphs[last]).length;
+      if (start === end) continue;
+      model.select(start, end);
+      if (model.replace('', { checkpoint })) { changed = true; checkpoint = false; }
+    }
+    model.setCellBlock(saved);
+    return changed;
+  }
   model.checkpoint();
   for (const { cell } of placements) state.byCell.set(cell.id, [blankFor(state, cell, cell)]);
   M.applyTableContent(model, table, state);

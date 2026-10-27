@@ -8,8 +8,10 @@ const THUMB_WIDTH = 132;
  * The Navigation pane: search the document, then browse by Headings (a collapsible outline that
  * tracks the current heading), Pages (thumbnails) or Results (each match in its context).
  *
- * api: navigate(paragraphId), goToPage(index), pages() → canvases, search(text) → matches,
+ * api: navigate(paragraphId), goToPage(index), pages() → canvases, flushPages() → paint the pages left for later,
+ *      search(text) → matches,
  *      text() → document text, selectMatch(match), highlight(matches), close(), focusEditor(),
+ *      version() → optional list of values that change whenever the searched text may have,
  *      headingActions() → optional { canEdit(), move(id, targetId, 'before' | 'after'), promote(id), demote(id),
  *      remove(id), insert(id, 'before' | 'after' | 'sub'), select(id) }: headings can then be dragged to
  *      reorder their sections, and their context menu promotes, demotes, adds and deletes them.
@@ -52,7 +54,7 @@ export function createNavigationPane(api) {
   });
 
   function select(id) {
-    tab = id;
+    tab = id; allThumbnails = true;
     for (const button of tabButtons) { const on = button.id === `nav-tab-${id}`; button.setAttribute('aria-selected', String(on)); button.tabIndex = on ? 0 : -1; }
     for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== id;
     render();
@@ -60,9 +62,19 @@ export function createNavigationPane(api) {
 
   /* ---- Search: highlights every match in the document and lists them under Results ---- */
   let current = -1;
+  // The last search, kept while the document and the search are the same: a caret move does not search again.
+  let searched = null;
+  function find(text) {
+    if (!text) return [];
+    const version = api.version?.() || null;
+    if (version && searched?.text === text && searched.version.length === version.length && searched.version.every((v, i) => v === version[i])) return searched.matches;
+    const found = api.search(text);
+    searched = version ? { text, version, matches: found } : null;
+    return found;
+  }
   function runSearch() {
     const text = search.value;
-    matches = text ? api.search(text) : [];
+    matches = find(text);
     current = -1;
     api.highlight(matches);
     status.textContent = !text ? '' : matches.length ? `${matches.length} result${matches.length === 1 ? '' : 's'}` : 'No matches';
@@ -78,6 +90,9 @@ export function createNavigationPane(api) {
     status.textContent = `Result ${current + 1} of ${matches.length}`;
     renderResults();
   });
+
+  /** The heading button for a paragraph, found by its id (no selector to escape, which not every environment offers). */
+  const headingButton = id => [...headingList.querySelectorAll('.nav-heading')].find(button => button.dataset.paragraph === id) || null;
 
   /* ---- Rendering ---- */
   function renderHeadings() {
@@ -116,7 +131,7 @@ export function createNavigationPane(api) {
         rows.push(el('li', { role: 'none' }, row));
       });
       headingList.replaceChildren(...rows);
-      if (focused) headingList.querySelector(`[data-paragraph="${CSS.escape(focused)}"]`)?.focus();
+      if (focused) headingButton(focused)?.focus();
     }
     const here = entries.filter(entry => entry.start <= position).at(-1)?.id;
     for (const button of headingList.querySelectorAll('.nav-heading')) {
@@ -140,13 +155,13 @@ export function createNavigationPane(api) {
     } else if (key === 'ArrowLeft') {
       if (parent && !collapsed.has(entry.id)) { collapsed.add(entry.id); renderHeadings(); return; }
       const up = entries.slice(0, index).findLast(e => e.level < entry.level);
-      if (up) focus(headingList.querySelector(`[data-paragraph="${CSS.escape(up.id)}"]`));
+      if (up) focus(headingButton(up.id));
     }
   }
   /* ---- Rearranging headings: drag a heading to move its section; its menu changes levels ---- */
   const actions = () => api.headingActions?.() || null;
   const editable = () => !!actions()?.canEdit?.();
-  const refocus = id => requestAnimationFrame(() => headingList.querySelector(`[data-paragraph="${CSS.escape(id)}"]`)?.focus());
+  const refocus = id => requestAnimationFrame(() => headingButton(id)?.focus());
   let dragging = null;
   function dragHeading(row, heading, entry) {
     heading.draggable = true;
@@ -189,14 +204,20 @@ export function createNavigationPane(api) {
       { label: 'Collapse All', onSelect: () => { collapsed = new Set(entries.filter((e, i) => entries[i + 1]?.level > e.level).map(e => e.id)); signature = ''; renderHeadings(); refocus(entries.findLast(e => e.start <= entry.start && e.level === 1)?.id || entry.id); } },
     ] });
   }
-  let pagesToken = 0;
+  // Thumbnails draw the screen pages scaled down, so they show exactly what the document shows. Shown
+  // afresh, every page is painted and drawn; after that a thumbnail is drawn again only when its page has
+  // been painted (pagesPainted). Typing paints the pages on screen, and the rest once typing pauses:
+  // painting every page and drawing every thumbnail after each keystroke held up typing.
+  let pagesToken = 0, allThumbnails = true;
+  const paintedPages = new Set();
   function renderPages() {
-    const canvases = api.pages();
     const token = ++pagesToken;
-    // Thumbnails draw the screen pages scaled down, so they show exactly what the document shows.
     requestAnimationFrame(() => {
       if (token !== pagesToken || node.hidden || tab !== 'pages') return;
-      const currentPage = api.currentPage();
+      const all = allThumbnails;
+      if (all) api.flushPages?.();
+      const canvases = api.pages(), currentPage = api.currentPage();
+      allThumbnails = false;
       while (pageGrid.children.length > canvases.length) pageGrid.lastChild.remove();
       canvases.forEach((source, i) => {
         // Each list item holds a button, so the page is announced as a button in a list of pages.
@@ -210,12 +231,16 @@ export function createNavigationPane(api) {
         item.lastChild.textContent = String(i + 1);
         if (i === currentPage) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
         const thumb = item.firstChild, ratio = source.height / source.width || 1.294, scale = window.devicePixelRatio || 1;
-        thumb.width = Math.round(THUMB_WIDTH * scale); thumb.height = Math.round(THUMB_WIDTH * ratio * scale);
+        const width = Math.round(THUMB_WIDTH * scale), height = Math.round(THUMB_WIDTH * ratio * scale);
+        if (!all && thumb.source === source && thumb.width === width && thumb.height === height && !paintedPages.has(i)) return;
+        thumb.source = source;
+        thumb.width = width; thumb.height = height;
         thumb.style.width = `${THUMB_WIDTH}px`; thumb.style.height = `${Math.round(THUMB_WIDTH * ratio)}px`;
         const ctx = thumb.getContext('2d');
         ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, thumb.width, thumb.height);
         if (source.width) ctx.drawImage(source, 0, 0, thumb.width, thumb.height);
       });
+      paintedPages.clear();
     });
   }
   function renderResults() {
@@ -225,11 +250,24 @@ export function createNavigationPane(api) {
     const body = matches.length ? api.text() : '';
     // Choosing a result redraws the list; keyboard focus stays on the same row instead of dropping to the page.
     const focused = [...resultList.querySelectorAll('.nav-result')].indexOf(document.activeElement);
-    resultList.replaceChildren(...matches.slice(0, 500).map((match, i) => {
+    // A row whose words are unchanged stays as it is: typing moves the matches after it, not their context,
+    // and rebuilding hundreds of rows held up every keystroke.
+    const shown = matches.slice(0, 500);
+    shown.forEach((match, i) => {
       const start = Math.max(body.lastIndexOf('\n', match.start - 1) + 1, match.start - 40), end = Math.min(...[body.indexOf('\n', match.end), match.end + 60].filter(n => n >= 0));
-      return el('li', {}, el('button.nav-result', { type: 'button', 'aria-current': i === current ? 'true' : null, onclick: () => { current = i; api.selectMatch(match); status.textContent = `Result ${i + 1} of ${matches.length}`; renderResults(); } },
-        (start > 0 && body[start - 1] !== '\n' ? '…' : '') + body.slice(start, match.start), el('mark', {}, body.slice(match.start, match.end)), body.slice(match.end, end)));
-    }));
+      const parts = [(start > 0 && body[start - 1] !== '\n' ? '…' : '') + body.slice(start, match.start), body.slice(match.start, match.end), body.slice(match.end, end)];
+      const key = parts.join('\u0000'), row = resultList.children[i];
+      if (row?.dataset.key === key) {
+        const button = row.firstChild;
+        if (i === current) button.setAttribute('aria-current', 'true'); else button.removeAttribute('aria-current');
+        return;
+      }
+      // The row chooses the match at its place in the list when clicked, so a kept row chooses the moved match.
+      const next = el('li', { dataset: { key } }, el('button.nav-result', { type: 'button', 'aria-current': i === current ? 'true' : null, onclick: () => { current = i; api.selectMatch(matches[i]); status.textContent = `Result ${i + 1} of ${matches.length}`; renderResults(); } },
+        parts[0], el('mark', {}, parts[1]), parts[2]));
+      if (row) row.replaceWith(next); else resultList.append(next);
+    });
+    while (resultList.children.length > shown.length) resultList.lastChild.remove();
     if (focused >= 0) (resultList.querySelectorAll('.nav-result')[Math.min(focused, matches.length - 1)] || search).focus();
   }
   function render() {
@@ -246,7 +284,7 @@ export function createNavigationPane(api) {
       entries = nextEntries; position = caret;
       if (node.hidden) return;
       if (search.value) {
-        matches = api.search(search.value); api.highlight(matches);
+        matches = find(search.value); api.highlight(matches);
         // The count and the current result follow edits to the document.
         if (current >= matches.length) current = -1;
         status.textContent = !matches.length ? 'No matches' : current >= 0 ? `Result ${current + 1} of ${matches.length}` : `${matches.length} result${matches.length === 1 ? '' : 's'}`;
@@ -254,10 +292,16 @@ export function createNavigationPane(api) {
       render();
     },
     open({ focus = true } = {}) {
-      node.hidden = false; signature = ''; render();
+      node.hidden = false; signature = ''; allThumbnails = true; render();
       if (focus) (tab === 'headings' && (headingList.querySelector('[aria-current]') || headingList.querySelector('.nav-heading')) || search).focus();
     },
     hide() { node.hidden = true; if (search.value) api.highlight([]); },
+    /** The document painted these pages: their thumbnails are drawn again. */
+    pagesPainted(indices) {
+      if (node.hidden || tab !== 'pages') return;
+      for (const index of indices) paintedPages.add(index);
+      renderPages();
+    },
     focusSearch() { search.focus(); search.select(); },
     setSearch(text) { search.value = text; runSearch(); search.focus(); search.select(); },
     /** The text searched for last, for Find Next. */

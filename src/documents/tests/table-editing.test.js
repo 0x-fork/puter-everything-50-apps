@@ -7,6 +7,7 @@ import { TextDocument, paragraph, paragraphText } from '../src/engine/model.js';
 import { tableCells, verticalMerges, rowGrid, documentBlocks } from '../src/engine/tables.js';
 import * as T from '../src/engine/table-editing.js';
 import { blockFor, ownerPlacements } from '../src/engine/table-selection.js';
+import { StorySession } from '../src/engine/story-session.js';
 
 let dom;
 beforeAll(() => { dom = new JSDOM(); globalThis.DOMParser = dom.window.DOMParser; globalThis.XMLSerializer = dom.window.XMLSerializer; });
@@ -176,6 +177,40 @@ describe('cells', () => {
   });
 });
 
+describe('inserting a table', () => {
+  const blocks = doc => documentBlocks(doc.paragraphs, doc.tables).map(b => b.type === 'table' ? 'table' : paragraphText(b.paragraph));
+  const document = texts => { const pkg = createDocx(texts.map(text => paragraph(text)), undefined, undefined, undefined, [], {}, WRITING_STYLES); return { pkg, doc: open(pkg) }; };
+  it('puts it in place of an empty paragraph, or before a paragraph at its start, with no empty paragraph above', async () => {
+    // Word places the table at the paragraph, which then follows the table.
+    const { pkg, doc } = document(['Before', '', 'After']);
+    doc.select('Before\n'.length); doc.insertTable(2, 2, 9000);
+    expect(blocks(doc)).toEqual(['Before', 'table', '', 'After']);
+    expect(doc.tableContext.table).toBe(doc.tables[0]);
+    const { reopened, xml } = await roundTrip(pkg, doc);
+    expect(blocks(reopened)).toEqual(['Before', 'table', '', 'After']);
+    expect(xml).toMatch(/>Before<\/w:t><\/w:r><\/w:p><w:tbl>/);
+    expect(doc.history).toHaveLength(1);
+    doc.undo();
+    expect([blocks(doc), doc.tables]).toEqual([['Before', '', 'After'], []]);
+
+    const heading = document(['Before', 'Heading']).doc;
+    heading.select('Before\n'.length); heading.insertTable(1, 2, 9000);
+    expect(blocks(heading)).toEqual(['Before', 'table', 'Heading']);
+    const first = document(['Only']).doc;
+    first.select(0); first.insertTable(1, 1, 9000);
+    expect(blocks(first)).toEqual(['table', 'Only']);
+    // Inside a paragraph it is split around the table.
+    const middle = document(['Before']).doc;
+    middle.select(3); middle.insertTable(1, 1, 9000);
+    expect(blocks(middle)).toEqual(['Bef', 'table', 'ore']);
+    // Right after another table the paragraph is split too: adjacent tables would join into one.
+    const after = document(['']).doc;
+    after.select(0); after.insertTable(1, 1, 9000);
+    after.select(after.text.length); after.insertTable(1, 1, 9000);
+    expect(blocks(after)).toEqual(['table', '', 'table', '']);
+  });
+});
+
 describe('table commands', () => {
   it('splits a table above the selected row', async () => {
     const { pkg, doc } = tableDocument(3, 2, ['Intro']);
@@ -183,7 +218,7 @@ describe('table commands', () => {
     expect(doc.tables).toHaveLength(2);
     expect(shape(doc, doc.tables[0])).toEqual(['a0 a1']);
     expect(shape(doc, doc.tables[1])).toEqual(['b0 b1', 'c0 c1']);
-    expect(documentBlocks(doc.paragraphs, doc.tables).map(b => b.type)).toEqual(['paragraph', 'paragraph', 'table', 'paragraph', 'table', 'paragraph']);
+    expect(documentBlocks(doc.paragraphs, doc.tables).map(b => b.type)).toEqual(['paragraph', 'table', 'paragraph', 'table', 'paragraph']);
     const { reopened } = await roundTrip(pkg, doc);
     expect(reopened.tables).toHaveLength(2);
   });
@@ -200,6 +235,24 @@ describe('table commands', () => {
     expect(shape(doc).map(r => r.split(' ')[0])).toEqual(['Item', 'Pens', 'Paper', 'Ink']);
     expect(T.sortDate('2024-02-01')).toBeLessThan(T.sortDate('March 3, 2024'));
     expect(T.sortDate('3/4/2024')).toBe(Date.UTC(2024, 2, 4));
+  });
+
+  it('sorting a repeated header row into the body without "Header row" leaves the repeat on the top row', async () => {
+    const { pkg, doc } = tableDocument(3, 1);
+    const fill = (r, text) => { at(doc, r, 0); doc.select(doc.selection.focus, doc.selection.focus + 2); doc.replace(text); };
+    ['Name', 'Zed', 'Amy'].forEach((text, r) => fill(r, text));
+    at(doc, 0, 0); expect(doc.setTableHeaderRows(1)).toBe(true);
+    const history = doc.history.length;
+    expect(T.sortTable(doc, { keys: [{ column: 0, type: 'text' }], header: false })).toBe(true);
+    expect(shape(doc)).toEqual(['Amy', 'Name', 'Zed']);
+    // The table still repeats its first row, which is now Amy's; Name's row, moved into the body, does not repeat.
+    expect(doc.tables[0].rows.map(row => !!row.header)).toEqual([true, false, false]);
+    expect(doc.history.length).toBe(history + 1);
+    const { reopened } = await roundTrip(pkg, doc);
+    expect(reopened.tables[0].rows.map(row => !!row.header)).toEqual([true, false, false]);
+    doc.undo();
+    expect(shape(doc)).toEqual(['Name', 'Zed', 'Amy']);
+    expect(doc.tables[0].rows.map(row => !!row.header)).toEqual([true, false, false]);
   });
 
   it('converts text to a table and back', async () => {
@@ -226,7 +279,7 @@ describe('table commands', () => {
     T.convertTextToTable(doc, { separator: 'tab', availableWidth: 8000 });
     const nested = doc.tables.find(t => t.parentCellId === cell.id);
     expect(nested.rows.map(r => r.cells.length)).toEqual([2, 2]);
-    expect(documentBlocks(doc.paragraphs, doc.tables)[1].rows[0].cells[0].content.map(b => b.type)).toEqual(['table', undefined]);
+    expect(documentBlocks(doc.paragraphs, doc.tables).find(b => b.type === 'table').rows[0].cells[0].content.map(b => b.type)).toEqual(['table', undefined]);
     const { reopened } = await roundTrip(pkg, doc);
     expect(reopened.tables).toHaveLength(2);
   });
@@ -457,7 +510,7 @@ describe('deleting a selection around tables', () => {
   it('removes a table the selection encloses together with text around it', async () => {
     const { pkg, doc } = tableDocument(2, 2, ['Before']);
     doc.select(doc.text.length); doc.replace('After');
-    expect(doc.text).toBe('Before\n\na0\na1\nb0\nb1\nAfter');
+    expect(doc.text).toBe('Before\na0\na1\nb0\nb1\nAfter');
     // From inside the paragraph before to inside the one after: the two ends join.
     doc.select(3, doc.text.length - 2);
     expect(doc.replace('')).toBe(true);
@@ -471,9 +524,9 @@ describe('deleting a selection around tables', () => {
     const other = tableBetween().doc;
     other.select(0, other.text.length); other.replace('X');
     expect([other.text, other.tables.length]).toEqual(['X', 0]);
-    // A selection from the end of the paragraph before to the start of the one after takes just the table.
+    // A selection from the start of the table to the start of the paragraph after takes just the table.
     const exact = tableBetween().doc;
-    exact.select(exact.text.indexOf('\na0'), exact.text.indexOf('After'));
+    exact.select(exact.text.indexOf('a0'), exact.text.indexOf('After'));
     exact.replace('');
     expect([exact.text, exact.tables.length]).toEqual(['Before\nAfter', 0]);
   });
@@ -527,5 +580,35 @@ describe('inserting columns into an AutoFit table', () => {
       const { xml } = await roundTrip(pkg, doc);
       expect(xml).not.toContain('<w:gridCol w:w="0"/>');
     }
+  });
+});
+
+it('explains that text holding a picture text wraps around cannot become a table yet', async () => {
+  const pkg = await DocxPackage.open(readFileSync('public/fixtures/square-wrap-flow.docx')), doc = open(pkg);
+  const at = doc.text.indexOf('CASE left');
+  doc.select(at, doc.text.indexOf('Following paragraph') + 5);
+  expect(doc.selectedParagraphs.some(p => p.runs.some(r => r.image?.anchor?.wrap === 'square'))).toBe(true);
+  const before = doc.text;
+  expect(() => T.convertTextToTable(doc, { separator: 'tab' })).toThrow(/picture or shape that text wraps around.*In Line with Text/);
+  expect([doc.text, doc.tables.length]).toEqual([before, 0]);
+});
+
+describe('clearing a block of cells with Track Changes on', () => {
+  it('marks each cell’s text as deleted, keeping the cells, in one undo step', async () => {
+    const { pkg, doc } = tableDocument(2, 3);
+    doc.trackChanges = true;
+    block(doc, 0, 1, 1, 2);
+    const session = new StorySession(doc), before = JSON.stringify(doc.paragraphs);
+    expect(session.run(() => T.clearCells(doc))).toBe(true);
+    const runs = doc.paragraphs.filter(p => p.cellId).flatMap(p => p.runs.map(r => [r.text, r.revision?.type ?? null]));
+    expect(runs).toEqual([['a0', null], ['a1', 'del'], ['a2', null], ['b0', null], ['b1', 'del'], ['b2', null]]);
+    expect(doc.activeCellBlock).toMatchObject({ top: 0, bottom: 1, left: 1, right: 2 });
+    const { reopened } = await roundTrip(pkg, doc);
+    reopened.resolveRevisions(true);
+    expect(shape(reopened)).toEqual(['a0  a2', 'b0  b2']);
+    // Clearing again finds nothing left to delete.
+    expect(T.clearCells(doc)).toBe(false);
+    session.undo();
+    expect(JSON.stringify(doc.paragraphs)).toBe(before);
   });
 });

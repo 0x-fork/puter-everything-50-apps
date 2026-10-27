@@ -6,7 +6,8 @@ import { openParagraphShading } from '../src/views/paragraph-shading.js';
 import { createNavigationPane } from '../src/views/navigation-pane.js';
 import { closeMenu } from '../src/ui/menu.js';
 const anchor = () => { const node = document.createElement('button'); document.body.append(node); node.focus(); return node; };
-afterEach(() => { closeMenu(); document.body.replaceChildren(); });
+// Let frames the pane asked for run while the document still exists.
+afterEach(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); closeMenu(); document.body.replaceChildren(); });
 it('previews table dimensions with keyboard navigation and inserts exactly once', () => {
   const apply = vi.fn(), popup = openInsertTable(apply, { anchor: anchor() });
   const cell = popup.menu.querySelector('[aria-label="3 columns, 2 rows"]'); cell.focus();
@@ -74,6 +75,9 @@ it('offers no section commands for a heading in a table, and says why, rather th
   // Alt+Shift+Arrow moves an ordinary section past the table's heading, never onto it.
   heading('next').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, shiftKey: true, bubbles: true }));
   expect(act.move).toHaveBeenCalledWith('next', 'plan', 'before');
+  // The moved heading keeps the keyboard focus (a frame later, once the list has been redrawn).
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  expect(document.activeElement).toBe(heading('next'));
   heading('costs').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, shiftKey: true, bubbles: true }));
   expect(act.move).toHaveBeenCalledTimes(1);
 });

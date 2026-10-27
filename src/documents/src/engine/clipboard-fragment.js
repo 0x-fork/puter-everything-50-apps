@@ -3,6 +3,7 @@ import { runFormat } from './formatting.js';
 import { listKind } from './numbering.js';
 import { HIGHLIGHTS } from './backgrounds.js';
 import { showLink } from './link-appearance.js';
+import { normalizeCrop, FULL_TURN } from './images.js';
 
 // Formatted copy and paste. A copy carries HTML for other applications, with
 // the editor's own fragment embedded for an exact paste back here. Pasting
@@ -87,8 +88,9 @@ export function fragmentHtml(fragment) {
     if (openList !== kind) { if (openList) html += `</${openList}>`; if (kind) html += `<${kind}>`; openList = kind; }
     const heading = /^Heading([1-6])$/.exec(p.styleId || '')?.[1] || (p.styleId === 'Title' ? '1' : null);
     const tag = kind ? 'li' : heading ? `h${heading}` : 'p';
-    const align = p.alignment && p.alignment !== 'left' ? ` style="text-align:${p.alignment === 'both' ? 'justify' : p.alignment}"` : '';
-    html += `<${tag}${align}>${p.runs.map(runHtml).join('') || '<br>'}</${tag}>`;
+    // Tabs and runs of spaces are the text's own, which HTML collapses into one space unless told otherwise.
+    const align = p.alignment && p.alignment !== 'left' ? `;text-align:${p.alignment === 'both' ? 'justify' : p.alignment}` : '';
+    html += `<${tag} style="white-space:pre-wrap${align}">${p.runs.map(runHtml).join('') || '<br>'}</${tag}>`;
   }
   if (openList) html += `</${openList}>`;
   return `<div ${FRAGMENT_ATTRIBUTE}="${escape(JSON.stringify(fragment))}">${html}</div>`;
@@ -119,9 +121,11 @@ export function copiesPicture(model) {
 export function pictureHtml(model) {
   if (!copiesPicture(model)) return '';
   const image = model.selectedImage, asset = model.assets[image.assetId];
-  // A cropped picture's frame has the cropped shape: the pasted whole image takes its own proportions.
+  // A paste here keeps the frame, crop, flips and rotation. Other applications get the whole image: a cropped
+  // picture's frame has the cropped shape, so the image takes its own proportions there.
   const cropped = Object.values(image.crop || {}).some(Boolean);
-  const data = { alt: image.alt || '', ...(cropped ? {} : { width: image.width, height: image.height }) };
+  const data = { alt: image.alt || '', width: image.width, height: image.height, ...(cropped ? { crop: image.crop } : {}),
+    ...(image.flipH ? { flipH: true } : {}), ...(image.flipV ? { flipV: true } : {}), ...(image.rotation ? { rotation: image.rotation } : {}) };
   const size = cropped ? '' : ` width="${Math.round(image.width / EMU_PER_PX)}" height="${Math.round(image.height / EMU_PER_PX)}"`;
   return `<img src="data:${asset.mime};base64,${base64(asset.bytes)}" alt="${escape(data.alt)}"${size} ${PICTURE_ATTRIBUTE}="${escape(JSON.stringify(data))}">`;
 }
@@ -137,7 +141,12 @@ export function htmlPicture(html) {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   const size = ['width', 'height'].every(key => Number.isSafeInteger(data[key]) && data[key] > 0 && data[key] <= MAX_PICTURE_EMU) ? { width: data.width, height: data.height } : {};
-  return { file: new File([bytes], `picture.${match[1].split('/')[1]}`, { type: match[1].toLowerCase() }), alt: typeof data.alt === 'string' ? data.alt.slice(0, 2000) : '', ...size };
+  // A crop only goes with the frame it was made for.
+  let crop = null;
+  try { if (size.width && data.crop) crop = normalizeCrop(data.crop); } catch { crop = null; }
+  const turn = Number.isInteger(data.rotation) && data.rotation > 0 && data.rotation < FULL_TURN ? { rotation: data.rotation } : {};
+  return { file: new File([bytes], `picture.${match[1].split('/')[1]}`, { type: match[1].toLowerCase() }), alt: typeof data.alt === 'string' ? data.alt.slice(0, 2000) : '', ...size,
+    ...(crop ? { crop } : {}), ...(data.flipH === true ? { flipH: true } : {}), ...(data.flipV === true ? { flipV: true } : {}), ...turn };
 }
 
 /* ---------- HTML from this editor or another application ---------- */
@@ -192,10 +201,13 @@ function fromForeignHtml(body) {
   const paragraphs = [];
   let current = null;
   const start = (props = {}) => { current = { text: '', runs: [], mark: true, styleId: null, styleName: null, alignment: null, list: null, ...props }; paragraphs.push(current); };
-  const append = (text, format, link) => {
+  const append = (text, format, link, pre = false) => {
     // Whitespace between blocks is source layout, not a paragraph.
     if (!text || !current && !/\S|\v/.test(text)) return;
     if (!current) start();
+    // Preformatted text keeps the spaces it starts or ends with (an indented line of code).
+    if (!current.filled) current.preStart = pre;
+    current.preEnd = pre;
     current.filled = true;
     const last = current.runs.at(-1);
     if (last && last.link === link && RUN_KEYS.every(key => last.format[key] === format[key])) last.text += text;
@@ -207,8 +219,8 @@ function fromForeignHtml(body) {
     if (current && !current.filled && paragraphs.at(-1) === current) paragraphs.pop();
     if (current?.runs.length) {
       // Whitespace around a block's content is layout in HTML, not text.
-      current.runs[0].text = current.runs[0].text.replace(/^ +/, '');
-      const last = current.runs.at(-1); last.text = last.text.replace(/ +$/, '');
+      if (!current.preStart) current.runs[0].text = current.runs[0].text.replace(/^ +/, '');
+      const last = current.runs.at(-1); if (!current.preEnd) last.text = last.text.replace(/ +$/, '');
       current.runs = current.runs.filter(r => r.text);
       // A block holding only no-break spaces is an empty paragraph kept open (Word's <o:p>&nbsp;</o:p>).
       if (/^[ \u00a0]*$/.test(current.runs.map(r => r.text).join(''))) current.runs = [];
@@ -221,7 +233,7 @@ function fromForeignHtml(body) {
       let text = context.pre ? node.data : node.data.replace(/[\s ]*\n[\s ]*/g, ' ').replace(/[ \t\r\f]+/g, ' ');
       if (context.pre) text = text.replace(/\r\n?/g, '\n').replace(/\n/g, '\v');
       if (!context.pre && (!current || /[ \t\v]$/.test(current.text) || !current.text) && text.startsWith(' ')) text = text.slice(1);
-      append(text, format, context.link);
+      append(text, format, context.link, !!context.pre);
       return;
     }
     if (node.nodeType !== 1 || SKIPPED.has(node.tagName) || /^ignore$/i.test(msoList(node))) return;
@@ -230,7 +242,16 @@ function fromForeignHtml(body) {
     const next = inherited(node, format);
     const ctx = { ...context };
     if (tag === 'A' && /^(https?:|mailto:|tel:)/i.test(node.getAttribute('href') || '')) ctx.link = node.getAttribute('href');
-    if (tag === 'PRE') ctx.pre = true;
+    // Word writes a tab as no-break spaces styled mso-tab-count, and a run of spaces as no-break spaces styled
+    // mso-spacerun, so a browser shows their width: they are a tab and ordinary spaces.
+    const declared = node.getAttribute?.('style') || '', tabs = /mso-tab-count\s*:\s*(\d+)/i.exec(declared)?.[1];
+    if (tabs) { append('\t'.repeat(Math.max(1, Math.min(Number(tabs), 64))), next, ctx.link); return; }
+    if (/mso-spacerun\s*:\s*yes/i.test(declared)) { append(node.textContent.replace(/\u00a0/g, ' '), next, ctx.link, true); return; }
+    // Preformatted text (pre, or white-space: pre or pre-wrap, as Google Docs and code editors write it) keeps its
+    // tabs, runs of spaces and line breaks.
+    const space = node.style?.whiteSpace;
+    if (tag === 'PRE' || /^(pre|pre-wrap|break-spaces)$/.test(space || '')) ctx.pre = true;
+    else if (/^(normal|nowrap|pre-line)$/.test(space || '')) ctx.pre = false;
     // Alignment is inherited, as on a page: from text-align, the align attribute READMEs center
     // blocks with or <center>. A table's align attribute centers the table, not its text, and the
     // cells of a table centered by its container (as Word writes one) keep their own alignment.
@@ -258,7 +279,7 @@ function fromForeignHtml(body) {
   walk(body, { bold: false, italic: false }, {});
   // Empty blocks between content are blank paragraphs; leading and trailing ones are not content.
   for (const p of paragraphs) {
-    delete p.filled;
+    delete p.filled; delete p.preStart; delete p.preEnd;
     const last = p.runs.at(-1);
     if (last) { last.text = last.text.replace(/\v+$/, ''); p.runs = p.runs.filter(r => r.text); }
     p.text = p.runs.map(r => r.text).join('');
@@ -347,7 +368,8 @@ export function pasteFragment(model, fragment) {
   // The caller's session keeps the state before the paste; per-command
   // snapshots of the whole document would only make a long paste quadratic.
   model.checkpoint = () => {};
-  try { applyFragment(model, fragment, start); } finally { delete model.checkpoint; }
+  // Formatting leaves the pasted text as it is: commands need not join or count through it each time.
+  try { model.withFixedText(() => applyFragment(model, fragment, start)); } finally { delete model.checkpoint; }
   return true;
 }
 

@@ -181,7 +181,9 @@ export function openSymbolDialog({ onInsert, onClose }) {
     const [, from, to] = SYMBOL_SUBSETS[Number(subset.value)];
     const chars = []; for (let cp = from; cp <= to && chars.length < 512; cp++) { const ch = String.fromCodePoint(cp); if (assigned(ch)) chars.push(ch); }
     grid.replaceChildren(...chars.map(ch => cell(ch, choose)));
-    const first = grid.firstElementChild; if (first) first.tabIndex = 0;
+    // The grid's Tab stop is the chosen character when the subset holds it, so Enter there inserts what the dialog describes.
+    const start = [...grid.children].find(b => b.textContent === chosen);
+    if (start) { start.tabIndex = 0; start.setAttribute('aria-selected', 'true'); } else if (grid.firstElementChild) grid.firstElementChild.tabIndex = 0;
   };
   // The recent symbols are one Tab stop too (each cell alone was out of the keyboard's reach); Left, Right, Home and End move along them.
   const drawRecent = () => { recent.replaceChildren(...recentSymbols().map(ch => cell(ch, choose))); if (recent.firstElementChild) recent.firstElementChild.tabIndex = 0; };
@@ -211,7 +213,8 @@ export function openSymbolDialog({ onInsert, onClose }) {
     if (index >= 0 && subset.value !== String(index)) { subset.value = String(index); drawGrid(); }
     const button = [...grid.children].find(b => b.textContent === ch); if (button) { choose(ch, button); button.scrollIntoView({ block: 'nearest' }); }
   });
-  subset.addEventListener('change', drawGrid);
+  // Another subset chooses its first character, as the arrows choose the one they reach.
+  subset.addEventListener('change', () => { drawGrid(); const first = grid.firstElementChild; if (first && first.textContent !== chosen) choose(first.textContent, first); });
   font.addEventListener('change', () => { for (const b of [...grid.children, ...recent.children]) b.style.fontFamily = fontStyle(); preview.style.fontFamily = fontStyle(); });
   const special = el('div.ed-choice-list.insert-special', { role: 'listbox', 'aria-label': 'Special characters' }, ...SPECIAL_CHARACTERS.map(([label, ch]) =>
     el('button.ed-choice.insert-special-row', { type: 'button', role: 'option', 'aria-selected': 'false', onclick: e => { chosen = ch; for (const o of special.children) o.setAttribute('aria-selected', String(o === e.currentTarget)); describe(ch); },
@@ -236,8 +239,11 @@ export function openSymbolDialog({ onInsert, onClose }) {
     return false; // Stay open for the next character, as symbol tables do.
   } });
   dialog.primary.textContent = 'Insert';
+  // Open on the subset that holds the chosen (most recent) symbol, with that symbol chosen and focused.
+  const home = SYMBOL_SUBSETS.findIndex(([, a, b]) => chosen.codePointAt(0) >= a && chosen.codePointAt(0) <= b);
+  if (home >= 0) subset.value = String(home);
   drawGrid(); drawRecent(); describe(chosen);
-  grid.firstElementChild?.focus();
+  (grid.querySelector('[tabindex="0"]') || grid.firstElementChild)?.focus();
   return dialog.modal;
 }
 
@@ -331,13 +337,14 @@ export function openDiagramDialog({ initial = null, editing = false, onInsert, o
   const preview = el('div.insert-diagram-preview', { 'aria-hidden': 'true' });
   const layouts = el('div.insert-diagram-layouts', { role: 'listbox', 'aria-label': 'Layouts' });
   const sample = parseOutline('One\nTwo\nThree\nFour');
-  const options = DIAGRAM_LAYOUTS.map(entry => el('button.insert-diagram-layout', { type: 'button', role: 'option', 'aria-selected': String(entry.id === layout), title: `${entry.name}: ${entry.hint}`, dataset: { layout: entry.id },
-    onclick: () => { layout = entry.id; for (const o of options) o.setAttribute('aria-selected', String(o.dataset.layout === layout)); render(); } },
+  const options = DIAGRAM_LAYOUTS.map(entry => el('button.insert-diagram-layout', { type: 'button', role: 'option', 'aria-selected': String(entry.id === layout), tabindex: entry.id === layout ? 0 : -1, title: `${entry.name}: ${entry.hint}`, dataset: { layout: entry.id },
+    onclick: () => { layout = entry.id; for (const o of options) { o.setAttribute('aria-selected', String(o.dataset.layout === layout)); o.tabIndex = o.dataset.layout === layout ? 0 : -1; } render(); } },
   diagramSketch(entry.id, entry.id === 'orgChart' ? parseOutline('Lead\n  A\n  B\n  C') : sample, 'blue', 120, 68), el('span', {}, entry.name), el('span.insert-diagram-category', {}, entry.category)));
   layouts.append(...options);
   layouts.addEventListener('keydown', e => {
     const at = options.indexOf(document.activeElement), step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
-    if (at < 0 || !step) return; e.preventDefault(); const next = options[(at + step + options.length) % options.length]; next.focus(); next.click();
+    const edge = { Home: options[0], End: options.at(-1) }[e.key];
+    if (at < 0 || !step && !edge) return; e.preventDefault(); const next = edge || options[(at + step + options.length) % options.length]; next.focus(); next.click();
   });
   const render = () => preview.replaceChildren(diagramSketch(layout, parseOutline(outline.value), colors.value));
   outline.addEventListener('input', render); colors.addEventListener('change', render);
@@ -398,7 +405,8 @@ export function openGenerateDialog({ generate, onInsert, onClose }) {
   const dialog = formDialog({ title: 'Generate a Picture', submit: 'Generate', onClose, content: [field('Describe the picture', prompt), preview,
     el('p.field-hint', {}, 'The description is sent to Puter AI to make the picture. Review it before inserting.')],
   onSubmit: async () => {
-    if (file) { await onInsert(file); return true; }
+    // The description the picture was made from is its alternative text, which screen readers announce.
+    if (file) { await onInsert(file, { alt: prompt.value.trim() }); return true; }
     if (busy) return false;
     if (!prompt.value.trim()) throw new Error('Describe the picture first.');
     busy = true; dialog.primary.disabled = true; preview.replaceChildren(el('span.field-hint', {}, 'Generating…'));

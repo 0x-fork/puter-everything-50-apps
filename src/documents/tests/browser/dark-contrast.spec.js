@@ -1,12 +1,13 @@
 import { test, expect } from '@playwright/test';
+import { menuBarMenu } from './helpers/editor-tools.js';
 
 // WCAG contrast of the colors an element shows: its text (or its edge over its own fill) against the first
-// opaque background behind it.
-const measure = (page, selector, { edge = false } = {}) => page.evaluate(([selector, edge]) => {
+// opaque background behind it (or under it, with own: an element that fills its own background).
+const measure = (page, selector, { edge = false, own = false } = {}) => page.evaluate(([selector, edge, own]) => {
   const rgba = c => { const g = Object.assign(document.createElement('canvas'), { width: 1, height: 1 }).getContext('2d'); g.fillStyle = c; g.fillRect(0, 0, 1, 1); return [...g.getImageData(0, 0, 1, 1).data]; };
   const lum = ([r, g, b]) => [r, g, b].map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
   return [...document.querySelectorAll(selector)].map(node => {
-    let back = node.parentElement, bg;
+    let back = own ? node : node.parentElement, bg;
     while (back && rgba(bg = getComputedStyle(back).backgroundColor)[3] < 255) back = back.parentElement;
     const style = getComputedStyle(node);
     let fore = rgba(style.color);
@@ -14,7 +15,7 @@ const measure = (page, selector, { edge = false } = {}) => page.evaluate(([selec
     const [hi, lo] = [lum(fore), lum(rgba(bg))].sort((x, y) => y - x);
     return { text: node.textContent, color: style.color, ratio: (hi + 0.05) / (lo + 0.05) };
   });
-}, [selector, edge]);
+}, [selector, edge, own]);
 
 async function open(page) {
   await page.goto('/mock.html#/new');
@@ -44,6 +45,59 @@ test.describe('dark theme', () => {
     expect(chips.length).toBeGreaterThan(0);
     for (const chip of chips) expect(chip.ratio).toBeGreaterThanOrEqual(3);
   });
+  test('the chosen style in Format > Style and the chosen level in Define New Multilevel List stay readable', async ({ page }) => {
+    await open(page);
+    await (await menuBarMenu(page, 'Format')).getByRole('menuitem', { name: 'Style…', exact: true }).click();
+    await expect(page.locator('.fmt-listbox-item[aria-selected="true"]')).toBeVisible();
+    const chosen = await measure(page, '.fmt-listbox-item[aria-selected="true"] *');
+    expect(chosen.length).toBeGreaterThan(0);
+    for (const item of chosen) expect(item.ratio, item.text).toBeGreaterThanOrEqual(4.5);
+    await page.keyboard.press('Escape');
+    await (await menuBarMenu(page, 'Format')).getByRole('menuitem', { name: 'Bullets and Numbering…' }).click();
+    await page.getByRole('dialog', { name: 'Bullets and Numbering' }).getByRole('tab', { name: 'Multilevel' }).click();
+    await page.getByRole('button', { name: 'Define New Multilevel List…' }).click();
+    await expect(page.locator('.fmt-level-item[aria-selected="true"]')).toBeVisible();
+    for (const item of await measure(page, '.fmt-level-item[aria-selected="true"]', { own: true })) expect(item.ratio, item.text).toBeGreaterThanOrEqual(4.5);
+  });
+  test('the None choice in Bullets and Numbering stays readable on its white tile', async ({ page }) => {
+    await open(page);
+    await (await menuBarMenu(page, 'Format')).getByRole('menuitem', { name: 'Bullets and Numbering…' }).click();
+    const none = await measure(page, '.fmt-list-tile .list-library-none');
+    expect(none.length).toBeGreaterThan(0);
+    for (const item of none) expect(item.ratio).toBeGreaterThanOrEqual(4.5);
+  });
+  test('a formula\'s error message stays readable', async ({ page }) => {
+    await open(page);
+    await page.getByRole('tab', { name: 'Insert', exact: true }).click();
+    await page.getByRole('button', { name: 'Insert table', exact: true }).click();
+    await page.getByRole('menuitem', { name: '3 columns, 3 rows' }).click();
+    await (await menuBarMenu(page, 'Table')).getByRole('menuitem', { name: 'Formula…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Formula' });
+    await dialog.getByRole('textbox', { name: 'Formula' }).fill('=');
+    await expect(page.locator('.table-formula-result.is-error')).toBeVisible();
+    for (const item of await measure(page, '.table-formula-result.is-error')) expect(item.ratio, item.text).toBeGreaterThanOrEqual(4.5);
+  });
+  test('the status bar\'s accessibility errors stay readable', async ({ page }) => {
+    await open(page);
+    // A table without a header row is an accessibility error.
+    await page.getByRole('tab', { name: 'Insert', exact: true }).click();
+    await page.getByRole('button', { name: 'Insert table', exact: true }).click();
+    await page.getByRole('menuitem', { name: '3 columns, 3 rows' }).click();
+    const status = page.locator('.ed-status-accessibility[data-state="errors"]');
+    await expect(status).toBeVisible({ timeout: 15000 });
+    for (const item of await measure(page, '.ed-status-accessibility[data-state="errors"]')) expect(item.ratio, item.text).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+test('the status bar\'s accessibility errors stay readable in the light theme', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page);
+  await page.getByRole('tab', { name: 'Insert', exact: true }).click();
+  await page.getByRole('button', { name: 'Insert table', exact: true }).click();
+  await page.getByRole('menuitem', { name: '3 columns, 3 rows' }).click();
+  await expect(page.locator('.ed-status-accessibility[data-state="errors"]')).toBeVisible({ timeout: 15000 });
+  for (const item of await measure(page, '.ed-status-accessibility[data-state="errors"]')) expect(item.ratio, item.text).toBeGreaterThanOrEqual(4.5);
 });
 
 test('the light theme shows a style sample in the style’s own color', async ({ page }) => {

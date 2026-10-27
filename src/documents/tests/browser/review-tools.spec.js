@@ -72,6 +72,28 @@ test('the Editor pane corrects spelling and reports readability computed locally
   expect(errors).toEqual([]);
 });
 
+test('the Editor pane\'s spelling suggestions are one Tab stop that the arrow keys choose from', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const input = await newDocument(page, 'I will recieve it.');
+  await onTab(page, 'review');
+  await review(page).getByRole('button', { name: 'Editor', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Editor pane' });
+  await pane.getByRole('listitem').filter({ hasText: 'recieve' }).click();
+  const options = pane.getByRole('listbox', { name: 'Suggestions for recieve' }).getByRole('option');
+  expect(await options.count()).toBeGreaterThan(1);
+  expect(await options.evaluateAll(all => all.filter(o => o.tabIndex >= 0).length)).toBe(1);
+  await options.first().focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(options.nth(1)).toBeFocused();
+  await expect(options.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(options.first()).toHaveAttribute('aria-selected', 'false');
+  const second = await options.nth(1).textContent();
+  await pane.getByRole('button', { name: 'Change', exact: true }).click();
+  await expect(input).toHaveValue(`I will ${second} it.`);
+  expect(errors).toEqual([]);
+});
+
 test('the Thesaurus inserts a synonym with the word\'s capitalization, and Word Count counts', async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const input = await newDocument(page, 'Happy people smile. A big dog.');
@@ -164,6 +186,36 @@ test('an accessibility quick fix applies where its issue is now after an edit be
   await fix.click();
   await expect(input).toHaveValue('Big Hello world and text');
   expect(errors).toEqual([]);
+});
+
+test('Set Proofing Language\'s list is one Tab stop that the arrow keys move through', async ({ page }) => {
+  const input = await newDocument(page, 'Hello and bonjour tout le monde.');
+  await select(input, 10, 31);
+  await onTab(page, 'review');
+  await page.evaluate(() => document.querySelector('#ribbon-panel-review [aria-label="Language"][aria-haspopup="menu"]')?.click());
+  await page.getByRole('menuitem', { name: 'Set Proofing Language…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Language' });
+  const list = dialog.getByRole('listbox', { name: 'Languages' });
+  const tabStops = () => list.getByRole('option').evaluateAll(options => options.filter(o => o.tabIndex >= 0).length);
+  expect(await tabStops()).toBe(1);
+  await dialog.getByRole('searchbox', { name: 'Find a language' }).focus();
+  await page.keyboard.press('Tab');
+  const first = list.getByRole('option', { selected: true });
+  await expect(first).toBeFocused();
+  const start = await first.getAttribute('data-tag');
+  await page.keyboard.press('ArrowDown');
+  const moved = list.locator(':focus');
+  await expect(moved).toHaveAttribute('aria-selected', 'true');
+  expect(await moved.getAttribute('data-tag')).not.toBe(start);
+  // Space or Enter on an option keeps the keyboard on it.
+  await page.keyboard.press(' ');
+  await expect(moved).toBeFocused();
+  expect(await tabStops()).toBe(1);
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('checkbox', { name: 'Do not check spelling or grammar' })).toBeFocused();
+  // Filtering keeps one Tab stop in what is left.
+  await dialog.getByRole('searchbox', { name: 'Find a language' }).fill('fr');
+  expect(await tabStops()).toBe(1);
 });
 
 test('Language marks text and Set As Default updates the document default', async ({ page }, info) => {
@@ -367,7 +419,7 @@ async function fakeAi(page) {
     window.puter = { ai: { chat: async prompt => {
       window.__prompts.push(prompt);
       const items = [...prompt.matchAll(/^\[(\d+)\] (.*)$/gm)].map(m => m[2]);
-      if (prompt.includes('proofreader')) return { message: { content: JSON.stringify(items.flatMap((text, i) => text.includes('alot') ? [{ paragraph: i + 1, original: 'alot', suggestion: 'a lot', kind: 'grammar', reason: 'Two words.' }] : [])) } };
+      if (prompt.includes('proofreader')) return { message: { content: JSON.stringify(items.flatMap((text, i) => [...(text.includes('alot') ? [{ paragraph: i + 1, original: 'alot', suggestion: 'a lot', kind: 'grammar', reason: 'Two words.' }] : []), ...(text.includes('claim .') ? [{ paragraph: i + 1, original: 'claim .', suggestion: 'claim.', kind: 'punctuation', reason: 'No space before a period.' }] : [])])) } };
       if (prompt.includes('Translate each numbered paragraph')) return JSON.stringify(items.map(text => `«${text.toUpperCase()}»`));
       return '[]';
     } } };
@@ -390,6 +442,30 @@ test('AI grammar suggestions are opt-in, marked and applied as ordinary edits', 
   await item.getByRole('button', { name: 'Accept' }).click();
   await expect(input).toHaveValue('Thanks a lot for the review.');
   expect(await page.evaluate(() => window.__prompts.length)).toBe(1);
+});
+
+test('an AI suggestion that would take in a note reference is not offered', async ({ page }) => {
+  await fakeAi(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const input = await newDocument(page, 'Thanks alot for the claim.');
+  await select(input, 25, 25);
+  await onTab(page, 'references');
+  await page.locator('#ribbon-panel-references').getByRole('button', { name: 'Insert Footnote', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Footnote text' })).toBeFocused();
+  await page.keyboard.type('Source.');
+  await page.keyboard.press('Escape');
+  await onTab(page, 'review');
+  await review(page).getByRole('button', { name: 'Editor', exact: true }).click();
+  const pane = page.getByRole('complementary', { name: 'Editor pane' });
+  await pane.getByRole('checkbox', { name: /Suggest with/ }).check();
+  await pane.getByRole('button', { name: 'Check with AI' }).click();
+  // The reference reached the AI as a space, so it saw "claim ." and suggested taking the space out.
+  expect((await page.evaluate(() => window.__prompts))[0]).toContain('claim .');
+  await expect(pane.locator('.rv-ai-item')).toHaveCount(1);
+  await expect(pane.locator('.rv-ai-item')).toContainText('alot → a lot');
+  await expect(pane.locator('.rv-ai-body .rv-status')).toHaveText('1 suggestion');
+  await pane.locator('.rv-ai-item').getByRole('button', { name: 'Accept' }).click();
+  await expect(input).toHaveValue('Thanks a lot for the claim\ufffc.');
 });
 
 test('an AI suggestion is accepted while a header is being edited', async ({ page }) => {
@@ -784,4 +860,163 @@ test('correcting a misspelled possessive keeps its ’s', async ({ page }) => {
   await page.locator('.ed-proof-actions').getByRole('button', { name: 'Change', exact: true }).click();
   await expect(input).toHaveValue('I saw receive’s notice.');
   expect(errors).toEqual([]);
+});
+
+test('a formatting balloon\'s Accept and Reject leave the other changes in its paragraph', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/mock.html#/new');
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await input.fill('Plain words stay plain.');
+  await onTab(page, 'review');
+  await input.press('ControlOrMeta+Shift+e');
+  await expect(review(page).getByRole('button', { name: 'Track Changes', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await select(input, 6);
+  await page.keyboard.type('new ');
+  await select(input, 2);
+  await input.press('ControlOrMeta+e');
+  const changes = () => page.evaluate(() => { const m = window.__docs.current.view.engine.model; return m.revisions.map(r => [r.type, m.text.slice(r.start, r.end)]); });
+  await expect.poll(changes).toEqual([['format', 'Plain new words stay plain.'], ['ins', 'new ']]);
+  const balloon = page.locator('.ed-revision-card');
+  await expect(balloon).toContainText('Formatted');
+  // Rejecting the centring takes it back and keeps the typed words, still tracked.
+  await balloon.getByRole('button', { name: 'Reject change' }).click();
+  await expect.poll(changes).toEqual([['ins', 'new ']]);
+  await expect(input).toHaveValue('Plain new words stay plain.');
+  expect(await page.evaluate(() => window.__docs.current.view.engine.model.paragraphs[0].format.alignment)).not.toBe('center');
+  await select(input, 2);
+  await input.press('ControlOrMeta+e');
+  await balloon.getByRole('button', { name: 'Accept change' }).click();
+  await expect.poll(changes).toEqual([['ins', 'new ']]);
+  expect(await page.evaluate(() => window.__docs.current.view.engine.model.paragraphs[0].format.alignment)).toBe('center');
+  expect(errors).toEqual([]);
+});
+
+test('Reject after Next Change rejects the change it went to, not the others inside it', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/mock.html#/new');
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await input.fill('Plain words stay plain.\nSecond paragraph.');
+  await onTab(page, 'review');
+  await input.press('ControlOrMeta+Shift+e');
+  await select(input, 6);
+  await page.keyboard.type('new ');
+  await select(input, 2);
+  await input.press('ControlOrMeta+e');
+  const changes = () => page.evaluate(() => { const m = window.__docs.current.view.engine.model; return m.revisions.map(r => [r.type, m.text.slice(r.start, r.end)]); });
+  await expect.poll(changes).toEqual([['format', 'Plain new words stay plain.\n'], ['ins', 'new ']]);
+  await select(input, 0);
+  await (await reviewButton(page, 'Next Change', 'Changes')).click();
+  await expect.poll(() => input.evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd))).toBe('Plain new words stay plain.\n');
+  await review(page).getByRole('button', { name: 'Reject', exact: true }).click();
+  // The centring goes; the typed words stay, still tracked, and Next went on to them.
+  await expect.poll(changes).toEqual([['ins', 'new ']]);
+  await expect(input).toHaveValue('Plain new words stay plain.\nSecond paragraph.');
+  await expect.poll(() => input.evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd))).toBe('new ');
+  // A selection the reader made still resolves every change in it.
+  await select(input, 0, 10);
+  await review(page).getByRole('button', { name: 'Reject', exact: true }).click();
+  await expect.poll(changes).toEqual([]);
+  await expect(input).toHaveValue('Plain words stay plain.\nSecond paragraph.');
+  expect(errors).toEqual([]);
+});
+
+test('typing before tracked changes leaves the Reviewing Pane list as it is, and its entries still select their changes', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/mock.html#/new');
+  const input = page.getByRole('textbox', { name: 'Document text' });
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await input.fill('Alpha beta gamma.\nSecond line here.');
+  await page.evaluate(() => {
+    const engine = window.__docs.current.view.engine, m = engine.model;
+    engine.execute(() => { m.trackChanges = true; m.revisionAuthor = 'Ada'; m.select(6, 10); m.replace(''); m.select(m.text.indexOf('line')); m.replace('new '); m.select(0, 5); m.setRunFormat({ bold: true }); m.trackChanges = false; });
+  });
+  await onTab(page, 'review');
+  await (await reviewButton(page, 'Reviewing Pane', 'Tracking')).click();
+  const pane = page.getByRole('complementary', { name: 'Reviewing Pane' });
+  const items = pane.locator('.review-pane-item');
+  await expect(items).toHaveCount(2);
+  await expect(items.nth(0)).toContainText('beta');
+  await expect(items.nth(1)).toContainText('new');
+  await items.nth(1).evaluate(node => { node.dataset.probe = 'kept'; });
+  await input.focus();
+  await select(input, 0);
+  await page.keyboard.type('Intro ');
+  await expect(input).toHaveValue('Intro Alpha beta gamma.\nSecond new line here.');
+  // Rebuilding every entry on each keystroke slowed typing in a document with many changes.
+  await expect(items.nth(1)).toHaveAttribute('data-probe', 'kept');
+  await items.nth(1).click();
+  await expect.poll(() => page.evaluate(() => { const model = window.__docs.current.view.engine.model; return model.text.slice(...model.range); })).toBe('new ');
+  // A change to what an entry shows does rebuild the list.
+  await page.evaluate(() => { const engine = window.__docs.current.view.engine, m = engine.model; engine.execute(() => { m.trackChanges = true; m.revisionAuthor = 'Ada'; m.select(m.text.indexOf('new ') + 4); m.replace('x'); m.trackChanges = false; }); });
+  await expect(items.nth(1)).toContainText('new x');
+});
+
+test('the Spelling pane\'s suggestions are one Tab stop that the arrow keys choose from', async ({ page }) => {
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const input = await newDocument(page, 'I will recieve it.');
+  await select(input, 0);
+  await input.press('F7');
+  await expect(page.locator('.ed-proof-context mark')).toHaveText('recieve', { timeout: 15000 });
+  const list = page.getByRole('complementary', { name: 'Spelling' }).getByRole('listbox', { name: 'Suggestions' });
+  const options = list.getByRole('option');
+  expect(await options.count()).toBeGreaterThan(1);
+  expect(await options.evaluateAll(all => all.filter(o => o.tabIndex >= 0).length)).toBe(1);
+  await options.first().focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(options.nth(1)).toBeFocused();
+  await expect(options.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(options.first()).toHaveAttribute('aria-selected', 'false');
+  const second = await options.nth(1).textContent();
+  await page.locator('.ed-proof-actions').getByRole('button', { name: 'Change', exact: true }).click();
+  await expect(input).toHaveValue(`I will ${second} it.`);
+  expect(errors).toEqual([]);
+});
+
+test('the Reviewing Pane button shows whether the pane is open, however the pane was opened or closed', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await newDocument(page, 'Some text to review.');
+  await onTab(page, 'review');
+  const button = review(page).getByRole('button', { name: 'Reviewing Pane', exact: true });
+  const pane = page.getByRole('complementary', { name: 'Reviewing Pane' });
+  await expect(button).toHaveAttribute('aria-pressed', 'false');
+  await button.click();
+  await expect(pane).toBeVisible();
+  await expect(button).toHaveAttribute('aria-pressed', 'true');
+  await button.click();
+  await expect(pane).toBeHidden();
+  await expect(button).toHaveAttribute('aria-pressed', 'false');
+  await button.click();
+  await expect(button).toHaveAttribute('aria-pressed', 'true');
+  await pane.getByRole('button', { name: 'Close Reviewing Pane' }).click();
+  await expect(pane).toBeHidden();
+  await expect(button).toHaveAttribute('aria-pressed', 'false');
+  await review(page).getByRole('button', { name: 'Reviewing Pane options', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: 'Reviewing Pane Horizontal' }).click();
+  await expect(pane).toBeVisible();
+  await expect(button).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('Show Comments is pressed exactly while the comments are shown', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const input = await newDocument(page, 'Alpha beta gamma delta.');
+  await onTab(page, 'review');
+  await select(input, 6, 10);
+  await review(page).getByRole('button', { name: 'New Comment', exact: true }).click();
+  await page.locator('.ed-comment-draft textarea').fill('About beta');
+  await page.locator('.ed-comment-draft').getByRole('button', { name: 'Post' }).click();
+  const card = page.locator('.ed-comment-card');
+  const show = review(page).getByRole('button', { name: 'Show Comments', exact: true });
+  await expect(card).toBeVisible();
+  await expect(show).toHaveAttribute('aria-pressed', 'true');
+  for (const shown of [false, true, false, true]) {
+    await show.click();
+    await expect(card).toHaveCount(shown ? 1 : 0);
+    await expect(show).toHaveAttribute('aria-pressed', String(shown));
+  }
 });

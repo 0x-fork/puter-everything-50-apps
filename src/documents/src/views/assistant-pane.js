@@ -12,7 +12,7 @@
 import { el, isComposing, MOD_KEY, shortcutCode } from '../ui/dom.js';
 import { toast } from '../ui/toast.js';
 import * as P from '../lib/puter.js';
-import { aiActionById, askAi, answerParagraphs } from '../lib/ai.js';
+import { aiActionById, askAi, answerParagraphs, readableText, insertableText, listItems } from '../lib/ai.js';
 import { assistantPrompt, readReply, assistantError, SUGGESTIONS, MAX_ASSISTANT_CHARS } from '../lib/assistant.js';
 import { sidePane, hint } from './review-ui.js';
 import { commandIconEl } from '../ui/ribbon.js';
@@ -32,6 +32,16 @@ export function createAssistantPane({ editor, pkg, error, available = () => P.ca
   const scopeSelection = el('button.as-scope-option', { type: 'button', role: 'radio', onclick: () => setScope('selection') }, 'Selection');
   const scopeDocument = el('button.as-scope-option', { type: 'button', role: 'radio', onclick: () => setScope('document') }, 'Whole document');
   const scopeGroup = el('div.as-scope', { role: 'radiogroup', 'aria-label': 'Send with your message' }, scopeSelection, scopeDocument);
+  // A radio group is one Tab stop, on the checked choice; the arrow keys switch between the choices that are available.
+  scopeGroup.addEventListener('keydown', e => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!step || isComposing(e) || e.altKey || e.ctrlKey || e.metaKey) return;
+    const choices = [scopeSelection, scopeDocument].filter(option => !option.disabled), at = choices.indexOf(document.activeElement);
+    if (at < 0) return;
+    e.preventDefault();
+    const next = choices[(at + step + choices.length) % choices.length];
+    scope = next === scopeSelection ? 'selection' : 'document'; renderContext(); renderEmpty(); next.focus();
+  });
   const context = el('p.as-context', { 'aria-live': 'polite' });
   const input = el('textarea.input.as-input', { rows: 3, placeholder: 'Ask about this document, or ask for a draft or a rewrite…', 'aria-label': 'Message the assistant', enterKeyHint: 'send' });
   const send = el('button.btn.btn-primary.as-send', { type: 'submit', 'aria-label': 'Send', title: 'Send (Enter)' }, 'Send');
@@ -61,12 +71,13 @@ export function createAssistantPane({ editor, pkg, error, available = () => P.ca
     if (engine.session.path !== null) return null;
     const [start, end] = engine.model.range;
     if (start === end) return null;
-    return { start, end, text: engine.model.text.slice(start, end) };
+    // `original` is the document's own text, to see whether it changed; `text` is what the assistant reads.
+    return { start, end, original: engine.model.text.slice(start, end), text: readableText(engine.model.paragraphs, start, end) };
   }
   function payload() {
     const engine = editor(); if (!engine) return null;
     if (scope === 'selection') { const s = selection(); return s ? { scope, ...s } : null; }
-    return { scope, text: engine.session.body.text };
+    return { scope, text: readableText(engine.session.body.paragraphs) };
   }
   function setScope(next) { scope = next; renderContext(); renderEmpty(); input.focus(); }
   function renderContext() {
@@ -74,6 +85,7 @@ export function createAssistantPane({ editor, pkg, error, available = () => P.ca
     if (scope === 'selection' && !s) scope = 'document';
     scopeSelection.setAttribute('aria-checked', String(scope === 'selection'));
     scopeDocument.setAttribute('aria-checked', String(scope === 'document'));
+    scopeSelection.tabIndex = scope === 'selection' ? 0 : -1; scopeDocument.tabIndex = scope === 'document' ? 0 : -1;
     scopeSelection.disabled = !s;
     const p = payload();
     const count = p ? words(p.text) : 0;
@@ -158,22 +170,26 @@ export function createAssistantPane({ editor, pkg, error, available = () => P.ca
     engine.finishComposition();
     if (engine.session.path !== null) engine.editStory(null);
     const model = engine.model;
-    if (p.start !== undefined && (how === 'replace' || how === 'below' || how === 'after') && model.text.slice(p.start, p.end) !== p.text) {
+    if (p.start !== undefined && (how === 'replace' || how === 'below' || how === 'after') && model.text.slice(p.start, p.end) !== p.original) {
       error(new Error('The selected text changed since you asked. Select it again and ask once more.')); return;
     }
-    const text = answer.paragraphs.join('\n');
+    // A reply's "- " and "1. " items go in as bulleted and numbered list paragraphs, not as text with a marker.
+    const items = listItems(answer.paragraphs).map(item => ({ ...item, text: insertableText(item.text) }));
+    const text = items.map(item => item.text).join('\n');
     const ok = engine.execute(() => {
       const m = engine.model;
-      if (how === 'replace') m.select(p.start, p.end);
+      let inserted;
+      if (how === 'replace') { m.select(p.start, p.end); inserted = m.replace(text); }
       else if (how === 'below' || how === 'after') {
         // After the selection's last paragraph, as new paragraphs. A selection that takes in its last paragraph's
         // mark (Shift+Down from a paragraph's start) ends in that paragraph, not at the start of the next.
         const last = p.end > p.start && m.text[p.end - 1] === '\n' ? p.end - 1 : p.end;
         const end = how === 'after' ? last : (() => { const at = m.text.indexOf('\n', last); return at < 0 ? m.text.length : at; })();
         m.select(end, end);
-        return m.replace(how === 'after' ? ` ${text}` : `\n${text}`);
-      }
-      return m.replace(text);
+        inserted = m.replace(how === 'after' ? ` ${text}` : `\n${text}`);
+      } else inserted = m.replace(text);
+      if (inserted && items.some(item => item.list)) listParagraphs(m, items, how === 'after');
+      return inserted;
     });
     if (!ok) return;
     engine.focus();
@@ -181,6 +197,29 @@ export function createAssistantPane({ editor, pkg, error, available = () => P.ca
     const undo = el('button.btn.btn-ghost.btn-sm', { type: 'button', onclick: () => { editor()?.undo(); undo.disabled = true; applied.textContent = 'Undone'; } }, 'Undo');
     const applied = el('span.as-applied', { role: 'status' }, how === 'replace' ? 'Replaced' : 'Inserted');
     row.replaceChildren(applied, undo);
+  }
+
+  /**
+   * Make the inserted items that are list items into list paragraphs. The caret is after the inserted text.
+   * The first item is a paragraph of its own only when it starts one (text inserted after a selection, or
+   * mid-paragraph, joins the text before it, which stays as it is).
+   */
+  function listParagraphs(m, items, joined) {
+    const end = m.range[1], starts = [];
+    let at = end - items.reduce((n, item) => n + item.text.length + 1, -1);
+    for (const item of items) { starts.push(at); at += item.text.length + 1; }
+    const own = !joined && (starts[0] === 0 || m.text[starts[0] - 1] === '\n');
+    for (let i = 0; i < items.length;) {
+      let j = i;
+      while (j + 1 < items.length && items[j + 1].list === items[i].list) j++;
+      const from = i === 0 && !own ? 1 : i;
+      if (items[i].list && from <= j) {
+        m.select(starts[from], starts[j] + items[j].text.length);
+        if (m.listFormatting !== items[i].list) m.toggleList(items[i].list);
+      }
+      i = j + 1;
+    }
+    m.select(end);
   }
 
   function toggle() { if (!available()) return; pane.toggle(); if (pane.isOpen) queueMicrotask(() => input.focus()); }

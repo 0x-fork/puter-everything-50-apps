@@ -13,7 +13,7 @@ import { readRunSpacing } from './docx-run-spacing.js';
 import { checkedBaselineShift } from './vertical-align.js';
 import { readRunVertical } from './docx-vertical-align.js';
 import { readRunBackground } from './docx-backgrounds.js';
-import { parseXml as xml } from './docx-xml.js';
+import { parseXml as xml, setContentTypeOverride } from './docx-xml.js';
 import { strToU8 } from 'fflate';
 import { emptyNumbering, NUMBER_FORMATS } from './numbering.js';
 import { relatedPartPath } from './docx-relationships.js';
@@ -21,6 +21,7 @@ import { writeFontProperties } from './docx-fonts.js';
 import { LEVEL_PARAGRAPH_ELEMENTS } from './numbering-paragraph.js';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const W16CID = 'http://schemas.microsoft.com/office/word/2016/wordml/cid';
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
 const OFFICE_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering';
 const TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml';
@@ -79,7 +80,9 @@ export function readNumbering(parts, readGeometry, readColor, readFonts, onError
     const suffix = val(child(node, 'suff')) || 'tab';
     if (!['left', 'center', 'right'].includes(alignment) || !['tab', 'space', 'nothing'].includes(suffix)) throw new Error('Unsupported numbering alignment or suffix.');
     let pPr = child(node, 'pPr');
-    const unsupported = children(pPr).filter(n => n.namespaceURI !== W || !LEVEL_PPR.includes(n.localName));
+    // An explicit left-to-right direction (w:bidi off) is the default and needs no support.
+    const defaultDirection = n => n.namespaceURI === W && n.localName === 'bidi' && ['0', 'false', 'off'].includes(n.getAttributeNS(W, 'val'));
+    const unsupported = children(pPr).filter(n => (n.namespaceURI !== W || !LEVEL_PPR.includes(n.localName)) && !defaultDirection(n));
     if (unsupported.length) {
       const messages = [...new Set(unsupported.map(n => `Unsupported numbering paragraph property: ${n.localName}.`))];
       if (!onError) throw new Error(messages[0]);
@@ -361,6 +364,8 @@ export function writeNumbering(parts, numbering) {
     // extension metadata must survive even when this preview cannot render them.
     const node = instance.sourceXml ? doc.importNode(xml(instance.sourceXml).documentElement, true) : make('num');
     node.setAttributeNS(W, 'w:numId', id);
+    // A clone is a new instance: the source's durable identifier ([MS-DOCX] w16cid:durableId) must stay unique.
+    for (const attribute of [...node.attributes]) if (attribute.namespaceURI === W16CID && attribute.localName === 'durableId') node.removeAttributeNode(attribute);
     if (!instance.sourceXml) node.append(make('abstractNumId', instance.abstractId));
     const overrides = instance.sourceXml ? Object.entries(instance.startChanges || {}).map(([index, start]) => [index, { start }]) : Object.entries(instance.overrides);
     for (const [index, override] of overrides) {
@@ -393,9 +398,8 @@ export function writeNumbering(parts, numbering) {
     const relationship = rels.createElementNS(REL, 'Relationship');
     relationship.setAttribute('Id', id); relationship.setAttribute('Type', OFFICE_REL); relationship.setAttribute('Target', path.slice(5));
     rels.documentElement.append(relationship); parts[relPath] = strToU8(serialize(rels));
-    const types = xml(parts['[Content_Types].xml']), type = types.createElementNS(types.documentElement.namespaceURI, 'Override');
-    type.setAttribute('PartName', '/' + path); type.setAttribute('ContentType', TYPE);
-    types.documentElement.append(type); parts['[Content_Types].xml'] = strToU8(serialize(types));
+    const types = xml(parts['[Content_Types].xml']); setContentTypeOverride(types, '/' + path, TYPE);
+    parts['[Content_Types].xml'] = strToU8(serialize(types));
   }
   parts[path] = strToU8(serialize(doc));
 }

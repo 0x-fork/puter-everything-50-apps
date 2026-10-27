@@ -4,7 +4,7 @@ import { typedScriptRuns } from './script-input.js';
 import {noteMarkRanges,noteMarkSelection} from './note-marks.js';
 import {bodySymbolText} from './body-symbols.js';
 import { plainTextFormattingRange, checkPlainTextObjects, formatPlainTextInputs } from './plain-text-controls.js';
-import { bodyFieldRanges, replacedBodyFields, placeBodyFields, renameBodyFieldBookmarks, macroButtonSelection } from './body-fields.js';
+import { bodyFieldRanges, replacedBodyFields, placeBodyFields, renameBodyFieldBookmarks, macroButtonSelection, setFieldRevision, removeFields } from './body-fields.js';
 import { synchronizeTocFormatting } from './toc-field-formatting.js';
 import { synchronizeFieldHyperlinks, unwrapEditedFieldHyperlinks } from './body-field-hyperlinks.js';
 import { selectedPictureControl, checkPictureControlEdit } from './picture-controls.js';
@@ -47,7 +47,7 @@ import { validatePageSettings, readingPageSize, DOCUMENT_PAGE_KEYS, SECTION_TYPE
 import { OBJECT, inlineSegments, validateImage, normalizeCrop, normalizedRotation, rotationOutsets, imageExtents, CROP_SIDES, isPositionedImage, nextDrawingId } from './images.js';
 import { outlineEntries, builtinOutlineLevel } from './outline.js';
 import { refreshConditionalTable } from './conditional-table-formatting.js';
-import { eachRevisionTarget, revisionRanges, hasRevisions, runFormatChange, paragraphFormatChange, acceptFormatChange, rejectFormatChange } from './revisions.js';
+import { eachRevisionTarget, revisionRanges, hasRevisions, runFormatChange, paragraphFormatChange, acceptFormatChange, rejectFormatChange, sharedRevision, sameRevision } from './revisions.js';
 import { footnoteReferenceRun } from './footnotes.js';
 import { commentAnchors, nextCommentId, addCommentMarkers, removeCommentMarkers, commentThread, checkedCommentText, initialsFor } from './comments.js';
 /** Original canvas engine. Positions are UTF-16 offsets in paragraphs joined by '\n'. */
@@ -253,6 +253,18 @@ function editedBoundaries(old, points, text) {
   return result;
 }
 
+// Backspace takes back the last character of a cluster, as text fields do: a vowel sign, virama or tone mark
+// typed after its consonant, or an accent after its letter, rather than the whole syllable. Emoji sequences,
+// flags, keycaps and variation sequences go whole, as one symbol; so does a cluster whose remainder would join
+// the character after the caret (a virama before a consonant).
+const WHOLE_CLUSTER = /[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\u200d\u20e3\ufe00-\ufe0f\u{e0020}-\u{e007f}\u{e0100}-\u{e01ef}\ufffc\r\n\t\v\f\u000e]/u;
+function backspaceStart(text, from, to, nextEnd) {
+  const cluster = text.slice(from, to), last = String.fromCodePoint(cluster.codePointAt(cluster.length - (/[\udc00-\udfff]/.test(cluster.at(-1)) ? 2 : 1)));
+  if (last.length >= cluster.length || WHOLE_CLUSTER.test(cluster)) return from;
+  const kept = cluster.length - last.length, rest = cluster.slice(0, kept) + text.slice(to, nextEnd);
+  return kept === rest.length || [...inlineSegments(rest)].some(s => s.index === kept) ? from + kept : from;
+}
+
 export function locate(paragraphs, position) {
   // Clamp within the walk; joining the whole document text made every lookup allocate it.
   let offset = Math.max(0, position);
@@ -323,6 +335,23 @@ function normalize(runs) {
   return result;
 }
 
+// The styles offered in style lists, each with the error that keeps it from being applied. Checking
+// a style resolves its whole basedOn chain, so checking them all costs the square of the longest
+// chain: a file with a chain thousands of styles long took seconds on every keystroke, since the
+// toolbar refreshes its list. Style and numbering edits replace those objects rather than change
+// them, so a result stays valid for the pair it was computed from.
+const styleChoiceCache = new WeakMap();
+function styleChoices(model, type, check) {
+  let entry = styleChoiceCache.get(model.styles);
+  if (!entry || entry.numbering !== model.numbering) styleChoiceCache.set(model.styles, entry = { numbering: model.numbering });
+  entry[type] ??= Object.values(model.styles.definitions).filter(s => s.type === type).map(s => {
+    let error = s.error;
+    try { check(s); } catch (e) { error = e.message; }
+    return { id: s.id, name: s.name, error };
+  });
+  return entry[type].map(choice => ({ ...choice }));
+}
+
 export class TextDocument {
   constructor(paragraphs = [paragraph()], pageSettings, numbering = emptyNumbering(), styles, tables = [], assets = {}, { displayOnly = false, comments = null, trackChanges } = {}) {
     this.assets = { ...assets }; // Immutable bytes stay out of text/history snapshots.
@@ -383,7 +412,36 @@ export class TextDocument {
     const block = this.hasBlockControls ? blockControlGroups(this.paragraphs).filter(r => r.control.placeholder && position >= r.start && (position < r.end || r.start === r.end && position === r.start)).at(-1) : undefined;
     return block ? { ...block, paragraph: block.paragraphs[0], localStart: 0, runs: block.paragraphs.flatMap(p => p.runs) } : undefined;
   }
-  get text() { return cachedDocumentText(this); }
+  get text() { return this.fixedText?.text ?? cachedDocumentText(this); }
+  /**
+   * Run commands that change only formatting: a formatted paste or import applies a command to each of
+   * its paragraphs and runs. The text stays as it is, so it is joined once instead of confirmed by every
+   * command, and a position's paragraph is found from the paragraphs' starts rather than by counting
+   * through every paragraph before it. Commands of long batches then cost no more for a longer document.
+   */
+  withFixedText(action) {
+    if (this.fixedText) return action();
+    const text = cachedDocumentText(this), ends = [];
+    let at = -1;
+    for (const p of this.paragraphs) ends.push(at += paragraphLength(p) + 1);
+    this.fixedText = { text, ends };
+    try { return action(); }
+    finally {
+      this.fixedText = null;
+      if (import.meta.env?.DEV && cachedDocumentText(this) !== text) throw new Error('A formatting command changed the document text.');
+    }
+  }
+  /** locate() in this document's paragraphs. */
+  locate(position) {
+    const fixed = this.fixedText;
+    if (!fixed || fixed.ends.length !== this.paragraphs.length) return locate(this.paragraphs, position);
+    // The first paragraph ending at or after the position, as locate() counts.
+    const at = Math.max(0, position), ends = fixed.ends;
+    let low = 0, high = ends.length - 1;
+    while (low < high) { const middle = (low + high) >> 1; if (ends[middle] >= at) high = middle; else low = middle + 1; }
+    const start = low ? ends[low - 1] + 1 : 0;
+    return { index: low, offset: Math.min(at - start, ends[low] - start) };
+  }
   get sectionPageSettings() {
     for (let i = locate(this.paragraphs, this.range[0]).index; i < this.paragraphs.length; i++) {
       if (this.paragraphs[i].sectionEnd) return this.paragraphs[i].sectionEnd;
@@ -398,9 +456,10 @@ export class TextDocument {
    * The selection as plain text. An object's place holder character (U+FFFC) is not text: a field
    * gives its result, an equation its text and a note reference `noteText(run, offset)` (the number
    * shown, which only layout knows), so neither another application nor a paste back here gets it.
+   * `[start, end]` is another range to read instead of the selection.
    */
-  clipboardText(noteText = () => '') {
-    const [start, end] = this.range; let at = 0, text = '';
+  clipboardText(noteText = () => '', [start, end] = this.range) {
+    let at = 0, text = '';
     for (const p of this.paragraphs) {
       for (const run of p.runs) {
         const length = run.text.length;
@@ -430,11 +489,20 @@ export class TextDocument {
   }
   get selectedParagraphs() {
     const [start, end] = this.range;
-    const first = locate(this.paragraphs, start).index;
-    const last = locate(this.paragraphs, end).index;
+    const first = this.locate(start).index;
+    const located = this.locate(end), last = located.index;
     // A selection ending at the next paragraph's start does not format that paragraph.
-    const stop = end > start && locate(this.paragraphs, end).offset === 0 ? last - 1 : last;
+    const stop = end > start && located.offset === 0 ? last - 1 : last;
     return this.paragraphs.slice(first, Math.max(first, stop) + 1);
+  }
+  /**
+   * The paragraphs a paragraph command acts on: those of the selected text, or of each cell of a block of cells,
+   * whose text range would otherwise reach only a column's first cell, or the cells between a block's corners.
+   */
+  get commandParagraphs() {
+    const out = [];
+    if (this.blockCellPass(() => { out.push(...this.selectedParagraphs); return false; }) === undefined) return this.selectedParagraphs;
+    return out;
   }
   get paragraphFormatting() {
     const formats = this.selectedParagraphs.map(p => paragraphFormat(p, this.numbering, this.pageSettings));
@@ -519,6 +587,8 @@ export class TextDocument {
     return true;
   }
   clearDirectParagraphFormatting() {
+    const pass = this.blockCellPass(() => this.clearDirectParagraphFormatting());
+    if (pass !== undefined) return pass;
     const targets = new Set(this.selectedParagraphs.filter(hasDirectParagraphFormatting).map(p => p.id));
     if (!targets.size) return false;
     const paragraphs = this.paragraphs.map(p => {
@@ -538,6 +608,8 @@ export class TextDocument {
     this.pageSettings = settings; this.didChange(); return true;
   }
   adjustIndent(delta) {
+    const pass = this.blockCellPass(() => this.adjustIndent(delta));
+    if (pass !== undefined) return pass;
     const targets = this.selectedParagraphs, current = targets.map(p => paragraphFormat(p, this.numbering).indentLeft);
     // Decreasing stops at the margin, as Decrease Indent does; an existing negative indent is left alone.
     const values = current.map(value => validateIndent(delta < 0 ? Math.max(Math.min(value, 0), value + delta) : value + delta));
@@ -553,15 +625,11 @@ export class TextDocument {
     const ids = this.selectedParagraphs.map(p => effectiveStyleId(p, this.styles) || '');
     return ids.every(id => id === ids[0]) ? ids[0] : null;
   }
-  get paragraphStyles() {
-    return Object.values(this.styles.definitions).filter(s => s.type === 'paragraph').map(s => {
-      let error = s.error;
-      try { resolveStyledParagraph({ runs: [], styleId: s.id }, this.styles, this.numbering); } catch (e) { error = e.message; }
-      return { id: s.id, name: s.name, error };
-    });
-  }
+  get paragraphStyles() { return styleChoices(this, 'paragraph', s => resolveStyledParagraph({ runs: [], styleId: s.id }, this.styles, this.numbering)); }
   setParagraphStyle(id) {
     if (id && this.styles.definitions[id]?.type !== 'paragraph') throw new Error('Choose a paragraph style.');
+    const pass = this.blockCellPass(() => this.setParagraphStyle(id));
+    if (pass !== undefined) return pass;
     const targets = this.selectedParagraphs;
     if (targets.every(p => (p.styleId || '') === id)) return false;
     const next = targets.map(p => resolveStyledParagraph({ ...copy(p), styleId: id || null, styleChanged: true }, this.styles, this.numbering));
@@ -591,15 +659,26 @@ export class TextDocument {
     const kinds = this.selectedParagraphs.map(p => listKind(this.numbering, p.list));
     return kinds.every(k => k === kinds[0]) ? kinds[0] : 'mixed';
   }
-  toggleList(kind) {
+  toggleList(kind, cells = null) {
     if (!['bullet', 'number'].includes(kind)) throw new Error('Choose bullets or numbering.');
-    const targets = this.selectedParagraphs, remove = this.listFormatting === kind;
+    // A block of cells is listed or unlisted as a whole, numbered on through its cells in reading order.
+    if (!cells && this.cellBlock && !this.inBlockCellPass) {
+      const kinds = [];
+      this.blockCellPass(() => { kinds.push(this.listFormatting); return false; });
+      if (kinds.length) {
+        const shared = { remove: kinds.every(k => k === kind), numId: null };
+        return this.blockCellPass(() => this.toggleList(kind, shared));
+      }
+    }
+    const targets = this.selectedParagraphs, remove = cells ? cells.remove : this.listFormatting === kind;
     this.checkpoint();
-    let numId;
-    if (!remove) {
-      const first = this.paragraphs.indexOf(targets[0]), previous = this.paragraphs[first - 1];
+    let numId = cells?.numId;
+    if (!remove && !numId) {
+      // The selected paragraphs start at the range's start (selectedParagraphs).
+      const first = this.locate(this.range[0]).index, previous = this.paragraphs[first - 1];
       const existing = targets.find(p => listKind(this.numbering, p.list) === kind) || (previous && listKind(this.numbering, previous.list) === kind ? previous : null);
       numId = existing?.list.numId || newList(this.numbering, kind);
+      if (cells) cells.numId = numId;
     }
     for (const p of targets) {
       // A direct numId=0 overrides inherited numbering when removing a list.
@@ -609,6 +688,8 @@ export class TextDocument {
     this.didChange(); return true;
   }
   changeListLevel(delta) {
+    const pass = this.blockCellPass(() => this.changeListLevel(delta));
+    if (pass !== undefined) return pass;
     const targets = this.selectedParagraphs;
     if (!targets.every(p => p.list)) return this.adjustIndent(delta * 720);
     if (targets.some(p => p.list.level + delta < 0 || p.list.level + delta > 8)) return false;
@@ -1139,10 +1220,16 @@ export class TextDocument {
       });
       table.rows.push(row);
     }
-    const location = locate(this.paragraphs, this.range[0]);
-    this.replace('\n'); // One transaction splits the surrounding paragraph.
+    const location = locate(this.paragraphs, this.range[0]), here = this.paragraphs[location.index], before = this.paragraphs[location.index - 1];
+    // At the start of a paragraph, or in an empty one, the table goes before it, as in Word: splitting
+    // there would leave an extra empty paragraph above the table. A paragraph right after a table at
+    // the same level is still split, since adjacent tables would join into one.
+    const insideHere = cellId => { for (let at = cellId && cellContext(this.tables, cellId); at; at = at.table.parentCellId && cellContext(this.tables, at.table.parentCellId)) if (at.table.parentCellId === here.cellId) return true; return false; };
+    const ahead = location.offset === 0 && (!before || before.cellId === here.cellId || (here.cellId ? !insideHere(before.cellId) : !before.cellId));
+    if (ahead) this.checkpoint();
+    else this.replace('\n'); // One transaction splits the surrounding paragraph.
     this.styles = styles; this.stylesEnabled = true;
-    this.paragraphs.splice(location.index + 1, 0, ...content); this.tables.push(table);
+    this.paragraphs.splice(location.index + (ahead ? 0 : 1), 0, ...content); this.tables.push(table);
     this.selectCell(table.rows[0].cells[0].id); this.didChange(); return true;
   }
   insertTableRow() {
@@ -1418,7 +1505,9 @@ export class TextDocument {
   }
   get hyperlink() {
     const [start, end] = this.range;
-    const found = hyperlinkAt(this.paragraphs, start) || (start === end ? hyperlinkAt(this.paragraphs, start, 'backward') : null);
+    // A link stays within its paragraph: only the links of the paragraph holding the start can hold it.
+    const { index, offset } = this.locate(start), links = hyperlinkRanges(this.paragraphs, index, index + 1, start - offset);
+    const found = links.find(r => r.start <= start && start < r.end) || (start === end ? links.find(r => r.start < start && start <= r.end) : null) || null;
     return found && end <= found.end ? found : null;
   }
   get bookmarks() { return bookmarkEntries(this.paragraphs, this.tables); }
@@ -1569,9 +1658,11 @@ export class TextDocument {
   }
   changeHyperlink(start, end, link) {
     if(this.hasHyperlinkFields)unwrapEditedFieldHyperlinks(this.paragraphs,bodyFieldRanges(this.paragraphs),start,end);
-    let at = 0;
-    for (const p of this.paragraphs) {
-      const length = paragraphLength(p), a = Math.max(0, start - at), b = Math.min(length, end - at);
+    // Paragraphs before the one holding the start, and after the end, keep their links.
+    const first = this.locate(start);
+    let at = start - first.offset;
+    for (let i = first.index; i < this.paragraphs.length && at <= end; i++) {
+      const p = this.paragraphs[i], length = paragraphLength(p), a = Math.max(0, start - at), b = Math.min(length, end - at);
       if (b > a) p.runs = normalize([...sliceRuns(p.runs, 0, a), ...sliceRuns(p.runs, a, b).map(r => {
         const next = { ...r };
         if (r.image?.hyperlink || r.image?.hyperlinkChanged) {
@@ -1602,13 +1693,7 @@ export class TextDocument {
     }
     return ids.every(id => id === ids[0]) ? ids[0] ?? '' : null;
   }
-  get characterStyles() {
-    return Object.values(this.styles.definitions).filter(s => s.type === 'character').map(s => {
-      let error = s.error;
-      try { resolveCharacterRun({ styleId: s.id, styleManaged: true }, this.styles, this.styles.defaults.run); } catch (e) { error = e.message; }
-      return { id: s.id, name: s.name, error };
-    });
-  }
+  get characterStyles() { return styleChoices(this, 'character', s => resolveCharacterRun({ styleId: s.id, styleManaged: true }, this.styles, this.styles.defaults.run)); }
   characterStyleState(id, styles = this.styles) {
     if (typeof id !== 'string' || id && styles.definitions[id]?.type !== 'character') throw new Error('Choose a character style.');
     const [start, end] = this.textFormattingRange, location = locate(this.paragraphs, start);
@@ -1634,6 +1719,8 @@ export class TextDocument {
     return { paragraphs, typingStyle: null };
   }
   setCharacterStyle(id) {
+    const pass = this.blockCellPass(() => this.setCharacterStyle(id));
+    if (pass !== undefined) return pass;
     const next = this.characterStyleState(id);
     if (this.characterStyle === id) return false;
     if (next.paragraphs === this.paragraphs) { this.typingStyle = next.typingStyle; this.stylesEnabled = true; return false; }
@@ -1657,8 +1744,11 @@ export class TextDocument {
       return Object.fromEntries(Object.keys(RUN_FORMAT).map(key => [key, format[key]]));
     }
     const formats = [];
-    let at = 0;
-    for (const p of this.paragraphs) {
+    // No paragraph before the one holding the start has text or a mark in the range, nor any after the end.
+    const first = this.locate(start);
+    let at = start - first.offset;
+    for (let i = first.index; i < this.paragraphs.length && at <= end; i++) {
+      const p = this.paragraphs[i];
       for (const run of p.runs) {
         if (at < end && at + run.text.length > start) formats.push(formatRun(run));
         at += run.text.length;
@@ -1767,6 +1857,8 @@ export class TextDocument {
   get italic() { return this.runFormatting.italic === true; }
   get underline() { return this.runFormatting.underline === true; }
   clearDirectTextFormatting() {
+    const pass = this.blockCellPass(() => this.clearDirectTextFormatting());
+    if (pass !== undefined) return pass;
     const [start, end] = this.textFormattingRange, location = locate(this.paragraphs, start);
     if (start === end && this.paragraphs[location.index].runs.length) {
       const p = this.paragraphs[location.index], next = clearedRun(this.typingRun());
@@ -1824,7 +1916,8 @@ export class TextDocument {
       else if (['color', 'underlineColor'].includes(key)) patch[key] = normalizeColor(value);
       else if (typeof value !== 'boolean') throw new Error('Text formatting must be on or off.');
     }
-    if (!Object.keys(patch).length || Object.entries(patch).every(([k, v]) => this.runFormatting[k] === v)) return false;
+    const current = Object.keys(patch).length ? this.runFormatting : null;
+    if (!current || Object.entries(patch).every(([k, v]) => current[k] === v)) return false;
     const [start, end] = this.textFormattingRange;
     if (patch.textScale && patch.textScale !== 100 && start !== end) {
       let offset = 0;
@@ -1851,9 +1944,11 @@ export class TextDocument {
       return false;
     }
     this.checkpoint();
-    let at = 0;
-    for (const p of this.paragraphs) {
-      const length = paragraphLength(p);
+    // Paragraphs before the one holding the start, and after the end, are left as they are.
+    const first = this.locate(start);
+    let at = start - first.offset;
+    for (let i = first.index; i < this.paragraphs.length && at <= end; i++) {
+      const p = this.paragraphs[i], length = paragraphLength(p);
       const a = Math.max(0, start - at), b = Math.min(length, end - at);
       if (a < b) p.runs = normalize([
         ...sliceRuns(p.runs, 0, a),
@@ -2036,6 +2131,47 @@ export class TextDocument {
     if (result && inserted > 0) clearRevisions(this.paragraphs, start, start + inserted);
     return result;
   }
+  /**
+   * Replace the selection untracked, as a field's refreshed result is: the new text keeps the tracked insertion
+   * or deletion the replaced text had, so a field a reviewer inserted (or deleted) still is after an update.
+   */
+  replaceResult(text, options = {}) {
+    const [start, end] = this.range, revision = sharedRevision(this.paragraphs, start, end), length = documentLength(this.paragraphs), tracking = this.trackChanges;
+    this.trackChanges = false;
+    let result;
+    try { result = this.replace(text, options); } finally { this.trackChanges = tracking; }
+    const inserted = documentLength(this.paragraphs) - length + (end - start);
+    if (result && revision && inserted > 0) {
+      const touched = new Set();
+      eachRevisionTarget(this.paragraphs, start, start + inserted, ({ paragraph, run, mark }) => { if (!mark) { run.revision = { ...revision }; touched.add(paragraph); } });
+      for (const p of touched) p.runs = normalize(p.runs);
+    }
+    return result;
+  }
+  /**
+   * After a command that wrote text untracked (a caption, a cross-reference, a table of contents), record what it
+   * inserted as a tracked insertion, as typing it would have been. Only a single inserted stretch is recorded;
+   * returns whether the change was one.
+   */
+  trackInsertion(previousText, previousFields = null) {
+    const text = this.text, limit = previousText.length;
+    if (text.length <= limit) return false;
+    let start = 0, tail = 0;
+    while (start < limit && text[start] === previousText[start]) start++;
+    while (tail < limit - start && text[text.length - 1 - tail] === previousText[limit - 1 - tail]) tail++;
+    if (start + tail !== limit) return false;
+    const revision = this.newRevision('ins'), touched = new Set();
+    eachRevisionTarget(this.paragraphs, start, text.length - tail, ({ paragraph, run, mark }) => {
+      if (mark) paragraph.markRevision = { ...revision };
+      else { run.revision = { ...revision }; delete run.formatRevision; touched.add(paragraph); }
+    });
+    for (const p of touched) p.runs = normalize(p.runs);
+    // Fields the command added (`previousFields` holds the ids there were before) are inserted, code and all.
+    if (previousFields && this.paragraphs.some(p => p.fieldMarkers?.length)) for (const f of bodyFieldRanges(this.paragraphs)) {
+      if (!previousFields.has(f.field.id) && start <= f.start && f.end <= text.length - tail) setFieldRevision(this.paragraphs, f.field.id, revision);
+    }
+    return true;
+  }
   newRevision(type) { return { type, author: this.revisionAuthor || 'Author', date: new Date().toISOString().replace(/\.\d+Z$/, 'Z') }; }
   trackedReplace(text, { checkpoint = true, ...rest } = {}) {
     const [start, end] = this.range, backward = this.selection.focus < this.selection.anchor;
@@ -2062,6 +2198,10 @@ export class TextDocument {
           if (prompts.length) removals = [...removals, ...prompts].sort((a, b) => a[0] - b[0]).reduce((out, [a, b]) => { const last = out.at(-1); if (last && a <= last[1]) last[1] = Math.max(last[1], b); else out.push([a, b]); return out; }, []);
         }
         const deletion = deletionRevision = this.newRevision('del');
+        // A field the deletion takes whole (as an untracked deletion would remove it) is deleted code and all;
+        // the author's own inserted field simply goes. Only its result text was marked, so accepting the
+        // deletion left an empty field.
+        const wholeFields = !this.paragraphs.some(p => p.fieldMarkers?.length) ? [] : bodyFieldRanges(this.paragraphs).filter(r => r.field.type !== 'MACROBUTTON' && start <= r.start && r.end <= end && (start < r.start || r.end < end));
         // Deleting next to the author's own deletion from moments ago (Backspace or Delete held down) extends it,
         // as typing extends an insertion, so it stays one change even when it crosses a clock second.
         const now = Date.now();
@@ -2075,11 +2215,17 @@ export class TextDocument {
           if (isMark) { if (!boundary(paragraph)) paragraph.markRevision = mark(paragraph.markRevision); }
           else run.revision = mark(run.revision);
         });
+        const ownFields = new Set();
+        for (const { field } of wholeFields) {
+          if (field.revision?.type === 'ins' && field.revision.author === me && !field.revision.move) ownFields.add(field.id);
+          else setFieldRevision(this.paragraphs, field.id, mark(field.revision));
+        }
         for (const [a, b] of removals.reverse()) {
           this.selection = { anchor: a, focus: b };
           this.replaceUntracked('', { checkpoint: false });
           removed += b - a;
         }
+        if (ownFields.size) { removeFields(this.paragraphs, ownFields); this.hasBodyFields = this.paragraphs.some(p => p.fieldMarkers?.length); }
       }
       const insertAt = end - removed;
       if (text) {
@@ -2177,12 +2323,39 @@ export class TextDocument {
     this.formatRejectSkipped = false;
     // Resolving changes is not itself a tracked formatting change.
     this.formatTrackingSuppressed = true;
-    const targets = (start === end ? this.revisionsAt(start, end) : revisionRanges(this.paragraphs).filter(r => r.start < end && r.end > start)).filter(r => only(r))
+    const changes = () => (start === end ? this.revisionsAt(start, end) : revisionRanges(this.paragraphs).filter(r => r.start < end && r.end > start)).filter(r => only(r))
       .map(r => ({ ...r, start: start === end ? r.start : Math.max(start, r.start), end: start === end ? r.end : Math.min(end, r.end) }));
-    if (!targets.length) return false;
+    let targets = changes();
+    // A field inserted or deleted as a whole is resolved with the change its result is part of, or, resolving a
+    // stretch of the document, whenever it lies inside it (an index entry or empty result has no text of its own).
+    // Its code goes with it: resolving only the result left an empty field behind.
+    const fieldTargets = !this.paragraphs.some(p => p.fieldMarkers?.length) ? [] : bodyFieldRanges(this.paragraphs).filter(f => f.field.revision && (
+      start !== end && start <= f.start && f.end <= end && only(f.field.revision) ||
+      targets.some(r => r.type !== 'format' && sameRevision(r, f.field.revision) && r.start <= f.start && f.end <= r.end)));
+    if (!targets.length && !fieldTargets.length) return false;
+    const fieldOutcomes = fieldTargets.map(({ field: { id, revision } }) => {
+      if (revision.type === 'ins') return { id, removed: !accept };
+      if (accept) return { id, removed: true };
+      // Rejecting the deletion of another reviewer's insertion brings that insertion back; rejecting a stretch
+      // rejects that insertion too when it is in scope, as for text.
+      if (!revision.inserted) return { id, removed: false, revision: null };
+      const insertion = { type: 'ins', ...revision.inserted };
+      return start !== end && only({ type: 'ins', author: insertion.author, date: insertion.date }) ? { id, removed: true } : { id, removed: false, revision: insertion };
+    });
     this.checkpoint();
+    // Rejecting a deletion of another reviewer's insertion brings that insertion back. Rejecting a range (or
+    // all changes) rejects that insertion too when it is in scope, as a second Reject All would have: the text
+    // goes, instead of staying as an insertion after Reject All.
+    if (!accept && start !== end) {
+      const restored = new Set();
+      for (const r of targets) if (r.type === 'del') eachRevisionTarget(this.paragraphs, r.start, r.end, ({ paragraph, run, mark }) => {
+        const target = mark ? paragraph : run, key = mark ? 'markRevision' : 'revision', inserted = target[key]?.inserted;
+        if (target[key]?.type === 'del' && inserted && only({ type: 'ins', author: inserted.author, date: inserted.date })) { target[key] = { type: 'ins', ...inserted }; restored.add(paragraph); }
+      });
+      if (restored.size) { for (const p of restored) p.runs = normalize(p.runs); targets = changes(); }
+    }
     this.trackingInternal = true;
-    const caret = targets[0].start;
+    const caret = targets[0]?.start ?? fieldTargets[0].start;
     try {
       // Changes that keep their text (formatting, and the side of a change being kept) first, while every
       // range still holds; then the removals, from the last, so each earlier range stays where it was.
@@ -2218,6 +2391,10 @@ export class TextDocument {
         if (keep) visitWithin(r.start, r.end, ({ paragraph, run, mark }) => {
           const target = mark ? paragraph : run, key = mark ? 'markRevision' : 'revision', next = kept(target[key]);
           if (next) target[key] = next; else delete target[key];
+          // Deleted text hides a formatting change made to it before. Rejecting a selection or all changes brings
+          // the text back and rejects that change too, instead of leaving it behind as a change of its own.
+          const hidden = !accept && r.type === 'del' && start !== end && !mark && !run.revision && runFormatChange(run);
+          if (hidden && only(hidden)) { if (rejectFormatChange(run)) acceptFormatChange(run, 'run'); else this.formatRejectSkipped = true; if (this.stylesEnabled) resolveStyledParagraph(paragraph, this.styles, this.numbering); }
         });
         else {
           const index = indexAt(r.start), p = this.paragraphs[index], from = r.start - starts[index], to = r.end - starts[index];
@@ -2245,6 +2422,10 @@ export class TextDocument {
         }
       }
     } finally { this.trackingInternal = false; }
+    const removedFields = new Set(fieldOutcomes.filter(o => o.removed).map(o => o.id));
+    if (removedFields.size) removeFields(this.paragraphs, removedFields);
+    for (const outcome of fieldOutcomes) if (!outcome.removed) setFieldRevision(this.paragraphs, outcome.id, outcome.revision);
+    if (removedFields.size) this.hasBodyFields = this.paragraphs.some(p => p.fieldMarkers?.length);
     for (const p of this.paragraphs) p.runs = normalize(p.runs);
     // Removing a change can join the characters on either side of the caret into one.
     const at = nextBoundary(this.paragraphs, Math.min(caret, documentLength(this.paragraphs)));
@@ -2500,7 +2681,7 @@ export class TextDocument {
       this.selection = { anchor: after, focus: after };
       return this.delete(direction);
     }
-    const target = points[at + direction];
+    let target = points[at + direction];
     if (target === undefined) return false;
     const other = this.paragraphs[locate(this.paragraphs, target).index];
     if (direction < 0 && location.offset === 0 && p.cellId && !other.cellId && other.sectionEnd && paragraphLength(other)) {
@@ -2538,6 +2719,8 @@ export class TextDocument {
         } catch (error) { this.selection = selection; throw error; }
       }
     }
+    // Tracked, a deleted mark would stay in the cluster: the caret could not stop before it.
+    if (direction < 0 && !(this.trackChanges && !this.trackingInternal)) target = backspaceStart(this.text, target, start, points[at + 1] ?? start);
     // Snapshot before extending the deletion range, so undo restores the caret.
     this.checkpoint();
     this.selection = { anchor: start, focus: target };

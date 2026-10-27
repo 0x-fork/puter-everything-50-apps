@@ -56,6 +56,21 @@ test('a run of Backspace or Delete presses undoes in one step', async ({ page })
   await input(page).press('ControlOrMeta+Shift+z'); await expect(input(page)).toHaveValue('Hello bra');
 });
 
+test('in Text mode a run of Backspace or Delete presses also undoes in one step', async ({ page }) => {
+  await blank(page);
+  await page.getByRole('checkbox', { name: 'Text mode', exact: true }).check();
+  await input(page).focus();
+  await page.keyboard.type('Hello brave world');
+  // The field handles the keys itself here; the document takes them from its input events.
+  for (let i = 0; i < 8; i++) await input(page).press('Backspace');
+  await expect(input(page)).toHaveValue('Hello bra');
+  await input(page).evaluate(el => { el.setSelectionRange(0, 0); el.dispatchEvent(new Event('select')); });
+  for (let i = 0; i < 3; i++) await input(page).press('Delete');
+  await expect(input(page)).toHaveValue('lo bra');
+  await input(page).press('ControlOrMeta+z'); await expect(input(page)).toHaveValue('Hello bra');
+  await input(page).press('ControlOrMeta+z'); await expect(input(page)).toHaveValue('Hello brave world');
+});
+
 test('Cmd+Backspace and Cmd+Delete stop at the edge of the line as laid out, not of the paragraph', async ({ page }) => {
   await blank(page);
   const long = 'This paragraph is long enough to wrap onto a second line of the page, so deleting to the start of the line removes only its last visual line.';
@@ -94,6 +109,24 @@ test('deleting a word with the platform chord removes that word, not letters shi
   await expect(input(page)).toHaveValue('one three');
   expect(await page.evaluate(() => window.__docs.current.view.engine.model.paragraphs[0].runs.map(r => [r.text, !!r.bold]))).toEqual([['one ', false], ['three', true]]);
   expect(await input(page).evaluate(el => [el.selectionStart, el.selectionEnd])).toEqual([4, 4]);
+});
+
+test('a word deletion the document refuses, at the edge of a table, leaves the caret where it was', async ({ page }) => {
+  await blank(page);
+  await page.keyboard.type('Intro');
+  await page.evaluate(() => { const e = window.__docs.current.view.engine; e.insertTable(1, 2); e.focus(); });
+  await page.keyboard.insertText('a'); await input(page).press('Tab'); await page.keyboard.insertText('b');
+  await page.evaluate(() => { const e = window.__docs.current.view.engine; e.model.select(e.model.text.length); e.syncInput(); });
+  await page.keyboard.insertText('After');
+  const value = await input(page).inputValue(), start = value.indexOf('After');
+  await input(page).evaluate((el, at) => { el.setSelectionRange(at, at); el.dispatchEvent(new Event('select')); }, start);
+  // Backspace at the start of the paragraph after a table does nothing; neither does the delete-word chord the native field handles.
+  await input(page).press(process.platform === 'darwin' ? 'Alt+Backspace' : 'Control+Backspace');
+  await expect(input(page)).toHaveValue(value);
+  expect(await page.evaluate(() => [...window.__docs.current.view.engine.model.range])).toEqual([start, start]);
+  // What is typed next goes where the caret is, not into the table.
+  await page.keyboard.insertText('Then ');
+  await expect(input(page)).toHaveValue(value.replace('After', 'Then After'));
 });
 
 test('with Track Changes on, word and line deletions leave the caret before what they struck out', async ({ page }) => {

@@ -16,7 +16,8 @@ export const EMU_PER_PX = 9525;
 // Keep authored EMUs in the model/package; only layout uses this conversion.
 // Independent signed body, group and cell controls: anchor-offset-precision.
 export const drawingOffsetPixels = emu => Math.trunc(emu / 635) / 15;
-export const isSideWrappedImage = image => image?.anchor?.wrap === 'square' && image.anchor.horizontal === 'column';
+// Every square wrap except the legacy column-centred band ('columnCenter') excludes text around its frame.
+export const isSideWrappedImage = image => image?.anchor?.wrap === 'square' && image.anchor.horizontal !== 'columnCenter';
 export const isPositionedImage = image => image?.anchor?.wrap === 'none' || image?.anchor?.wrap === 'topAndBottom' || isSideWrappedImage(image);
 export const EMU_PER_INCH = 914400;
 export const CROP_SIDES = ['left', 'top', 'right', 'bottom'];
@@ -101,7 +102,7 @@ export function* inlineSegments(text) {
 }
 
 export const MAX_IMAGE_SIDE = 8192, MAX_IMAGE_PIXELS = 16000000;
-/** Format and pixel size of PNG, JPEG or TIFF bytes; `checkSize: false` skips the pixel limits for PNG and JPEG. */
+/** Format and pixel size of PNG, JPEG, GIF or TIFF bytes; `checkSize: false` skips the pixel limits for PNG, JPEG and GIF. */
 export function imageInfo(bytes, { checkSize = true } = {}) {
   // Embedded PNG/JPEG parts share the session's encoded-byte budget. Their
   // decoded dimensions, rather than compression or metadata size, bound pixels.
@@ -117,6 +118,9 @@ export function imageInfo(bytes, { checkSize = true } = {}) {
       if (type === 0x6163544c) throw new Error('Animated PNG images are not supported yet.');
       at += size + 12;
     }
+  } else if (bytes.length >= 10 && /^GIF8[79]a$/.test(String.fromCharCode(...bytes.subarray(0, 6)))) {
+    // A GIF (often a web graphic pasted into a document) shows its first frame; its bytes are kept.
+    mime = 'image/gif'; width = view.getUint16(6, true); height = view.getUint16(8, true);
   } else if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216) {
     mime = 'image/jpeg';
     for (let at = 2; at + 4 <= bytes.length;) {
@@ -132,7 +136,7 @@ export function imageInfo(bytes, { checkSize = true } = {}) {
       at += size;
     }
   }
-  if (!width || !height) throw new Error('This image is not a supported PNG, JPEG or TIFF.');
+  if (!width || !height) throw new Error('This image is not a supported PNG, JPEG, GIF or TIFF.');
   if (checkSize && (width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE || width * height > MAX_IMAGE_PIXELS)) throw new Error('Images must be at most 8,192 pixels per side and 16 megapixels.');
   return { mime, width, height };
 }

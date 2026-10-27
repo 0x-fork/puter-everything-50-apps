@@ -41,6 +41,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
   const layer = el('div.ed-comments-layer', { role: 'complementary', 'aria-label': 'Comments' });
   let markupButton = null;
   let activeId = null, pinned = false, pinnedRange = '', draft = null, editing = null, signature = '', positionsKey = '';
+  // The tracked change last selected with Previous/Next Change or from the Reviewing Pane.
+  let navigated = null;
   const cards = new Map();
   const readAloud = createReadAloud({ editor, onState: () => onChange() });
   /* ---- Reviewing Pane: every comment and change in document order ---- */
@@ -49,42 +51,56 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
   const paneSummary = el('p.review-pane-summary');
   let paneOrientation = revisionView.options.paneOrientation || 'vertical';
   const pane = el('aside.review-pane', { 'aria-label': 'Reviewing Pane', hidden: true, dataset: { orientation: paneOrientation } },
-    el('div.canvas-panel-heading', {}, el('h2', {}, 'Revisions'), el('button.icon-btn', { type: 'button', 'aria-label': 'Close Reviewing Pane', onclick: () => { paneShown = false; refresh(true); editor()?.focus(); } }, '✕')),
+    el('div.canvas-panel-heading', {}, el('h2', {}, 'Revisions'), el('button.icon-btn', { type: 'button', 'aria-label': 'Close Reviewing Pane', onclick: () => { commands.toggleReviewingPane(false); editor()?.focus(); } }, '✕')),
     paneSummary, paneList);
+  /** The Reviewing Pane's entries, every comment and change in document order, as the document is now. */
+  function paneItems(engine) {
+    const body = engine.session.body, changes = body.revisions, notes = threads();
+    // The document's text, read once: each read checks every paragraph, and reading it per change made typing
+    // with the pane open slow in a document with many changes.
+    const text = body.text, formatSummary = formatSummaries(body);
+    const items = [
+      ...changes.map(c => ({ at: c.start, kind: c.move ? (c.type === 'ins' ? 'Moved (to)' : 'Moved (from)') : { ins: 'Inserted', del: 'Deleted', format: 'Formatted' }[c.type] || 'Changed', author: c.author, date: c.date, text: c.type === 'format' ? formatSummary(c) : (text.slice(c.start, Math.min(c.end, text.length)) + (c.end > text.length ? '\n' : '')).replace(/\n/g, ' ¶ ').trim(), select: () => { body.select(c.start, Math.min(c.end, body.text.length)); navigated = c; engine.focus(); engine.revealCaret?.(); onChange(); } })),
+      ...notes.map(t => ({ at: t.start ?? Infinity, kind: t.root.done ? 'Comment (resolved)' : 'Comment', author: t.root.author, date: t.root.date, text: t.root.text, select: () => selectThread(t) })),
+    ].sort((a, b) => a.at - b.at);
+    return { changes, notes, items };
+  }
   function renderPane() {
     const engine = editor();
     if (!paneShown || !engine) { pane.hidden = true; return; }
     pane.hidden = false;
-    const body = engine.session.body, changes = body.revisions, notes = threads();
-    const sig = JSON.stringify([changes, notes.map(t => [t.id, t.root.text, t.replies.length, t.root.done])]);
-    if (sig === paneSignature) return;
-    paneSignature = sig;
+    const { changes, notes, items } = paneItems(engine);
     const count = type => changes.filter(c => c.type === type).length;
     const n = (value, one, many) => `${value} ${value === 1 ? one : many}`;
-    paneSummary.textContent = `${n(changes.length + notes.length, 'revision', 'revisions')}: ${n(count('ins'), 'insertion', 'insertions')}, ${n(count('del'), 'deletion', 'deletions')}, ${count('format')} formatting, ${n(notes.length, 'comment', 'comments')}`;
-    const items = [
-      ...changes.map(c => ({ at: c.start, kind: c.move ? (c.type === 'ins' ? 'Moved (to)' : 'Moved (from)') : { ins: 'Inserted', del: 'Deleted', format: 'Formatted' }[c.type] || 'Changed', author: c.author, date: c.date, text: c.type === 'format' ? formatSummary(body, c) : (body.text.slice(c.start, Math.min(c.end, body.text.length)) + (c.end > body.text.length ? '\n' : '')).replace(/\n/g, ' ¶ ').trim(), select: () => { body.select(c.start, Math.min(c.end, body.text.length)); engine.focus(); engine.revealCaret?.(); onChange(); } })),
-      ...notes.map(t => ({ at: t.start ?? Infinity, kind: t.root.done ? 'Comment (resolved)' : 'Comment', author: t.root.author, date: t.root.date, text: t.root.text, select: () => selectThread(t) })),
-    ].sort((a, b) => a.at - b.at);
-    paneList.replaceChildren(...items.map(item => listItem(el('button.review-pane-item', { type: 'button', onclick: item.select },
+    const summary = `${n(changes.length + notes.length, 'revision', 'revisions')}: ${n(count('ins'), 'insertion', 'insertions')}, ${n(count('del'), 'deletion', 'deletions')}, ${count('format')} formatting, ${n(notes.length, 'comment', 'comments')}`;
+    // Where the changes are does not change the list (an entry selects its change where it is when chosen), so
+    // typing before them does not rebuild every entry.
+    const sig = JSON.stringify([summary, items.map(item => [item.kind, item.author, item.date, item.text])]);
+    if (sig === paneSignature) return;
+    paneSignature = sig;
+    paneSummary.textContent = summary;
+    paneList.replaceChildren(...items.map((item, index) => listItem(el('button.review-pane-item', { type: 'button', onclick: () => { const current = editor(); if (current) paneItems(current).items[index]?.select(); } },
       el('span.review-pane-head', {}, el('strong', {}, item.author || 'Unknown author'), ' ', el('span', {}, item.kind)),
       el('span.review-pane-text', {}, item.text.replace(/\ufffc/g, '').slice(0, 200) || '(formatting)')))));
     if (!items.length) paneList.append(el('p.field-hint', {}, 'No comments or tracked changes.'));
   }
-  /** What a formatting change did, e.g. "Bold, Font size 14 pt". */
-  function formatSummary(body, change) {
-    let at = 0;
-    for (const p of body.paragraphs) {
-      const size = p.runs.reduce((n, r) => n + r.text.length, 0);
-      if (at + size + 1 > change.start) {
-        if (p.formatRevision && change.end > at + size) return describeFormatChange(p).join(', ');
-        let offset = at;
-        for (const run of p.runs) { if (offset >= change.start && run.formatRevision) return describeFormatChange(run).join(', '); offset += run.text.length; }
-        return 'Formatted';
-      }
-      at += size + 1;
-    }
-    return 'Formatted';
+  /**
+   * What formatting changes did, e.g. "Bold, Font size 14 pt": summarize(change). Paragraph starts are measured
+   * once, so summarizing every change of a long document does not walk it from the start for each.
+   */
+  function formatSummaries(body) {
+    const starts = []; let at = 0;
+    for (const p of body.paragraphs) { starts.push(at); at += p.runs.reduce((n, r) => n + r.text.length, 0) + 1; }
+    return change => {
+      let low = 0, high = starts.length - 1;
+      while (low < high) { const middle = (low + high + 1) >> 1; if (starts[middle] <= change.start) low = middle; else high = middle - 1; }
+      const p = body.paragraphs[low]; if (!p) return 'Formatted';
+      const size = (starts[low + 1] ?? at) - starts[low] - 1;
+      if (p.formatRevision && change.end > starts[low] + size) return describeFormatChange(p).join(', ');
+      let offset = starts[low];
+      for (const run of p.runs) { if (offset >= change.start && run.formatRevision) return describeFormatChange(run).join(', '); offset += run.text.length; }
+      return 'Formatted';
+    };
   }
   /** Changes shown under the current Show Markup choices (reviewers, kinds). */
   const shownChanges = list => list.filter(c => !revisionView.options.hiddenAuthors.includes(c.author) && (c.type === 'format' ? revisionView.options.showFormatting : revisionView.options.showInsDel));
@@ -118,7 +134,9 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     if (engine.session.path !== null) engine.editStory(null);
     engine.model.select(thread.start, thread.end);
     pinnedRange = engine.model.range.join();
-    if (focusDocument) engine.focus();
+    // The document's text field takes the selection too: going back to it with the keyboard kept its own,
+    // which the next key put back.
+    if (focusDocument) engine.focus(); else engine.syncInput();
     engine.revealCaret?.(); engine.paint(); onChange();
     cards.get(thread.id)?.scrollIntoView?.({ block: 'nearest' });
   }
@@ -156,7 +174,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       commentsShown = true;
       selectThread(next);
     },
-    toggleShown() { commentsShown = !commentsShown; refresh(true); editor()?.focus(); },
+    toggleShown() { commentsShown = !commentsShown; refresh(true); onChange(); editor()?.focus(); },
     selectThreadById(id) { const thread = threads().find(t => t.id === id); if (thread) { commentsShown = true; selectThread(thread); } },
     /** Delete every comment by the reviewers shown (Show Markup › Specific People). */
     deleteAllShown() {
@@ -166,7 +184,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       run(() => { for (const id of ids) editor().model.deleteComment(id); }); activeId = null; refresh(true);
     },
     get paneShown() { return paneShown; },
-    toggleReviewingPane(on = !paneShown) { paneShown = on; paneSignature = ''; refresh(true); },
+    // The ribbon and menus read paneShown for their pressed and checked states: they are told it changed.
+    toggleReviewingPane(on = !paneShown) { paneShown = on; paneSignature = ''; refresh(true); onChange(); },
     // The Tracking Options dialog shows (and keeps) the orientation chosen here.
     setPaneOrientation(value = 'vertical') { paneOrientation = value; revisionView.options.paneOrientation = value; pane.dataset.orientation = value; refresh(true); },
     /** 'everyone' writes Track Changes into the document; 'mine' tracks this session only. */
@@ -201,14 +220,20 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       return engine.session.body.revisionsAt?.(...engine.session.body.range) || [];
     },
     hasRevisions() { return (editor()?.session.body.revisions || []).length > 0; },
-    resolve(accept, scope = 'here', { moveNext = false, stopTracking = false } = {}) {
+    resolve(accept, scope = 'here', { moveNext = false, stopTracking = false, change = null } = {}) {
       const engine = ready(); if (!engine) return;
       if (locked()) { error(new Error('Tracking is locked: changes cannot be accepted or rejected.')); return; }
       if (engine.session.path !== null) engine.editStory(null);
       const body = engine.session.body, [a, b] = body.range;
+      // A balloon's buttons act on its own change. Its range can hold others (a paragraph's formatting change spans
+      // the paragraph), and resolving the range accepted or rejected every insertion and deletion in it too.
+      // A change reached with Previous/Next (or the Reviewing Pane) and still selected as it was is the one meant.
+      if (!change && scope === 'here' && navigated && a === navigated.start && b === Math.min(navigated.end, body.text.length)
+        && body.revisions.some(c => c.start === navigated.start && c.end === navigated.end && c.type === navigated.type && c.author === navigated.author && c.date === navigated.date)) change = navigated;
+      const own = change && (c => c.type === change.type && c.author === change.author && c.date === change.date && !!c.move === !!change.move);
       // "All shown" leaves the changes of reviewers and kinds hidden by Show Markup alone.
       const ok = run(() => scope === 'shown' ? body.resolveRevisions(accept, undefined, undefined, { only: change => shownChanges([change]).length > 0 })
-        : scope === 'all' ? body.resolveRevisions(accept) : body.resolveRevisions(accept, a, b));
+        : scope === 'all' ? body.resolveRevisions(accept) : own ? body.resolveRevisions(accept, change.start, change.end, { only: own }) : body.resolveRevisions(accept, a, b));
       if (!accept && body.formatRejectSkipped) error(new Error('Formatting changes cannot be rejected here yet, so they were kept. Accept them, or change the formatting back by hand.'));
       if (stopTracking) commands.toggleTracking(false);
       if (ok && moveNext) commands.goChange(1, { from: body.range[0] });
@@ -222,7 +247,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       const next = direction > 0 ? list.find(r => r.start >= at && !(r.start === a && r.end === b)) || list[0] : [...list].reverse().find(r => r.end <= at && !(r.start === a && r.end === b)) || list.at(-1);
       engine.finishComposition();
       if (engine.session.path !== null) engine.editStory(null);
-      body.select(next.start, Math.min(next.end, body.text.length));
+      body.select(next.start, Math.min(next.end, body.text.length)); navigated = next;
       engine.focus(); engine.revealCaret?.(); engine.paint(); onChange();
     },
     get shown() { return commentsShown; },
@@ -367,11 +392,11 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     if (mode === 'inline') return [];
     return shownChanges(engine.session.body.revisions).filter(c => c.type === 'format' || mode === 'balloons' && c.type === 'del' && !c.move);
   }
-  function balloonCard(change) {
+  function balloonCard(change, documentText, formatSummary) {
     const engine = editor(), body = engine.session.body;
-    const text = change.type === 'format' ? formatSummary(body, change) : body.text.slice(change.start, Math.min(change.end, body.text.length)).replace(/\n/g, ' ¶ ');
+    const text = change.type === 'format' ? formatSummary(change) : documentText.slice(change.start, Math.min(change.end, documentText.length)).replace(/\n/g, ' ¶ ');
     const editable = !!ready() && !locked();
-    const act = accept => { body.select(change.start, Math.min(change.end, body.text.length)); commands.resolve(accept); };
+    const act = accept => { body.select(change.start, Math.min(change.end, body.text.length)); commands.resolve(accept, 'here', { change }); };
     return el('article.ed-comment-card.ed-revision-card', { dataset: { anchor: String(change.start), kind: change.type }, 'aria-label': `${change.type === 'format' ? 'Formatted' : 'Deleted'} by ${change.author || 'unknown author'}` },
       el('div.wcc-head', {}, avatar(change.author), el('div.wcc-meta', {}, el('span.wcc-author', {}, change.author || 'Unknown author'), el('span.wcc-date', {}, time(change.date))),
         el('button.icon-btn.wcc-more', { type: 'button', title: 'Accept', 'aria-label': 'Accept change', disabled: !editable, onclick: () => act(true) }, '✓'),
@@ -450,7 +475,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       cards.clear();
       const nodes = visible && commentsShown ? list.map(thread => { const node = card(thread); cards.set(thread.id, node); return node; }) : [];
       if (visible && commentsShown && draft) nodes.push(draftCard());
-      nodes.push(...balloons.map(balloonCard));
+      if (balloons.length) { const body = engine.session.body, documentText = body.text, summarize = formatSummaries(body); nodes.push(...balloons.map(change => balloonCard(change, documentText, summarize))); }
       layer.replaceChildren(...nodes);
       // A card that grows (a reply or edit being typed, a wrapped draft) pushes the cards below it down.
       cardResize.disconnect(); for (const node of nodes) cardResize.observe(node);
@@ -544,7 +569,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     const speak = command('Read Aloud', 'readAloud', () => readAloud.active ? readAloud.stop() : readAloud.start(), { size: 'large', text: 'Read Aloud', shortcut: MOD_KEY === 'Cmd' ? 'Option+Cmd+Space' : 'Ctrl+Alt+Space' });
     speak.addEventListener('mousedown', e => e.preventDefault());
     when(speak, () => readAloud.supported && !!editor(), () => String(readAloud.active));
-    const reviewing = command('Reviewing Pane', 'reviewingPane', () => { paneShown = !paneShown; paneSignature = ''; refresh(true); }, { text: 'Reviewing Pane' });
+    const reviewing = command('Reviewing Pane', 'reviewingPane', () => commands.toggleReviewingPane(), { text: 'Reviewing Pane' });
     reviewing.addEventListener('mousedown', e => e.preventDefault());
     const reviewingSplit = split(reviewing, { label: 'Reviewing Pane options', open: (anchor, e) => openMenu({ anchor, label: 'Reviewing Pane', pointer: !!e?.detail, onClose: e?.detail ? () => editor()?.focus() : null, items: [
       { label: 'Reviewing Pane Vertical', radio: true, checked: paneShown && paneOrientation === 'vertical', onSelect: () => { commands.setPaneOrientation('vertical'); commands.toggleReviewingPane(true); } },

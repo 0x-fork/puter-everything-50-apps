@@ -341,6 +341,31 @@ test('the Date and Time and Special Characters lists are one Tab stop with arrow
   expect(errors).toEqual([]);
 });
 
+test('the Symbol dialog opens on the symbol it shows, so Enter inserts that symbol', async ({ page }) => {
+  const { input, errors, ribbon } = await start(page, { text: 'Price ' });
+  await input.press('ControlOrMeta+End');
+  await ribbon.getByRole('button', { name: 'Symbol', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'More Symbols…' }).click();
+  const symbols = page.getByRole('dialog', { name: 'Symbol' });
+  const grid = symbols.getByRole('grid', { name: 'Characters' });
+  // The most recent symbol (the euro sign at first) is the one described, chosen in the grid, and focused.
+  await expect(symbols.getByRole('textbox', { name: 'Character code (hexadecimal)' })).toHaveValue('20AC');
+  await expect(symbols.getByRole('combobox', { name: 'Subset' })).toHaveValue(/\d+/);
+  const focused = grid.locator(':focus');
+  await expect(focused).toHaveText('€');
+  await expect(focused).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => input.inputValue()).toBe('Price €');
+  // Another subset chooses its first character, so the grid and the description agree again.
+  await symbols.getByRole('combobox', { name: 'Subset' }).selectOption({ label: 'Arrows' });
+  await expect(symbols.getByRole('textbox', { name: 'Character code (hexadecimal)' })).toHaveValue('2190');
+  await expect(grid.getByRole('gridcell', { selected: true })).toHaveText('←');
+  await symbols.getByRole('button', { name: 'Insert' }).click();
+  await symbols.getByRole('button', { name: 'Cancel' }).click();
+  await expect.poll(() => input.inputValue()).toBe('Price €←');
+  expect(errors).toEqual([]);
+});
+
 test('Text from File reads Unicode and Windows text files as opening them does', async ({ page }) => {
   const { input, errors, ribbon } = await start(page, { text: 'Start' });
   const insert = async (name, buffer) => {
@@ -373,6 +398,38 @@ test('Text from File puts a web page in a table cell as its paragraphs, without 
   expect(errors).toEqual([]);
 });
 
+test('Text from File puts a Markdown file in a table cell as its text, without its marks', async ({ page }) => {
+  const { input, errors, ribbon } = await start(page, { text: 'Start' });
+  await ribbon.getByRole('button', { name: 'Insert table', exact: true }).click();
+  await page.getByRole('button', { name: 'Insert', exact: true }).click();
+  await ribbon.getByRole('button', { name: 'Object', exact: true }).click();
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('menuitem', { name: 'Text from File…' }).click();
+  await (await chooser).setFiles({ name: 'notes.md', mimeType: 'text/markdown', buffer: Buffer.from('# Notes\n\nSome **bold** words and a [link](https://example.com).\n\n- item\n') });
+  await expect.poll(() => input.inputValue()).toContain('Notes\nSome bold words and a link.\nitem');
+  expect(await input.inputValue()).not.toMatch(/[#*[\]]/);
+  await expect(ribbon.page().getByRole('tab', { name: 'Table Design' })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('Text from File leaves out what opening the file leaves out: hidden text, menus and front matter', async ({ page }) => {
+  const { input, errors, ribbon } = await start(page, { text: 'Start' });
+  const insert = async (name, mimeType, source) => {
+    await input.press('ControlOrMeta+End'); await input.press('Enter');
+    await ribbon.getByRole('button', { name: 'Object', exact: true }).click();
+    const chooser = page.waitForEvent('filechooser');
+    await page.getByRole('menuitem', { name: 'Text from File…' }).click();
+    await (await chooser).setFiles({ name, mimeType, buffer: Buffer.from(source) });
+  };
+  await insert('page.html', 'text/html', '<nav>Home | About</nav><p>Shown</p><p hidden>Hidden note</p><div style="display:none">Popup text</div><p>Also shown</p>');
+  await expect.poll(() => input.inputValue()).toBe('Start\nShown\nAlso shown');
+  await insert('post.md', 'text/markdown', '---\ntitle: Draft\n---\n\nPost body\n');
+  await expect.poll(() => input.inputValue()).toBe('Start\nShown\nAlso shown\nPost body');
+  await insert('log.txt', 'text/plain', 'one\u0000two\u0007\n');
+  await expect.poll(() => input.inputValue()).toBe('Start\nShown\nAlso shown\nPost body\nonetwo');
+  expect(errors).toEqual([]);
+});
+
 test('a picture Puter AI could not make is explained in plain words', async ({ page }) => {
   await page.goto('/mock.html#/new');
   await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
@@ -386,4 +443,17 @@ test('a picture Puter AI could not make is explained in plain words', async ({ p
   await expect(dialog.getByRole('alert')).toHaveText('Your Puter AI allowance has run out for now.');
   await expect(dialog).not.toContainText('Generating');
   await expect(dialog.getByRole('button', { name: 'Generate', exact: true })).toBeEnabled();
+});
+
+test('a picture made with Puter AI takes its description as its alternative text', async ({ page }) => {
+  await page.goto('/mock.html#/new');
+  await expect(page.getByRole('button', { name: 'Bold', exact: true })).toBeEnabled();
+  await (await onTab(page, 'insert')).locator('#ribbon-panel-insert').getByRole('button', { name: 'Pictures', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Generate with AI…' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Generate a Picture' });
+  await dialog.getByRole('textbox', { name: 'Describe the picture' }).fill('A lighthouse at dawn');
+  await dialog.getByRole('button', { name: 'Generate', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Insert', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.__docs.current.view.engine.model.paragraphs.flatMap(p => p.runs).find(r => r.image)?.image.alt)).toBe('A lighthouse at dawn');
 });

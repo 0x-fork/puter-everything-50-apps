@@ -130,6 +130,7 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
   const notes = footnotePlan(pageStories, paragraphs), endnotes = endnotePlan(pageStories, paragraphs), source = paragraphs;
   const numberNotes = () => numberedParagraphs(source, { footnote: notes?.numbers || new Map(), endnote: endnotes?.numbers || new Map() });
   if (notes || endnotes) paragraphs = numberNotes();
+  const visited = new Set();
   for (let attempt = 0; attempt < MAX_PAGES; attempt++) {
     // Page counts reach the body only through the header and footer heights they produce.
     const storyHeights = totals ? new Map() : undefined, storyHeightCache = new Map(), paragraphKeys = new WeakMap();
@@ -155,11 +156,17 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
     if (!totals) return aligned();
     const sectionCounts = [];
     for (const regions of placed.pageRegions) for (const section of new Set((regions || []).map(r => r.section))) sectionCounts[section] = (sectionCounts[section] || 0) + 1;
-    const next = { pageCount: placed.pageCount, sectionCounts };
-    if (JSON.stringify(next) === JSON.stringify(counts)) return aligned();
+    const next = { pageCount: placed.pageCount, sectionCounts }, key = JSON.stringify(next);
+    if (key === JSON.stringify(counts)) return aligned();
     // When the new counts leave every header and footer this layout measured at the same height,
     // laying out again with them would place everything exactly as it is now.
-    if ([...storyHeights.values()].every(story => story.measure(next) === story.height)) return aligned();
+    const heights = [...storyHeights.values()].map(story => [story.measure(next), story.height]);
+    if (heights.every(([height, reserved]) => height === reserved)) return aligned();
+    // A count whose header or footer is shorter than a smaller count's (Roman numerals: "viii" is
+    // longer than "ix") can make the counts alternate for ever. Once they come round again, keep the
+    // first layout that left its headers and footers at least the room they now take.
+    visited.add(JSON.stringify(counts));
+    if (visited.has(key) && heights.every(([height, reserved]) => height <= reserved + 1e-6)) return aligned();
     counts = next;
   }
   throw new Error('Header/footer page-count fields did not converge during pagination.');
@@ -191,8 +198,9 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
   const pageKeys = new WeakMap(), sharedKey = paragraphCache && paragraphCache.intern(JSON.stringify([numbering ?? null, revisionView]));
   // Paragraphs keep their content through the passes of one layout; serialize each once.
   const paragraphKeys = storyOptions.paragraphKeys || new WeakMap();
-  // What pagination reads of each block, in order (paragraph-measure-cache.js flowName).
-  let flowNames = paragraphCache ? [] : null;
+  // What pagination reads of each block, in order (paragraph-measure-cache.js flowName). Only footnote
+  // settling reads it (layoutWithFootnotes); naming a table serializes all of its measured rows.
+  let flowNames = paragraphCache && storyOptions.noteReserve !== undefined ? [] : null;
   const pageKey = geometry => { let key = pageKeys.get(geometry); if (key === undefined) pageKeys.set(geometry, key = paragraphCache.intern(JSON.stringify(geometry))); return key; };
   // A screen view (web, draft, read) lays every section out on its own display geometry.
   const viewPage = storyOptions.viewGeometry || (geometry => geometry);
@@ -272,6 +280,23 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
     const keepBoundaryLine = Boolean(nextSectionPage?.sectionType === 'continuous' &&
       ['width', 'height'].every(key => page[key] === nextSectionPage[key]) &&
       (sourceBlocks[blockIndex - 1]?.table && page.compatibilityMode >= 15 || currentSection.count === 0));
+    // A cell's AutoFit widths, remembered across layouts by what they read: the cell's own properties
+    // and borders, its paragraphs (pictures included, by content: the widths are numbers) and list
+    // labels, the page, numbering and revision view. Cells holding nested tables are measured every time.
+    const cellWidths = (cell, page, borders) => {
+      const compute = () => cellIntrinsicWidths(cell, measure, page, numbering, markers, borders);
+      if (!paragraphCache || cell.content.some(block => !block.paragraph)) return compute();
+      let key;
+      try {
+        const content = cell.content.map(({ paragraph, index }) => {
+          let keys = paragraphKeys.get(paragraph);
+          if (!keys) paragraphKeys.set(paragraph, keys = { content: JSON.stringify(paragraph), byContext: new Map() });
+          return `${keys.content},${JSON.stringify(markers[index] ?? null)}`;
+        });
+        key = `${pageKey(page)}:${sharedKey}:${JSON.stringify([{ ...cell, content: undefined }, borders ?? null])}:[${content.join(',')}]`;
+      } catch { return compute(); }
+      return paragraphCache.cellWidths(key, compute);
+    };
     const measureBlock = (block, page, cellEdges) => {
       if (block.paragraph) {
         const previous = paragraphs[block.index - 1];
@@ -279,11 +304,11 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
         const textMeasure = page.rotatedCellText ? (text, style) => rotatedCellTextMetrics(measure(text, style), style) : measure;
         const hints = page.paragraphFrameFlow ? undefined : wrapHints && { ...wrapHints, exclusions: wrapHints.exclusions.filter(e => cellEdges ? e.cellId === block.paragraph.cellId : !e.cellId) };
         const run = () => measureParagraph(block.paragraph, block.offset, textMeasure, page, markers[block.index], numbering, edges, hints, !cellEdges && keepBoundaryLine);
-        // A cell paragraph's key adds its cell edges and neighbours. Rows wrapping around drawings,
-        // unequal columns and drawings themselves (whose objects keep their identity) are always
-        // measured again.
-        let key = null;
-        if (paragraphCache && !squareHintsReach(hints, block.paragraph.id) && !page.rotatedCellText && !page.columnWidthAt && !block.paragraph.runs.some(r => r.image)) {
+        // A cell paragraph's key adds its cell edges and neighbours. Rows wrapping around drawings and
+        // unequal columns are always measured again. A paragraph's pictures are measured by their
+        // content, and a reused measurement is given the paragraph's own picture objects.
+        let key = null, pictures = null;
+        if (paragraphCache && !squareHintsReach(hints, block.paragraph.id) && !page.rotatedCellText && !page.columnWidthAt) {
           try {
             // The same key string in every pass keeps its hash: the cache does not hash a long paragraph again.
             let keys = paragraphKeys.get(block.paragraph);
@@ -291,9 +316,10 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
             const context = JSON.stringify([pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey]);
             key = keys.byContext.get(context);
             if (key === undefined) keys.byContext.set(context, key = `[${keys.content},${context}]`);
+            if (block.paragraph.runs.some(r => r.image)) pictures = block.paragraph.runs.flatMap(r => r.image ? [r.image] : []);
           } catch { key = null; }
         }
-        const measured = key === null ? readOnlyMeasurement(run()) : paragraphCache.measure(key, block.offset, run);
+        const measured = key === null ? readOnlyMeasurement(run()) : paragraphCache.measure(key, block.offset, run, pictures);
         // Removing a floating frame from body flow must not join paragraph
         // borders across the source paragraph that interrupted the group.
         return [!page.paragraphFrameFlow && framePlan.byParagraph.has(previous?.id) ? { ...measured, borderGroupStart: true } : measured];
@@ -315,7 +341,7 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
       const intrinsic = table.layout === 'autofit' ? table.grid.map(() => ({ min: 0, max: 0, floor: 0, paddingFloor: 0, contentMin: 0 })) : null, spans = [];
       if (intrinsic) for (const row of block.rows) for (const { cell, column, span } of rowGrid(row)) {
         if (!cell.rowSpan) continue;
-        const metrics = cellIntrinsicWidths(cell, measure, page, numbering, markers, cellBorders.get(cell.id));
+        const metrics = cellWidths(cell, page, cellBorders.get(cell.id));
         const values = Object.fromEntries(['min', 'max', 'floor', 'paddingFloor', 'contentMin'].map(key => [key, metrics[key] * 15]));
         if (span > 1) spans.push({ column, span, ...values });
         else for (const key of ['min', 'max', 'floor', 'paddingFloor', 'contentMin']) intrinsic[column][key] = Math.max(intrinsic[column][key], values[key]);

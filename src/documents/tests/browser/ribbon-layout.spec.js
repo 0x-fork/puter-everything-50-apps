@@ -25,6 +25,29 @@ test('a large drop-down keeps its arrow beside the last word of its label', asyn
   }
 });
 
+test('a large split button keeps its two-line label clear of its arrow', async ({ page }) => {
+  for (const width of [1440, 600]) {
+    await openEditor(page, width);
+    await tab(page, 'Review').click();
+    // Every glyph of a large split button sits inside one of its two halves, and none crosses the line between them.
+    const crossing = await page.evaluate(() => [...document.querySelectorAll('.ribbon-panel:not([hidden]) .ribbon-split.is-large')].filter(wrap => wrap.offsetParent).flatMap(wrap => {
+      const [main, arrow] = wrap.children, range = document.createRange();
+      return [main, arrow].flatMap(half => {
+        const box = half.getBoundingClientRect(), bad = [];
+        for (const node of half.querySelectorAll('span')) {
+          if (!node.textContent.trim() || node.children.length) continue;
+          range.selectNodeContents(node);
+          for (const r of range.getClientRects()) if (r.top < box.top - 0.5 || r.bottom > box.bottom + 0.5) bad.push(`${main.getAttribute('aria-label')}: ${node.textContent}`);
+        }
+        return bad;
+      });
+    }));
+    expect(crossing, `Review at ${width}px`).toEqual([]);
+    await expect(page.getByRole('button', { name: 'Track Changes', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Track Changes options', exact: true })).toBeVisible();
+  }
+});
+
 test('the ribbon reopens a folded group once there is room for it again', async ({ page }) => {
   for (const width of [800, 900, 1000, 1100, 1200]) {
     await openEditor(page, width);
@@ -236,6 +259,122 @@ test('a ribbon menu the mouse opens starts with no item chosen; one the keyboard
   await page.locator('#ribbon-panel-home').getByRole('button', { name: 'Change Case', exact: true }).focus();
   await page.keyboard.press('Enter');
   expect(await focusedItem()).toBe('Sentence case.');
+});
+
+test('a gallery\'s More menu opened from the keyboard closes back to its button, and a choice goes to the document', async ({ page }) => {
+  await openEditor(page);
+  const focused = () => page.evaluate(() => document.activeElement.getAttribute('aria-label'));
+  await tab(page, 'Insert').click();
+  await page.getByRole('button', { name: 'Insert table', exact: true }).click();
+  await page.getByRole('menuitem', { name: '3 columns, 3 rows' }).click();
+  for (const [tabName, more, menu] of [['Home', 'More Styles', 'Styles'], ['Design', 'More Style Sets', 'Style Sets'], ['Table Design', 'More Table Styles', 'Table Styles']]) {
+    await tab(page, tabName).click();
+    const button = page.locator('.ribbon-panel:not([hidden])').getByRole('button', { name: more, exact: true });
+    // It says it opens a menu, as the ribbon's other menu buttons do.
+    await expect(button).toHaveAttribute('aria-haspopup', 'menu');
+    await button.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator(`.menu[aria-label="${menu}"]`)).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.locator(`.menu[aria-label="${menu}"]`)).toHaveCount(0);
+    await expect.poll(focused, more).toBe(more);
+    // Choosing from the menu still acts on the document and leaves the keyboard there.
+    await page.keyboard.press('Enter');
+    await expect(page.locator(`.menu[aria-label="${menu}"]`)).toBeVisible();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await expect(page.locator(`.menu[aria-label="${menu}"]`)).toHaveCount(0);
+    await expect.poll(focused, more).toBe('Document text');
+  }
+  // A shape's style gallery, whose choices are previews in a grid.
+  await page.keyboard.press('ControlOrMeta+End'); await page.keyboard.press('Enter');
+  await tab(page, 'Insert').click();
+  await page.getByRole('button', { name: 'Shapes', exact: true }).click();
+  await page.locator('.shape-gallery-item').nth(2).click();
+  await page.locator('canvas.canvas-page').first().click({ position: { x: 200, y: 400 } });
+  await tab(page, 'Shape Format').click();
+  const more = page.locator('.ribbon-panel:not([hidden])').getByRole('button', { name: 'More Shape Styles', exact: true });
+  await expect(more).toHaveAttribute('aria-haspopup', 'menu');
+  await more.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.menu[aria-label="Shape Styles"]')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect.poll(focused).toBe('More Shape Styles');
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.menu[aria-label="Shape Styles"]')).toHaveCount(0);
+  await expect.poll(focused).toBe('Document text');
+});
+
+test('the arrow keys step the Layout tab\'s indent and spacing fields, keeping the keyboard in the field', async ({ page }) => {
+  await openEditor(page, 1600);
+  await page.getByRole('textbox', { name: 'Document text' }).fill('A paragraph to indent.');
+  await tab(page, 'Layout').click();
+  const panel = page.locator('#ribbon-panel-layout');
+  const paragraph = () => page.evaluate(() => { const m = window.__docs.current.view.engine.model; return { left: m.paragraphFormatting?.indentLeft, before: m.paragraphFormatting?.spaceBefore ?? m.paragraphs[0].format?.spaceBefore }; });
+  for (const [name, from, to] of [['Indent left (in)', '0', '0.3'], ['Space before paragraph (pt)', '0', '3']]) {
+    const field = panel.getByRole('spinbutton', { name, exact: true });
+    await expect(field).toHaveValue(from);
+    await field.focus();
+    for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowUp');
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue(to);
+    await page.keyboard.press('ArrowDown');
+    await expect(field).toBeFocused();
+  }
+  // Enter in the indent field still applies and goes back to the document.
+  await panel.getByRole('spinbutton', { name: 'Indent left (in)', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('textbox', { name: 'Document text' })).toBeFocused();
+  const after = await paragraph();
+  expect(after.left).toBe(288); // 0.2 in, in twips
+  expect(await panel.getByRole('spinbutton', { name: 'Space before paragraph (pt)', exact: true }).inputValue()).toBe('2');
+  // So does Enter in a spacing field, whether or not its value changed; a typed value applies first, in one step.
+  for (const name of ['Space before paragraph (pt)', 'Space after paragraph (pt)']) {
+    await panel.getByRole('spinbutton', { name, exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('textbox', { name: 'Document text' })).toBeFocused();
+  }
+  const spaceAfter = () => page.evaluate(() => window.__docs.current.view.engine.model.paragraphFormatting.spaceAfter);
+  const was = await spaceAfter();
+  await panel.getByRole('spinbutton', { name: 'Space after paragraph (pt)', exact: true }).fill('9');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('textbox', { name: 'Document text' })).toBeFocused();
+  expect(await spaceAfter()).toBe(9);
+  expect((await paragraph()).before).toBe(2);
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(spaceAfter).toBe(was);
+  // A table row's height: stepping kept the caret in the table, so the table's tab stays.
+  await page.keyboard.press('ControlOrMeta+End'); await page.keyboard.press('Enter');
+  await tab(page, 'Insert').click();
+  await page.getByRole('button', { name: 'Insert table', exact: true }).click();
+  await page.getByRole('menuitem', { name: '3 columns, 3 rows' }).click();
+  await tab(page, 'Table Layout').click();
+  const height = page.locator('#ribbon-panel-tableLayout').getByRole('spinbutton', { name: 'Height (in)', exact: true });
+  const start = Number(await height.inputValue());
+  await height.focus();
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowUp');
+  await expect(height).toBeFocused();
+  await expect.poll(async () => Number(await height.inputValue())).toBeCloseTo(start + 0.03, 5);
+  // A shape's size applies a moment after each step; the keyboard stays in the field meanwhile.
+  await page.keyboard.press('Escape');
+  await tab(page, 'Insert').click();
+  await page.getByRole('button', { name: 'Shapes', exact: true }).click();
+  await page.locator('.shape-gallery-item').nth(2).click();
+  await page.locator('canvas.canvas-page').first().click({ position: { x: 200, y: 600 } });
+  await tab(page, 'Shape Format').click();
+  const shapeHeight = page.locator('#ribbon-panel-shapeFormat').getByRole('spinbutton', { name: 'Shape height (in)', exact: true });
+  const shapeStart = Number(await shapeHeight.inputValue());
+  await shapeHeight.focus();
+  for (let i = 0; i < 3; i++) { await page.keyboard.press('ArrowUp'); await page.waitForTimeout(150); }
+  await expect(shapeHeight).toBeFocused();
+  await expect.poll(async () => Number(await shapeHeight.inputValue())).toBeCloseTo(shapeStart + 0.03, 5);
+  // A typed size and Enter still apply and return to the document.
+  await shapeHeight.fill('1.5');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('textbox', { name: 'Document text' })).toBeFocused();
+  await expect(shapeHeight).toHaveValue('1.5');
 });
 
 test('the subscript and superscript icons draw their digit large enough to read at 16px', async ({ page }) => {

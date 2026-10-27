@@ -100,6 +100,9 @@ export function refreshPageReferences(model, layoutOf, definition, { dirtyOnly =
   const before = model.snapshot(), revision = model.revision, history = [...model.history], future = [...model.future];
   let anchor = before.selection.anchor, focus = before.selection.focus, recorded = false;
   const changed = new Set();
+  // A refreshed page number is not a tracked edit: tracked, the old number stayed beside the new one as
+  // deleted text, the result never matched the page and every refresh with Track Changes on failed.
+  const tracking = model.trackChanges; model.trackChanges = false;
   try {
     for (let pass = 0; pass < 32; pass++) {
       const plan = pageReferencePlan(model, layoutOf(model), definition, ids);
@@ -114,7 +117,7 @@ export function refreshPageReferences(model, layoutOf, definition, { dirtyOnly =
         anchor = mapPosition(anchor); focus = mapPosition(focus);
         model.select(change.start, change.end);
         model.typingFormat = {}; model.typingStyle = null; model.typingDirectCleared = false;
-        if (model.text.slice(change.start, change.end) !== change.text) model.replace(change.text, { checkpoint: false });
+        if (model.text.slice(change.start, change.end) !== change.text) model.replaceResult(change.text, { checkpoint: false });
         const current = bodyFieldRanges(model.paragraphs).find(r => r.field.id === change.field.id), field = current?.field;
         if (!field) throw new Error('Refresh removed the page-reference envelope.');
         cleanDirty(field);
@@ -126,5 +129,5 @@ export function refreshPageReferences(model, layoutOf, definition, { dirtyOnly =
   } catch (error) {
     model.restore(before); model.revision = revision; model.history = history; model.future = future;
     throw error;
-  }
+  } finally { model.trackChanges = tracking; }
 }
