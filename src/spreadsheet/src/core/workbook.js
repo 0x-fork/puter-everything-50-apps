@@ -18,7 +18,7 @@ import { nativeSparklineDateMismatch, nativeSparklineLocation } from './native-s
 import { importedNativeSparklines } from './native-sparkline-import.js';
 import { packedMoveReferences } from './packed-move-refs.js';
 import { copyNativeSparklines, mapPastedNativeSparklines, replacePastedNativeSparklines } from './native-sparkline-paste.js';
-import { copyValidations, mapPastedValidations, replaceValidations, moveValidations } from './validation-paste.js';
+import { copyValidations, mapPastedValidations, replaceValidations, moveValidations, clearValidationsIn } from './validation-paste.js';
 import { NATIVE_ICON_SETS, nativeIconFor, nativeIconCount } from './native-icons.js';
 import { conditionalRuleGroups, conditionalGroupPieces, distinctConditionalRanges, splitRulePieces } from './conditional-groups.js';
 import { moveConditionalFormats, conditionalMoveBlocks } from './conditional-move.js';
@@ -3571,7 +3571,7 @@ export class Workbook extends EventTarget {
   }
 
   /** Create a native group without replacing scalar values or existing charts. */
-  createNativeSparklines(sheetId, { source = '', location = '', type = 'line', orientation = 'auto' } = {}) {
+  createNativeSparklines(sheetId, { source = '', location = '', type = 'line', orientation = 'auto', flags = {} } = {}) {
     const sheet = this.sheet(sheetId), bad = (field, message) => ({ field, message });
     if (!sheet) return bad('location', 'Choose a worksheet destination.');
     if (!nativeSparklineChoices.type.includes(type)) return bad('type', 'Choose a sparkline type.');
@@ -3616,7 +3616,9 @@ export class Workbook extends EventTarget {
     // Excel's defaults for a new group: an empty cell is a gap in the line (not a drop to zero), and the
     // negative, high, low, first and last points and markers take accent colours once turned on, not black.
     const shade = (tint) => ({ theme: 4, ...(tint ? { tint } : {}) });
-    const group = normalizeNativeSparklineGroups([{ type, displayEmptyCellsAs: 'gap', colorSeries: shade(), colorNegative: { theme: 5 },
+    // `flags`: the group's on/off settings (markers, high, low, …) to start with, as Sparkline settings would set them.
+    const on = Object.fromEntries(Object.entries(flags || {}).filter(([key, value]) => nativeSparklineFlags.includes(key) && value === true));
+    const group = normalizeNativeSparklineGroups([{ type, ...on, displayEmptyCellsAs: 'gap', colorSeries: shade(), colorNegative: { theme: 5 },
       colorMarkers: shade(-0.499984740745262), colorFirst: shade(0.39997558519241921), colorLast: shade(0.39997558519241921),
       colorHigh: shade(), colorLow: shade(), uid: `{${crypto.randomUUID().toUpperCase()}}`, sparklines }])[0];
     this._growTo(sheet, dest.r2 + 1, dest.c2 + 1);
@@ -5813,54 +5815,11 @@ export class Workbook extends EventTarget {
    * or false when the rows cannot change places (see rearrangeBlocker).
    */
   removeDuplicates(sheetId, range, { header = false, columns = null } = {}) {
-    // `columns`: the (absolute) columns that decide whether two rows match; all of them when null.
     const sheet = this.sheet(sheetId);
-    if (!sheet) return false;
-    if (this._gridLocked(sheet)) return false;
-    const asked = normalizeRange(range);
-    const n = this._dataRowsOnly(sheet, asked);
-    if (!n) return false;
-    // Inside a table the header row is the table's own and was trimmed away already.
-    const table = sheet.tables.find((t) => n.r1 > t.range.r1 && n.r2 <= t.range.r2 && n.c1 >= t.range.c1 && n.c2 <= t.range.c2) || null;
-    const start = header && !table ? n.r1 + 1 : n.r1;
-    if (start > n.r2) return 0;
-    if (this.lockedIn(sheetId, { ...n, r1: start })) return false;
-    // The columns asked for decide whether two rows match: a table's other columns, taken in so that
-    // whole rows move (see _rearrangeCheck), do not join the comparison unasked.
-    const compare = columns ? new Set(columns)
-      : n.c1 !== asked.c1 || n.c2 !== asked.c2 ? new Set(Array.from({ length: asked.c2 - asked.c1 + 1 }, (_, i) => asked.c1 + i)) : null;
-    const seen = new Set();
-    const kept = [];
-    let removed = 0;
-    let changed = false;
-    let emptyGone = false;
-    for (let r = start; r <= n.r2; r++) {
-      const cells = [];
-      const parts = [];
-      for (let c = n.c1; c <= n.c2; c++) {
-        const cell = cloneCell(sheet.cells.get(cellKey(r, c)));
-        cells.push(cell);
-        if (compare && !compare.has(c)) continue;
-        // Rows match by the text they show: a date and its serial, or 1.5 and
-        // 150%, are two values, while two cells that both read 0.3 are one.
-        parts.push(this.getDisplay(sheetId, r, c).toLowerCase());
-      }
-      // Cell text can contain any delimiter, including control characters.
-      // Keep column boundaries unambiguous so distinct rows are never deleted.
-      // Blank rows read the same as one another, so as in Excel the first of them stays and the rest go.
-      const key = JSON.stringify(parts);
-      if (seen.has(key)) {
-        removed++;
-        // A blank row that goes changes nothing when it holds nothing at all and no kept row lies below it
-        // (the rows freed at the bottom, run through again): those alone are no duplicates removed.
-        if (table || cells.some((cell, j) => cell || sheet.notes.has(cellKey(r, n.c1 + j)) || sheet.comments.has(cellKey(r, n.c1 + j)))) changed = true;
-        else emptyGone = true;
-        continue;
-      }
-      seen.add(key);
-      if (emptyGone) changed = true;
-      kept.push({ r, cells });
-    }
+    const plan = this.duplicatesPlan(sheetId, range, { header, columns });
+    if (!plan) return plan;
+    if (this.lockedIn(sheetId, { ...plan.range, r1: plan.start })) return false;
+    const { range: n, table, start, kept, removed, changed } = plan;
     if (!removed || !changed) return 0;
     const entries = [];
     const notes = [];
@@ -5902,6 +5861,63 @@ export class Workbook extends EventTarget {
       this._refilterRearranged(sheet, { r1: start, r2: n.r2 }, 'Remove duplicates');
     });
     return removed;
+  }
+
+  /**
+   * A removal of duplicates worked out without being made: { range (the rows taken, a table's widened to its
+   * columns), table, start (the first data row), kept, removed, changed }, 0 when only a header is left, or false
+   * when the rows cannot change places. `removed` counts rows that would go even when `changed` is false (blank
+   * rows at the bottom, whose going changes nothing, so nothing is removed).
+   */
+  duplicatesPlan(sheetId, range, { header = false, columns = null } = {}) {
+    // `columns`: the (absolute) columns that decide whether two rows match; all of them when null.
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return false;
+    if (this._gridLocked(sheet)) return false;
+    const asked = normalizeRange(range);
+    const n = this._dataRowsOnly(sheet, asked);
+    if (!n) return false;
+    // Inside a table the header row is the table's own and was trimmed away already.
+    const table = sheet.tables.find((t) => n.r1 > t.range.r1 && n.r2 <= t.range.r2 && n.c1 >= t.range.c1 && n.c2 <= t.range.c2) || null;
+    const start = header && !table ? n.r1 + 1 : n.r1;
+    if (start > n.r2) return 0;
+    // The columns asked for decide whether two rows match: a table's other columns, taken in so that
+    // whole rows move (see _rearrangeCheck), do not join the comparison unasked.
+    const compare = columns ? new Set(columns)
+      : n.c1 !== asked.c1 || n.c2 !== asked.c2 ? new Set(Array.from({ length: asked.c2 - asked.c1 + 1 }, (_, i) => asked.c1 + i)) : null;
+    const seen = new Set();
+    const kept = [];
+    let removed = 0;
+    let changed = false;
+    let emptyGone = false;
+    for (let r = start; r <= n.r2; r++) {
+      const cells = [];
+      const parts = [];
+      for (let c = n.c1; c <= n.c2; c++) {
+        const cell = cloneCell(sheet.cells.get(cellKey(r, c)));
+        cells.push(cell);
+        if (compare && !compare.has(c)) continue;
+        // Rows match by the text they show: a date and its serial, or 1.5 and
+        // 150%, are two values, while two cells that both read 0.3 are one.
+        parts.push(this.getDisplay(sheetId, r, c).toLowerCase());
+      }
+      // Cell text can contain any delimiter, including control characters.
+      // Keep column boundaries unambiguous so distinct rows are never deleted.
+      // Blank rows read the same as one another, so as in Excel the first of them stays and the rest go.
+      const key = JSON.stringify(parts);
+      if (seen.has(key)) {
+        removed++;
+        // A blank row that goes changes nothing when it holds nothing at all and no kept row lies below it
+        // (the rows freed at the bottom, run through again): those alone are no duplicates removed.
+        if (table || cells.some((cell, j) => cell || sheet.notes.has(cellKey(r, n.c1 + j)) || sheet.comments.has(cellKey(r, n.c1 + j)))) changed = true;
+        else emptyGone = true;
+        continue;
+      }
+      seen.add(key);
+      if (emptyGone) changed = true;
+      kept.push({ r, cells });
+    }
+    return { range: n, table, start, kept, removed, changed };
   }
 
   /* ---------- Go To Special ---------- */
@@ -6055,9 +6071,9 @@ export class Workbook extends EventTarget {
    * `target` evaluate to `goal`. Secant iterations with a widening step when
    * the formula is flat; the trial values never touch history, only the
    * answer is written (one undo step). Returns { ok, value, result,
-   * iterations } or { ok: false, reason }.
+   * iterations } or { ok: false, reason }. `label` names the undo step.
    */
-  goalSeek(sheetId, target, goal, variable, { maxIter = 200, tol = 1e-9 } = {}) {
+  goalSeek(sheetId, target, goal, variable, { maxIter = 200, tol = 1e-9, label = 'Goal seek' } = {}) {
     const sheet = this.sheet(sheetId);
     if (!sheet) return { ok: false, reason: 'No such sheet' };
     if (this._gridLocked(sheet)) return { ok: false, reason: 'The sheet is protected' };
@@ -6141,7 +6157,7 @@ export class Workbook extends EventTarget {
     this._invalidate();
     if (result === null || Number.isNaN(result)) return { ok: false, reason: Number.isNaN(result) ? 'The formula does not produce a number' : 'Could not find a value that reaches the goal', iterations };
     if (met) return { ok: true, value: start, result: this.getValue(sheetId, target.r, target.c), iterations };
-    this.setCells(sheetId, [{ r: variable.r, c: variable.c, cell: { v: clean, f: null, s: original?.s } }], 'Goal seek');
+    this.setCells(sheetId, [{ r: variable.r, c: variable.c, cell: { v: clean, f: null, s: original?.s } }], label);
     return { ok: true, value: clean, result: this.getValue(sheetId, target.r, target.c), iterations };
   }
 
@@ -11012,6 +11028,14 @@ export class Workbook extends EventTarget {
     return this._setValidations(sheet, sheet.validations.filter((v) => v.id !== id), 'Delete validation');
   }
 
+  /** Take validation off a block of cells; rules reaching past it keep their parts outside (see clearValidationsIn). One undo step. */
+  clearValidations(sheetId, range) {
+    const sheet = this.sheet(sheetId);
+    if (!sheet) return false;
+    const next = clearValidationsIn(sheet.validations, normalizeRange(range), newId);
+    return next !== sheet.validations && this._setValidations(sheet, next, 'Clear validation');
+  }
+
   /** The last rule covering (r, c) wins, so newer rules override older ones. */
   validationAt(sheetId, r, c) {
     const sheet = this.sheet(sheetId);
@@ -12010,7 +12034,8 @@ export class Workbook extends EventTarget {
       // changesSince answers "anything may have changed" for every span across it. Growth is the most frequent
       // version bump there is — a flick past the last row fires several — so that hole sent every chart, and
       // anything else built from the book, back over its whole range after a scroll.
-      this._changeLog.push({ version: this.version, type: 'layout', sheetId: sheet.id, box: null, formula: false });
+      // `grow` tells it from a change of layout, for a reader that minds edits alone (the assistant's Solver).
+      this._changeLog.push({ version: this.version, type: 'layout', sheetId: sheet.id, box: null, formula: false, grow: true });
       if (this._changeLog.length > CHANGE_LOG * 2) this._changeLog.splice(0, this._changeLog.length - CHANGE_LOG);
       this._announce('layout', sheet.id);
     }
