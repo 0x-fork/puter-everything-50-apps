@@ -223,6 +223,15 @@ export function sharedRevision(paragraphs, start, end) {
 export const hasRevisions = paragraphs => paragraphs.some(p => p.markRevision || paragraphFormatChange(p) || p.runs.some(r => r.revision || runFormatChange(r)));
 
 /** The authors who made changes, in first-appearance order. */
+/**
+ * Give the reviewers of `paragraphs` their colors in the order they first appear (revisionColor).
+ * The colors are part of every measured paragraph, so a document's reviewers are given theirs
+ * before it is first laid out: given later, they changed the colors on screen at the first edit
+ * and made it measure the whole document again.
+ */
+export function registerRevisionAuthors(paragraphs) {
+  for (const name of revisionAuthors(paragraphs)) if (!revisionView.authors.includes(name)) revisionView.authors.push(name);
+}
 export function revisionAuthors(paragraphs) {
   const authors = [];
   for (const range of revisionRanges(paragraphs)) if (!authors.includes(range.author)) authors.push(range.author);
@@ -270,6 +279,25 @@ export function runRevisionDisplay(run) {
     return { color: fixed, ...MARKS[o.formatMark](fixed) };
   }
   return null;
+}
+
+/**
+ * What measuring `paragraphs` reads of revisionView, as text: the display (runRevisionDisplay) of each
+ * of their changed runs in order, and showHidden once one of their runs is hidden text, or always with
+ * `hidden` (page stories gain hidden text from their styles while they are measured); '' when nothing.
+ * Layout reads the view nowhere else (layout.js measureParagraph). Measurements are remembered by this
+ * instead of by the whole view: a new reviewer, or another Display for Review, left no paragraph's
+ * measurement usable, though only paragraphs with changes or hidden text are displayed differently.
+ */
+export function revisionViewKey(paragraphs, hidden = false) {
+  try {
+    let key = '';
+    for (const p of paragraphs) for (const run of p.runs) {
+      if (run.vanish) hidden = true;
+      if (run.revision || run.formatRevision) key += `${JSON.stringify(runRevisionDisplay(run))},`;
+    }
+    return hidden ? `${revisionView.showHidden}:${key}` : key;
+  } catch { return JSON.stringify(revisionView); }
 }
 
 /** Human-readable names of what a formatting revision changed, e.g. ['Bold', 'Font size 14 pt']. */

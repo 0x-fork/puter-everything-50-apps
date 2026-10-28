@@ -14,7 +14,7 @@
 import { el, isComposing, MOD_KEY, scrollBehavior, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { openModal } from '../ui/modal.js';
 import { toast } from '../ui/toast.js';
-import { paintFormattingMarks, formattingMarks } from '../engine/formatting-marks.js';
+import { paintFormattingMarks, breakMarks, sectionBreakLabels } from '../engine/formatting-marks.js';
 import { isContinuousView, usesScreenGeometry } from '../engine/document-views.js';
 import { BODY_LEVEL, moveOutlineSection, setOutlineLevels, promotedLevel, demotedLevel, deleteOutlineSection, insertOutlineHeading, outlineUnits, subtreeEnd } from '../engine/outline-editing.js';
 import { createOutlineView } from './outline-view.js';
@@ -58,11 +58,17 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
   const breakOverlay = (ctx, index, geometry) => {
     const engine = editor();
     if (mode !== 'draft' || !engine) return;
-    if (breakOverlay.cache?.layout !== engine.layout) breakOverlay.cache = { layout: engine.layout, pages: new Map() };
+    if (breakOverlay.cache?.layout !== engine.layout) breakOverlay.cache = { layout: engine.layout, pages: new Map(), lines: null, sections: null };
     const cache = breakOverlay.cache;
     if (!cache.pages.has(index)) {
-      const body = engine.session.body, lines = engine.layout.lines.filter(l => l.page === index && !l.pageStory);
-      cache.pages.set(index, formattingMarks(lines, body.text, body.paragraphs, body.pageSettings, geometry).filter(m => m.kind === 'break' || m.kind === 'section'));
+      // Once for each layout: the body's lines by page, and its section breaks' labels.
+      if (!cache.lines) {
+        cache.lines = new Map();
+        for (const line of engine.layout.lines) if (!line.pageStory) { if (!cache.lines.has(line.page)) cache.lines.set(line.page, []); cache.lines.get(line.page).push(line); }
+        const body = engine.session.body;
+        cache.sections = sectionBreakLabels(body.paragraphs, body.pageSettings);
+      }
+      cache.pages.set(index, breakMarks(cache.lines.get(index) || [], geometry, cache.sections));
     }
     const marks = cache.pages.get(index);
     // The formatting marks already draw these when shown.
@@ -83,8 +89,13 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
   };
   /** Split: the second pane copies the pages after every paint. */
   const mirrorOverlay = () => { if (split && !mirrorOverlay.queued) { mirrorOverlay.queued = true; queueMicrotask(() => { mirrorOverlay.queued = false; paintMirror(); }); } };
-  /** Side to side: the thumbnails follow the pages. */
-  const thumbOverlay = () => { if (sideToSide && thumbnails && !thumbOverlay.queued) { thumbOverlay.queued = true; setTimeout(() => { thumbOverlay.queued = false; paintThumbnails(); }, 120); } };
+  /** Side to side: the thumbnails follow the pages, each drawn again once its page has been painted. */
+  const paintedThumbs = new Set();
+  const thumbOverlay = (ctx, index) => {
+    if (!sideToSide || !thumbnails) return;
+    paintedThumbs.add(index);
+    if (!thumbOverlay.queued) { thumbOverlay.queued = true; setTimeout(() => { thumbOverlay.queued = false; paintThumbnails(); }, 120); }
+  };
   const overlays = [breakOverlay, gridOverlay, mirrorOverlay, thumbOverlay];
 
   /* ---- Draft style area: each paragraph's style name in a column at the left ---- */
@@ -174,16 +185,30 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
       engine.pages.classList.add('is-side-to-side');
     } else if (!silent) w.setZoom?.(1);
     thumbStrip.hidden = !(on && thumbnails);
-    if (on && thumbnails) paintThumbnails();
+    if (on && thumbnails) paintThumbnails({ all: true });
     revealCaretHorizontally();
     if (!silent) { layoutChanged(); onState(); }
   }
-  function paintThumbnails() {
+  // Shown afresh, every page is painted and every thumbnail drawn. After that a thumbnail is drawn again
+  // only when its page has been painted (thumbOverlay), or is a new page or a new size. Typing paints
+  // the pages on screen, and the rest once typing pauses: painting every page and drawing every
+  // thumbnail after each keystroke held up typing in a long document (as in the Navigation pane).
+  function paintThumbnails({ all = false } = {}) {
     const engine = editor();
-    if (!engine || thumbStrip.hidden) return;
-    engine.flushPaint?.();
-    const pages = engine.canvases, current = engine.caretPageIndex ?? 0;
+    if (!engine || thumbStrip.hidden) { paintedThumbs.clear(); return; }
+    if (all) engine.flushPaint?.();
+    const pages = engine.canvases, current = engine.caretPageIndex ?? 0, height = 84, scale = window.devicePixelRatio || 1;
     while (thumbStrip.children.length > pages.length) thumbStrip.lastChild.remove();
+    const sizeOf = source => { const ratio = source.width / source.height || 0.77; return { ratio, width: Math.round(height * ratio * scale), height: Math.round(height * scale) }; };
+    const redrawn = pages.flatMap((source, index) => {
+      const thumb = thumbStrip.children[index]?.firstChild.firstChild, size = sizeOf(source);
+      return all || paintedThumbs.has(index) || !thumb || thumb.source !== source || thumb.width !== size.width || thumb.height !== size.height ? [index] : [];
+    });
+    // A new or resized page not painted yet is painted now, so its thumbnail shows it.
+    const unpainted = all ? [] : redrawn.filter(index => engine.stalePages?.has(index) && !paintedThumbs.has(index));
+    if (unpainted.length) engine.paint({ pages: unpainted });
+    paintedThumbs.clear();
+    const redraw = new Set(redrawn);
     pages.forEach((source, index) => {
       // Each list item holds a button, so the page is announced as a button in a list of pages.
       if (!thumbStrip.children[index]) {
@@ -194,9 +219,11 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
       const item = thumbStrip.children[index].firstChild;
       item.dataset.index = index; item.setAttribute('aria-label', `Page ${index + 1}`); item.lastChild.textContent = String(index + 1);
       if (index === current) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
-      const thumb = item.firstChild, height = 84, ratio = source.width / source.height || 0.77, scale = window.devicePixelRatio || 1;
-      thumb.width = Math.round(height * ratio * scale); thumb.height = Math.round(height * scale);
-      thumb.style.width = `${Math.round(height * ratio)}px`; thumb.style.height = `${height}px`;
+      if (!redraw.has(index)) return;
+      const thumb = item.firstChild, size = sizeOf(source);
+      thumb.source = source;
+      thumb.width = size.width; thumb.height = size.height;
+      thumb.style.width = `${Math.round(height * size.ratio)}px`; thumb.style.height = `${height}px`;
       const ctx = thumb.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, thumb.width, thumb.height);
       if (source.width) ctx.drawImage(source, 0, 0, thumb.width, thumb.height);
     });
@@ -467,7 +494,7 @@ export function createDocumentViews({ editor, pkg, host, surface, root, error, c
     const has = () => !!ready();
     const vertical = command('Vertical', 'verticalMovement', () => setSideToSide(false), { size: 'large', attrs: { 'aria-pressed': 'true' } });
     const across = command('Side to Side', 'sideToSide', () => setSideToSide(true), { size: 'large', text: 'Side to Side', attrs: { 'aria-pressed': 'false' } });
-    const thumbs = command('Thumbnails', 'thumbnails', () => { thumbnails = !thumbnails; thumbStrip.hidden = !(sideToSide && thumbnails); paintThumbnails(); onState(); }, { text: 'Thumbnails', attrs: { 'aria-pressed': 'false' } });
+    const thumbs = command('Thumbnails', 'thumbnails', () => { thumbnails = !thumbnails; thumbStrip.hidden = !(sideToSide && thumbnails); paintThumbnails({ all: true }); onState(); }, { text: 'Thumbnails', attrs: { 'aria-pressed': 'false' } });
     when(vertical, has, () => String(!sideToSide)); when(across, () => has() && mode !== 'outline', () => String(sideToSide));
     when(thumbs, () => has() && sideToSide, () => String(sideToSide && thumbnails));
     const newWin = command('New Window', 'newWindow', newWindow, { size: 'large', text: 'New Window' });

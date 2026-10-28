@@ -32,9 +32,9 @@ import { LineBuilder } from './line-builder.js';
 import { bidiCharacters, bidiLineCharacters, bidiRtlSpace } from './bidi-text.js';
 import { createParagraphPaginator } from './pagination.js';
 import { paragraphText, paragraphFormat, runFormat } from './model.js';
-import { revisionView, runRevisionDisplay } from './revisions.js';
+import { revisionView, runRevisionDisplay, revisionViewKey } from './revisions.js';
 import { inlineSegments, EMU_PER_PX, drawingOffsetPixels, imageExtents, inlineImageExtents, inlineImagePaintFrame, normalizedRotation, isPositionedImage, isSideWrappedImage } from './images.js';
-import { squareFlowHints, squareFlowSignature, squareRow, squareHintsReach, joinSquareLine, clearingBreakTarget } from './square-wrap.js';
+import { squareFlowHints, squareFlowSignature, squareRow, squareHintsKey, joinSquareLine, clearingBreakTarget } from './square-wrap.js';
 import { positionedImageFrame, positionedImageContains, positionedImageBounds, isCellRelativePosition, isPageBasedCellPosition } from './positioned-images.js';
 import { resolveDrawingCollisions } from './drawing-collisions.js';
 import { floatingParagraph } from './floating-images.js';
@@ -138,7 +138,7 @@ function layoutDocumentContent(paragraphs, measureBase, page, numbering, tables,
     const storyScope = measureBase.paragraphCache ? { storyStylesKey: JSON.stringify(storyOptions.styles ?? null), storyKeys: new WeakMap(), storyStories: pageStories } : {};
     // Everything besides the blocks that decides where footnote references land and how tall their notes are.
     const flowContext = () => measureBase.paragraphCache && JSON.stringify([counts, storiesContentKey(pageStories), storyOptions.styles ?? null, numbering ?? null, !!storyOptions.bestEffort,
-      storyOptions.drawingLayouts ? [...storyOptions.drawingLayouts] : null, revisionView]);
+      storyOptions.drawingLayouts ? [...storyOptions.drawingLayouts] : null, revisionViewKey(Object.values(pageStories?.stories || {}).flatMap(story => story.paragraphs || []), true)]);
     const flow = () => notes
       ? layoutWithFootnotes(notes, noteReserve => layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...storyScope, ...counts, storyHeights, storyHeightCache, paragraphKeys, noteReserve }), measureBase, numbering, { ...storyOptions, ...storyScope }, flowContext())
       : layoutWithWrap(paragraphs, measureBase, page, numbering, tables, pageStories, { ...storyOptions, ...storyScope, ...counts, storyHeights, storyHeightCache, paragraphKeys });
@@ -194,10 +194,20 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
   const measure = (text, style) => measureTextGeometry(text, style, measureBase);
   // Body paragraphs measured by an earlier layout with this measurer (paragraph-measure-cache.js).
   const paragraphCache = measureBase.paragraphCache?.();
+  paragraphCache?.reserve(paragraphs.length);
   // Page geometry and numbering are long; keys name them by the cache's short ids (intern).
-  const pageKeys = new WeakMap(), sharedKey = paragraphCache && paragraphCache.intern(JSON.stringify([numbering ?? null, revisionView]));
-  // Paragraphs keep their content through the passes of one layout; serialize each once.
+  const pageKeys = new WeakMap(), sharedKey = paragraphCache && paragraphCache.intern(JSON.stringify(numbering ?? null));
+  // Paragraphs keep their content through the passes of one layout; serialize each once. A paragraph's
+  // content includes what its measurement reads of the revision view (revisionViewKey), not the whole view.
   const paragraphKeys = storyOptions.paragraphKeys || new WeakMap();
+  const contentKeys = paragraph => {
+    let keys = paragraphKeys.get(paragraph);
+    if (!keys) {
+      const view = revisionViewKey([paragraph]);
+      paragraphKeys.set(paragraph, keys = { content: view ? `${JSON.stringify(paragraph)},${JSON.stringify(view)}` : JSON.stringify(paragraph), byContext: new Map() });
+    }
+    return keys;
+  };
   // What pagination reads of each block, in order (paragraph-measure-cache.js flowName). Only footnote
   // settling reads it (layoutWithFootnotes); naming a table serializes all of its measured rows.
   let flowNames = paragraphCache && storyOptions.noteReserve !== undefined ? [] : null;
@@ -281,18 +291,15 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
       ['width', 'height'].every(key => page[key] === nextSectionPage[key]) &&
       (sourceBlocks[blockIndex - 1]?.table && page.compatibilityMode >= 15 || currentSection.count === 0));
     // A cell's AutoFit widths, remembered across layouts by what they read: the cell's own properties
-    // and borders, its paragraphs (pictures included, by content: the widths are numbers) and list
-    // labels, the page, numbering and revision view. Cells holding nested tables are measured every time.
+    // and borders, its paragraphs (pictures included, by content: the widths are numbers, with what they
+    // read of the revision view) and list labels, the page and numbering. Cells holding nested tables
+    // are measured every time.
     const cellWidths = (cell, page, borders) => {
       const compute = () => cellIntrinsicWidths(cell, measure, page, numbering, markers, borders);
       if (!paragraphCache || cell.content.some(block => !block.paragraph)) return compute();
       let key;
       try {
-        const content = cell.content.map(({ paragraph, index }) => {
-          let keys = paragraphKeys.get(paragraph);
-          if (!keys) paragraphKeys.set(paragraph, keys = { content: JSON.stringify(paragraph), byContext: new Map() });
-          return `${keys.content},${JSON.stringify(markers[index] ?? null)}`;
-        });
+        const content = cell.content.map(({ paragraph, index }) => `${contentKeys(paragraph).content},${JSON.stringify(markers[index] ?? null)}`);
         key = `${pageKey(page)}:${sharedKey}:${JSON.stringify([{ ...cell, content: undefined }, borders ?? null])}:[${content.join(',')}]`;
       } catch { return compute(); }
       return paragraphCache.cellWidths(key, compute);
@@ -304,16 +311,17 @@ function layoutPass(paragraphs, measureBase, page, numbering, tables, pageStorie
         const textMeasure = page.rotatedCellText ? (text, style) => rotatedCellTextMetrics(measure(text, style), style) : measure;
         const hints = page.paragraphFrameFlow ? undefined : wrapHints && { ...wrapHints, exclusions: wrapHints.exclusions.filter(e => cellEdges ? e.cellId === block.paragraph.cellId : !e.cellId) };
         const run = () => measureParagraph(block.paragraph, block.offset, textMeasure, page, markers[block.index], numbering, edges, hints, !cellEdges && keepBoundaryLine);
-        // A cell paragraph's key adds its cell edges and neighbours. Rows wrapping around drawings and
-        // unequal columns are always measured again. A paragraph's pictures are measured by their
-        // content, and a reused measurement is given the paragraph's own picture objects.
+        // A cell paragraph's key adds its cell edges and neighbours, and one that drawings can wrap
+        // around adds what wrapping reads (squareHintsKey). Unequal columns are always measured
+        // again. A paragraph's pictures are measured by their content, and a reused measurement is
+        // given the paragraph's own picture objects.
         let key = null, pictures = null;
-        if (paragraphCache && !squareHintsReach(hints, block.paragraph.id) && !page.rotatedCellText && !page.columnWidthAt) {
+        if (paragraphCache && !page.rotatedCellText && !page.columnWidthAt) {
           try {
             // The same key string in every pass keeps its hash: the cache does not hash a long paragraph again.
-            let keys = paragraphKeys.get(block.paragraph);
-            if (!keys) paragraphKeys.set(block.paragraph, keys = { content: JSON.stringify(block.paragraph), byContext: new Map() });
-            const context = JSON.stringify([pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey]);
+            const keys = contentKeys(block.paragraph);
+            const wrap = squareHintsKey(hints, block.paragraph.id, block.offset);
+            const context = JSON.stringify([pageKey(page), markers[block.index] ?? null, !cellEdges && keepBoundaryLine, edges ?? null, sharedKey, ...(wrap === null ? [] : [wrap])]);
             key = keys.byContext.get(context);
             if (key === undefined) keys.byContext.set(context, key = `[${keys.content},${context}]`);
             if (block.paragraph.runs.some(r => r.image)) pictures = block.paragraph.runs.flatMap(r => r.image ? [r.image] : []);
@@ -1192,15 +1200,19 @@ export function caretRect(layout, position, affinity = 'forward', pageHint = nul
 }
 const visibleCellLine = line => !line.cellClip || line.y < line.cellClip.bottom && line.y + Math.max(line.height, 1) > line.cellClip.top && (line.cellClip.left === undefined || (line.cellText ? line.x + line.width > line.cellClip.left && line.x < line.cellClip.right : line.stops.at(-1).x >= line.cellClip.left && line.stops[0].x < line.cellClip.right));
 const pageStart = (layout, page) => layout.pageOffsets?.[page] ?? page * layout.page.height;
-export function verticalLine(layout, line, direction, x) {
-  if (line.cellText) {
-    const localY = line.cellText.line.y;
-    return [...layout.lines, ...(layout.repeatedLines || [])]
-      .filter(candidate => candidate.cellText && candidate.cellId === line.cellId && candidate.page === line.page
-        && candidate.column === line.column && visiblePageLine(layout, candidate)
-        && direction * (candidate.cellText.line.y - localY) > 1e-6)
-      .sort((a, b) => Math.abs(a.cellText.line.y - localY) - Math.abs(b.cellText.line.y - localY))[0];
-  }
+/**
+ * The lines a vertical caret step chooses from, kept for one layout. ArrowUp and ArrowDown take one
+ * step and PageUp and PageDown take one per line on screen; each step used to copy every line, index
+ * every cell box and sort all the lines above or below. The index holds the lines (body, then repeated
+ * header copies), the cell boxes and each line's flow position, the last two worked out when first read.
+ */
+const verticalIndexes = new WeakMap();
+function verticalIndex(layout) {
+  const known = verticalIndexes.get(layout), repeated = layout.repeatedLines || [], cells = layout.cells || [];
+  if (known && known.lines === layout.lines && known.lineCount === layout.lines.length && known.repeated === layout.repeatedLines && known.repeatedCount === repeated.length
+    && known.cells === layout.cells && known.cellCount === cells.length && known.pages === layout.pages && known.pageRegions === layout.pageRegions
+    && known.pageOffsets === layout.pageOffsets && known.page === layout.page) return known;
+  // A line's place in the reading flow: pages, then a page's columns (or each region's columns) one after another.
   let flowHeight = 0;
   const flowOffsets = layout.pages?.some(p => p.columns && !p.storyKind) ? layout.pages.map(p => { const start = flowHeight; flowHeight += p.height * (p.columns?.count || 1); return start; }) : null;
   let regionOffset = 0;
@@ -1215,29 +1227,82 @@ export function verticalLine(layout, line, direction, x) {
       : flowOffsets ? flowOffsets[l.page] + (l.column || 0) * layout.pages[l.page].height : pageStart(layout, l.page);
   };
   const y = l => flowStart(l) + (l.cellClip ? Math.max(l.cellClip.top, Math.min(l.y + l.height / 2, l.cellClip.bottom)) : l.y + l.height / 2);
-  const rowId = layout.cells?.find(c => c.id === line.cellId)?.rowId;
-  const rowCells = new Set(rowId ? layout.cells.filter(c => c.rowId === rowId).map(c => c.id) : []);
-  const boxes = new Map((layout.cells || []).map(c => [`${c.id}/${c.page}/${c.column ?? 0}`, c]));
-  const current = (layout.cells || []).filter(c => c.id === line.cellId && (!line.header || c.page === line.page));
-  const candidates = [...layout.lines, ...(layout.repeatedLines || [])].filter(l => {
-    if (!visiblePageLine(layout, l)) return false;
-    if (direction * (y(l) - y(line)) <= 1e-6) return false;
-    if (l.cellId === line.cellId) return !line.header || l.page === line.page;
-    const box = boxes.get(`${l.cellId}/${l.page}/${l.column ?? 0}`);
-    return !rowCells.has(l.cellId) && !current.some(c => box && box.page === c.page && box.column === c.column && box.y < c.y + c.height - 1e-6 && box.y + box.height > c.y + 1e-6);
+  const all = [...layout.lines, ...repeated], count = all.length;
+  // Later boxes of the same cell, page and column replace earlier ones, as one map of them all did.
+  const boxes = new Map(cells.map(c => [`${c.id}/${c.page}/${c.column ?? 0}`, c]));
+  const box = all.map(l => boxes.get(`${l.cellId}/${l.page}/${l.column ?? 0}`));
+  const firstCell = new Map(), cellBoxes = new Map(), rows = new Map(), cellTextLines = new Map();
+  for (const c of cells) {
+    if (!firstCell.has(c.id)) firstCell.set(c.id, c);
+    if (!cellBoxes.has(c.id)) cellBoxes.set(c.id, []);
+    cellBoxes.get(c.id).push(c);
+    if (!rows.has(c.rowId)) rows.set(c.rowId, new Set());
+    rows.get(c.rowId).add(c.id);
+  }
+  all.forEach((l, i) => { if (l.cellText) { if (!cellTextLines.has(l.cellId)) cellTextLines.set(l.cellId, []); cellTextLines.get(l.cellId).push(i); } });
+  // 0: not read yet. Visibility and positions are read only for the lines a step looks at.
+  const visibleState = new Uint8Array(count), middleKnown = new Uint8Array(count), middle = new Float64Array(count), edgeKnown = new Uint8Array(count), edge = new Float64Array(count);
+  const index = {
+    lines: layout.lines, lineCount: layout.lines.length, repeated: layout.repeatedLines, repeatedCount: repeated.length, cells: layout.cells, cellCount: cells.length,
+    pages: layout.pages, pageRegions: layout.pageRegions, pageOffsets: layout.pageOffsets, page: layout.page,
+    all, box, firstCell, cellBoxes, rows, cellTextLines, y, flowStart,
+    visible: i => (visibleState[i] ||= visiblePageLine(layout, all[i]) ? 1 : 2) === 1,
+    middle: i => { if (!middleKnown[i]) { middle[i] = y(all[i]); middleKnown[i] = 1; } return middle[i]; },
+    // The flow position of a line's cell box top.
+    edge: i => { if (!edgeKnown[i]) { const cell = box[i]; edge[i] = flowStart(cell) + cell.y; edgeKnown[i] = 1; } return edge[i]; },
+  };
+  verticalIndexes.set(layout, index);
+  return index;
+}
+// The candidate whose keys come first, the earliest in line order among equals: the first of a stable
+// sort by those keys. Keys that are not numbers have no order, so those candidates are sorted as before.
+function firstByKeys(candidates, keys, compare) {
+  if (keys.some(k => k.some(Number.isNaN))) return candidates.map((c, i) => i).sort((a, b) => compare(keys[a], keys[b])).map(i => candidates[i])[0];
+  let best = 0;
+  for (let i = 1; i < candidates.length; i++) if (compare(keys[i], keys[best]) < 0) best = i;
+  return candidates[best];
+}
+export function verticalLine(layout, line, direction, x) {
+  const index = verticalIndex(layout), { all } = index;
+  if (line.cellText) {
+    const localY = line.cellText.line.y, found = [], keys = [];
+    for (const i of index.cellTextLines.get(line.cellId) || []) {
+      const candidate = all[i];
+      if (candidate.page === line.page && candidate.column === line.column && index.visible(i) && direction * (candidate.cellText.line.y - localY) > 1e-6) {
+        found.push(candidate); keys.push([Math.abs(candidate.cellText.line.y - localY)]);
+      }
+    }
+    return firstByKeys(found, keys, (a, b) => a[0] - b[0]);
+  }
+  let lineY;
+  const rowId = index.firstCell.get(line.cellId)?.rowId;
+  const rowCells = rowId ? index.rows.get(rowId) || new Set() : new Set();
+  const current = (index.cellBoxes.get(line.cellId) || []).filter(c => !line.header || c.page === line.page);
+  const candidates = [];
+  for (let i = 0; i < all.length; i++) {
+    if (!index.visible(i)) continue;
+    const middle = index.middle(i);
+    lineY ??= index.y(line);
+    if (direction * (middle - lineY) <= 1e-6) continue;
+    const l = all[i];
+    if (l.cellId === line.cellId) { if (!line.header || l.page === line.page) candidates.push(i); continue; }
+    if (rowCells.has(l.cellId)) continue;
+    const box = index.box[i];
+    let overlaps = false;
+    for (const c of current) if (box && box.page === c.page && box.column === c.column && box.y < c.y + c.height - 1e-6 && box.y + box.height > c.y + 1e-6) { overlaps = true; break; }
+    if (!overlaps) candidates.push(i);
+  }
+  if (!candidates.length) return undefined;
+  lineY ??= index.y(line);
+  const inCell = line.cellId ? candidates.filter(i => all[i].cellId === line.cellId) : [];
+  if (inCell.length) return firstByKeys(inCell.map(i => all[i]), inCell.map(i => [Math.abs(index.middle(i) - lineY)]), (a, b) => a[0] - b[0]);
+  const keys = candidates.map(i => {
+    const l = all[i], cell = index.box[i], targetX = x + (l.columnOffset || 0) - (line.columnOffset || 0);
+    const distance = cell ? Math.max(cell.x - targetX, 0, targetX - cell.x - cell.width) : Math.max(l.stops[0].x - targetX, 0, targetX - l.stops.at(-1).x);
+    const verticalDistance = cell ? Math.max(0, direction * (index.edge(i) + (direction < 0 ? cell.height : 0) - lineY)) : Math.abs(index.middle(i) - lineY);
+    return [verticalDistance, distance, Math.abs(index.middle(i) - lineY)];
   });
-  const inCell = line.cellId ? candidates.filter(l => l.cellId === line.cellId) : [];
-  const distance = l => {
-    const cell = boxes.get(`${l.cellId}/${l.page}/${l.column ?? 0}`);
-    const targetX = x + (l.columnOffset || 0) - (line.columnOffset || 0);
-    return cell ? Math.max(cell.x - targetX, 0, targetX - cell.x - cell.width) : Math.max(l.stops[0].x - targetX, 0, targetX - l.stops.at(-1).x);
-  };
-  const verticalDistance = l => {
-    const cell = boxes.get(`${l.cellId}/${l.page}/${l.column ?? 0}`);
-    return cell ? Math.max(0, direction * (flowStart(cell) + cell.y + (direction < 0 ? cell.height : 0) - y(line))) : Math.abs(y(l) - y(line));
-  };
-  if (inCell.length) return inCell.sort((a,b) => Math.abs(y(a) - y(line)) - Math.abs(y(b) - y(line)))[0];
-  return candidates.sort((a,b) => verticalDistance(a) - verticalDistance(b) || distance(a) - distance(b) || Math.abs(y(a) - y(line)) - Math.abs(y(b) - y(line)))[0];
+  return firstByKeys(candidates.map(i => all[i]), keys, (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
 }
 export function hitTest(layout, page, x, y) {
   return hitTestStop(layout, page, x, y).offset;
@@ -1323,60 +1388,96 @@ export function imageAtPoint(layout, page, x, y, { includeBehindText = false } =
   }
   return textHit ? null : behind;
 }
+// The lines a selection's rectangles are made of: a line wrapped around drawings by its segments.
+const selectionLines = layout => [...layout.lines, ...(layout.repeatedLines || [])].flatMap(line => line.wrapSegments && !line.cellText
+  ? line.wrapSegments.map(segment => ({ ...segment, page: line.page, baseline: line.baseline, clip: line.clip, y: line.y + (line.wrapBefore || 0), height: line.height - (line.wrapBefore || 0), ...(line.oversizedInlineHeight ? { oversizedInlineHeight: true } : {}), cellClip: line.cellClip })) : [line]);
 export function selectionRects(layout, start, end) {
-  return [...layout.lines, ...(layout.repeatedLines || [])].flatMap(line => line.wrapSegments && !line.cellText
-    ? line.wrapSegments.map(segment => ({ ...segment, page: line.page, baseline: line.baseline, clip: line.clip, y: line.y + (line.wrapBefore || 0), height: line.height - (line.wrapBefore || 0), ...(line.oversizedInlineHeight ? { oversizedInlineHeight: true } : {}), cellClip: line.cellClip })) : [line]).flatMap(line => {
-    if (end <= line.start || start > line.end || start === line.end && !line.paragraphEnd && !line.hardBreak) return [];
-    if (line.cellText) {
-      const pictures = line.fragments.filter(f => f.uprightImage && start < f.end && end > f.start);
-      let ranges = [[start, end]];
-      for (const picture of pictures) ranges = ranges.flatMap(([a, b]) => b <= picture.start || a >= picture.end ? [[a, b]]
-        : [...(a < picture.start ? [[a, picture.start]] : []), ...(b > picture.end ? [[picture.end, b]] : [])]);
-      const localLayout = { page: { width: Infinity }, lines: [{ ...line.cellText.line, page: 0 }] };
-      const local = ranges.flatMap(([a, b]) => selectionRects(localLayout, a, b));
-      const rects = local.map(rect => ({ ...cellTextRect(line.cellText.matrix, rect), page: line.page }));
-      for (const picture of pictures) {
-        const rect = normalizedRotation(picture.image.rotation)
-          ? clipCellRect(positionedImageBounds(inlineImagePaintFrame(picture.image, picture.uprightImage.x, picture.uprightImage.y)), {left:line.x,right:line.x+line.width,top:-Infinity,bottom:Infinity})
-          : picture.uprightImage;
-        if (rect) rects.push({...rect,page:line.page});
-      }
-      return rects.map(rect => clipCellRect(rect, line.cellClip)).filter(Boolean);
+  return finishSelectionRects(layout, selectionLines(layout).flatMap(line => lineSelectionRects(layout, line, start, end)), start, end);
+}
+/**
+ * selectionRects for many ranges of one layout: the spelling marks, comment and change tints and
+ * suggestion underlines each look at every range. Each call of selectionRects copies and reads every
+ * line, and a long document holds thousands of both; this one sorts the lines by where they start
+ * once and reads only those a range reaches. The rectangles are selectionRects', in its order.
+ */
+const rectFinders = new WeakMap();
+export function selectionRectFinder(layout) {
+  const count = layout.lines.length + (layout.repeatedLines?.length || 0), known = rectFinders.get(layout);
+  if (known && known.lines === layout.lines && known.count === count) return known.find;
+  const lines = selectionLines(layout);
+  let find = (start, end) => selectionRects(layout, start, end);
+  if (lines.every(line => Number.isFinite(line.start) && Number.isFinite(line.end))) {
+    const order = lines.map((_, i) => i).sort((a, b) => lines[a].start - lines[b].start || a - b);
+    // The furthest end of the lines up to each place in that order: lines before the first to reach a range's start end before it.
+    const reach = new Float64Array(order.length);
+    for (let k = 0, furthest = -Infinity; k < order.length; k++) reach[k] = furthest = Math.max(furthest, lines[order[k]].end);
+    find = (start, end) => {
+      let low = 0, high = order.length;
+      while (low < high) { const mid = (low + high) >> 1; if (reach[mid] < start) low = mid + 1; else high = mid; }
+      // A line outside these gives no rectangles (lineSelectionRects): it ends before the range or starts at or past its end.
+      const reached = [];
+      for (let k = low; k < order.length && lines[order[k]].start < end; k++) if (lines[order[k]].end >= start) reached.push(order[k]);
+      reached.sort((a, b) => a - b);
+      return finishSelectionRects(layout, reached.flatMap(i => lineSelectionRects(layout, lines[i], start, end)), start, end);
+    };
+  }
+  rectFinders.set(layout, { lines: layout.lines, count, find });
+  return find;
+}
+function lineSelectionRects(layout, line, start, end) {
+  if (end <= line.start || start > line.end || start === line.end && !line.paragraphEnd && !line.hardBreak) return [];
+  if (line.cellText) {
+    const pictures = line.fragments.filter(f => f.uprightImage && start < f.end && end > f.start);
+    let ranges = [[start, end]];
+    for (const picture of pictures) ranges = ranges.flatMap(([a, b]) => b <= picture.start || a >= picture.end ? [[a, b]]
+      : [...(a < picture.start ? [[a, picture.start]] : []), ...(b > picture.end ? [[picture.end, b]] : [])]);
+    const localLayout = { page: { width: Infinity }, lines: [{ ...line.cellText.line, page: 0 }] };
+    const local = ranges.flatMap(([a, b]) => selectionRects(localLayout, a, b));
+    const rects = local.map(rect => ({ ...cellTextRect(line.cellText.matrix, rect), page: line.page }));
+    for (const picture of pictures) {
+      const rect = normalizedRotation(picture.image.rotation)
+        ? clipCellRect(positionedImageBounds(inlineImagePaintFrame(picture.image, picture.uprightImage.x, picture.uprightImage.y)), {left:line.x,right:line.x+line.width,top:-Infinity,bottom:Infinity})
+        : picture.uprightImage;
+      if (rect) rects.push({...rect,page:line.page});
     }
-    const a = line.stops.find(s => s.offset >= Math.max(start, line.start)) || line.stops.at(-1);
-    const b = [...line.stops].reverse().find(s => s.offset <= Math.min(end, line.end)) || line.stops[0];
-    const newline = (line.paragraphEnd || line.hardBreak) && end > line.end ? 7 : 0;
-    const edge = Math.min(line.hangingRight ?? Infinity, line.textClip?.right ?? Infinity);
-    const width = Math.min(Math.max(0, b.x - a.x) + newline, Math.max(0, edge - a.x));
-    const collapsed = !width && (b.offset > a.offset || newline) && (a.hanging || b.hanging);
-    const rects = line.bidi ? line.fragments.flatMap(f=>{
-      if(!f.caretStops || end<=f.start || start>=f.end) return [];
-      const first=f.caretStops.find(s=>s.offset>=Math.max(start,f.start)) || f.caretStops.at(-1);
-      const last=[...f.caretStops].reverse().find(s=>s.offset<=Math.min(end,f.end)) || f.caretStops[0];
-      const x=Math.max(line.textClip?.left ?? -Infinity,f.x+Math.min(first.x,last.x));
-      const right=Math.min(edge,f.x+Math.max(first.x,last.x));
-      return [clipCellRect({page:line.page,x,y:line.y,width:Math.max(0,right-x),height:line.height},line.cellClip)];
-    }) : [clipCellRect({ page: line.page, x: collapsed ? a.x - 1 : a.x, y: line.y, width: collapsed ? 1 : width, height: line.height }, line.cellClip)];
-    if(line.bidi && newline) rects.push(clipCellRect({page:line.page,x:b.x,y:line.y,width:newline,height:line.height},line.cellClip));
-    for (const f of line.fragments || []) if (f.image && normalizedRotation(f.image.rotation) && !isPositionedImage(f.image) && start < f.end && end > f.start) {
-      const rect = positionedImageBounds(inlineImagePaintFrame(f.image, f.x, line.baseline - f.ascent));
+    return rects.map(rect => clipCellRect(rect, line.cellClip)).filter(Boolean);
+  }
+  const a = line.stops.find(s => s.offset >= Math.max(start, line.start)) || line.stops.at(-1);
+  const b = [...line.stops].reverse().find(s => s.offset <= Math.min(end, line.end)) || line.stops[0];
+  const newline = (line.paragraphEnd || line.hardBreak) && end > line.end ? 7 : 0;
+  const edge = Math.min(line.hangingRight ?? Infinity, line.textClip?.right ?? Infinity);
+  const width = Math.min(Math.max(0, b.x - a.x) + newline, Math.max(0, edge - a.x));
+  const collapsed = !width && (b.offset > a.offset || newline) && (a.hanging || b.hanging);
+  const rects = line.bidi ? line.fragments.flatMap(f=>{
+    if(!f.caretStops || end<=f.start || start>=f.end) return [];
+    const first=f.caretStops.find(s=>s.offset>=Math.max(start,f.start)) || f.caretStops.at(-1);
+    const last=[...f.caretStops].reverse().find(s=>s.offset<=Math.min(end,f.end)) || f.caretStops[0];
+    const x=Math.max(line.textClip?.left ?? -Infinity,f.x+Math.min(first.x,last.x));
+    const right=Math.min(edge,f.x+Math.max(first.x,last.x));
+    return [clipCellRect({page:line.page,x,y:line.y,width:Math.max(0,right-x),height:line.height},line.cellClip)];
+  }) : [clipCellRect({ page: line.page, x: collapsed ? a.x - 1 : a.x, y: line.y, width: collapsed ? 1 : width, height: line.height }, line.cellClip)];
+  if(line.bidi && newline) rects.push(clipCellRect({page:line.page,x:b.x,y:line.y,width:newline,height:line.height},line.cellClip));
+  for (const f of line.fragments || []) if (f.image && normalizedRotation(f.image.rotation) && !isPositionedImage(f.image) && start < f.end && end > f.start) {
+    const rect = positionedImageBounds(inlineImagePaintFrame(f.image, f.x, line.baseline - f.ascent));
+    const bottom = Math.min(rect.y + rect.height, line.y + line.height);
+    rect.y = Math.max(rect.y, line.y); rect.height = Math.max(0, bottom - rect.y);
+    rects.push(clipCellRect({page: line.page, ...rect}, line.cellClip));
+  }
+  for (const f of line.fragments || []) if ((f.image?.flatLine || f.image?.flatGroup) && !isPositionedImage(f.image) && start < f.end && end > f.start) {
+    const e = imageExtents(f.image);
+    const rect = flatLineRect(f.image, f.x + e.left / EMU_PER_PX, line.baseline - f.ascent + e.top / EMU_PER_PX, f.image.width / EMU_PER_PX, f.image.height / EMU_PER_PX);
+    if (line.clip) {
       const bottom = Math.min(rect.y + rect.height, line.y + line.height);
       rect.y = Math.max(rect.y, line.y); rect.height = Math.max(0, bottom - rect.y);
-      rects.push(clipCellRect({page: line.page, ...rect}, line.cellClip));
     }
-    for (const f of line.fragments || []) if ((f.image?.flatLine || f.image?.flatGroup) && !isPositionedImage(f.image) && start < f.end && end > f.start) {
-      const e = imageExtents(f.image);
-      const rect = flatLineRect(f.image, f.x + e.left / EMU_PER_PX, line.baseline - f.ascent + e.top / EMU_PER_PX, f.image.width / EMU_PER_PX, f.image.height / EMU_PER_PX);
-      if (line.clip) {
-        const bottom = Math.min(rect.y + rect.height, line.y + line.height);
-        rect.y = Math.max(rect.y, line.y); rect.height = Math.max(0, bottom - rect.y);
-      }
-      rects.push(clipCellRect({ page: line.page, ...rect }, line.cellClip));
-    }
-    const visible = rects.filter(Boolean);
-    return line.oversizedInlineHeight ? visible.map(rect =>
-      clipCellRect(rect, { left: 0, right: physicalWidth(layout, line.page), top: 0, bottom: (layout.pages?.[line.page] || layout.page).height })).filter(Boolean) : visible;
-  }).concat((layout.floatingObjects || []).filter(f => start < f.end && end > f.start).map(f => clipCellRect({ page: f.page, ...((f.image.flatLine || f.image.flatGroup) ? flatLineRect(f.image,f.x,f.y,f.width,f.height) : positionedImageBounds(f)) }, f.cellClip)).filter(Boolean))
+    rects.push(clipCellRect({ page: line.page, ...rect }, line.cellClip));
+  }
+  const visible = rects.filter(Boolean);
+  return line.oversizedInlineHeight ? visible.map(rect =>
+    clipCellRect(rect, { left: 0, right: physicalWidth(layout, line.page), top: 0, bottom: (layout.pages?.[line.page] || layout.page).height })).filter(Boolean) : visible;
+}
+function finishSelectionRects(layout, rects, start, end) {
+  return rects.concat((layout.floatingObjects || []).filter(f => start < f.end && end > f.start).map(f => clipCellRect({ page: f.page, ...((f.image.flatLine || f.image.flatGroup) ? flatLineRect(f.image,f.x,f.y,f.width,f.height) : positionedImageBounds(f)) }, f.cellClip)).filter(Boolean))
     .map(rect => rect.x >= 0 && rect.x + rect.width <= physicalWidth(layout, rect.page) ? rect
       : clipCellRect(rect, { left: 0, right: physicalWidth(layout, rect.page), top: -Infinity, bottom: Infinity })).filter(Boolean);
 }

@@ -1413,19 +1413,21 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     tableActions.querySelector('option[value="clearHeader"]').disabled = !engine.model.tableContext?.table.rows.some(row => row.header);
     const columnCount = engine.model.tableContext?.span ?? 1;
     tableActions.querySelector('option[value="column"]').textContent = columnCount > 1 ? `Delete ${columnCount} spanned columns` : 'Delete column';
-    keepRow.disabled = !engine.model.selectedTableRows.length;
+    // Each of these walks the selection's tables: read once for all the controls.
+    const selectedRows = engine.model.selectedTableRows, selectedCells = engine.model.selectedTableCells, inCells = selectedCells.length > 0;
+    keepRow.disabled = !selectedRows.length;
     rowHeight.disabled = keepRow.disabled;
     rowHeight.title = 'Row height: ' + rowHeightLabel(engine.model.tableRowHeight);
-    cellAlignment.disabled = !engine.model.selectedTableCells.length;
+    cellAlignment.disabled = !inCells;
     cellAlignment.title = 'Cell alignment: ' + (CELL_ALIGNMENTS[engine.model.cellVerticalAlignment] || 'Mixed');
-    cellShading.disabled = !engine.model.selectedTableCells.length;
+    cellShading.disabled = !inCells;
     cellShading.title = 'Cell shading: ' + cellShadingLabel(engine.model.cellShading);
-    cellBorders.disabled = !engine.model.selectedTableCells.length;
+    cellBorders.disabled = !inCells;
     cellBorders.title = 'Cell borders: ' + cellBorderLabel(engine.model.cellBorderValues);
-    cellMargins.disabled = !engine.model.selectedTableCells.length;
-    cellMargins.title = 'Cell margins: ' + cellMarginLabel(engine.model.selectedTableCells);
+    cellMargins.disabled = !inCells;
+    cellMargins.title = 'Cell margins: ' + cellMarginLabel(selectedCells);
     // Outside a table there is nothing to keep together: a state of 'mixed' there would read as a mixed selection.
-    keepRow.setAttribute('aria-pressed', !engine.model.selectedTableRows.length ? 'false' : engine.model.tableRowKeep === null ? 'mixed' : String(engine.model.tableRowKeep));
+    keepRow.setAttribute('aria-pressed', !selectedRows.length ? 'false' : engine.model.tableRowKeep === null ? 'mixed' : String(engine.model.tableRowKeep));
     const run = engine.model.runCommandFormatting;
     clearTextFormatting.disabled = false;
     clearParagraphFormatting.disabled = false;
@@ -1458,7 +1460,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     if (document.activeElement !== fontSize) fontSize.value = run.fontSize ?? '';
     for (const control of [pageSetup, pageBreak, pageBreakBefore, outdent, indent, paragraphGeometry, insertTab, lineSpacingOptions, lineSpacingMenu, ...alignmentButtons]) control.disabled = false;
     pageBreak.disabled = !!engine.model.selectedParagraphs[0]?.cellId;
-    pageBreakBefore.disabled = !!engine.model.selectedTableRows.length;
+    pageBreakBefore.disabled = !!selectedRows.length;
     for (const [control, kind] of [[bullets, 'bullet'], [numbers, 'number']]) {
       control.disabled = false;
       control.setAttribute('aria-pressed', engine.model.listFormatting === 'mixed' ? 'mixed' : String(engine.model.listFormatting === kind));
@@ -1619,8 +1621,8 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const designVersions = { undo: [], redo: [] };
   let reopening = false;
   async function reopenPackage(blob) {
-    const { CanvasEditor, openCanvasDocument } = engineApi();
-    const opened = await openCanvasDocument(blob);
+    const { CanvasEditor, openCanvasDocument, registerRevisionAuthors } = engineApi();
+    const opened = await openCanvasDocument(blob, { beforeLayout: pkg => registerRevisionAuthors(pkg.paragraphs) });
     if (opened.pkg.readOnly || destroyed) {
       for (const image of opened.images.values()) image.close();
       if (destroyed) return false;
@@ -1693,7 +1695,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
   const ready = (async () => {
     const engineModules = await loadEngine();
     provideEngineApi(engineModules);
-    const { CanvasEditor, createDocx, WRITING_STYLES, paragraph, openCanvasDocument, loadCanvasFonts, htmlFragment, pasteFragment } = engineModules;
+    const { CanvasEditor, createDocx, WRITING_STYLES, paragraph, openCanvasDocument, loadCanvasFonts, htmlFragment, pasteFragment, registerRevisionAuthors } = engineModules;
     // Plain text becomes one paragraph per line, without the file's final line ending.
     const imported = doc.pendingImport, importedText = imported?.type === 'text' ? imported.value.replace(/\n+$/, '') : null;
     // Markdown and HTML become headings, lists, paragraphs and character formatting.
@@ -1704,7 +1706,7 @@ export function editorView({ doc, goHome, newDoc, importFile, openPath, newFromT
     // A new document starts from the page and Design defaults the user set, if any.
     // A host that already opened the file (the local playground validates it first) hands it over once.
     const handed = doc.opened; doc.opened = null;
-    const opened = handed || (doc.blob ? await openCanvasDocument(doc.blob) : await editorCommands.newDocumentDefaults?.(blank(), openCanvasDocument) || { pkg: blank(), images: new Map() });
+    const opened = handed || (doc.blob ? await openCanvasDocument(doc.blob, { beforeLayout: pkg => registerRevisionAuthors(pkg.paragraphs) }) : await editorCommands.newDocumentDefaults?.(blank(), openCanvasDocument) || { pkg: blank(), images: new Map() });
     pkg = opened.pkg; openedAssets.set(pkg, Object.keys(pkg.assets || {}));
     const images = opened.images; decodedPictures = images;
     await loadCanvasFonts();

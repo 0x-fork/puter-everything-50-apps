@@ -309,8 +309,11 @@ function clearRevisions(paragraphs, start, end) {
     at += size + 1; if (at > end) break;
   }
   if (!found) return;
-  eachRevisionTarget(paragraphs, start, end, ({ run, mark }) => { if (!mark) delete run.revision; });
-  for (const p of paragraphs) if (p.runs.length > 1) p.runs = normalize(p.runs);
+  // Only the paragraphs in the range have runs split here. Joining every paragraph's runs changed all
+  // of them on a keystroke beside a tracked change, so the whole document was measured again.
+  const touched = new Set();
+  eachRevisionTarget(paragraphs, start, end, ({ paragraph, run, mark }) => { touched.add(paragraph); if (!mark) delete run.revision; });
+  for (const p of touched) if (p.runs.length > 1) p.runs = normalize(p.runs);
 }
 /**
  * The changes of the paragraphs that reach [start, end], including the mark just before it. Only their
@@ -352,6 +355,11 @@ function styleChoices(model, type, check) {
   return entry[type].map(choice => ({ ...choice }));
 }
 
+/**
+ * The tables, in order, that hold any of the cells `ids`. The toolbar asks for the selection's cells and rows
+ * many times a keystroke; working out every table's merged cells for each answer was slow beside long tables.
+ */
+const tablesWithCells = (tables, ids) => ids.size ? tables.filter(table => table.rows.some(row => row.cells.some(cell => ids.has(cell.id)))) : [];
 export class TextDocument {
   constructor(paragraphs = [paragraph()], pageSettings, numbering = emptyNumbering(), styles, tables = [], assets = {}, { displayOnly = false, comments = null, trackChanges } = {}) {
     this.assets = { ...assets }; // Immutable bytes stay out of text/history snapshots.
@@ -905,7 +913,7 @@ export class TextDocument {
     const block = this.activeCellBlock;
     if (block) return cellBlockPlacements(block.table, block).map(p => p.cell);
     const ids = new Set(this.selectedParagraphs.map(p => p.cellId).filter(Boolean));
-    return this.tables.flatMap(table => editableCells(table).filter(cell => ids.has(cell.id)));
+    return tablesWithCells(this.tables, ids).flatMap(table => editableCells(table).filter(cell => ids.has(cell.id)));
   }
   get cellVerticalAlignment() {
     const cells = this.selectedTableCells, value = cells[0]?.vertical || 'top';
@@ -917,7 +925,7 @@ export class TextDocument {
   }
   get cellBorderValues() {
     const ids = new Set(this.selectedTableCells.map(cell => cell.id));
-    return this.tables.flatMap(table => {
+    return tablesWithCells(this.tables, ids).flatMap(table => {
       const owners = verticalMerges(table);
       return table.rows.flatMap((row, rowIndex) => rowGrid(row).filter(({ cell }) => ids.has(cell.id)).map(({ cell, column, span }) => {
         const owner = owners.get(cell.id);
@@ -1136,9 +1144,9 @@ export class TextDocument {
   get selectedTableRows() {
     const block = this.activeCellBlock;
     if (block) return block.table.rows.slice(block.top, block.bottom + 1);
-    const rows = new Map();
-    for (const table of this.tables) for (const [id, owner] of verticalMerges(table)) if (id === owner.cell.id) rows.set(id, table.rows.slice(owner.rowIndex, owner.endRow + 1));
-    return [...new Set(this.selectedParagraphs.flatMap(p => rows.get(p.cellId) || []))];
+    const paragraphs = this.selectedParagraphs, ids = new Set(paragraphs.map(p => p.cellId).filter(Boolean)), rows = new Map();
+    for (const table of tablesWithCells(this.tables, ids)) for (const [id, owner] of verticalMerges(table)) if (ids.has(id) && id === owner.cell.id) rows.set(id, table.rows.slice(owner.rowIndex, owner.endRow + 1));
+    return [...new Set(paragraphs.flatMap(p => rows.get(p.cellId) || []))];
   }
   get tableRowKeep() { const rows = this.selectedTableRows; return rows.length && rows.every(r => r.cantSplit === rows[0].cantSplit) ? rows[0].cantSplit : null; }
   get tableRowHeight() {
@@ -1182,12 +1190,21 @@ export class TextDocument {
     if (index < 0) return false;
     this.select(this.paragraphOffset(index)); return true;
   }
-  moveCell(direction) {
-    const context = this.tableContext; if (!context) return false;
+  /**
+   * Where Tab (1) or Shift+Tab (-1) goes from the caret's cell: { cell } to select, { addRow } after the last
+   * cell, or { before } the table, out of its first cell. Only adding a row changes the document.
+   */
+  cellMove(direction) {
+    const context = this.tableContext; if (!context) return null;
     const cells = editableCells(context.table), index = cells.findIndex(c => c.id === context.cell.id);
-    if (cells[index + direction]) { this.selectCell(cells[index + direction].id); return false; }
-    if (direction > 0) return this.insertTableRow();
-    const p = this.paragraphs.findIndex(p => p.cellId === context.cell.id);
+    if (cells[index + direction]) return { cell: cells[index + direction].id };
+    return direction > 0 ? { addRow: true } : { before: context.cell.id };
+  }
+  moveCell(direction, move = this.cellMove(direction)) {
+    if (!move) return false;
+    if (move.cell) { this.selectCell(move.cell); return false; }
+    if (move.addRow) return this.insertTableRow();
+    const p = this.paragraphs.findIndex(p => p.cellId === move.before);
     this.select(Math.max(0, this.paragraphOffset(p) - 1)); return false;
   }
   insertTable(rows = 2, columns = 2, availableWidth) {
@@ -1514,13 +1531,25 @@ export class TextDocument {
   /** Comments with their current anchors, in document order; replies follow their parent. */
   get commentList() {
     const comments = this.comments || [], anchors = new Map(commentAnchors(this.paragraphs).map(a => [a.id, a]));
-    const roots = comments.filter(c => !c.parentId || !comments.some(p => p.id === c.parentId));
+    // Comments by id (the first of a repeated id) and replies by parent, in the comments' order: a search of every
+    // comment for each one made listing a much-commented document's comments slow.
+    const byId = new Map(), replies = new Map();
+    for (const c of comments) {
+      if (!byId.has(c.id)) byId.set(c.id, c);
+      if (c.parentId) { if (!replies.has(c.parentId)) replies.set(c.parentId, []); replies.get(c.parentId).push(c); }
+    }
+    const roots = comments.filter(c => !c.parentId || !byId.has(c.parentId));
     const position = c => anchors.get(c.id)?.start ?? Infinity;
     roots.sort((a, b) => position(a) - position(b) || Number(a.id) - Number(b.id));
     const list = [];
-    for (const root of roots) for (const id of commentThread(comments, root.id)) {
-      const c = comments.find(item => item.id === id);
-      list.push({ ...c, start: anchors.get(id)?.start ?? anchors.get(root.id)?.start ?? null, end: anchors.get(id)?.end ?? anchors.get(root.id)?.end ?? null, rootId: root.id });
+    for (const root of roots) {
+      // The thread: the root, then its replies breadth first, each once (as commentThread lists them).
+      const ids = [root.id], seen = new Set(ids);
+      for (let i = 0; i < ids.length; i++) for (const c of replies.get(ids[i]) || []) if (!seen.has(c.id)) { seen.add(c.id); ids.push(c.id); }
+      for (const id of ids) {
+        const c = byId.get(id);
+        list.push({ ...c, start: anchors.get(id)?.start ?? anchors.get(root.id)?.start ?? null, end: anchors.get(id)?.end ?? anchors.get(root.id)?.end ?? null, rootId: root.id });
+      }
     }
     return list;
   }
@@ -2343,12 +2372,17 @@ export class TextDocument {
       return start !== end && only({ type: 'ins', author: insertion.author, date: insertion.date }) ? { id, removed: true } : { id, removed: false, revision: insertion };
     });
     this.checkpoint();
+    // The paragraphs whose runs this splits or changes in place; others it replaces or gives new runs. Only
+    // these have their runs joined again at the end: joining every paragraph's runs changed all that could
+    // be joined, so one Accept or Reject measured most of the document again.
+    const touched = new Set(), runsBefore = new Map(this.paragraphs.map(p => [p, p.runs]));
     // Rejecting a deletion of another reviewer's insertion brings that insertion back. Rejecting a range (or
     // all changes) rejects that insertion too when it is in scope, as a second Reject All would have: the text
     // goes, instead of staying as an insertion after Reject All.
     if (!accept && start !== end) {
       const restored = new Set();
       for (const r of targets) if (r.type === 'del') eachRevisionTarget(this.paragraphs, r.start, r.end, ({ paragraph, run, mark }) => {
+        touched.add(paragraph);
         const target = mark ? paragraph : run, key = mark ? 'markRevision' : 'revision', inserted = target[key]?.inserted;
         if (target[key]?.type === 'del' && inserted && only({ type: 'ins', author: inserted.author, date: inserted.date })) { target[key] = { type: 'ins', ...inserted }; restored.add(paragraph); }
       });
@@ -2377,11 +2411,12 @@ export class TextDocument {
           const resolve = (target, kind) => { if (accept) acceptFormatChange(target, kind); else if (!rejectFormatChange(target)) this.formatRejectSkipped = true; else if (kind === 'run') acceptFormatChange(target, 'run'); };
           for (let i = indexAt(r.start); i < this.paragraphs.length && starts[i] < r.end; i++) {
             const p = this.paragraphs[i], at = starts[i], size = paragraphLength(p);
-            let touched = false;
+            touched.add(p);
+            let resolved = false;
             const change = paragraphFormatChange(p);
-            if (change && only(change) && at >= r.start && at + size + 1 <= r.end + 1) { resolve(p, 'paragraph'); touched = true; }
-            eachRevisionTarget([p], Math.max(r.start, at) - at, Math.min(r.end, at + size) - at, ({ run, mark }) => { const runChange = !mark && runFormatChange(run); if (runChange && only(runChange)) { resolve(run, 'run'); touched = true; } });
-            if (touched && !accept && this.stylesEnabled) resolveStyledParagraph(p, this.styles, this.numbering);
+            if (change && only(change) && at >= r.start && at + size + 1 <= r.end + 1) { resolve(p, 'paragraph'); resolved = true; }
+            eachRevisionTarget([p], Math.max(r.start, at) - at, Math.min(r.end, at + size) - at, ({ run, mark }) => { const runChange = !mark && runFormatChange(run); if (runChange && only(runChange)) { resolve(run, 'run'); resolved = true; } });
+            if (resolved && !accept && this.stylesEnabled) resolveStyledParagraph(p, this.styles, this.numbering);
           }
           continue;
         }
@@ -2389,6 +2424,7 @@ export class TextDocument {
         // Rejecting a deletion of another reviewer's insertion restores that insertion.
         const kept = revision => revision?.inserted && !accept ? { type: 'ins', ...revision.inserted } : undefined;
         if (keep) visitWithin(r.start, r.end, ({ paragraph, run, mark }) => {
+          touched.add(paragraph);
           const target = mark ? paragraph : run, key = mark ? 'markRevision' : 'revision', next = kept(target[key]);
           if (next) target[key] = next; else delete target[key];
           // Deleted text hides a formatting change made to it before. Rejecting a selection or all changes brings
@@ -2426,7 +2462,7 @@ export class TextDocument {
     if (removedFields.size) removeFields(this.paragraphs, removedFields);
     for (const outcome of fieldOutcomes) if (!outcome.removed) setFieldRevision(this.paragraphs, outcome.id, outcome.revision);
     if (removedFields.size) this.hasBodyFields = this.paragraphs.some(p => p.fieldMarkers?.length);
-    for (const p of this.paragraphs) p.runs = normalize(p.runs);
+    for (const p of this.paragraphs) if (touched.has(p) || runsBefore.get(p) !== p.runs) p.runs = normalize(p.runs);
     // Removing a change can join the characters on either side of the caret into one.
     const at = nextBoundary(this.paragraphs, Math.min(caret, documentLength(this.paragraphs)));
     this.selection = { anchor: at, focus: at };

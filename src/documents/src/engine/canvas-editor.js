@@ -51,7 +51,7 @@ import { pageBorderStrokes } from './page-borders.js';
 import { lineNumberLabels } from './line-numbers.js';
 import { paintPagePictureBackground } from './canvas-page-background.js';
 import { viewGeometry, viewPageStories, fitContinuousPages, isContinuousView, usesScreenGeometry } from './document-views.js';
-import { font, layoutDocument, caretRect, lineAtPosition, verticalLine, hitTestStop, nearestStop, imageAtPoint, selectionRects } from './layout.js';
+import { font, layoutDocument, caretRect, lineAtPosition, verticalLine, hitTestStop, nearestStop, imageAtPoint, selectionRects, selectionRectFinder } from './layout.js';
 import { refreshPageReferences } from './page-reference-refresh.js';
 import { positionedImageBounds } from './positioned-images.js';
 import { createImageInteraction } from './image-interaction.js';
@@ -59,10 +59,27 @@ import { paintDecodedImage, imageInfo, decodeImage, decodeImages, validateImageA
 let nextAsset = 0;
 // A document longer than this paints only the pages on screen (and a screenful either side) at
 // once; the rest are painted when they scroll into view, when their pixels are read, or while the
-// browser is idle.
-const EAGER_PAGES = 80;
+// browser is idle. Painting every page of a document of a few dozen pages took most of each
+// keystroke and caret move.
+const EAGER_PAGES = 8;
 // Pages off screen are painted once changes have paused this long (schedulePaint).
 const QUIET_PAINT_MS = 600;
+
+/**
+ * The change bars' ranges with those that touch or overlap joined into one, in document order. A bar marks every
+ * line a range touches (starts at or before the line's end and ends after its start), and a joined range touches
+ * exactly the lines its parts do, so the bars are painted the same. Typing on in a tracked insertion splits it
+ * into ranges a second each (or around text typed inside it), while the bars carried across the keystroke cover
+ * it whole: joined, the two are found equal and the pages are not painted a second time for each keystroke.
+ */
+export function joinedBarRanges(ranges) {
+  const sorted = ranges.map(r => ({ start: r.start, end: r.end })).sort((a, b) => a.start - b.start), joined = [];
+  for (const range of sorted) {
+    const last = joined.at(-1);
+    if (last && range.start <= last.end) last.end = Math.max(last.end, range.end); else joined.push(range);
+  }
+  return joined;
+}
 
 /** Canvas paint surface plus a real textarea for native input, composition and accessible text. */
 export class CanvasEditor {
@@ -200,7 +217,8 @@ export class CanvasEditor {
     }
     this.relayout();
   }
-  focus() { this.input.focus({ preventScroll: true }); this.syncInput(); this.paint(); }
+  /** Give the document the keyboard and paint it; { paint: false } when the caller paints once it has moved the view. */
+  focus({ paint = true } = {}) { this.input.focus({ preventScroll: true }); this.syncInput(); if (paint) this.paint(); }
   /** The page the caret is on: a header or footer's own page while editing one. */
   get caretPageIndex() {
     if (this.session.path !== null) return this.storyPage ?? 0;
@@ -281,6 +299,7 @@ export class CanvasEditor {
   /** Vertical bars in the left margin beside lines that touch the given ranges (tracked changes). */
   // side: 'left', 'right' or 'outside' (right on odd pages, left on even ones).
   setMarginBars(ranges = [], color = '#7a7a7a', side = 'left') {
+    ranges = joinedBarRanges(ranges);
     const key = JSON.stringify([ranges.map(r => [r.start, r.end]), color, side]);
     const same = key === this.marginBarKey;
     if (!same) { this.marginBarKey = key; this.marginBars = { ranges, color, side }; }
@@ -310,7 +329,7 @@ export class CanvasEditor {
     // Matches in a header or footer being edited keep its offsets.
     if (this.findHighlights?.length && this.session.path === null) { this.findHighlights = followEdit(this.findHighlights, edit); this.findRects = null; }
     if (this.marginBars?.ranges.length) {
-      const { color, side } = this.marginBars, ranges = followEdit(this.marginBars.ranges, edit, { endAfter: true });
+      const { color, side } = this.marginBars, ranges = joinedBarRanges(followEdit(this.marginBars.ranges, edit, { endAfter: true }));
       this.marginBars = { ranges, color, side };
       this.marginBarKey = JSON.stringify([ranges.map(r => [r.start, r.end]), color, side]);
     }
@@ -320,7 +339,9 @@ export class CanvasEditor {
     if (!tints?.length || !layout) return [];
     if (this.tintRects?.layout === layout) return this.tintRects.rects;
     const rects = [], { page, pages } = layout;
-    for (const tint of tints) if (tint.end > tint.start) for (const rect of selectionRects({ lines: [...layout.lines, ...(layout.repeatedLines || [])], page, pages }, tint.start, tint.end)) rects.push({ ...rect, fill: tint.fill });
+    // Tints cover text, not floating drawings: the lines alone.
+    const rectsOf = selectionRectFinder({ lines: [...layout.lines, ...(layout.repeatedLines || [])], page, pages });
+    for (const tint of tints) if (tint.end > tint.start) for (const rect of rectsOf(tint.start, tint.end)) rects.push({ ...rect, fill: tint.fill });
     this.tintRects = { layout, rects };
     return rects;
   }
@@ -385,6 +406,24 @@ export class CanvasEditor {
     } catch (e) {
       this.relayout(); if (!quiet) this.onError(e); onFailure?.(e); return false;
     }
+  }
+  /**
+   * Tab (1) and Shift+Tab (-1) in a table. Tab in the last cell adds a row: an edit, one step to undo.
+   * Otherwise the caret only goes to another cell (or out before the table), and that is done as a caret
+   * move is: the document is unchanged, so it is not laid out again and the copy kept for the next undo
+   * step stays. The rest is what the edit command does with an unchanged document.
+   */
+  tabCell(direction) {
+    if (this.readOnly || this.viewOnly) return;
+    this.finishComposition();
+    const move = this.model.cellMove(direction);
+    let valid = true;
+    try { this.validateStory(); } catch { valid = false; }
+    // A story the command would refuse (and report) goes through the command, as before.
+    if (!move || move.addRow || !valid) { this.execute(() => this.model.moveCell(direction, move)); return; }
+    this.model.moveCell(direction, move);
+    this.preferredX = null; this.caretAffinity = 'forward';
+    this.syncInput(); this.paint(); this.onSelection(); this.revealCaret();
   }
   setTableProperties(patch) { return this.execute(() => this.model.setTableProperties(patch)); }
   /** Lay out a body model as this editor would, for field refreshes inside a transaction. */
@@ -638,7 +677,8 @@ export class CanvasEditor {
   }
   /** Lay the body and its page stories out for a view (null: the authored pages). */
   computeLayout(view = this.view) {
-    this.measure.paragraphCache?.().nextGeneration();
+    // Each view keeps its last layout's measurements while another is shown (paragraph-measure-cache.js).
+    this.measure.paragraphCache?.().nextGeneration(view?.kind ?? null);
     const body = this.session.body;
     const stories = view ? viewPageStories(this.pageStories, view.kind) : this.pageStories;
     let layout = layoutDocument(body.paragraphs, this.measure, pageGeometry(body.pageSettings), body.numbering, body.tables, stories, { bestEffort: this.readOnly, drawingLayouts: this.drawingLayouts, ...(!this.readOnly ? { styles: this.model.styles } : {}), ...(view ? { viewGeometry: viewGeometry(view) } : {}) });
@@ -1673,7 +1713,7 @@ export class CanvasEditor {
     // Escape then Tab leaves the editor; Shift+Tab also keeps normal focus navigation.
     if (e.key === 'Escape') { if (this.session.path !== null) { e.preventDefault(); this.editStory(null); } else this.leaveWithTab = true; return; }
     if (e.key === 'Tab' && !mod && !e.altKey && !leaveWithTab && this.model.tableContext) {
-      e.preventDefault(); this.execute(() => this.model.moveCell(e.shiftKey ? -1 : 1)); return;
+      e.preventDefault(); this.tabCell(e.shiftKey ? -1 : 1); return;
     }
     // At the start of list items, Tab demotes them and Shift+Tab promotes them, as in other word processors.
     // At the top level Shift+Tab still moves focus on.

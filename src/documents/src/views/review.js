@@ -6,7 +6,7 @@
 import { el, listItem, isComposing, relativeTime, MOD_KEY, shortcutCode, typesCharacter } from '../ui/dom.js';
 import { openMenu } from '../ui/menu.js';
 import { initialsFor } from '../engine/comments.js';
-import { revisionView, revisionAuthors, describeFormatChange } from '../engine/revisions.js';
+import { revisionView, registerRevisionAuthors, describeFormatChange } from '../engine/revisions.js';
 import { createReadAloud } from './read-aloud.js';
 import { renderMentions } from './mentions.js';
 
@@ -46,7 +46,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
   const cards = new Map();
   const readAloud = createReadAloud({ editor, onState: () => onChange() });
   /* ---- Reviewing Pane: every comment and change in document order ---- */
-  let paneShown = false, paneSignature = '';
+  let paneShown = false, paneSignature = '', paneEntries = [];
   const paneList = el('div.review-pane-list', { role: 'list' });
   const paneSummary = el('p.review-pane-summary');
   let paneOrientation = revisionView.options.paneOrientation || 'vertical';
@@ -75,13 +75,35 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     const summary = `${n(changes.length + notes.length, 'revision', 'revisions')}: ${n(count('ins'), 'insertion', 'insertions')}, ${n(count('del'), 'deletion', 'deletions')}, ${count('format')} formatting, ${n(notes.length, 'comment', 'comments')}`;
     // Where the changes are does not change the list (an entry selects its change where it is when chosen), so
     // typing before them does not rebuild every entry.
-    const sig = JSON.stringify([summary, items.map(item => [item.kind, item.author, item.date, item.text])]);
+    const entries = items.map(item => JSON.stringify([item.kind, item.author, item.date, item.text]));
+    const sig = JSON.stringify([summary, entries]);
     if (sig === paneSignature) return;
-    paneSignature = sig;
+    const shown = paneSignature ? paneEntries : null;
+    paneSignature = sig; paneEntries = entries;
     paneSummary.textContent = summary;
-    paneList.replaceChildren(...items.map((item, index) => listItem(el('button.review-pane-item', { type: 'button', onclick: () => { const current = editor(); if (current) paneItems(current).items[index]?.select(); } },
-      el('span.review-pane-head', {}, el('strong', {}, item.author || 'Unknown author'), ' ', el('span', {}, item.kind)),
-      el('span.review-pane-text', {}, item.text.replace(/\ufffc/g, '').slice(0, 200) || '(formatting)')))));
+    // An entry selects the change or comment at its place in the list when it is chosen.
+    const entry = item => {
+      const node = listItem(el('button.review-pane-item', { type: 'button', onclick: () => { const current = editor(), index = [...paneList.children].indexOf(node); if (current && index >= 0) paneItems(current).items[index]?.select(); } },
+        el('span.review-pane-head', {}, el('strong', {}, item.author || 'Unknown author'), ' ', el('span', {}, item.kind)),
+        el('span.review-pane-text', {}, item.text.replace(/\ufffc/g, '').slice(0, 200) || '(formatting)')));
+      return node;
+    };
+    // Typing in a tracked change changes what one entry shows: only the entries that changed are built again, so
+    // the list is not rebuilt (and laid out again) at every keystroke. The list is rebuilt whole when it held no
+    // entries, and while it has the keyboard, as it always was.
+    if (shown?.length && items.length && paneList.childElementCount === shown.length && !paneList.contains(document.activeElement)) {
+      let head = 0, tail = 0;
+      while (head < shown.length && head < entries.length && shown[head] === entries[head]) head++;
+      while (tail < shown.length - head && tail < entries.length - head && shown[shown.length - 1 - tail] === entries[entries.length - 1 - tail]) tail++;
+      // The list keeps its scroll position, as a rebuilt one does: entries changed above the ones in view do not
+      // scroll it to keep those in place.
+      const top = paneList.scrollTop, children = [...paneList.children], after = children[shown.length - tail] || null;
+      for (const node of children.slice(head, shown.length - tail)) node.remove();
+      for (let index = head; index < entries.length - tail; index++) paneList.insertBefore(entry(items[index]), after);
+      if (paneList.scrollTop !== top) paneList.scrollTop = top;
+      return;
+    }
+    paneList.replaceChildren(...items.map(entry));
     if (!items.length) paneList.append(el('p.field-hint', {}, 'No comments or tracked changes.'));
   }
   /**
@@ -107,7 +129,17 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
   const locked = () => !!hooks.trackingLocked?.();
   const ready = () => { const engine = editor(); return engine && !pkg()?.readOnly && !engine.viewOnly && engine.model.comments ? engine : null; };
   const me = () => { const name = author() || 'Author'; return { author: name, initials: initialsFor(name) }; };
-  const threads = () => { const engine = editor(); return engine?.model.comments ? commentThreads(engine.model.commentList) : []; };
+  /**
+   * The document's comment threads. They are read several times for each keystroke (the column, the caret's
+   * thread, the ribbon), and the document changes only with a new revision, so they are listed once for each.
+   */
+  let listed = null;
+  const threads = () => {
+    const model = editor()?.model; if (!model?.comments) return [];
+    if (listed?.model !== model || listed.revision !== model.revision || listed.comments !== model.comments || listed.paragraphs !== model.paragraphs || listed.count !== model.comments.length)
+      listed = { model, revision: model.revision, comments: model.comments, paragraphs: model.paragraphs, count: model.comments.length, threads: commentThreads(model.commentList) };
+    return listed.threads;
+  };
 
   // Keys typed in a comment stay in the comment: the document's chords must not act on it.
   layer.addEventListener('keydown', e => {
@@ -136,7 +168,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     pinnedRange = engine.model.range.join();
     // The document's text field takes the selection too: going back to it with the keyboard kept its own,
     // which the next key put back.
-    if (focusDocument) engine.focus(); else engine.syncInput();
+    // Painted once, after the view has moved to the thread.
+    if (focusDocument) engine.focus({ paint: false }); else engine.syncInput();
     engine.revealCaret?.(); engine.paint(); onChange();
     cards.get(thread.id)?.scrollIntoView?.({ block: 'nearest' });
   }
@@ -248,7 +281,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       engine.finishComposition();
       if (engine.session.path !== null) engine.editStory(null);
       body.select(next.start, Math.min(next.end, body.text.length)); navigated = next;
-      engine.focus(); engine.revealCaret?.(); engine.paint(); onChange();
+      // Painted once, after the view has moved to the change.
+      engine.focus({ paint: false }); engine.revealCaret?.(); engine.paint(); onChange();
     },
     get shown() { return commentsShown; },
     hasComments() { return threads().length > 0; },
@@ -312,7 +346,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     queueMicrotask(grow);
     return el('div.wcc-editor', {}, input, mentions, el('div.wcc-actions', {}, cancel, submit));
   }
-  function entry(comment, thread, isRoot) {
+  function entry(comment, thread, isRoot, names) {
     const editable = !!ready();
     const more = el('button.icon-btn.wcc-more', { type: 'button', 'aria-label': `More thread actions for ${comment.author || 'comment'}`, title: 'More thread actions', disabled: !editable,
       onclick: () => openMenu({ anchor: more, label: 'Comment actions', items: [
@@ -324,10 +358,11 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       el('div.wcc-meta', {}, el('span.wcc-author', {}, comment.author || 'Unknown author'), el('span.wcc-date', { title: comment.date ? new Date(comment.date).toLocaleString() : '' }, time(comment.date))), more);
     const body = editing === comment.id
       ? textEditor({ value: comment.text, placeholder: 'Edit comment', submitLabel: 'Save', onSubmit: text => { editing = null; run(() => editor().model.editComment(comment.id, text)); refresh(true); }, onCancel: () => { editing = null; refresh(true); editor()?.focus(); } })
-      : el('div.wcc-text', {}, ...renderMentions(comment.text, hooks.people?.() || []));
+      // Only text with an @ can mention anyone.
+      : el('div.wcc-text', {}, ...renderMentions(comment.text, String(comment.text || '').includes('@') ? names() : []));
     return el(`div.wcc-entry${editing === comment.id ? '.is-editing' : ''}`, { dataset: { commentId: comment.id } }, head, body);
   }
-  function card(thread) {
+  function card(thread, names) {
     const done = thread.root.done, active = thread.id === activeId;
     const node = el(`article.ed-comment-card${done ? '.is-resolved' : ''}${active ? '.is-active' : ''}`, { dataset: { thread: thread.id }, tabIndex: 0, 'aria-label': `Comment by ${thread.root.author || 'unknown author'}${done ? ', resolved' : ''}` });
     node.addEventListener('click', e => { if (!e.target.closest('button, textarea')) selectThread(thread, { focusDocument: false }); });
@@ -337,7 +372,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
         el('div.wcc-text.is-clamped', {}, thread.root.text));
       return node;
     }
-    node.append(entry(thread.root, thread, true), ...thread.replies.map(reply => entry(reply, thread, false)));
+    node.append(entry(thread.root, thread, true, names), ...thread.replies.map(reply => entry(reply, thread, false, names)));
     if (done) node.append(el('div.wcc-resolved', {}, el('span', {}, 'Resolved'), el('button.btn.btn-sm', { type: 'button', disabled: !ready(), onclick: () => { run(() => editor().model.setCommentDone(thread.id, false)); refresh(true); } }, 'Reopen')));
     else if (ready()) node.append(el('div.wcc-reply', {}, textEditor({ placeholder: 'Reply', submitLabel: 'Reply',
       onSubmit: text => { run(() => editor().model.replyToComment(thread.id, { ...me(), text })); refresh(true); },
@@ -430,7 +465,8 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       item.node.style.left = `${right + 16}px`;
       item.node.style.display = '';
     });
-    for (const node of items) if (!anchored.some(item => item.node === node)) node.style.display = 'none';
+    const placed = new Set(anchored.map(item => item.node));
+    for (const node of items) if (!placed.has(node)) node.style.display = 'none';
   }
 
   function tints(list) {
@@ -473,7 +509,11 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
       const focused = layer.contains(document.activeElement) ? document.activeElement : null;
       const keep = focused?.matches?.('textarea') ? { thread: focused.closest('[data-thread]')?.dataset.thread, value: focused.value, start: focused.selectionStart, end: focused.selectionEnd, draft: !!focused.closest('.ed-comment-draft') } : null;
       cards.clear();
-      const nodes = visible && commentsShown ? list.map(thread => { const node = card(thread); cards.set(thread.id, node); return node; }) : [];
+      // The review's people are found once for the whole column: finding them reads every tracked change, and
+      // doing that for each comment made rebuilding the column of a much-commented document slow.
+      let people = null;
+      const names = () => people ??= hooks.people?.() || [];
+      const nodes = visible && commentsShown ? list.map(thread => { const node = card(thread, names); cards.set(thread.id, node); return node; }) : [];
       if (visible && commentsShown && draft) nodes.push(draftCard());
       if (balloons.length) { const body = engine.session.body, documentText = body.text, summarize = formatSummaries(body); nodes.push(...balloons.map(change => balloonCard(change, documentText, summarize))); }
       layer.replaceChildren(...nodes);
@@ -488,7 +528,7 @@ export function createReview({ editor, pkg, host, error, author, onChange = () =
     tints(list);
     const body = engine.session.body;
     body.revisionAuthor = author() || 'Author';
-    for (const name of revisionAuthors(body.paragraphs)) if (!revisionView.authors.includes(name)) revisionView.authors.push(name);
+    registerRevisionAuthors(body.paragraphs);
     const o = revisionView.options, barColor = o.changeBarColor && !['auto', 'author'].includes(o.changeBarColor) ? `#${o.changeBarColor}` : revisionView.mode === 'simple' ? '#C4314B' : '#7A7A7A';
     engine.setMarginBars?.(['all', 'simple'].includes(revisionView.mode) && o.changeBars !== 'none' ? shownChanges(body.revisions) : [], barColor, o.changeBars === 'none' ? 'left' : o.changeBars || 'left');
     const label = markupButton?.querySelector('.ribbon-small-label'), name = MARKUP_VIEWS.find(([mode]) => mode === revisionView.mode)?.[1];
